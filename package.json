@@ -1,0 +1,15 @@
+{
+  "name": "self_clipboard",
+  "version": "1.0.0",
+  "description": "Windows 透明磨砂毛玻璃剪贴板工具",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "author": "kunge9106",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^42.3.2"
+  }
+}

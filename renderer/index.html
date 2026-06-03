@@ -1,0 +1,41 @@
+﻿<!--
+  self_clipboard — 主界面 HTML
+  采用自定义标题栏（无边框窗口），内容区域动态渲染剪贴板历史列表
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>self_clipboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="window">
+    <!-- 标题栏：左侧图标 + 应用名称 + 右侧清空按钮 -->
+    <div class="titlebar" id="titlebar">
+      <span class="title-icon">📋</span>
+      <span class="title-text">self_clipboard</span>
+      <!-- 清空全部按钮，点击后清空所有历史记录 -->
+      <button class="btn-clear" id="btnClear" title="清空全部">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="3 6 5 6 21 6"></polyline>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+        </svg>
+      </button>
+    </div>
+
+    <!-- 历史记录列表容器（由 app.js 动态渲染） -->
+    <div class="list" id="list"></div>
+
+    <!-- 空状态提示：当无历史记录时显示 -->
+    <div class="empty-state" id="emptyState">
+      <div class="empty-icon">📋</div>
+      <div class="empty-text">剪贴板历史为空</div>
+      <div class="empty-hint">复制文本或图片后将自动显示在此</div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
