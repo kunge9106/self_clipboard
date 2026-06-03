@@ -4,6 +4,8 @@
  * 主进程文件：负责创建窗口、设置毛玻璃效果、监听系统剪贴板，
  * 并通过 IPC 与渲染进程通信。
  * 
+ * 注意：console.log 使用英文，避免 Windows 控制台编码导致的乱码
+ * 
  * @module main
  */
 
@@ -15,37 +17,33 @@ const path = require("path");
 /** 历史记录最大保留条数 */
 const MAX_HISTORY = 100;
 
-/** 剪贴板轮询间隔（毫秒），每隔 1000ms 检查一次系统剪贴板是否有变化 */
+/** 剪贴板轮询间隔（毫秒） */
 const POLL_INTERVAL = 1000;
 
 // ========== 全局状态 ==========
 
-/** 主窗口引用，用于向渲染进程发送消息 */
+/** 主窗口引用 */
 let mainWindow = null;
 
-/** 
- * 剪贴板历史记录数组
- * @type {Array<{id: number, type: string, content: string, timestamp: number}>}
- */
+/** 剪贴板历史记录列表 */
 let history = [];
 
-/** 上一次读取到的剪贴板文本内容，用于去重判断 */
+/** 上一次读取到的剪贴板文本 */
 let lastClipboardText = "";
 
-/** 上一次读取到的剪贴板图片哈希值，用于去重判断 */
+/** 上一次读取到的剪贴板图片哈希值 */
 let lastClipboardImageHash = null;
 
 /** 轮询定时器句柄 */
 let pollingTimer = null;
 
-/** 调试模式下自动打开开发者工具（命令行传 --dev 参数时启用） */
+/** 调试模式标识（命令行传 --dev 启用） */
 const isDev = process.argv.includes("--dev");
 
 // ========== 剪贴板图片哈希计算 ==========
 
 /**
  * 计算图片内容的哈希值，用于判断剪贴板图片是否变化
- * 采用简单哈希算法，取 PNG 数据前 1024 字节做累加计算
  * 
  * @param {Electron.NativeImage} img - Electron 原生图片对象
  * @returns {number|null} 哈希值，图片为空时返回 null
@@ -67,32 +65,32 @@ function getImageHash(img) {
 /**
  * 定期轮询系统剪贴板，检测是否有新的文本或图片内容
  * 通过对比上一次缓存的内容来判断是否发生变化
- * 如果检测到新内容，自动添加到历史记录中
  */
 function pollClipboard() {
   if (!mainWindow) {
-    console.log("[pollClipboard] mainWindow 不存在，跳过");
+    console.log("[poll] mainWindow not ready, skip");
     return;
   }
 
   try {
-    // 检查文本：读取系统剪贴板的纯文本内容
+    // 检查文本
     const text = clipboard.readText();
-    console.log("[pollClipboard] 读取到文本:", text ? text.substring(0, 30) + "..." : "(空)");
+    const textPreview = text ? text.substring(0, 40) : "(empty)";
+    console.log("[poll] text:", textPreview);
+
     if (text && text !== lastClipboardText && text.trim()) {
-      console.log("[pollClipboard] 检测到新文本");
+      console.log("[poll] new text detected");
       lastClipboardText = text;
       addHistoryItem({ type: "text", content: text });
     }
 
-    // 检查图片：读取系统剪贴板的图片内容
+    // 检查图片
     const img = clipboard.readImage();
     if (!img.isEmpty()) {
       const hash = getImageHash(img);
       if (hash !== null && hash !== lastClipboardImageHash) {
-        console.log("[pollClipboard] 检测到新图片");
+        console.log("[poll] new image detected");
         lastClipboardImageHash = hash;
-        // 将图片转为 base64 格式的 data URL，方便渲染进程直接显示
         const pngBuffer = img.toPNG();
         const dataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
         addHistoryItem({ type: "image", content: dataUrl });
@@ -100,7 +98,7 @@ function pollClipboard() {
     }
   } catch (e) {
     // 剪贴板被其他程序占用时抛出异常属于正常情况，忽略即可
-    console.log("[pollClipboard] 访问剪贴板出错:", e.message);
+    console.log("[poll] clipboard access error:", e.message);
   }
 }
 
@@ -108,8 +106,6 @@ function pollClipboard() {
 
 /**
  * 向历史记录列表中添加新条目
- * 新条目插入到列表最前面，超过最大条数时移除末尾最旧的条目
- * 添加后主动去重：与最新一条内容相同时不重复添加
  * 
  * @param {{type: string, content: string}} item - 要添加的条目
  */
@@ -121,11 +117,11 @@ function addHistoryItem(item) {
     timestamp: Date.now(),
   };
 
-  // 去重：和最新一条比对，内容相同则跳过
+  // 去重：和最新一条比对
   if (history.length > 0) {
     const last = history[0];
     if (last.type === entry.type && last.content === entry.content) {
-      console.log("[addHistoryItem] 内容与最新条目相同，跳过");
+      console.log("[history] duplicate, skip");
       return;
     }
   }
@@ -135,9 +131,8 @@ function addHistoryItem(item) {
     history.pop();
   }
 
-  // 更新缓存，避免重复触发
   lastClipboardText = clipboard.readText();
-  console.log("[addHistoryItem] 已添加，当前历史条数:", history.length);
+  console.log("[history] added, total:", history.length);
   sendHistoryToRenderer();
 }
 
@@ -146,33 +141,28 @@ function addHistoryItem(item) {
  */
 function clearHistory() {
   history = [];
-  console.log("[clearHistory] 已清空");
+  console.log("[history] cleared");
   sendHistoryToRenderer();
 }
 
 /**
- * 将当前历史记录推送到渲染进程，通知 UI 更新
- * 如果渲染进程尚未就绪（窗口未加载完毕），则等待后重试
+ * 将当前历史记录推送到渲染进程
  */
 function sendHistoryToRenderer() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       mainWindow.webContents.send("clipboard-history", history);
-      console.log("[sendHistoryToRenderer] 已推送", history.length, "条记录");
     } catch (e) {
-      console.log("[sendHistoryToRenderer] 发送失败:", e.message);
+      console.log("[history] send error:", e.message);
     }
   }
 }
 
-// ========== IPC 通信处理（主进程 ↔ 渲染进程） ==========
+// ========== IPC 通信 ==========
 
-/**
- * 处理渲染进程的复制请求：将指定条目写回系统剪贴板
- * 同时更新本地缓存，避免触发重复添加
- */
+/** 处理复制请求：将指定条目写回系统剪贴板 */
 ipcMain.handle("copy-to-clipboard", (event, item) => {
-  console.log("[IPC] copy-to-clipboard:", item.type);
+  console.log("[ipc] copy-to-clipboard:", item.type);
   if (item.type === "text") {
     clipboard.writeText(item.content);
     lastClipboardText = item.content;
@@ -183,25 +173,22 @@ ipcMain.handle("copy-to-clipboard", (event, item) => {
   }
 });
 
-/** 处理渲染进程的清空请求 */
+/** 处理清空请求 */
 ipcMain.handle("clear-all", () => {
-  console.log("[IPC] clear-all");
+  console.log("[ipc] clear-all");
   clearHistory();
 });
 
-/** 处理渲染进程的历史记录初始化加载请求 */
+/** 处理历史加载请求 */
 ipcMain.handle("get-history", () => {
-  console.log("[IPC] get-history, 返回", history.length, "条");
   return history;
 });
 
-// ========== 窗口创建与毛玻璃效果 ==========
+// ========== 窗口创建 ==========
 
 /**
  * 创建 Electron 主窗口
- * 应用 Windows Acrylic 磨砂毛玻璃效果（Windows 10/11）
- * 如果 Win32 的 acrylic 不可用，降级尝试 mica 效果
- * 窗口属性：透明背景、置顶显示、无边框
+ * 应用 Windows Acrylic 磨砂毛玻璃效果
  */
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -227,23 +214,22 @@ function createWindow() {
     mainWindow.webContents.openDevTools({ mode: "bottom" });
   }
 
-  // 记录渲染进程控制台日志
+  // 捕获渲染进程日志
   mainWindow.webContents.on("console-message", (event, level, message) => {
-    console.log("[renderer]", message);
+    console.log("[render]", message);
   });
 
-  // 在 Windows 上启用系统级毛玻璃效果
+  // 启用 Windows 毛玻璃效果
   if (process.platform === "win32") {
     try {
       mainWindow.setBackgroundMaterial("acrylic");
-      console.log("[window] 已启用 Acrylic 毛玻璃效果");
+      console.log("[window] acrylic enabled");
     } catch (e) {
-      console.log("[window] Acrylic 不可用，尝试 Mica...");
       try {
         mainWindow.setBackgroundMaterial("mica");
-        console.log("[window] 已启用 Mica 效果");
+        console.log("[window] mica enabled");
       } catch (e2) {
-        console.log("[window] Mica 也不可用，使用 CSS 模糊");
+        console.log("[window] acrylic/mica not available, use css blur");
       }
     }
   }
@@ -251,13 +237,13 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
   mainWindow.on("closed", () => {
-    console.log("[window] 窗口已关闭");
+    console.log("[window] closed");
     mainWindow = null;
   });
 
-  // 窗口准备好后主动推送一次历史（即使为空）
+  // 页面加载完成后推送历史
   mainWindow.webContents.on("did-finish-load", () => {
-    console.log("[window] 页面加载完成");
+    console.log("[window] page loaded");
     sendHistoryToRenderer();
   });
 }
@@ -265,29 +251,24 @@ function createWindow() {
 // ========== 应用生命周期 ==========
 
 app.whenReady().then(() => {
-  console.log("[app] 应用就绪");
+  console.log("[app] ready");
   createWindow();
-
-  // 剪贴板监听：轮询方式
-  console.log("[app] 启动剪贴板轮询，间隔", POLL_INTERVAL, "ms");
   pollingTimer = setInterval(pollClipboard, POLL_INTERVAL);
-
-  // 延迟执行首次剪贴板读取
   setTimeout(() => {
-    console.log("[app] 执行首次剪贴板读取");
+    console.log("[app] first poll");
     pollClipboard();
   }, 1000);
 });
 
 app.on("window-all-closed", () => {
-  console.log("[app] 所有窗口已关闭，退出");
+  console.log("[app] all windows closed, quit");
   if (pollingTimer) clearInterval(pollingTimer);
   app.quit();
 });
 
 app.on("activate", () => {
   if (mainWindow === null) {
-    console.log("[app] 重新创建窗口");
+    console.log("[app] recreate window");
     createWindow();
   }
 });

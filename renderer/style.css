@@ -1,13 +1,8 @@
 ﻿/* ========================================================
    self_clipboard — 磨砂毛玻璃主题样式
-   
-   设计思路：
-   - 背景采用半透明深色 + CSS backdrop-filter 模糊效果
-   - 配合 Electron 的 Acrylic/Mica 系统效果叠加使用
-   - 视觉风格参考 Windows 11 Fluent Design
+   无标题栏设计，整个窗口背景可拖拽
    ======================================================== */
 
-/* ===== 全局重置 ===== */
 * {
   margin: 0;
   padding: 0;
@@ -15,19 +10,16 @@
 }
 
 :root {
-  /* 颜色变量：半透明深色基调，配合毛玻璃效果 */
-  --bg-primary: rgba(30, 30, 40, 0.65);     /* 主背景色 */
-  --bg-secondary: rgba(255, 255, 255, 0.06);  /* 列表项底色 */
-  --bg-hover: rgba(255, 255, 255, 0.10);      /* 悬停高亮 */
-  --bg-active: rgba(255, 255, 255, 0.14);     /* 点击反馈 */
-  --text-primary: rgba(255, 255, 255, 0.90);  /* 主文字 */
-  --text-secondary: rgba(255, 255, 255, 0.50);/* 次要文字 */
-  --text-muted: rgba(255, 255, 255, 0.35);    /* 时间/提示 */
-  --border-color: rgba(255, 255, 255, 0.08);  /* 分隔线 */
-  --accent: rgba(100, 150, 255, 0.50);        /* 选中高亮色 */
-  --radius: 10px;                              /* 大圆角 */
-  --radius-sm: 6px;                            /* 小圆角 */
-  /* 字体：优先系统字体，其次微软雅黑 */
+  --bg-primary: rgba(30, 30, 40, 0.60);
+  --bg-secondary: rgba(255, 255, 255, 0.06);
+  --bg-hover: rgba(255, 255, 255, 0.10);
+  --bg-active: rgba(255, 255, 255, 0.14);
+  --text-primary: rgba(255, 255, 255, 0.90);
+  --text-secondary: rgba(255, 255, 255, 0.50);
+  --text-muted: rgba(255, 255, 255, 0.35);
+  --border-color: rgba(255, 255, 255, 0.08);
+  --accent: rgba(100, 150, 255, 0.50);
+  --radius-sm: 6px;
   --font: -apple-system, "Microsoft YaHei", "Segoe UI", sans-serif;
 }
 
@@ -37,88 +29,34 @@ html, body {
   overflow: hidden;
   font-family: var(--font);
   color: var(--text-primary);
-  /* Electron 透明窗口模式下，真正的背景由 DWM Acrylic 提供 */
   background: transparent;
   user-select: none;
 }
 
-/* ===== 窗口容器 ===== */
+/* 窗口容器：整窗可拖拽 */
 .window {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  /* CSS 层面的毛玻璃模糊，作为系统 Acrylic 效果的补充 */
   background: var(--bg-primary);
   backdrop-filter: blur(30px) saturate(1.2);
   -webkit-backdrop-filter: blur(30px) saturate(1.2);
   border: 1px solid var(--border-color);
-  border-radius: 0;
   overflow: hidden;
+  -webkit-app-region: drag;     /* 整窗可拖拽移动 */
 }
 
-/* ===== 标题栏（可拖拽区域） ===== */
-.titlebar {
-  display: flex;
-  align-items: center;
-  padding: 12px 16px;
-  gap: 8px;
-  border-bottom: 1px solid var(--border-color);
-  -webkit-app-region: drag;  /* Electron：允许拖拽窗口 */
-  flex-shrink: 0;
-}
-
-.title-icon {
-  font-size: 16px;
-  line-height: 1;
-}
-
-.title-text {
-  flex: 1;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  letter-spacing: 0.3px;
-}
-
-/* 清空按钮 */
-.btn-clear {
-  -webkit-app-region: no-drag; /* 按钮区域不允许拖拽，否则无法点击 */
-  background: var(--bg-secondary);
-  border: none;
-  color: var(--text-secondary);
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s ease;
-  opacity: 0.6;
-}
-
-.btn-clear:hover {
-  /* 清空按钮悬停时变为红色，提示危险操作 */
-  background: rgba(255, 80, 80, 0.25);
-  color: rgba(255, 120, 120, 0.9);
-  opacity: 1;
-}
-
-.btn-clear:active {
-  transform: scale(0.92); /* 点击微缩动画 */
-}
-
-/* ===== 列表容器（可滚动） ===== */
+/* 可滚动列表：禁止拖拽，否则无法滚动 */
 .list {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 6px 10px;
+  padding: 12px 10px 6px;
   scrollbar-width: thin;
   scrollbar-color: rgba(255,255,255,0.15) transparent;
+  -webkit-app-region: no-drag;  /* 列表区域不可拖拽 */
 }
 
-/* Webkit 滚动条样式 */
 .list::-webkit-scrollbar {
   width: 4px;
 }
@@ -130,7 +68,7 @@ html, body {
   border-radius: 2px;
 }
 
-/* ===== 历史条目样式 ===== */
+/* ===== 历史条目 ===== */
 .item {
   display: flex;
   align-items: flex-start;
@@ -139,10 +77,11 @@ html, body {
   margin: 3px 0;
   border-radius: var(--radius-sm);
   background: var(--bg-secondary);
-  border: 1px solid transparent;      /* 预留边框，复制成功时高亮 */
+  border: 1px solid transparent;
   cursor: pointer;
   transition: all 0.12s ease;
   position: relative;
+  -webkit-app-region: no-drag;
 }
 
 .item:hover {
@@ -152,16 +91,14 @@ html, body {
 
 .item:active {
   background: var(--bg-active);
-  transform: scale(0.98);             /* 点击微缩反馈 */
+  transform: scale(0.98);
 }
 
-/* 复制成功后的高亮状态（由 JS 动态添加） */
 .item-copied {
   border-color: var(--accent) !important;
   background: rgba(100, 150, 255, 0.12) !important;
 }
 
-/* 条目左侧图标 */
 .item-icon {
   width: 32px;
   height: 32px;
@@ -174,13 +111,11 @@ html, body {
   background: rgba(255,255,255,0.05);
 }
 
-/* 条目内容区域（文本或图片） */
 .item-body {
   flex: 1;
   min-width: 0;
 }
 
-/* 文本内容：最多显示 2 行，多余的用省略号 */
 .item-text {
   font-size: 13px;
   line-height: 1.4;
@@ -193,7 +128,6 @@ html, body {
   white-space: pre-wrap;
 }
 
-/* 图片缩略图 */
 .item-image {
   max-width: 100%;
   max-height: 120px;
@@ -202,7 +136,6 @@ html, body {
   display: block;
 }
 
-/* 时间标签 */
 .item-time {
   font-size: 11px;
   color: var(--text-muted);
@@ -210,7 +143,6 @@ html, body {
   white-space: nowrap;
 }
 
-/* 复制成功对勾标记（右上角） */
 .item-check {
   position: absolute;
   right: 10px;
@@ -225,7 +157,7 @@ html, body {
   opacity: 1;
 }
 
-/* ===== 空状态提示 ===== */
+/* ===== 空状态 ===== */
 .empty-state {
   display: none;
   flex-direction: column;
@@ -255,6 +187,49 @@ html, body {
 .empty-hint {
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* ===== 底部工具栏 ===== */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-color);
+  gap: 8px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+
+.toolbar-count {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.btn-clear {
+  background: var(--bg-secondary);
+  border: none;
+  color: var(--text-secondary);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  opacity: 0.5;
+}
+
+.btn-clear:hover {
+  background: rgba(255, 80, 80, 0.25);
+  color: rgba(255, 120, 120, 0.9);
+  opacity: 1;
+}
+
+.btn-clear:active {
+  transform: scale(0.92);
 }
 
 /* ===== 入场动画 ===== */
