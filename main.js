@@ -15,8 +15,8 @@ const path = require("path");
 /** 历史记录最大保留条数 */
 const MAX_HISTORY = 100;
 
-/** 剪贴板轮询间隔（毫秒），每隔 500ms 检查一次系统剪贴板是否有变化 */
-const POLL_INTERVAL = 500;
+/** 剪贴板轮询间隔（毫秒），每隔 1000ms 检查一次系统剪贴板是否有变化 */
+const POLL_INTERVAL = 1000;
 
 // ========== 全局状态 ==========
 
@@ -37,6 +37,9 @@ let lastClipboardImageHash = null;
 
 /** 轮询定时器句柄 */
 let pollingTimer = null;
+
+/** 调试模式下自动打开开发者工具（命令行传 --dev 参数时启用） */
+const isDev = process.argv.includes("--dev");
 
 // ========== 剪贴板图片哈希计算 ==========
 
@@ -67,14 +70,19 @@ function getImageHash(img) {
  * 如果检测到新内容，自动添加到历史记录中
  */
 function pollClipboard() {
-  if (!mainWindow) return;
+  if (!mainWindow) {
+    console.log("[pollClipboard] mainWindow 不存在，跳过");
+    return;
+  }
 
   try {
     // 检查文本：读取系统剪贴板的纯文本内容
     const text = clipboard.readText();
+    console.log("[pollClipboard] 读取到文本:", text ? text.substring(0, 30) + "..." : "(空)");
     if (text && text !== lastClipboardText && text.trim()) {
+      console.log("[pollClipboard] 检测到新文本");
       lastClipboardText = text;
-      addHistoryItem({ type: "text", content: text }, false);
+      addHistoryItem({ type: "text", content: text });
     }
 
     // 检查图片：读取系统剪贴板的图片内容
@@ -82,15 +90,17 @@ function pollClipboard() {
     if (!img.isEmpty()) {
       const hash = getImageHash(img);
       if (hash !== null && hash !== lastClipboardImageHash) {
+        console.log("[pollClipboard] 检测到新图片");
         lastClipboardImageHash = hash;
         // 将图片转为 base64 格式的 data URL，方便渲染进程直接显示
         const pngBuffer = img.toPNG();
         const dataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
-        addHistoryItem({ type: "image", content: dataUrl }, false);
+        addHistoryItem({ type: "image", content: dataUrl });
       }
     }
   } catch (e) {
     // 剪贴板被其他程序占用时抛出异常属于正常情况，忽略即可
+    console.log("[pollClipboard] 访问剪贴板出错:", e.message);
   }
 }
 
@@ -102,9 +112,8 @@ function pollClipboard() {
  * 添加后主动去重：与最新一条内容相同时不重复添加
  * 
  * @param {{type: string, content: string}} item - 要添加的条目
- * @param {boolean} fromRenderer - 是否来自渲染进程的添加请求（预留参数）
  */
-function addHistoryItem(item, fromRenderer) {
+function addHistoryItem(item) {
   const entry = {
     id: Date.now() + Math.random(),
     type: item.type,
@@ -116,6 +125,7 @@ function addHistoryItem(item, fromRenderer) {
   if (history.length > 0) {
     const last = history[0];
     if (last.type === entry.type && last.content === entry.content) {
+      console.log("[addHistoryItem] 内容与最新条目相同，跳过");
       return;
     }
   }
@@ -127,6 +137,7 @@ function addHistoryItem(item, fromRenderer) {
 
   // 更新缓存，避免重复触发
   lastClipboardText = clipboard.readText();
+  console.log("[addHistoryItem] 已添加，当前历史条数:", history.length);
   sendHistoryToRenderer();
 }
 
@@ -135,15 +146,22 @@ function addHistoryItem(item, fromRenderer) {
  */
 function clearHistory() {
   history = [];
+  console.log("[clearHistory] 已清空");
   sendHistoryToRenderer();
 }
 
 /**
  * 将当前历史记录推送到渲染进程，通知 UI 更新
+ * 如果渲染进程尚未就绪（窗口未加载完毕），则等待后重试
  */
 function sendHistoryToRenderer() {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("clipboard-history", history);
+    try {
+      mainWindow.webContents.send("clipboard-history", history);
+      console.log("[sendHistoryToRenderer] 已推送", history.length, "条记录");
+    } catch (e) {
+      console.log("[sendHistoryToRenderer] 发送失败:", e.message);
+    }
   }
 }
 
@@ -154,6 +172,7 @@ function sendHistoryToRenderer() {
  * 同时更新本地缓存，避免触发重复添加
  */
 ipcMain.handle("copy-to-clipboard", (event, item) => {
+  console.log("[IPC] copy-to-clipboard:", item.type);
   if (item.type === "text") {
     clipboard.writeText(item.content);
     lastClipboardText = item.content;
@@ -166,11 +185,13 @@ ipcMain.handle("copy-to-clipboard", (event, item) => {
 
 /** 处理渲染进程的清空请求 */
 ipcMain.handle("clear-all", () => {
+  console.log("[IPC] clear-all");
   clearHistory();
 });
 
 /** 处理渲染进程的历史记录初始化加载请求 */
 ipcMain.handle("get-history", () => {
+  console.log("[IPC] get-history, 返回", history.length, "条");
   return history;
 });
 
@@ -187,29 +208,42 @@ function createWindow() {
     width: 380,
     height: 600,
     resizable: true,
-    frame: false,                    // 无边框窗口，用自定义标题栏
-    transparent: true,               // 透明背景，配合毛玻璃效果
-    alwaysOnTop: true,               // 始终置顶，方便随时查看
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
     skipTaskbar: false,
     title: "self_clipboard",
+    show: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
-      contextIsolation: true,        // 启用上下文隔离，增强安全性
-      nodeIntegration: false,        // 禁止渲染进程直接访问 Node.js
+      contextIsolation: true,
+      nodeIntegration: false,
+      devTools: true,
     },
+  });
+
+  // 调试模式自动打开开发者工具
+  if (isDev) {
+    mainWindow.webContents.openDevTools({ mode: "bottom" });
+  }
+
+  // 记录渲染进程控制台日志
+  mainWindow.webContents.on("console-message", (event, level, message) => {
+    console.log("[renderer]", message);
   });
 
   // 在 Windows 上启用系统级毛玻璃效果
   if (process.platform === "win32") {
     try {
-      // 优先尝试 Acrylic（Win10 开始支持），效果为半透明彩色模糊
       mainWindow.setBackgroundMaterial("acrylic");
+      console.log("[window] 已启用 Acrylic 毛玻璃效果");
     } catch (e) {
+      console.log("[window] Acrylic 不可用，尝试 Mica...");
       try {
-        // Acrylic 不可用时降级到 Mica（Win11 引入），效果为桌面色调融合
         mainWindow.setBackgroundMaterial("mica");
+        console.log("[window] 已启用 Mica 效果");
       } catch (e2) {
-        // 什么都不做，退回到 CSS 层面的 backdrop-filter 模糊效果
+        console.log("[window] Mica 也不可用，使用 CSS 模糊");
       }
     }
   }
@@ -217,27 +251,43 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
   mainWindow.on("closed", () => {
+    console.log("[window] 窗口已关闭");
     mainWindow = null;
+  });
+
+  // 窗口准备好后主动推送一次历史（即使为空）
+  mainWindow.webContents.on("did-finish-load", () => {
+    console.log("[window] 页面加载完成");
+    sendHistoryToRenderer();
   });
 }
 
 // ========== 应用生命周期 ==========
 
 app.whenReady().then(() => {
+  console.log("[app] 应用就绪");
   createWindow();
 
-  // 启动剪贴板轮询监听
+  // 剪贴板监听：轮询方式
+  console.log("[app] 启动剪贴板轮询，间隔", POLL_INTERVAL, "ms");
   pollingTimer = setInterval(pollClipboard, POLL_INTERVAL);
 
-  // 延迟 300ms 后执行首次读取，确保窗口已就绪
-  setTimeout(pollClipboard, 300);
+  // 延迟执行首次剪贴板读取
+  setTimeout(() => {
+    console.log("[app] 执行首次剪贴板读取");
+    pollClipboard();
+  }, 1000);
 });
 
 app.on("window-all-closed", () => {
+  console.log("[app] 所有窗口已关闭，退出");
   if (pollingTimer) clearInterval(pollingTimer);
   app.quit();
 });
 
 app.on("activate", () => {
-  if (mainWindow === null) createWindow();
+  if (mainWindow === null) {
+    console.log("[app] 重新创建窗口");
+    createWindow();
+  }
 });

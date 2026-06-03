@@ -8,6 +8,18 @@
  * @module renderer/app
  */
 
+// ========== 调试工具 ==========
+
+/**
+ * 输出调试日志到主进程控制台（通过 Electron 的 console-message 事件）
+ * 也会将日志显示到页面上的调试区域（如果存在）
+ * 
+ * @param {string} msg - 调试消息
+ */
+function log(msg) {
+  console.log("[app]", msg);
+}
+
 // ========== 时间格式化工具 ==========
 
 /**
@@ -25,6 +37,7 @@
 function formatTime(timestamp) {
   const now = Date.now();
   const diff = now - timestamp;
+  if (diff < 0) return "刚刚";
 
   const seconds = Math.floor(diff / 1000);
   const minutes = Math.floor(seconds / 60);
@@ -39,7 +52,6 @@ function formatTime(timestamp) {
     date.getDate() === today.getDate();
 
   if (!isToday) {
-    // 超过当天 0 点，显示为固定时间格式
     const hh = String(date.getHours()).padStart(2, "0");
     const mm = String(date.getMinutes()).padStart(2, "0");
     const ss = String(date.getSeconds()).padStart(2, "0");
@@ -66,19 +78,21 @@ const emptyState = document.getElementById("emptyState");
 /** 清空全部按钮 */
 const btnClear = document.getElementById("btnClear");
 
-// ========== 渲染历史列表 ==========
-
 /** 当前展示的历史数据快照，用于时间更新时快速访问 */
 let currentItems = [];
+
+// ========== 渲染历史列表 ==========
 
 /**
  * 将历史数据渲染到列表视图
  * 支持文本条目的多行缩略显示和图片条目的缩略图展示
  * 每条记录都附带时间标签和点击复制功能
  * 
- * @param {Array|null} items - 历史记录数组，为空或空数组时显示空状态
+ * @param {Array|null} items - 历史记录数组
  */
 function render(items) {
+  log("render() 被调用，数据条数:" + (items ? items.length : 0));
+
   currentItems = items || [];
 
   if (!items || items.length === 0) {
@@ -86,23 +100,23 @@ function render(items) {
     emptyState.classList.add("visible");
     btnClear.style.opacity = "0.3";
     btnClear.style.pointerEvents = "none";
+    log("显示空状态");
     return;
   }
 
-  // 有数据时隐藏空状态，启用清空按钮
   emptyState.classList.remove("visible");
   btnClear.style.opacity = "1";
   btnClear.style.pointerEvents = "auto";
 
-  // 使用 DocumentFragment 批量构建 DOM，减少重排次数
   const fragment = document.createDocumentFragment();
 
-  items.forEach((item) => {
+  items.forEach((item, index) => {
     const div = document.createElement("div");
     div.className = "item item-enter";
     div.dataset.id = item.id;
+    div.dataset.index = index;
 
-    // 条目图标：图片用 🖼️，文本用 📝
+    // 条目图标
     const iconDiv = document.createElement("div");
     iconDiv.className = "item-icon";
     iconDiv.textContent = item.type === "image" ? "🖼️" : "📝";
@@ -112,13 +126,11 @@ function render(items) {
     bodyDiv.className = "item-body";
 
     if (item.type === "text") {
-      // 文本：限制最多显示 2 行，超出省略
       const textEl = document.createElement("div");
       textEl.className = "item-text";
       textEl.textContent = item.content;
       bodyDiv.appendChild(textEl);
     } else if (item.type === "image") {
-      // 图片：等比缩略图展示，最大高度 120px
       const imgEl = document.createElement("img");
       imgEl.className = "item-image";
       imgEl.src = item.content;
@@ -132,7 +144,7 @@ function render(items) {
     timeEl.textContent = formatTime(item.timestamp);
     bodyDiv.appendChild(timeEl);
 
-    // 复制成功对勾标记（默认隐藏，点击后短暂显示）
+    // 复制成功对勾标记
     const checkEl = document.createElement("div");
     checkEl.className = "item-check";
     checkEl.textContent = "✓";
@@ -141,11 +153,11 @@ function render(items) {
     div.appendChild(bodyDiv);
     div.appendChild(checkEl);
 
-    // 点击条目时将内容写回系统剪贴板
+    // 点击复制
     div.addEventListener("click", async () => {
       try {
+        log("点击复制条目:" + item.id);
         await window.clipboardAPI.copyToClipboard(item);
-        // 短暂显示 ✓ 动画和高亮边框，800ms 后自动消失
         checkEl.classList.add("show");
         div.classList.add("item-copied");
         setTimeout(() => {
@@ -153,16 +165,16 @@ function render(items) {
           div.classList.remove("item-copied");
         }, 800);
       } catch (e) {
-        console.error("复制失败", e);
+        log("复制失败:" + e.message);
       }
     });
 
     fragment.appendChild(div);
   });
 
-  // 替换整个列表内容
   listEl.innerHTML = "";
   listEl.appendChild(fragment);
+  log("列表渲染完成");
 }
 
 // ========== 时间自动更新 ==========
@@ -171,9 +183,7 @@ function render(items) {
 let timeUpdateTimer = null;
 
 /**
- * 启动时间自动更新定时器
- * 每秒遍历所有条目的时间标签，更新相对时间显示
- * 只更新时间文本，不重新渲染整个列表
+ * 启动时间自动更新定时器，每秒更新时间标签
  */
 function startTimeUpdater() {
   if (timeUpdateTimer) clearInterval(timeUpdateTimer);
@@ -186,37 +196,52 @@ function startTimeUpdater() {
       }
     });
   }, 1000);
+  log("时间更新器已启动");
 }
 
 // ========== 初始化入口 ==========
 
 /**
- * 应用启动初始化：
- * 1. 加载现有历史记录
- * 2. 注册主进程的实时推送更新
- * 3. 绑定清空按钮事件
- * 4. 启动时间自动更新
+ * 应用启动初始化
  */
 async function init() {
+  log("页面初始化开始");
+
+  // 检查 clipboardAPI 是否可用
+  if (!window.clipboardAPI) {
+    log("错误: clipboardAPI 未定义，preload 可能未正确加载");
+    return;
+  }
+  log("clipboardAPI 可用");
+
+  // 加载现有历史记录
   try {
     const history = await window.clipboardAPI.getHistory();
-    render(history);
+    log("获取到历史记录:" + (history ? history.length : 0) + "条");
+    render(history || []);
   } catch (e) {
-    console.error("获取历史记录失败", e);
+    log("获取历史记录失败:" + e.message);
   }
 
-  // 主进程检测到剪贴板新内容时，会主动推送最新历史列表
+  // 注册主进程推送的更新
   window.clipboardAPI.onHistoryUpdate((data) => {
-    render(data);
+    log("收到主进程推送的历史更新:" + (data ? data.length : 0) + "条");
+    render(data || []);
   });
 
-  // 绑定清空按钮
+  // 清空按钮
   btnClear.addEventListener("click", async () => {
+    log("点击清空按钮");
     await window.clipboardAPI.clearAll();
     render([]);
   });
 
+  // 启动时间更新
   startTimeUpdater();
+
+  log("页面初始化完成");
 }
 
+// 页面加载完成后执行
 document.addEventListener("DOMContentLoaded", init);
+log("app.js 已加载");
