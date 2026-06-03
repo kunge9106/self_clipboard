@@ -1,5 +1,5 @@
 ﻿/**
- * self_clipboard — 渲染进程逻辑
+ * self_clipboard — 渲染进程逻辑（VisionOS 风格）
  * 
  * 注意：console.log 使用英文，避免 Windows 控制台编码导致乱码
  * 
@@ -17,9 +17,9 @@ function log(msg) {
  * 将时间戳格式化为可读的中文时间描述
  * 
  * 规则：
- *   不到 60 秒 → "xx秒前"
- *   不到 60 分 → "xx分前"
- *   超过 60 分但仍在当天 → "xx时前"
+ *   不到 60 秒 → "xx秒钟前"
+ *   不到 60 分 → "xx分钟前"
+ *   超过 60 分但仍在当天 → "xx小时前"
  *   过了当天 0 点 → "xx:xx:xx"
  * 
  * @param {number} timestamp - 毫秒时间戳
@@ -48,9 +48,9 @@ function formatTime(timestamp) {
     return `${hh}:${mm}:${ss}`;
   }
 
-  if (seconds < 60) return `${Math.max(1, seconds)}秒前`;
-  if (minutes < 60) return `${minutes}分前`;
-  return `${hours}时前`;
+  if (seconds < 60) return `${Math.max(1, seconds)}秒钟前`;
+  if (minutes < 60) return `${minutes}分钟前`;
+  return `${hours}小时前`;
 }
 
 // ========== DOM 引用 ==========
@@ -59,16 +59,39 @@ const listEl = document.getElementById("list");
 const emptyState = document.getElementById("emptyState");
 const btnClear = document.getElementById("btnClear");
 const itemCount = document.getElementById("itemCount");
+const searchInput = document.getElementById("searchInput");
 
-let currentItems = [];
+let allItems = [];       // 全部历史数据
+let searchQuery = "";    // 当前搜索关键词
+
+// ========== 搜索过滤 ==========
+
+/**
+ * 根据搜索关键词过滤历史记录
+ * 匹配文本内容的完整关键词（不区分大小写）
+ * 
+ * @param {string} query - 搜索关键词
+ * @returns {Array} 过滤后的条目列表
+ */
+function filterItems(query) {
+  if (!query || !query.trim()) return allItems;
+  const q = query.trim().toLowerCase();
+  return allItems.filter((item) => {
+    if (item.type === "text") {
+      return item.content.toLowerCase().includes(q);
+    }
+    // 图片类型通过文本描述不可搜索，但保留（在搜索模式下仍然显示所有图片）
+    return true;
+  });
+}
 
 // ========== 渲染列表 ==========
 
 function render(items) {
-  currentItems = items || [];
-  log("render, count:", currentItems.length);
+  const displayItems = items || filterItems(searchQuery);
+  log("render, count:", displayItems.length);
 
-  if (!items || items.length === 0) {
+  if (!displayItems || displayItems.length === 0) {
     listEl.innerHTML = "";
     emptyState.classList.add("visible");
     btnClear.style.opacity = "0.3";
@@ -80,11 +103,14 @@ function render(items) {
   emptyState.classList.remove("visible");
   btnClear.style.opacity = "1";
   btnClear.style.pointerEvents = "auto";
-  itemCount.textContent = `共 ${items.length} 条`;
+  const totalText = searchQuery
+    ? `找到 ${displayItems.length} 条结果`
+    : `共 ${displayItems.length} 条`;
+  itemCount.textContent = totalText;
 
   const fragment = document.createDocumentFragment();
 
-  items.forEach((item) => {
+  displayItems.forEach((item) => {
     const div = document.createElement("div");
     div.className = "item item-enter";
     div.dataset.id = item.id;
@@ -99,10 +125,10 @@ function render(items) {
     bodyDiv.className = "item-body";
 
     if (item.type === "text") {
-      const textEl = document.createElement("div");
-      textEl.className = "item-text";
-      textEl.textContent = item.content;
-      bodyDiv.appendChild(textEl);
+      const titleEl = document.createElement("div");
+      titleEl.className = "item-title";
+      titleEl.textContent = item.content;
+      bodyDiv.appendChild(titleEl);
     } else if (item.type === "image") {
       const imgEl = document.createElement("img");
       imgEl.className = "item-image";
@@ -158,9 +184,10 @@ function startTimeUpdater() {
   if (timeUpdateTimer) clearInterval(timeUpdateTimer);
   timeUpdateTimer = setInterval(() => {
     const timeEls = listEl.querySelectorAll(".item-time");
+    const items = filterItems(searchQuery);
     timeEls.forEach((el, index) => {
-      if (currentItems[index]) {
-        el.textContent = formatTime(currentItems[index].timestamp);
+      if (items[index]) {
+        el.textContent = formatTime(items[index].timestamp);
       }
     });
   }, 1000);
@@ -174,26 +201,40 @@ async function init() {
 
   if (!window.clipboardAPI) {
     log("ERROR: clipboardAPI not available");
+    document.getElementById("window").innerHTML = "<div style='padding:40px;color:red;text-align:center;'>App Error: clipboardAPI not loaded</div>";
     return;
   }
   log("clipboardAPI ok");
 
+  // 加载历史
   try {
     const history = await window.clipboardAPI.getHistory();
     log("getHistory:", history ? history.length : 0, "items");
-    render(history || []);
+    allItems = history || [];
+    render(filterItems(searchQuery));
   } catch (e) {
     log("getHistory error:", e.message);
   }
 
+  // 监听主进程推送
   window.clipboardAPI.onHistoryUpdate((data) => {
-    log("history update received:", data ? data.length : 0, "items");
-    render(data || []);
+    log("history update:", data ? data.length : 0, "items");
+    allItems = data || [];
+    render(filterItems(searchQuery));
   });
 
+  // 搜索输入
+  searchInput.addEventListener("input", (e) => {
+    searchQuery = e.target.value;
+    log("search:", searchQuery);
+    render(filterItems(searchQuery));
+  });
+
+  // 清空按钮
   btnClear.addEventListener("click", async () => {
     log("clear button clicked");
     await window.clipboardAPI.clearAll();
+    allItems = [];
     render([]);
   });
 
