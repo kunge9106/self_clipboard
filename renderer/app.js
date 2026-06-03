@@ -11,6 +11,14 @@ function log(msg) {
   console.log("[app]", msg);
 }
 
+// ========== 禁用 F12 开发者工具 ==========
+// 防止用户误按 F12 弹出开发者工具栏
+document.addEventListener("keydown", (e) => {
+  if (e.key === "F12") {
+    e.preventDefault();
+  }
+});
+
 // ========== 时间格式化 ==========
 
 /**
@@ -61,18 +69,11 @@ const btnClear = document.getElementById("btnClear");
 const itemCount = document.getElementById("itemCount");
 const searchInput = document.getElementById("searchInput");
 
-let allItems = [];       // 全部历史数据
-let searchQuery = "";    // 当前搜索关键词
+let allItems = [];
+let searchQuery = "";
 
 // ========== 搜索过滤 ==========
 
-/**
- * 根据搜索关键词过滤历史记录
- * 匹配文本内容的完整关键词（不区分大小写）
- * 
- * @param {string} query - 搜索关键词
- * @returns {Array} 过滤后的条目列表
- */
 function filterItems(query) {
   if (!query || !query.trim()) return allItems;
   const q = query.trim().toLowerCase();
@@ -80,7 +81,6 @@ function filterItems(query) {
     if (item.type === "text") {
       return item.content.toLowerCase().includes(q);
     }
-    // 图片类型通过文本描述不可搜索，但保留（在搜索模式下仍然显示所有图片）
     return true;
   });
 }
@@ -103,10 +103,9 @@ function render(items) {
   emptyState.classList.remove("visible");
   btnClear.style.opacity = "1";
   btnClear.style.pointerEvents = "auto";
-  const totalText = searchQuery
+  itemCount.textContent = searchQuery
     ? `找到 ${displayItems.length} 条结果`
     : `共 ${displayItems.length} 条`;
-  itemCount.textContent = totalText;
 
   const fragment = document.createDocumentFragment();
 
@@ -115,12 +114,7 @@ function render(items) {
     div.className = "item item-enter";
     div.dataset.id = item.id;
 
-    // 图标
-    const iconDiv = document.createElement("div");
-    iconDiv.className = "item-icon";
-    iconDiv.textContent = item.type === "image" ? "🖼️" : "📝";
-
-    // 内容
+    // 内容区域（无图标，只有文本或图片）
     const bodyDiv = document.createElement("div");
     bodyDiv.className = "item-body";
 
@@ -143,12 +137,11 @@ function render(items) {
     timeEl.textContent = formatTime(item.timestamp);
     bodyDiv.appendChild(timeEl);
 
-    // 对勾
+    // 复制对勾
     const checkEl = document.createElement("div");
     checkEl.className = "item-check";
     checkEl.textContent = "✓";
 
-    div.appendChild(iconDiv);
     div.appendChild(bodyDiv);
     div.appendChild(checkEl);
 
@@ -201,12 +194,12 @@ async function init() {
 
   if (!window.clipboardAPI) {
     log("ERROR: clipboardAPI not available");
-    document.getElementById("window").innerHTML = "<div style='padding:40px;color:red;text-align:center;'>App Error: clipboardAPI not loaded</div>";
+    document.getElementById("window").innerHTML =
+      "<div style='padding:40px;color:red;text-align:center;'>App Error: clipboardAPI not loaded</div>";
     return;
   }
   log("clipboardAPI ok");
 
-  // 加载历史
   try {
     const history = await window.clipboardAPI.getHistory();
     log("getHistory:", history ? history.length : 0, "items");
@@ -216,21 +209,17 @@ async function init() {
     log("getHistory error:", e.message);
   }
 
-  // 监听主进程推送
   window.clipboardAPI.onHistoryUpdate((data) => {
     log("history update:", data ? data.length : 0, "items");
     allItems = data || [];
     render(filterItems(searchQuery));
   });
 
-  // 搜索输入
   searchInput.addEventListener("input", (e) => {
     searchQuery = e.target.value;
-    log("search:", searchQuery);
     render(filterItems(searchQuery));
   });
 
-  // 清空按钮
   btnClear.addEventListener("click", async () => {
     log("clear button clicked");
     await window.clipboardAPI.clearAll();
