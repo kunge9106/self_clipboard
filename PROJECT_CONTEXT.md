@@ -1,6 +1,6 @@
 ﻿# Project Context — self_clipboard
 
-> 最后更新时间：2026-06-04 09:56
+> 最后更新时间：2026-06-04 10:50
 
 ## 项目基本面
 
@@ -79,6 +79,7 @@ clipboard/
 
 | 日期 | 变更内容 | 影响范围 |
 |------------|----------|----------|
+| 2026-06-04 10:50 | 移除 setBackgroundMaterial(acrylic) 消除 DWM 矩形丙烯酸背景 + transparent:true 启用 CSS backdrop-filter 穿透 + minHeight:350 优化宽高比 + 修复 t4_minSize 测试用例大小写 | main.js, test/app-test.js, PROJECT_CONTEXT.md |
 | 2026-06-04 10:20 | 内外层结构分离彻底修复直角阴影 + 默认最小窗口打开 + 按钮hover统一红色 + 搜索框缩小至30px + 图片缩略图限高 | renderer/*, main.js |
 | 2026-06-04 09:56 | macOS风格按钮 + drop-shadow修复直角阴影 + 无限制历史 + 文本截断 + minSize | renderer/*, main.js, test/app-test.js |
 | 2026-06-04 09:56 | 圆角统一24px/16px + 搜索框外可拖拽 + 右上角关闭按钮 + clip-path消除直角阴影 | renderer/*, preload.js, main.js |

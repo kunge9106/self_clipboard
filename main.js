@@ -202,12 +202,13 @@ ipcMain.handle("get-history", () => {
  */
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 300,
-    height: 350,
+    width: 340,
+    height: 440,
     resizable: true,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
+    backgroundColor: "#00000000",
     skipTaskbar: false,
     title: "self_clipboard",
     minWidth: 300,
@@ -230,21 +231,6 @@ function createWindow() {
   mainWindow.webContents.on("console-message", (event, level, message) => {
     console.log("[render]", message);
   });
-
-  // 启用 Windows 毛玻璃效果
-  if (process.platform === "win32") {
-    try {
-      mainWindow.setBackgroundMaterial("acrylic");
-      console.log("[window] acrylic enabled");
-    } catch (e) {
-      try {
-        mainWindow.setBackgroundMaterial("mica");
-        console.log("[window] mica enabled");
-      } catch (e2) {
-        console.log("[window] acrylic/mica not available, use css blur");
-      }
-    }
-  }
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
@@ -284,6 +270,7 @@ app.on("activate", () => {
     createWindow();
   }
 });
+
 
 
 

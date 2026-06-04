@@ -8,7 +8,6 @@
 </head>
 <body>
   <div class="window" id="window">
-  <div class="window-inner">
     <!-- macOS 风格窗口控制按钮 -->
     <div class="window-controls">
       <button class="win-btn win-btn-minimize" id="btnMinimize" title="最小化">
@@ -19,10 +18,9 @@
       </button>
     </div>
 
-    <!-- 顶部搜索框 -->
     <div class="search-area">
       <div class="search-box">
-        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8A8A8A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8A8A8A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="11" cy="11" r="8"/>
           <line x1="21" y1="21" x2="16.65" y2="16.65"/>
         </svg>
@@ -30,16 +28,13 @@
       </div>
     </div>
 
-    <!-- 历史列表 -->
     <div class="list" id="list"></div>
 
-    <!-- 空状态 -->
     <div class="empty-state" id="emptyState">
       <div class="empty-title">暂无相关记录</div>
       <div class="empty-desc">您暂时没有任何剪贴板历史记录</div>
     </div>
 
-    <!-- 底部工具栏 -->
     <div class="toolbar">
       <span class="toolbar-count" id="itemCount"></span>
       <button class="btn-clear" id="btnClear" title="清空全部">
@@ -50,8 +45,6 @@
       </button>
     </div>
   </div>
-  </div>
   <script src="app.js"></script>
 </body>
 </html>
-
