@@ -1,6 +1,6 @@
 ﻿# Project Context — self_clipboard
 
-> 最后更新时间：2026-06-04 11:17
+> 最后更新时间：2026-06-04 12:45
 
 ## 项目基本面
 
@@ -15,6 +15,7 @@
 
 | 技术 | 版本 | 用途 |
 |------|------|------|
+| 2026-06-04 12:45 | 全面重构玻璃效果：去除全窗蒙白/玻璃仅限卡片/优化blur+saturate+contrast算法/卡片高光/alwaysOnTop:false+失焦隐藏+全局快捷键Ctrl+Shift+V唤出/黄金比例尺寸300×485 | main.js, renderer/style.css, test/app-test.js, PROJECT_CONTEXT.md |
 | 2026-06-04 11:17 | 移除 CSS backdrop-filter（与acrylic叠加为双层模糊）+ 窗口失焦时消失 + 圆角恢复18px | renderer/style.css, PROJECT_CONTEXT.md |
 | 2026-06-04 11:09 | 恢复 acrylic 真玻璃效果（CSS backdrop-filter 无法捕获桌面）+ 圆角缩小至14px 减少DWM冲突 + CSS box-shadow + 尺寸调整为5:6.8(340×462, min 300×408) | main.js, renderer/style.css, test/app-test.js, PROJECT_CONTEXT.md |
 | Node.js | v24.14.0 | 运行环境 |
@@ -91,6 +92,7 @@ clipboard/
 | 2026-06-03 | 删除标题栏和图标、控制台日志改用英文防乱码、增加变更日志章节 | UI、调试、文档 |
 | 2026-06-03 | 修复剪贴板监听无响应：增加调试日志、优化轮询逻辑 | main.js, app.js |
 | 2026-06-03 | 初始版本：实现 Electron 剪贴板工具全部功能 | 项目全局 |
+
 
 
 

@@ -6,4 +6,8 @@ contextBridge.exposeInMainWorld("clipboardAPI", {
   getHistory: () => ipcRenderer.invoke("get-history"),
   closeWindow: () => ipcRenderer.invoke("close-window"),
   minimizeWindow: () => ipcRenderer.invoke("minimize-window"),
+  deleteItem: (itemId) => ipcRenderer.invoke("delete-item", itemId),
+  getAutoStart: () => ipcRenderer.invoke("get-auto-start"),
+  setAutoStart: (enable) => ipcRenderer.invoke("set-auto-start", enable),
+  dragWindow: (dx, dy) => ipcRenderer.send("window-drag", dx, dy),
 });

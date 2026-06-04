@@ -46,6 +46,7 @@ function render(items) {
     return;
   }
   emptyState.classList.remove("visible");
+  listEl.style.display = "";
   btnClear.style.opacity = "1"; btnClear.style.pointerEvents = "auto";
   itemCount.textContent = searchQuery ? "找到 " + di.length + " 条结果" : "共 " + di.length + " 条";
   const frag = document.createDocumentFragment();
@@ -101,6 +102,61 @@ async function init() {
   document.getElementById('btnMinimize').addEventListener('click', async () => { await window.clipboardAPI.minimizeWindow(); });
   btnClose.addEventListener("click", async () => { await window.clipboardAPI.closeWindow(); });
   startTimer();
+  
+
+  // 统一处理
+  document.querySelector(".window").addEventListener("mousedown", (e) => {
+    if (!e.target.closest(".search-box")) searchInput.blur();
+    if (!e.target.closest(".settings-panel") && !e.target.closest("#btnSettings")) {
+      document.getElementById("settingsPanel").classList.remove("visible");
+    }
+    if (!e.target.closest(".context-menu")) {
+      document.getElementById("contextMenu").classList.remove("visible");
+    }
+  });
+
+  // 全窗拖拽
+  let dragA = false, dragSX, dragSY;
+  document.querySelector(".window").addEventListener("mousedown", (e) => {
+    if (e.target.closest(".win-btn") || e.target.closest(".search-box") || 
+        e.target.closest(".item") || e.target.closest(".btn-clear") ||
+        e.target.closest(".settings-panel") || e.target.closest(".context-menu")) return;
+    dragA = true; dragSX = e.screenX; dragSY = e.screenY;
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!dragA) return;
+    window.clipboardAPI.dragWindow(e.screenX - dragSX, e.screenY - dragSY);
+    dragSX = e.screenX; dragSY = e.screenY;
+  });
+  document.addEventListener("mouseup", () => { dragA = false; });
+
+  // 右键删除菜单
+  const ctxM = document.getElementById("contextMenu");
+  let ctxId = null;
+  document.querySelector(".list").addEventListener("contextmenu", (e) => {
+    const item = e.target.closest(".item");
+    if (!item) { ctxM.classList.remove("visible"); return; }
+    e.preventDefault();
+    ctxId = parseFloat(item.dataset.id);
+    ctxM.style.left = e.clientX + "px";
+    ctxM.style.top = e.clientY + "px";
+    ctxM.classList.add("visible");
+  });
+  ctxM.querySelector("[data-action='delete']").addEventListener("click", async () => {
+    if (ctxId != null) { await window.clipboardAPI.deleteItem(ctxId); ctxId = null; }
+    ctxM.classList.remove("visible");
+  });
+
+
+  // 设置面板
+  const bSet = document.getElementById("btnSettings");
+  const sPan = document.getElementById("settingsPanel");
+  const tAuto = document.getElementById("toggleAutoStart");
+  bSet.addEventListener("click", (e) => { e.stopPropagation(); sPan.classList.toggle("visible"); });
+  tAuto.addEventListener("change", async () => { await window.clipboardAPI.setAutoStart(tAuto.checked); });
+  (async () => { tAuto.checked = await window.clipboardAPI.getAutoStart(); })();
+
+
   log("init done");
 }
 document.addEventListener("DOMContentLoaded", init);

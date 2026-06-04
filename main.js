@@ -194,6 +194,45 @@ ipcMain.handle("get-history", () => {
   return history;
 });
 
+
+// 删除指定条目
+ipcMain.handle("delete-item", (event, itemId) => {
+  history = history.filter(i => i.id !== itemId);
+  sendHistoryToRenderer();
+});
+
+
+// 开机自启（注册表方式，dev 模式也生效）
+ipcMain.handle("get-auto-start", () => {
+  try {
+    const { execSync } = require("child_process");
+    const r = execSync("reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard 2>nul", { encoding: "utf8", timeout: 3000 });
+    return !!(r && r.includes("self_clipboard"));
+  } catch(e) {
+    return false;
+  }
+});
+ipcMain.handle("set-auto-start", (event, enable) => {
+  const { execSync } = require("child_process");
+  const exePath = process.execPath.replace(/\\/g, "\\\\");
+  const args = process.argv.slice(1).map(a => a.includes(" ") ? `\"${a}\"` : a).join(" ");
+  const cmd = `"${process.execPath}" ${args}`;
+  if (enable) {
+    execSync(`reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /t REG_SZ /d "${cmd}" /f`, { timeout: 3000 });
+  } else {
+    execSync(`reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /f`, { timeout: 3000 });
+  }
+  console.log("[auto-start]", enable ? "enabled" : "disabled");
+});
+
+
+// 窗口拖拽
+ipcMain.on("window-drag", (event, dx, dy) => {
+  if (!mainWindow) return;
+  const b = mainWindow.getBounds();
+  mainWindow.setBounds({ x: b.x + dx, y: b.y + dy, width: b.width, height: b.height });
+});
+
 // ========== 窗口创建 ==========
 
 /**
@@ -202,17 +241,16 @@ ipcMain.handle("get-history", () => {
  */
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 340,
-    height: 462,
+    width: 300,
+    height: 485,
     resizable: true,
     frame: false,
-    transparent: false,
-    alwaysOnTop: true,
-    backgroundColor: "#00000000",
+    transparent: true,
+    alwaysOnTop: false,
     skipTaskbar: false,
     title: "self_clipboard",
     minWidth: 300,
-    minHeight: 408,
+    minHeight: 485,
     show: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -232,14 +270,18 @@ function createWindow() {
     console.log("[render]", message);
   });
 
-
-  // Windows 毛玻璃效果
+  // 启用 Windows 毛玻璃效果
   if (process.platform === "win32") {
     try {
       mainWindow.setBackgroundMaterial("acrylic");
       console.log("[window] acrylic enabled");
     } catch (e) {
-      console.log("[window] acrylic failed:", e.message);
+      try {
+        mainWindow.setBackgroundMaterial("mica");
+        console.log("[window] mica enabled");
+      } catch (e2) {
+        console.log("[window] acrylic/mica not available, use css blur");
+      }
     }
   }
 
