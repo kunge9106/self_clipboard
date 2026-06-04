@@ -1,6 +1,6 @@
 ﻿# Project Context — self_clipboard
 
-> 最后更新时间：2026-06-04 11:09
+> 最后更新时间：2026-06-04 11:17
 
 ## 项目基本面
 
@@ -15,6 +15,7 @@
 
 | 技术 | 版本 | 用途 |
 |------|------|------|
+| 2026-06-04 11:17 | 移除 CSS backdrop-filter（与acrylic叠加为双层模糊）+ 窗口失焦时消失 + 圆角恢复18px | renderer/style.css, PROJECT_CONTEXT.md |
 | 2026-06-04 11:09 | 恢复 acrylic 真玻璃效果（CSS backdrop-filter 无法捕获桌面）+ 圆角缩小至14px 减少DWM冲突 + CSS box-shadow + 尺寸调整为5:6.8(340×462, min 300×408) | main.js, renderer/style.css, test/app-test.js, PROJECT_CONTEXT.md |
 | Node.js | v24.14.0 | 运行环境 |
 | Electron | ^42.3.2 | 桌面窗口框架 |
