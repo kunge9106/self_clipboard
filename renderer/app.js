@@ -115,18 +115,26 @@ async function init() {
     }
   });
 
-  // 全窗拖拽
+  // 全窗拖拽（排除窗口边缘6px缩放区 + 交互元素）
   let dragA = false, dragSX, dragSY;
   document.querySelector(".window").addEventListener("mousedown", (e) => {
     if (e.target.closest(".win-btn") || e.target.closest(".search-box") || 
         e.target.closest(".item") || e.target.closest(".btn-clear") ||
         e.target.closest(".settings-panel") || e.target.closest(".context-menu")) return;
+    // 排除窗口边缘6px（系统隐形缩放区），避免拖拽与系统缩放冲突
+    const r = e.currentTarget.getBoundingClientRect();
+    const edge = 6;
+    if (e.clientX - r.left < edge || r.right - e.clientX < edge ||
+        e.clientY - r.top < edge || r.bottom - e.clientY < edge) return;
     dragA = true; dragSX = e.screenX; dragSY = e.screenY;
   });
   document.addEventListener("mousemove", (e) => {
     if (!dragA) return;
-    window.clipboardAPI.dragWindow(e.screenX - dragSX, e.screenY - dragSY);
-    dragSX = e.screenX; dragSY = e.screenY;
+    const dx = e.screenX - dragSX, dy = e.screenY - dragSY;
+    if (dx !== 0 || dy !== 0) {
+      window.clipboardAPI.dragWindow(dx, dy);
+      dragSX = e.screenX; dragSY = e.screenY;
+    }
   });
   document.addEventListener("mouseup", () => { dragA = false; });
 

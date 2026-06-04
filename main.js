@@ -271,18 +271,28 @@ function createWindow() {
     console.log("[render]", message);
   });
 
-  // 启用 Windows 毛玻璃效果
+  // 启用 Windows 毛玻璃效果（增强版）
   if (process.platform === "win32") {
+    let glassOk = false;
     try {
       mainWindow.setBackgroundMaterial("acrylic");
       console.log("[window] acrylic enabled");
+      glassOk = true;
     } catch (e) {
+      console.log("[window] acrylic failed:", e.message);
+    }
+    if (!glassOk) {
       try {
         mainWindow.setBackgroundMaterial("mica");
         console.log("[window] mica enabled");
+        glassOk = true;
       } catch (e2) {
-        console.log("[window] acrylic/mica not available, use css blur");
+        console.log("[window] mica failed:", e2.message);
       }
+    }
+    if (!glassOk) {
+      console.log("[window] glass unavailable, fallback to css");
+      mainWindow.setBackgroundMaterial("none");
     }
   }
 
