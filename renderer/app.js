@@ -1,235 +1,106 @@
-﻿/**
- * self_clipboard — 渲染进程逻辑（VisionOS 风格）
- * 
- * 注意：console.log 使用英文，避免 Windows 控制台编码导致乱码
- * 
- * @module renderer/app
- */
+﻿// ========== 日志 ==========
+function log(m) { console.log("[app]", m); }
 
-// ========== 调试日志 ==========
-function log(msg) {
-  console.log("[app]", msg);
-}
-
-// ========== 禁用 F12 开发者工具 ==========
-// 防止用户误按 F12 弹出开发者工具栏
-document.addEventListener("keydown", (e) => {
-  if (e.key === "F12") {
-    e.preventDefault();
-  }
-});
+// ========== 禁用 F12 ==========
+document.addEventListener("keydown", (e) => { if (e.key === "F12") e.preventDefault(); });
 
 // ========== 时间格式化 ==========
-
-/**
- * 将时间戳格式化为可读的中文时间描述
- * 
- * 规则：
- *   不到 60 秒 → "xx秒钟前"
- *   不到 60 分 → "xx分钟前"
- *   超过 60 分但仍在当天 → "xx小时前"
- *   过了当天 0 点 → "xx:xx:xx"
- * 
- * @param {number} timestamp - 毫秒时间戳
- * @returns {string}
- */
-function formatTime(timestamp) {
-  const now = Date.now();
-  const diff = now - timestamp;
+function formatTime(ts) {
+  const now = Date.now(), diff = now - ts;
   if (diff < 0) return "刚刚";
-
-  const seconds = Math.floor(diff / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-
-  const date = new Date(timestamp);
-  const today = new Date(now);
-  const isToday =
-    date.getFullYear() === today.getFullYear() &&
-    date.getMonth() === today.getMonth() &&
-    date.getDate() === today.getDate();
-
-  if (!isToday) {
-    const hh = String(date.getHours()).padStart(2, "0");
-    const mm = String(date.getMinutes()).padStart(2, "0");
-    const ss = String(date.getSeconds()).padStart(2, "0");
-    return `${hh}:${mm}:${ss}`;
+  const s = Math.floor(diff / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60);
+  const d = new Date(ts), t = new Date(now);
+  const today = d.getFullYear() === t.getFullYear() && d.getMonth() === t.getMonth() && d.getDate() === t.getDate();
+  if (!today) {
+    return String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0") + ":" + String(d.getSeconds()).padStart(2,"0");
   }
-
-  if (seconds < 60) return `${Math.max(1, seconds)}秒钟前`;
-  if (minutes < 60) return `${minutes}分钟前`;
-  return `${hours}小时前`;
+  if (s < 60) return Math.max(1,s) + "秒钟前";
+  if (m < 60) return m + "分钟前";
+  return h + "小时前";
 }
 
-// ========== DOM 引用 ==========
-
+// ========== DOM ==========
 const listEl = document.getElementById("list");
 const emptyState = document.getElementById("emptyState");
 const btnClear = document.getElementById("btnClear");
+const btnClose = document.getElementById("btnClose");
 const itemCount = document.getElementById("itemCount");
 const searchInput = document.getElementById("searchInput");
 
-let allItems = [];
-let searchQuery = "";
+let allItems = [], searchQuery = "";
 
-// ========== 搜索过滤 ==========
-
-function filterItems(query) {
-  if (!query || !query.trim()) return allItems;
-  const q = query.trim().toLowerCase();
-  return allItems.filter((item) => {
-    if (item.type === "text") {
-      return item.content.toLowerCase().includes(q);
-    }
-    return true;
-  });
+function filterItems(q) {
+  if (!q || !q.trim()) return allItems;
+  const lq = q.trim().toLowerCase();
+  return allItems.filter(i => i.type !== "text" || i.content.toLowerCase().includes(lq));
 }
 
-// ========== 渲染列表 ==========
-
 function render(items) {
-  const displayItems = items || filterItems(searchQuery);
-  log("render, count:", displayItems.length);
-
-  if (!displayItems || displayItems.length === 0) {
+  const di = items || filterItems(searchQuery);
+  log("render:", di.length);
+  if (!di || di.length === 0) {
     listEl.innerHTML = "";
     emptyState.classList.add("visible");
-    btnClear.style.opacity = "0.3";
-    btnClear.style.pointerEvents = "none";
+    btnClear.style.opacity = "0.3"; btnClear.style.pointerEvents = "none";
     itemCount.textContent = "";
     return;
   }
-
   emptyState.classList.remove("visible");
-  btnClear.style.opacity = "1";
-  btnClear.style.pointerEvents = "auto";
-  itemCount.textContent = searchQuery
-    ? `找到 ${displayItems.length} 条结果`
-    : `共 ${displayItems.length} 条`;
-
-  const fragment = document.createDocumentFragment();
-
-  displayItems.forEach((item) => {
+  btnClear.style.opacity = "1"; btnClear.style.pointerEvents = "auto";
+  itemCount.textContent = searchQuery ? "找到 " + di.length + " 条结果" : "共 " + di.length + " 条";
+  const frag = document.createDocumentFragment();
+  for (const item of di) {
     const div = document.createElement("div");
-    div.className = "item item-enter";
-    div.dataset.id = item.id;
-
-    // 内容区域（无图标，只有文本或图片）
-    const bodyDiv = document.createElement("div");
-    bodyDiv.className = "item-body";
-
+    div.className = "item item-enter"; div.dataset.id = item.id;
+    const body = document.createElement("div"); body.className = "item-body";
     if (item.type === "text") {
-      const titleEl = document.createElement("div");
-      titleEl.className = "item-title";
-      titleEl.textContent = item.content;
-      bodyDiv.appendChild(titleEl);
+      const t = document.createElement("div"); t.className = "item-title"; t.textContent = item.content; body.appendChild(t);
     } else if (item.type === "image") {
-      const imgEl = document.createElement("img");
-      imgEl.className = "item-image";
-      imgEl.src = item.content;
-      imgEl.draggable = false;
-      bodyDiv.appendChild(imgEl);
+      const img = document.createElement("img"); img.className = "item-image"; img.src = item.content; img.draggable = false; body.appendChild(img);
     }
-
-    // 时间
-    const timeEl = document.createElement("div");
-    timeEl.className = "item-time";
-    timeEl.textContent = formatTime(item.timestamp);
-    bodyDiv.appendChild(timeEl);
-
-    // 复制对勾
-    const checkEl = document.createElement("div");
-    checkEl.className = "item-check";
-    checkEl.textContent = "✓";
-
-    div.appendChild(bodyDiv);
-    div.appendChild(checkEl);
-
-    // 点击复制
+    const time = document.createElement("div"); time.className = "item-time"; time.textContent = formatTime(item.timestamp); body.appendChild(time);
+    const check = document.createElement("div"); check.className = "item-check"; check.textContent = "✓";
+    div.appendChild(body); div.appendChild(check);
     div.addEventListener("click", async () => {
       try {
-        log("copy item:", item.id);
+        log("copy:", item.id);
         await window.clipboardAPI.copyToClipboard(item);
-        checkEl.classList.add("show");
-        div.classList.add("item-copied");
-        setTimeout(() => {
-          checkEl.classList.remove("show");
-          div.classList.remove("item-copied");
-        }, 800);
-      } catch (e) {
-        log("copy error:", e.message);
-      }
+        check.classList.add("show"); div.classList.add("item-copied");
+        setTimeout(() => { check.classList.remove("show"); div.classList.remove("item-copied"); }, 800);
+      } catch(e) { log("copy err:", e.message); }
     });
-
-    fragment.appendChild(div);
-  });
-
-  listEl.innerHTML = "";
-  listEl.appendChild(fragment);
-  log("render done");
+    frag.appendChild(div);
+  }
+  listEl.innerHTML = ""; listEl.appendChild(frag);
 }
 
 // ========== 时间自动更新 ==========
-
-let timeUpdateTimer = null;
-
-function startTimeUpdater() {
-  if (timeUpdateTimer) clearInterval(timeUpdateTimer);
-  timeUpdateTimer = setInterval(() => {
-    const timeEls = listEl.querySelectorAll(".item-time");
+let timer = null;
+function startTimer() {
+  if (timer) clearInterval(timer);
+  timer = setInterval(() => {
+    const els = listEl.querySelectorAll(".item-time");
     const items = filterItems(searchQuery);
-    timeEls.forEach((el, index) => {
-      if (items[index]) {
-        el.textContent = formatTime(items[index].timestamp);
-      }
-    });
+    els.forEach((el, i) => { if (items[i]) el.textContent = formatTime(items[i].timestamp); });
   }, 1000);
-  log("time updater started");
 }
 
 // ========== 初始化 ==========
-
 async function init() {
-  log("init start");
-
-  if (!window.clipboardAPI) {
-    log("ERROR: clipboardAPI not available");
-    document.getElementById("window").innerHTML =
-      "<div style='padding:40px;color:red;text-align:center;'>App Error: clipboardAPI not loaded</div>";
-    return;
-  }
-  log("clipboardAPI ok");
+  log("init");
+  if (!window.clipboardAPI) { log("ERROR: no clipboardAPI"); return; }
 
   try {
-    const history = await window.clipboardAPI.getHistory();
-    log("getHistory:", history ? history.length : 0, "items");
-    allItems = history || [];
-    render(filterItems(searchQuery));
-  } catch (e) {
-    log("getHistory error:", e.message);
-  }
+    const h = await window.clipboardAPI.getHistory();
+    allItems = h || []; render(filterItems(searchQuery));
+  } catch(e) { log("getHistory err:", e.message); }
 
-  window.clipboardAPI.onHistoryUpdate((data) => {
-    log("history update:", data ? data.length : 0, "items");
-    allItems = data || [];
-    render(filterItems(searchQuery));
-  });
-
-  searchInput.addEventListener("input", (e) => {
-    searchQuery = e.target.value;
-    render(filterItems(searchQuery));
-  });
-
-  btnClear.addEventListener("click", async () => {
-    log("clear button clicked");
-    await window.clipboardAPI.clearAll();
-    allItems = [];
-    render([]);
-  });
-
-  startTimeUpdater();
+  window.clipboardAPI.onHistoryUpdate((data) => { allItems = data || []; render(filterItems(searchQuery)); });
+  searchInput.addEventListener("input", (e) => { searchQuery = e.target.value; render(filterItems(searchQuery)); });
+  btnClear.addEventListener("click", async () => { await window.clipboardAPI.clearAll(); allItems = []; render([]); });
+  btnClose.addEventListener("click", async () => { await window.clipboardAPI.closeWindow(); });
+  startTimer();
   log("init done");
 }
-
 document.addEventListener("DOMContentLoaded", init);
-log("app.js loaded");
+log("loaded");

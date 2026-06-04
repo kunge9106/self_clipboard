@@ -173,6 +173,12 @@ ipcMain.handle("copy-to-clipboard", (event, item) => {
   }
 });
 
+/** 处理关闭窗口请求 */
+ipcMain.handle("close-window", () => {
+  console.log("[ipc] close-window");
+  if (mainWindow) mainWindow.close();
+});
+
 /** 处理清空请求 */
 ipcMain.handle("clear-all", () => {
   console.log("[ipc] clear-all");
@@ -272,3 +278,4 @@ app.on("activate", () => {
     createWindow();
   }
 });
+
