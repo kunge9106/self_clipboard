@@ -4,12 +4,44 @@
   "description": "Windows 透明磨砂毛玻璃剪贴板工具",
   "main": "main.js",
   "scripts": {
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
     "start": "electron .",
     "dev": "electron . --dev"
   },
   "author": "kunge9106",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^42.3.2"
+    "electron": "^42.3.2",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.kunge9106.self_clipboard",
+    "productName": "self_clipboard",
+    "directories": {
+      "output": "dist"
+    },
+    "compression": "maximum",
+    "removePackageScripts": true,
+    "afterPack": "./scripts/afterPack.js",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "self_clipboard",
+      "compression": "lzma",
+      "differentialPackage": false
+    }
   }
 }

@@ -234,13 +234,14 @@ ipcMain.on("window-drag", (event, dx, dy) => {
 });
 
 // ========== 窗口创建 ==========
-
 /**
  * 创建 Electron 主窗口
  * 应用 Windows Acrylic 磨砂毛玻璃效果
  */
 function createWindow() {
+  const iconPath = path.join(__dirname, "assets", "icon.ico");
   mainWindow = new BrowserWindow({
+    icon: iconPath,
     width: 300,
     height: 485,
     resizable: true,
@@ -323,9 +324,3 @@ app.on("activate", () => {
     createWindow();
   }
 });
-
-
-
-
-
-

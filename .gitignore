@@ -15,9 +15,4 @@ Thumbs.db
 dist/
 build/
 *.tsbuildinfo
-
-# Electron
-node_modules/
-
-# Build
 electron-builder-output/
