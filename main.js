@@ -15,7 +15,7 @@ const path = require("path");
 // ========== 应用配置 ==========
 
 /** 历史记录最大保留条数 */
-const MAX_HISTORY = 100;
+// 不限制历史记录条数
 
 /** 剪贴板轮询间隔（毫秒） */
 const POLL_INTERVAL = 1000;
@@ -127,9 +127,7 @@ function addHistoryItem(item) {
   }
 
   history.unshift(entry);
-  if (history.length > MAX_HISTORY) {
-    history.pop();
-  }
+  
 
   lastClipboardText = clipboard.readText();
   console.log("[history] added, total:", history.length);
@@ -174,6 +172,18 @@ ipcMain.handle("copy-to-clipboard", (event, item) => {
 });
 
 /** 处理关闭窗口请求 */
+ipcMain.handle("close-window", () => {
+  console.log("[ipc] close-window");
+  if (mainWindow) mainWindow.close();
+});
+
+/** 处理最小化窗口请求 */
+ipcMain.handle("minimize-window", () => {
+  console.log("[ipc] minimize-window");
+  if (mainWindow) mainWindow.minimize();
+});
+
+/** 处理清空请求 */
 ipcMain.handle("close-window", () => {
   console.log("[ipc] close-window");
   if (mainWindow) mainWindow.close();
@@ -278,4 +288,6 @@ app.on("activate", () => {
     createWindow();
   }
 });
+
+
 

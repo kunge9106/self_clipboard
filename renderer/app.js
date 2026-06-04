@@ -98,9 +98,11 @@ async function init() {
   window.clipboardAPI.onHistoryUpdate((data) => { allItems = data || []; render(filterItems(searchQuery)); });
   searchInput.addEventListener("input", (e) => { searchQuery = e.target.value; render(filterItems(searchQuery)); });
   btnClear.addEventListener("click", async () => { await window.clipboardAPI.clearAll(); allItems = []; render([]); });
+  document.getElementById('btnMinimize').addEventListener('click', async () => { await window.clipboardAPI.minimizeWindow(); });
   btnClose.addEventListener("click", async () => { await window.clipboardAPI.closeWindow(); });
   startTimer();
   log("init done");
 }
 document.addEventListener("DOMContentLoaded", init);
 log("loaded");
+

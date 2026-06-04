@@ -5,4 +5,5 @@ contextBridge.exposeInMainWorld("clipboardAPI", {
   clearAll: () => ipcRenderer.invoke("clear-all"),
   getHistory: () => ipcRenderer.invoke("get-history"),
   closeWindow: () => ipcRenderer.invoke("close-window"),
+  minimizeWindow: () => ipcRenderer.invoke("minimize-window"),
 });
