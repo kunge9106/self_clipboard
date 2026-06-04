@@ -1,6 +1,6 @@
 ﻿# Project Context — self_clipboard
 
-> 最后更新时间：2026-06-04 10:50
+> 最后更新时间：2026-06-04 11:09
 
 ## 项目基本面
 
@@ -15,6 +15,7 @@
 
 | 技术 | 版本 | 用途 |
 |------|------|------|
+| 2026-06-04 11:09 | 恢复 acrylic 真玻璃效果（CSS backdrop-filter 无法捕获桌面）+ 圆角缩小至14px 减少DWM冲突 + CSS box-shadow + 尺寸调整为5:6.8(340×462, min 300×408) | main.js, renderer/style.css, test/app-test.js, PROJECT_CONTEXT.md |
 | Node.js | v24.14.0 | 运行环境 |
 | Electron | ^42.3.2 | 桌面窗口框架 |
 | HTML/CSS/JS | — | 渲染进程 UI |
@@ -52,7 +53,7 @@ clipboard/
 
 - **风格**：VisionOS / Apple Vision Pro Glassmorphism
 - **配色**：浅色（白色 + 冰蓝色），半透明磨砂
-- **容器**：圆角 20px，背景 rgba(255,255,255,0.35)，阴影 0 10px 40px
+- **容器**：圆角 14px，背景 rgba(255,255,255,0.35)，阴影 0 10px 40px
 - **卡片**：条目为独立悬浮卡片，圆角 14px，hover 上浮 2px
 - **搜索框**：44px 高，圆角 14px，带放大镜图标
 - **字体**：标题 16px Semibold #222，时间 12px #999

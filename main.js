@@ -203,16 +203,16 @@ ipcMain.handle("get-history", () => {
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 340,
-    height: 440,
+    height: 462,
     resizable: true,
     frame: false,
-    transparent: true,
+    transparent: false,
     alwaysOnTop: true,
     backgroundColor: "#00000000",
     skipTaskbar: false,
     title: "self_clipboard",
     minWidth: 300,
-    minHeight: 350,
+    minHeight: 408,
     show: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -231,6 +231,17 @@ function createWindow() {
   mainWindow.webContents.on("console-message", (event, level, message) => {
     console.log("[render]", message);
   });
+
+
+  // Windows 毛玻璃效果
+  if (process.platform === "win32") {
+    try {
+      mainWindow.setBackgroundMaterial("acrylic");
+      console.log("[window] acrylic enabled");
+    } catch (e) {
+      console.log("[window] acrylic failed:", e.message);
+    }
+  }
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 

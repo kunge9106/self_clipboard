@@ -8,7 +8,7 @@ function t1_oneLayer(){const c=rd('renderer/style.css'),h=rd('renderer/index.htm
   console.log('  PASS t1_oneLayer');}
 function t2_radius(){const m=rd('renderer/style.css').match(/--radius-window:\s*(\d+)px/);a.ok(m&&parseInt(m[1])<=20);console.log('  PASS t2_radius');}
 function t3_buttons(){a.ok(rd('renderer/style.css').includes('width:16px'));console.log('  PASS t3_buttons');}
-function t4_minSize(){const m=rd('main.js');a.ok(m.includes('minWidth')&&m.includes('minHeight')&&m.includes('minWidth: 300'));console.log('  PASS t4_minSize');}
+function t4_minSize(){const m=rd('main.js');a.ok(m.includes('minWidth')&&m.includes('minHeight')&&m.includes('minHeight: 408'));console.log('  PASS t4_minSize');}
 function t5_text(){a.ok(rd('renderer/style.css').includes('ellipsis'));console.log('  PASS t5_text');}
 function t6_noIcons(){a.ok(!rd('renderer/app.js').includes('item-icon'));console.log('  PASS t6_noIcons');}
 function t7_F12(){a.ok(rd('renderer/app.js').includes('F12'));console.log('  PASS t7_F12');}
