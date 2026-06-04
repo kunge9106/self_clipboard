@@ -202,8 +202,8 @@ ipcMain.handle("get-history", () => {
  */
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 380,
-    height: 600,
+    width: 300,
+    height: 350,
     resizable: true,
     frame: false,
     transparent: true,
@@ -284,6 +284,7 @@ app.on("activate", () => {
     createWindow();
   }
 });
+
 
 
 
