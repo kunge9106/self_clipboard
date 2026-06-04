@@ -1,6 +1,6 @@
 ﻿# Project Context — self_clipboard
 
-> 最后更新时间：2026-06-04
+> 最后更新时间：2026-06-04 09:56
 
 ## 项目基本面
 
@@ -79,13 +79,14 @@ clipboard/
 
 | 日期 | 变更内容 | 影响范围 |
 |------------|----------|----------|
-| 2026-06-04 | 圆角统一24px/16px + 搜索框外可拖拽 + 右上角关闭按钮 + clip-path消除直角阴影 | renderer/*, preload.js, main.js |
+| 2026-06-04 09:56 | 圆角统一24px/16px + 搜索框外可拖拽 + 右上角关闭按钮 + clip-path消除直角阴影 | renderer/*, preload.js, main.js |
 | 2026-06-03 | 拖拽修复 + 去除条目图标 + 禁用F12，新建分支 dev/visionos-ui | renderer/*, test/app-test.js, git |
 | 2026-06-03 | VisionOS 风格 UI 重设计：浅色主题、搜索框、卡片式条目、动画、拖拽修复 | renderer/*, test/app-test.js |
 | 2026-06-03 | 合并日志时间为单列格式 yyyy:mm:dd xx:xx | PROJECT_CONTEXT.md |
 | 2026-06-03 | 删除标题栏和图标、控制台日志改用英文防乱码、增加变更日志章节 | UI、调试、文档 |
 | 2026-06-03 | 修复剪贴板监听无响应：增加调试日志、优化轮询逻辑 | main.js, app.js |
 | 2026-06-03 | 初始版本：实现 Electron 剪贴板工具全部功能 | 项目全局 |
+
 
 
 
