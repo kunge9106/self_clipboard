@@ -210,6 +210,8 @@ function createWindow() {
     alwaysOnTop: true,
     skipTaskbar: false,
     title: "self_clipboard",
+    minWidth: 300,
+    minHeight: 350,
     show: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -282,6 +284,7 @@ app.on("activate", () => {
     createWindow();
   }
 });
+
 
 
 
