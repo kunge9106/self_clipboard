@@ -32,7 +32,7 @@ let allItems = [], searchQuery = "";
 function filterItems(q) {
   if (!q || !q.trim()) return allItems;
   const lq = q.trim().toLowerCase();
-  return allItems.filter(i => i.type === "image" ? lq.includes("图片") || lq.includes("image") : i.content.toLowerCase().includes(lq));
+  return allItems.filter(i => i.type === "image" ? lq.includes("图片") || lq.includes("image") || lq.includes("tupian") : i.content.toLowerCase().includes(lq));
 }
 
 function render(items) {
@@ -122,15 +122,10 @@ async function init() {
 
   // 全窗拖拽（排除窗口边缘6px缩放区 + 交互元素）
   let dragA = false, dragSX, dragSY;
-  document.addEventListener("mousedown", (e) => {
+  document.querySelector(".window").addEventListener("mousedown", (e) => {
     if (e.target.closest(".win-btn") || e.target.closest(".search-box") || 
         e.target.closest(".item") || e.target.closest(".btn-clear") ||
         e.target.closest(".settings-panel") || e.target.closest(".context-menu")) return;
-    // 排除窗口边缘6px（系统隐形缩放区），避免拖拽与系统缩放冲突
-    const r = e.currentTarget.getBoundingClientRect();
-    const edge = 6;
-    if (e.clientX - r.left < edge || r.right - e.clientX < edge ||
-        e.clientY - r.top < edge || r.bottom - e.clientY < edge) return;
     dragA = true; dragSX = e.screenX; dragSY = e.screenY;
   });
   document.addEventListener("mousemove", (e) => {
