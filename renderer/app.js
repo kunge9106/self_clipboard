@@ -32,7 +32,7 @@ let allItems = [], searchQuery = "";
 function filterItems(q) {
   if (!q || !q.trim()) return allItems;
   const lq = q.trim().toLowerCase();
-  return allItems.filter(i => i.type !== "text" || i.content.toLowerCase().includes(lq));
+  return allItems.filter(i => i.type === "image" ? lq.includes("图片") || lq.includes("image") : i.content.toLowerCase().includes(lq));
 }
 
 function render(items) {
@@ -105,7 +105,7 @@ async function init() {
   
 
   // 统一处理
-  document.querySelector(".window").addEventListener("mousedown", (e) => {
+  document.addEventListener("mousedown", (e) => {
     if (!e.target.closest(".search-box")) searchInput.blur();
     if (!e.target.closest(".settings-panel") && !e.target.closest("#btnSettings")) {
       document.getElementById("settingsPanel").classList.remove("visible");
@@ -114,10 +114,15 @@ async function init() {
       document.getElementById("contextMenu").classList.remove("visible");
     }
   });
+  // ????????
+  window.addEventListener("blur", () => {
+    document.getElementById("settingsPanel").classList.remove("visible");
+    document.getElementById("contextMenu").classList.remove("visible");
+  });
 
   // 全窗拖拽（排除窗口边缘6px缩放区 + 交互元素）
   let dragA = false, dragSX, dragSY;
-  document.querySelector(".window").addEventListener("mousedown", (e) => {
+  document.addEventListener("mousedown", (e) => {
     if (e.target.closest(".win-btn") || e.target.closest(".search-box") || 
         e.target.closest(".item") || e.target.closest(".btn-clear") ||
         e.target.closest(".settings-panel") || e.target.closest(".context-menu")) return;

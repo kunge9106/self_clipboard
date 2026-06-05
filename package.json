@@ -1,13 +1,13 @@
-﻿{
+{
   "name": "self_clipboard",
-  "version": "1.0.0",
+  "version": "1.2.1",
   "description": "Windows 透明磨砂毛玻璃剪贴板工具",
   "main": "main.js",
   "scripts": {
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder",
     "start": "electron .",
-    "dev": "electron . --dev"
+    "dev": "electron . --dev",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
   },
   "author": "kunge9106",
   "license": "MIT",
@@ -17,19 +17,12 @@
   },
   "build": {
     "appId": "com.kunge9106.self_clipboard",
-    "productName": "self_clipboard",
+    "productName": "轻贴",
     "directories": {
       "output": "dist"
     },
     "compression": "maximum",
-    "removePackageScripts": true,
-    "afterPack": "./scripts/afterPack.js",
-    "files": [
-      "main.js",
-      "preload.js",
-      "renderer/**/*",
-      "assets/**/*"
-    ],
+    "asar": false,
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"
@@ -39,9 +32,8 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "self_clipboard",
-      "compression": "lzma",
-      "differentialPackage": false
+      "shortcutName": "轻贴",
+      "runAfterFinish": false
     }
   }
 }
