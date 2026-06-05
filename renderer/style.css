@@ -41,9 +41,20 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
   background:linear-gradient(90deg,transparent,var(--glass-highlight),transparent);
   opacity:0.6; pointer-events:none; z-index:1;
 }
+/* ===== ??????????????flex??? ===== */
+.drag-bar-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  z-index: 1;
+  -webkit-app-region: drag;
+}
+
 /* ===== 窗口控制按钮 ===== */
 .window-controls {
-  position:absolute; top:4px; right:16px; z-index:20;
+  position:absolute; top:6px; right:16px; z-index:20;
   display:flex; gap:8px;
   -webkit-app-region:no-drag;
 }
@@ -62,7 +73,7 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
 .win-btn-minimize:hover { color:#E04040; background:rgba(255,80,80,0.10); border-color:rgba(255,80,80,0.20); }
 
 /* ===== 搜索区域 ===== */
-.search-area { padding:28px 16px 4px; flex-shrink:0; -webkit-app-region:drag; }
+.search-area { padding:28px 16px 4px; flex-shrink:0; }
 .search-box {
   display:flex; align-items:center; height:30px; padding:0 10px;
   border-radius:var(--radius-card);
@@ -129,12 +140,13 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
 .empty-state .empty-desc { font-size:13px; color:var(--text-muted); }
 
 /* ===== 底部工具栏 ===== */
-.toolbar { display:flex; align-items:center; justify-content:flex-end; padding:1px 16px 6px; gap:6px; flex-shrink:0; -webkit-app-region:drag; }
-.toolbar-count { flex:1; font-size:11px; color:var(--text-muted); font-weight:400; }
+.toolbar { display:flex; align-items:center; justify-content:flex-end; padding:4px 16px 4px; gap:8px; flex-shrink:0; -webkit-app-region:drag; }
+.toolbar-count { font-size:11px; color:var(--text-muted); font-weight:400; white-space:nowrap; }
+.toolbar-version { flex:1; text-align:center; font-size:11px; color:var(--text-muted); font-weight:400; white-space:nowrap; }
 .btn-clear {
   -webkit-app-region: no-drag;
   background:transparent; border:1px solid rgba(0,0,0,0.06);
-  color:rgba(0,0,0,0.25); width:24px; height:24px; border-radius:50%;
+  color:rgba(0,0,0,0.25); width:20px; height:20px; border-radius:50%;
   cursor:pointer; display:flex; align-items:center; justify-content:center;
   transition:all 0.2s ease;
 }
@@ -145,11 +157,11 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
 @keyframes slideFadeIn { from { opacity:0; transform:translateY(-8px) scale(0.97); } to { opacity:1; transform:translateY(0) scale(1); } }
 .item-enter { animation:slideFadeIn 0.25s cubic-bezier(0.25,0.1,0.25,1) both; }
 /* ===== 设置 ===== */
-.btn-settings { position:absolute; top:4px; left:12px; z-index:20; width:16px; height:16px; border-radius:50%; border:1px solid rgba(0,0,0,0.08); background:rgba(255,255,255,0.20); cursor:pointer; padding:0; display:flex; align-items:center; justify-content:center; transition:all 0.2s ease; color:rgba(0,0,0,0.35); -webkit-app-region:no-drag; }
+.btn-settings { position:absolute; top:6px; left:12px; z-index:20; width:16px; height:16px; border-radius:50%; border:1px solid rgba(0,0,0,0.08); background:rgba(255,255,255,0.20); cursor:pointer; padding:0; display:flex; align-items:center; justify-content:center; transition:all 0.2s ease; color:rgba(0,0,0,0.35); -webkit-app-region:no-drag; }
 .btn-settings svg { width:8px; height:8px; }
 .btn-settings:hover { color:rgba(0,0,0,0.55); background:rgba(255,255,255,0.30); border-color:rgba(0,0,0,0.15); }
 .btn-settings:active { transform:scale(0.85); }
-.settings-panel { display:none; position:absolute; top:24px; left:8px; z-index:30; padding:8px 0; border-radius:14px; background:rgba(255,255,255,0.72); border:1px solid rgba(255,255,255,0.45); box-shadow:0 8px 32px rgba(0,0,0,0.10); min-width:110px; -webkit-app-region:no-drag; }
+.settings-panel { display:none; position:absolute; top:26px; left:8px; z-index:30; padding:8px 0; border-radius:14px; background:rgba(255,255,255,0.72); border:1px solid rgba(255,255,255,0.45); box-shadow:0 8px 32px rgba(0,0,0,0.10); min-width:110px; -webkit-app-region:no-drag; }
 .settings-panel.visible { display:block; }
 .settings-item { display:flex; align-items:center; justify-content:space-between; padding:6px 12px; cursor:pointer; font-size:12px; color:var(--text-secondary); border-radius:8px; margin:0 4px; }
 .settings-item:hover { background:rgba(255,255,255,0.20); }

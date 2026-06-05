@@ -147,6 +147,12 @@ async function init() {
   (async () => { tAuto.checked = await window.clipboardAPI.getAutoStart(); })();
 
 
+  // ????????drag ????? DOM mousedown?
+  window.clipboardAPI.onClosePanels(() => {
+    document.getElementById("settingsPanel").classList.remove("visible");
+    document.getElementById("contextMenu").classList.remove("visible");
+  });
+
   log("init done");
 }
 document.addEventListener("DOMContentLoaded", init);

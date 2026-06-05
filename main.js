@@ -289,6 +289,23 @@ function createWindow() {
     }
   }
 
+  // ??????/????????-webkit-app-region:drag ?? DOM ???
+  if (process.platform === "win32") {
+    try {
+      mainWindow.hookWindowMessage(0x0201, () => { // WM_LBUTTONDOWN
+        try { mainWindow.webContents.send("close-panels"); } catch(e) {}
+      });
+      mainWindow.hookWindowMessage(0x00A1, () => { // WM_NCLBUTTONDOWN (drag)
+        try { mainWindow.webContents.send("close-panels"); } catch(e) {}
+      });
+    } catch(e) {
+      console.log("[window] hookWindowMessage failed:", e.message);
+    }
+  }
+  mainWindow.on("will-move", () => {
+    try { mainWindow.webContents.send("close-panels"); } catch(e) {}
+  });
+
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
   mainWindow.on("closed", () => {
