@@ -120,24 +120,6 @@ async function init() {
     document.getElementById("contextMenu").classList.remove("visible");
   });
 
-  // 全窗拖拽（排除窗口边缘6px缩放区 + 交互元素）
-  let dragA = false, dragSX, dragSY;
-  document.querySelector(".window").addEventListener("mousedown", (e) => {
-    if (e.target.closest(".win-btn") || e.target.closest(".search-box") || 
-        e.target.closest(".item") || e.target.closest(".btn-clear") ||
-        e.target.closest(".settings-panel") || e.target.closest(".context-menu")) return;
-    dragA = true; dragSX = e.screenX; dragSY = e.screenY;
-  });
-  document.addEventListener("mousemove", (e) => {
-    if (!dragA) return;
-    const dx = e.screenX - dragSX, dy = e.screenY - dragSY;
-    if (dx !== 0 || dy !== 0) {
-      window.clipboardAPI.dragWindow(dx, dy);
-      dragSX = e.screenX; dragSY = e.screenY;
-    }
-  });
-  document.addEventListener("mouseup", () => { dragA = false; });
-
   // 右键删除菜单
   const ctxM = document.getElementById("contextMenu");
   let ctxId = null;

@@ -226,13 +226,6 @@ ipcMain.handle("set-auto-start", (event, enable) => {
 });
 
 
-// 窗口拖拽
-ipcMain.on("window-drag", (event, dx, dy) => {
-  if (!mainWindow) return;
-  const b = mainWindow.getBounds();
-  mainWindow.setBounds({ x: b.x + dx, y: b.y + dy, width: b.width, height: b.height });
-});
-
 // ========== 窗口创建 ==========
 /**
  * 创建 Electron 主窗口
@@ -291,8 +284,8 @@ function createWindow() {
       }
     }
     if (!glassOk) {
-      console.log("[window] glass unavailable, fallback to css");
-      mainWindow.setBackgroundMaterial("none");
+      console.log("[window] acrylic/mica unavailable, CSS backdrop-filter is primary glass");
+      // No destructive fallback, CSS backdrop-filter handles it
     }
   }
 
