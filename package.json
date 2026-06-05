@@ -1,6 +1,6 @@
-﻿{
+{
   "name": "self_clipboard",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "Windows 透明磨砂毛玻璃剪贴板工具",
   "main": "main.js",
   "scripts": {

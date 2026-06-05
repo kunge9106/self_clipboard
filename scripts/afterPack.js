@@ -23,17 +23,12 @@ module.exports = async function afterPack(context) {
         fs.rmSync(el);
     }
 
-    // ????? DLL???????/GPU/?????
-    const safeDlls = [
-        "ffmpeg.dll",          // ???????????
-        "d3dcompiler_47.dll",  // ???? DirectX ????Electron ????????
-    ];
-    for (const dll of safeDlls) {
-        const p = path.join(appOutDir, dll);
-        if (fs.existsSync(p)) {
-            cleaned += fs.statSync(p).size;
-            fs.rmSync(p);
-        }
+    // ?? ffmpeg.dll?????????????
+    // ????? d3dcompiler_47.dll?GPU/?????
+    const ffmpeg = path.join(appOutDir, "ffmpeg.dll");
+    if (fs.existsSync(ffmpeg)) {
+        cleaned += fs.statSync(ffmpeg).size;
+        fs.rmSync(ffmpeg);
     }
 
     console.log("[afterPack] cleaned " + (cleaned / 1024 / 1024).toFixed(1) + " MB");
