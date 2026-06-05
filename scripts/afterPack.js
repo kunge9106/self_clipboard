@@ -1,11 +1,11 @@
-﻿const fs = require("fs");
+const fs = require("fs");
 const path = require("path");
 
 module.exports = async function afterPack(context) {
     const { appOutDir } = context;
     let cleaned = 0;
 
-    // ?????????? zh-CN + en-US?
+    // ??????????? zh-CN + en-US?????? DLL/exe
     const localeDir = path.join(appOutDir, "locales");
     if (fs.existsSync(localeDir)) {
         for (const f of fs.readdirSync(localeDir)) {
@@ -16,20 +16,5 @@ module.exports = async function afterPack(context) {
         }
     }
 
-    // ?? elevate.exe??????????
-    const el = path.join(appOutDir, "resources", "elevate.exe");
-    if (fs.existsSync(el)) {
-        cleaned += fs.statSync(el).size;
-        fs.rmSync(el);
-    }
-
-    // ?? ffmpeg.dll?????????????
-    // ????? d3dcompiler_47.dll?GPU/?????
-    const ffmpeg = path.join(appOutDir, "ffmpeg.dll");
-    if (fs.existsSync(ffmpeg)) {
-        cleaned += fs.statSync(ffmpeg).size;
-        fs.rmSync(ffmpeg);
-    }
-
-    console.log("[afterPack] cleaned " + (cleaned / 1024 / 1024).toFixed(1) + " MB");
+    console.log("[afterPack] cleaned locales: " + (cleaned / 1024 / 1024).toFixed(1) + " MB");
 };

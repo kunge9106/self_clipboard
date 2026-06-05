@@ -34,6 +34,7 @@
       "createDesktopShortcut": true,
       "shortcutName": "轻贴",
       "runAfterFinish": false
-    }
+    },
+    "afterPack": "scripts/afterPack.js"
   }
 }
