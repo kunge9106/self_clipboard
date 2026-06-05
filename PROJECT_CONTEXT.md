@@ -7,10 +7,10 @@
 - **项目名称**：self_clipboard
 - **类型**：Windows 桌面剪贴板管理工具
 - **定位**：轻量、常驻、VisionOS 风格毛玻璃剪贴板历史管理器
-- **当前状态**：开发中 v1.0.0
+- **当前状态**：开发中 v1.2.3
 - **目标用户**：Windows 桌面用户，需要便捷管理剪贴板历史的人
 - **GitHub**：https://github.com/kunge9106/self_clipboard
-- **当前分支**：dev/visionos-ui（领先 origin 4 个 commit，未推送）
+- **当前分支**：main
 
 ## 技术栈
 
@@ -109,7 +109,7 @@ clipboard/
 ## 已知问题
 
 - 搜索框点击 padding 区域不会 blur（因为拖拽排除逻辑未覆盖 .search-area）
-- 本地位于 dev/visionos-ui 分支，领先远程 4 个 commit，尚未推送
+- 
 
 ## 打包构建
 

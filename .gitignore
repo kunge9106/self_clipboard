@@ -21,3 +21,6 @@ node_modules/
 
 # Build
 electron-builder-output/
+
+# Zip archives
+*.zip
