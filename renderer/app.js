@@ -153,6 +153,17 @@ async function init() {
     document.getElementById("contextMenu").classList.remove("visible");
   });
 
+  // ??????????? body class?acrylic ???????
+  window.clipboardAPI.onThemeChanged((isDark) => {
+    document.body.classList.toggle("dark", isDark);
+    document.body.classList.toggle("light", !isDark);
+  });
+
+  // ????? class
+  document.body.classList.add(
+    window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+  );
+
   log("init done");
 }
 document.addEventListener("DOMContentLoaded", init);

@@ -9,7 +9,7 @@
  * @module main
  */
 
-const { app, BrowserWindow, ipcMain, nativeImage, clipboard } = require("electron");
+const { app, BrowserWindow, ipcMain, nativeImage, clipboard, nativeTheme } = require("electron");
 const path = require("path");
 
 // ========== 应用配置 ==========
@@ -251,7 +251,11 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       devTools: true,
+      // ?? Chromium ??????????????
+      enablePreferredSizeMode: false,
     },
+    // ?????????
+    backgroundColor: "#00000000",
   });
 
   // 调试模式自动打开开发者工具
@@ -305,6 +309,26 @@ function createWindow() {
   mainWindow.on("will-move", () => {
     try { mainWindow.webContents.send("close-panels"); } catch(e) {}
   });
+
+  // ????/????????? acrylic + ??????
+  const sendTheme = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const isDark = nativeTheme.shouldUseDarkColors;
+      console.log("[window] theme changed, isDark:", isDark);
+      // ???? acrylic ?????
+      try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+      mainWindow.webContents.send("theme-changed", isDark);
+    }
+  };
+  nativeTheme.on("updated", () => setTimeout(sendTheme, 50));
+  // ???????????????
+  if (process.platform === "win32") {
+    try {
+      mainWindow.hookWindowMessage(0x001A, () => { // WM_SETTINGCHANGE
+        setTimeout(sendTheme, 100);
+      });
+    } catch(e) {}
+  }
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
