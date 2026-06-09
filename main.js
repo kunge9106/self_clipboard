@@ -213,16 +213,29 @@ ipcMain.handle("get-auto-start", () => {
   }
 });
 ipcMain.handle("set-auto-start", (event, enable) => {
-  const { execSync } = require("child_process");
-  const exePath = process.execPath.replace(/\\/g, "\\\\");
-  const args = process.argv.slice(1).map(a => a.includes(" ") ? `\"${a}\"` : a).join(" ");
-  const cmd = `"${process.execPath}" ${args}`;
-  if (enable) {
-    execSync(`reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /t REG_SZ /d "${cmd}" /f`, { timeout: 3000 });
-  } else {
-    execSync(`reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /f`, { timeout: 3000 });
+  // ??????
+  if (!app.isPackaged) {
+    console.log("[auto-start] skipped in dev mode");
+    return;
   }
-  console.log("[auto-start]", enable ? "enabled" : "disabled");
+  const { execSync } = require("child_process");
+  if (enable) {
+    const exe = process.execPath.replace(/\\/g, "\\\\");
+    try {
+      execSync("reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /t REG_SZ /d \"" + exe + "\" /f", { timeout: 3000 });
+      console.log("[auto-start] enabled:", exe);
+    } catch(e) {
+      console.error("[auto-start] enable failed:", e.message);
+    }
+  } else {
+    try {
+      execSync("reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /f", { timeout: 3000 });
+      console.log("[auto-start] disabled - registry key removed");
+    } catch(e) {
+      // ???????????
+      console.log("[auto-start] disable - key not found or already removed");
+    }
+  }
 });
 
 
@@ -310,22 +323,38 @@ function createWindow() {
     try { mainWindow.webContents.send("close-panels"); } catch(e) {}
   });
 
-  // ????/????????? acrylic + ??????
-  const sendTheme = () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
+  // ???????? acrylic ?????????
+  let themeReady = false;
+  setTimeout(() => { themeReady = true; console.log("[window] theme handler ready"); }, 2000);
+  
+  const sendThemeCSS = () => {
+    if (mainWindow && !mainWindow.isDestroyed() && themeReady) {
       const isDark = nativeTheme.shouldUseDarkColors;
       console.log("[window] theme changed, isDark:", isDark);
-      // ???? acrylic ?????
-      try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
       mainWindow.webContents.send("theme-changed", isDark);
     }
   };
-  nativeTheme.on("updated", () => setTimeout(sendTheme, 50));
-  // ???????????????
+  
+  // ???????????? acrylic ????????
+  let pendingTheme = null;
+  nativeTheme.on("updated", () => {
+    if (themeReady) {
+      setTimeout(sendThemeCSS, 50);
+    } else {
+      // acrylic ??????????
+      pendingTheme = setTimeout(sendThemeCSS, 50);
+      console.log("[window] theme change queued (acrylic not ready)");
+    }
+  });
+  // ??/????????? acrylic ????
   if (process.platform === "win32") {
     try {
       mainWindow.hookWindowMessage(0x001A, () => { // WM_SETTINGCHANGE
-        setTimeout(sendTheme, 100);
+        setTimeout(() => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+          }
+        }, 100);
       });
     } catch(e) {}
   }
@@ -341,6 +370,24 @@ function createWindow() {
   mainWindow.webContents.on("did-finish-load", () => {
     console.log("[window] page loaded");
     sendHistoryToRenderer();
+    // acrylic ?????????????? DWM ???????
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try { mainWindow.setBackgroundMaterial("none"); } catch(e) {}
+        setTimeout(() => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+            console.log("[window] acrylic warm-up done");
+          }
+        }, 200);
+      }
+    }, 500);
+    // ? acrylic ????????????? themeReady ???
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("theme-changed", nativeTheme.shouldUseDarkColors);
+      }
+    }, 1000);
   });
 }
 
@@ -348,6 +395,21 @@ function createWindow() {
 
 app.whenReady().then(() => {
   console.log("[app] ready");
+  
+  // ????????????????? exe ????????
+  if (app.isPackaged) {
+    try {
+      const { execSync } = require("child_process");
+      const regOut = execSync("reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard 2>nul", { encoding: "utf8", timeout: 3000 }).trim();
+      if (regOut && !regOut.includes(process.execPath)) {
+        execSync("reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /f", { timeout: 3000 });
+        console.log("[auto-start] cleaned stale registry entry");
+      }
+    } catch(e) {
+      // ???????
+    }
+  }
+
   createWindow();
   pollingTimer = setInterval(pollClipboard, POLL_INTERVAL);
   setTimeout(() => {
