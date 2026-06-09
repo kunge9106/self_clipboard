@@ -213,27 +213,32 @@ ipcMain.handle("get-auto-start", () => {
   }
 });
 ipcMain.handle("set-auto-start", (event, enable) => {
-  // ??????
   if (!app.isPackaged) {
     console.log("[auto-start] skipped in dev mode");
     return;
   }
   const { execSync } = require("child_process");
+  // ?? template literal ??????
+  const exe = process.execPath;
   if (enable) {
-    const exe = process.execPath.replace(/\\/g, "\\\\");
     try {
-      execSync("reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /t REG_SZ /d \"" + exe + "\" /f", { timeout: 3000 });
+      execSync(
+        `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v self_clipboard /t REG_SZ /d "${exe}" /f`,
+        { timeout: 3000 }
+      );
       console.log("[auto-start] enabled:", exe);
     } catch(e) {
       console.error("[auto-start] enable failed:", e.message);
     }
   } else {
     try {
-      execSync("reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /f", { timeout: 3000 });
+      execSync(
+        `reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v self_clipboard /f`,
+        { timeout: 3000 }
+      );
       console.log("[auto-start] disabled - registry key removed");
     } catch(e) {
-      // ???????????
-      console.log("[auto-start] disable - key not found or already removed");
+      console.log("[auto-start] disable - key not found");
     }
   }
 });
