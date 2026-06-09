@@ -1,13 +1,13 @@
 ﻿# Project Context — self_clipboard
 
-> 最后更新时间：2026-06-04 14:10
+> 最后更新时间：2026-06-09 10:33
 
 ## 项目基本面
 
 - **项目名称**：self_clipboard
 - **类型**：Windows 桌面剪贴板管理工具
 - **定位**：轻量、常驻、VisionOS 风格毛玻璃剪贴板历史管理器
-- **当前状态**：开发中 v1.0.0
+- **当前状态**：开发中 v1.2.9
 - **目标用户**：Windows 桌面用户，需要便捷管理剪贴板历史的人
 - **GitHub**：https://github.com/kunge9106/self_clipboard
 - **当前分支**：dev/visionos-ui（领先 origin 4 个 commit，未推送）
@@ -108,8 +108,8 @@ clipboard/
 
 ## 已知问题
 
-- 搜索框点击 padding 区域不会 blur（因为拖拽排除逻辑未覆盖 .search-area）
-- 本地位于 dev/visionos-ui 分支，领先远程 4 个 commit，尚未推送
+- 开机自启在部分情况下写入/读取注册表可能因用户权限不足失败（已优化编码和路径匹配）
+- 当前位于 fix/drag-and-glass 分支，尚未推送
 
 ## 打包构建
 
@@ -145,6 +145,7 @@ npx electron-builder --dir
 
 | 序号 | 日期 | 变更内容 | 影响范围 |
 |---|------|----------|----------|
+| 24 | 2026-06-09 10:33 | fix: 修复开机自启严重Bug — execSync encoding:utf8 与 reg.exe CP936 不兼容导致路径乱码，启动清理误删正确注册表项；get-auto-start/startup cleanup 移除 encoding 和 2>nul 改用 buf.toString()+try/catch；增强启动清理扫描 HKCU+HKLM 并检查 electron.exe 残留 | main.js, package.json(1.2.9), renderer/index.html |
 | 23 | 2026-06-04 14:10 | 重写 PROJECT_CONTEXT.md 补全至最新 commit 的所有功能记录 | PROJECT_CONTEXT.md |
 | 22 | 2026-06-04 13:15 | feat: 设置+开机自启(注册表)+右键删除+全窗JS拖拽+搜索blur+空状态icon+弹窗玻璃+alwaysOnTop:false+默认300×485 | main.js, preload.js, renderer/*, test/app-test.js |
 | 21 | 2026-06-04 12:45 | 全面重构玻璃效果：去除全窗蒙白/玻璃仅限卡片/优化blur+saturate+contrast算法/卡片高光/alwaysOnTop:false+失焦隐藏+全局快捷键 | main.js, renderer/style.css, test/app-test.js |

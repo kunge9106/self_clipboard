@@ -1,4 +1,4 @@
-﻿const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("clipboardAPI", {
   onHistoryUpdate: (cb) => ipcRenderer.on("clipboard-history", (e, d) => cb(d)),
   copyToClipboard: (item) => ipcRenderer.invoke("copy-to-clipboard", item),

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * self_clipboard — Windows 透明磨砂毛玻璃剪贴板工具
  * 
  * 主进程文件：负责创建窗口、设置毛玻璃效果、监听系统剪贴板，
@@ -206,9 +206,12 @@ ipcMain.handle("delete-item", (event, itemId) => {
 ipcMain.handle("get-auto-start", () => {
   try {
     const { execSync } = require("child_process");
-    const r = execSync("reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard 2>nul", { encoding: "utf8", timeout: 3000 });
-    return !!(r && r.includes("self_clipboard"));
+    const buf = execSync("reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard", { timeout: 3000 });
+    const ok = buf.toString().includes("self_clipboard");
+    console.log("[auto-start] check:", ok);
+    return ok;
   } catch(e) {
+    console.log("[auto-start] check: key not found");
     return false;
   }
 });
@@ -401,18 +404,69 @@ function createWindow() {
 app.whenReady().then(() => {
   console.log("[app] ready");
   
-  // ????????????????? exe ????????
+  // ????????????????? exe + HKLM ??????
   if (app.isPackaged) {
-    try {
-      const { execSync } = require("child_process");
-      const regOut = execSync("reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard 2>nul", { encoding: "utf8", timeout: 3000 }).trim();
-      if (regOut && !regOut.includes(process.execPath)) {
-        execSync("reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /f", { timeout: 3000 });
-        console.log("[auto-start] cleaned stale registry entry");
-      }
-    } catch(e) {
-      // ???????
+    const { execSync } = require("child_process");
+    const { homedir } = require("os");
+    const path = require("path");
+
+    // 1. Clean known self_clipboard entries with electron.exe
+    const regLocations = [
+      "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+      "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+      "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+    ];
+    for (const loc of regLocations) {
+      try {
+        const buf = execSync(`reg query "${loc}" /v self_clipboard`, { timeout: 3000 });
+        if (buf.toString().includes("electron.exe")) {
+          execSync(`reg delete "${loc}" /v self_clipboard /f`, { timeout: 3000 });
+          console.log("[cleanup] deleted stale self_clipboard with electron.exe");
+        }
+      } catch(e) { /* key not found */ }
     }
+
+    // 2. Full scan: delete ANY value containing electron.exe in Run keys
+    for (const loc of regLocations) {
+      try {
+        const buf = execSync(`reg query "${loc}"`, { timeout: 3000 });
+        const lines = buf.toString().split(/\r?\n/);
+        for (const line of lines) {
+          if (line.includes("electron.exe") && line.includes("REG_")) {
+            const parts = line.trim().split(/\s{2,}/);
+            const valName = parts[0] || "";
+            if (valName && valName !== "(Default)") {
+              try {
+                execSync(`reg delete "${loc}" /v "${valName}" /f`, { timeout: 3000 });
+                console.log("[cleanup] deleted stale entry:", valName);
+              } catch(e2) { /* skip */ }
+            }
+          }
+        }
+      } catch(e) { /* key not found */ }
+    }
+
+    // 3. Clean Startup folder shortcuts
+    try {
+      const startupDir = path.join(homedir(), "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
+      const { readdirSync, unlinkSync } = require("fs");
+      const files = readdirSync(startupDir);
+      for (const f of files) {
+        const lower = f.toLowerCase();
+        if (lower.endsWith(".lnk") && (lower.includes("self") || lower.includes("clipboard") || lower.includes("electron") || lower.includes("light"))) {
+          // Use PowerShell to read shortcut target
+          try {
+            const psCmd = "powershell -NoProfile -Command \"$w = New-Object -ComObject WScript.Shell; $s = $w.CreateShortcut('" + path.join(startupDir, f).replace(/'/g, "''") + "'); Write-Output $s.TargetPath\"";
+            const psResult = execSync(psCmd, { timeout: 5000 });
+            const target = psResult.toString().trim();
+            if (target && (target.includes("electron.exe") || target.includes("self_clipboard"))) {
+              unlinkSync(path.join(startupDir, f));
+              console.log("[cleanup] deleted startup shortcut:", f);
+            }
+          } catch(e3) { /* skip */ }
+        }
+      }
+    } catch(e) { /* startup dir not accessible */ }
   }
 
   createWindow();

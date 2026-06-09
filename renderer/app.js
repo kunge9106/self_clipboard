@@ -1,4 +1,4 @@
-﻿// ========== 日志 ==========
+// ========== 日志 ==========
 function log(m) { console.log("[app]", m); }
 
 // ========== 禁用 F12 ==========
@@ -153,13 +153,13 @@ async function init() {
     document.getElementById("contextMenu").classList.remove("visible");
   });
 
-  // ??????????? body class?acrylic ???????
+  // ???????????? class?? DWM acrylic ???????
   window.clipboardAPI.onThemeChanged((isDark) => {
     document.body.classList.toggle("dark", isDark);
-    document.body.classList.toggle("light", !isDark);
+    document.body.classList.toggle("light", !isDark); // ??? DWM ???? acrylic ?
   });
 
-  // ????? class
+  // ????? class????? DWM acrylic ???
   document.body.classList.add(
     window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
   );
