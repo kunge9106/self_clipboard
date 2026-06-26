@@ -61,9 +61,9 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
 .win-btn-minimize:hover { color:#E04040; background:rgba(255,80,80,0.10); border-color:rgba(255,80,80,0.20); }
 
 /* ===== 搜索区域 ===== */
-.search-area { padding:28px 16px 4px; flex-shrink:0; }
+.search-area { padding:26px 16px 6px; flex-shrink:0; }
 .search-box {
-  display:flex; align-items:center; height:30px; padding:0 10px;
+  display:flex; align-items:center; height:30px; padding:0 14px;
   border-radius:var(--radius-card);
   background:rgba(255,255,255,0.30);
   border:1px solid rgba(255,255,255,0.20);
