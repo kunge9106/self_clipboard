@@ -98,6 +98,14 @@ async function init() {
 
   window.clipboardAPI.onHistoryUpdate((data) => { allItems = data || []; render(filterItems(searchQuery)); });
   searchInput.addEventListener("input", (e) => { searchQuery = e.target.value; render(filterItems(searchQuery)); });
+
+  // IME composition events: re-apply acrylic when candidate window appears/disappears
+  searchInput.addEventListener("compositionstart", () => {
+    window.clipboardAPI.refreshAcrylic();
+  });
+  searchInput.addEventListener("compositionend", () => {
+    setTimeout(() => window.clipboardAPI.refreshAcrylic(), 100);
+  });
   btnClear.addEventListener("click", async () => { await window.clipboardAPI.clearAll(); allItems = []; render([]); });
   document.getElementById('btnMinimize').addEventListener('click', async () => { await window.clipboardAPI.minimizeWindow(); });
   btnClose.addEventListener("click", async () => { await window.clipboardAPI.closeWindow(); });
@@ -118,6 +126,7 @@ async function init() {
   window.addEventListener("blur", () => {
     document.getElementById("settingsPanel").classList.remove("visible");
     document.getElementById("contextMenu").classList.remove("visible");
+    dialogOverlay.classList.remove("visible");
   });
 
   // 右键删除菜单
@@ -131,10 +140,12 @@ async function init() {
     ctxM.style.left = e.clientX + "px";
     ctxM.style.top = e.clientY + "px";
     ctxM.classList.add("visible");
+    dialogOverlay.classList.add("visible");
   });
   ctxM.querySelector("[data-action='delete']").addEventListener("click", async () => {
     if (ctxId != null) { await window.clipboardAPI.deleteItem(ctxId); ctxId = null; }
     ctxM.classList.remove("visible");
+    dialogOverlay.classList.remove("visible");
   });
 
 
@@ -142,27 +153,97 @@ async function init() {
   const bSet = document.getElementById("btnSettings");
   const sPan = document.getElementById("settingsPanel");
   const tAuto = document.getElementById("toggleAutoStart");
-  bSet.addEventListener("click", (e) => { e.stopPropagation(); sPan.classList.toggle("visible"); });
+  bSet.addEventListener("click", (e) => {
+    e.stopPropagation();
+    sPan.classList.toggle("visible");
+    dialogOverlay.classList.toggle("visible", sPan.classList.contains("visible"));
+  });
+  // 设置弹窗和右键菜单关闭时隐藏overlay
+  document.addEventListener("mousedown", (e) => {
+    if (!e.target.closest(".settings-panel") && !e.target.closest("#btnSettings") && !e.target.closest(".context-menu")) {
+      dialogOverlay.classList.remove("visible");
+    }
+  });
   tAuto.addEventListener("change", async () => { await window.clipboardAPI.setAutoStart(tAuto.checked); });
   (async () => { tAuto.checked = await window.clipboardAPI.getAutoStart(); })();
 
 
-  // ????????drag ????? DOM mousedown?
+  // JS??????? CSS -webkit-app-region????????
+  let dragActive = false, dragStartX = 0, dragStartY = 0;
+  document.querySelector(".window").addEventListener("mousedown", (e) => {
+    // ????????????delete????????????
+    const target = e.target;
+    if (target.closest(".win-btn") || target.closest(".search-box") ||
+        target.closest(".btn-settings") || target.closest(".btn-clear") ||
+        target.closest(".settings-panel") || target.closest(".context-menu") ||
+        target.closest(".close-dialog") || target.closest(".dialog-overlay") ||
+        target.closest(".list") || target.closest(".empty-state")) {
+      return;
+    }
+    dragActive = true;
+    dragStartX = e.screenX;
+    dragStartY = e.screenY;
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!dragActive) return;
+    const dx = e.screenX - dragStartX;
+    const dy = e.screenY - dragStartY;
+    if (Math.abs(dx) > 0 || Math.abs(dy) > 0) {
+      window.clipboardAPI.dragWindow(dx, dy);
+      dragStartX = e.screenX;
+      dragStartY = e.screenY;
+    }
+  });
+  document.addEventListener("mouseup", () => { dragActive = false; });
   window.clipboardAPI.onClosePanels(() => {
     document.getElementById("settingsPanel").classList.remove("visible");
     document.getElementById("contextMenu").classList.remove("visible");
   });
 
-  // ???????????? class?? DWM acrylic ???????
+  // 主题切换时设置 body class 配合 DWM acrylic
   window.clipboardAPI.onThemeChanged((isDark) => {
     document.body.classList.toggle("dark", isDark);
     document.body.classList.toggle("light", !isDark); // ??? DWM ???? acrylic ?
   });
 
-  // ????? class????? DWM acrylic ???
+  // 初始化 body class
   document.body.classList.add(
     window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
   );
+
+
+  // 关闭弹窗交互
+  const closeDialog = document.getElementById("closeDialog");
+  const dialogOverlay = document.getElementById("dialogOverlay");
+  function showCloseDialog() {
+    dialogOverlay.classList.add("visible");
+    closeDialog.classList.add("visible");
+  }
+  function hideCloseDialog() {
+    dialogOverlay.classList.remove("visible");
+    closeDialog.classList.remove("visible");
+  }
+  window.clipboardAPI.onShowCloseDialog(() => {
+    showCloseDialog();
+  });
+  closeDialog.querySelectorAll(".close-dialog-opt").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      hideCloseDialog();
+      await window.clipboardAPI.sendCloseAction(btn.dataset.action);
+    });
+  });
+  closeDialog.addEventListener("click", (e) => {
+    if (e.target === closeDialog) hideCloseDialog();
+  });
+  // 设置面板 - 关闭时到托盘
+  const toggleTray = document.getElementById("toggleTrayMode");
+  (async () => {
+    const cfg = await window.clipboardAPI.getConfig();
+    toggleTray.checked = cfg.trayOnClose || false;
+  })();
+  toggleTray.addEventListener("change", async () => {
+    await window.clipboardAPI.setConfig({ trayOnClose: toggleTray.checked });
+  });
 
   log("init done");
 }

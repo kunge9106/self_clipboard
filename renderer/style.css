@@ -1,4 +1,4 @@
-* { margin:0; padding:0; box-sizing:border-box; }
+﻿* { margin:0; padding:0; box-sizing:border-box; }
 :root {
   --glass-bg: rgba(255,255,255,0.35);
   --glass-card: rgba(255,255,255,0.25);
@@ -23,14 +23,12 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
 .window {
   position:relative;
   height:100vh; width:100vw;
-
 }
 /* 内层容器：负责玻璃效果和内容裁剪，阴影不受影响 */
 .window-inner {
   display:flex; flex-direction:column; height:100%; width:100%;
   border:1px solid var(--glass-border);
   overflow:hidden;
-  -webkit-app-region: drag;
 }
 
 .window::before {
@@ -38,22 +36,13 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
   background:linear-gradient(90deg,transparent,var(--glass-highlight),transparent);
   opacity:0.6; pointer-events:none; z-index:1;
 }
-/* ===== ??????????????flex??? ===== */
-.drag-bar-top {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 40px;
-  z-index: 0;
-  pointer-events: none;
-}
+/* ===== 顶部拖拽条 ===== */
+
 
 /* ===== 窗口控制按钮 ===== */
 .window-controls {
   position:absolute; top:6px; right:16px; z-index:110;
   display:flex; gap:8px;
-  -webkit-app-region:no-drag;
 }
 .win-btn {
   width:16px; height:16px; border-radius:50%;
@@ -62,6 +51,8 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
   display:flex; align-items:center; justify-content:center;
   transition:all 0.2s ease; position:relative;
   color:rgba(0,0,0,0.35);
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
 }
 .win-btn svg { width:8px; height:8px; stroke:currentColor; stroke-width:2.5; stroke-linecap:round; }
 .win-btn:hover { color:rgba(0,0,0,0.55); background:rgba(255,255,255,0.30); border-color:rgba(0,0,0,0.15); }
@@ -154,16 +145,16 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
 @keyframes slideFadeIn { from { opacity:0; transform:translateY(-8px) scale(0.97); } to { opacity:1; transform:translateY(0) scale(1); } }
 .item-enter { animation:slideFadeIn 0.25s cubic-bezier(0.25,0.1,0.25,1) both; }
 /* ===== 设置 ===== */
-.btn-settings { position:absolute; top:6px; left:12px; z-index:110; width:16px; height:16px; border-radius:50%; border:1px solid rgba(0,0,0,0.08); background:rgba(255,255,255,0.20); cursor:pointer; padding:0; display:flex; align-items:center; justify-content:center; transition:all 0.2s ease; color:rgba(0,0,0,0.35); -webkit-app-region:no-drag; }
+.btn-settings { position:absolute; top:6px; left:12px; z-index:110; width:16px; height:16px; border-radius:50%; border:1px solid rgba(0,0,0,0.08); background:rgba(255,255,255,0.20); cursor:pointer; padding:0; display:flex; align-items:center; justify-content:center; transition:all 0.2s ease; color:rgba(0,0,0,0.35); -webkit-app-region:no-drag; pointer-events:auto; }
 .btn-settings svg { width:8px; height:8px; }
 .btn-settings:hover { color:rgba(0,0,0,0.55); background:rgba(255,255,255,0.30); border-color:rgba(0,0,0,0.15); }
 .btn-settings:active { transform:scale(0.85); }
-.settings-panel { display:none; position:absolute; top:26px; left:8px; z-index:120; padding:8px 0; border-radius:14px; background:rgba(255,255,255,0.72); border:1px solid rgba(255,255,255,0.45); box-shadow:0 8px 32px rgba(0,0,0,0.10); min-width:110px; -webkit-app-region:no-drag; }
+.settings-panel { display:none; position:absolute; top:28px; left:6px; z-index:120; padding:10px 4px; border-radius:14px; background:rgba(255,255,255,0.85); backdrop-filter:blur(20px) saturate(150%); -webkit-backdrop-filter:blur(20px) saturate(150%); border:1px solid rgba(255,255,255,0.55); box-shadow:0 8px 32px rgba(0,0,0,0.10), inset 0 0 0 1px rgba(255,255,255,0.15); min-width:120px; -webkit-app-region:no-drag; }
 .settings-panel.visible { display:block; }
-.settings-item { display:flex; align-items:center; justify-content:space-between; padding:6px 12px; cursor:pointer; font-size:12px; color:var(--text-secondary); border-radius:8px; margin:0 4px; }
+.settings-item { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:8px 14px; cursor:pointer; font-size:12px; color:var(--text-secondary); border-radius:10px; margin:2px 2px; }
 .settings-item:hover { background:rgba(255,255,255,0.20); }
 .settings-item input[type="checkbox"] { width:14px; height:14px; cursor:pointer; }
-.context-menu { display:none; position:fixed; z-index:100; padding:4px 0; border-radius:14px; background:rgba(255,255,255,0.72); border:1px solid rgba(255,255,255,0.45); box-shadow:0 8px 32px rgba(0,0,0,0.10); min-width:80px; -webkit-app-region:no-drag; }
+.context-menu { display:none; position:fixed; z-index:100; padding:4px 0; border-radius:14px; background:rgba(255,255,255,0.85); backdrop-filter:blur(20px) saturate(150%); -webkit-backdrop-filter:blur(20px) saturate(150%); border:1px solid rgba(255,255,255,0.55); box-shadow:0 8px 32px rgba(0,0,0,0.10), inset 0 0 0 1px rgba(255,255,255,0.15); min-width:80px; -webkit-app-region:no-drag; }
 .context-menu.visible { display:block; }
 .context-menu-item { padding:6px 14px; font-size:12px; color:var(--text-secondary); cursor:pointer; }
 .context-menu-item:hover { background:rgba(0,0,0,0.05); }
@@ -180,7 +171,7 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
 
 
 
-/* ===== ?/?????body class ???acrylic ???????? ===== */
+/* ===== Light/Dark 模式 body class 配合 acrylic ===== */
 body.light .window-inner {
   background: rgba(255,255,255,0.08);
 }
@@ -210,7 +201,7 @@ body.dark .item:hover {
   background: rgba(0,0,0,0.25);
 }
 
-/* ??????????? */
+/* 深色模式变量覆盖 */
 body.dark {
   --text-primary: #eee;
   --text-secondary: #bbb;
@@ -250,8 +241,10 @@ body.dark .btn-clear {
 }
 body.dark .settings-panel,
 body.dark .context-menu {
-  background: rgba(30,30,30,0.85);
-  border-color: rgba(255,255,255,0.1);
+  background: rgba(30,30,30,0.80);
+  backdrop-filter:blur(20px) saturate(150%);
+  -webkit-backdrop-filter:blur(20px) saturate(150%);
+  border-color: rgba(255,255,255,0.12);
   color: #ddd;
 }
 body.dark .settings-item,
@@ -262,3 +255,51 @@ body.dark .settings-item:hover,
 body.dark .context-menu-item:hover {
   background: rgba(255,255,255,0.08);
 }
+
+/* ===== 弹窗遮罩 ===== */
+.dialog-overlay {
+  display:none; position:fixed; top:0; left:0; right:0; bottom:0;
+  z-index:150; background:rgba(180,185,200,0.20);
+  backdrop-filter:none;
+  -webkit-app-region:no-drag; pointer-events:none;
+}
+.dialog-overlay.visible { display:block; }
+body.dark .dialog-overlay { background:rgba(0,0,0,0.25); }
+
+/* ===== 关闭弹窗 ===== */
+.close-dialog {
+  display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  z-index:200; padding:16px; border-radius:14px;
+  background:rgba(255,255,255,0.85);
+  backdrop-filter:blur(20px) saturate(150%);
+  -webkit-backdrop-filter:blur(20px) saturate(150%);
+  border:1px solid rgba(255,255,255,0.55);
+  box-shadow:0 8px 32px rgba(0,0,0,0.10), inset 0 0 0 1px rgba(255,255,255,0.15);
+  min-width:130px; text-align:center;
+  -webkit-app-region:no-drag;
+}
+.close-dialog.visible { display:block; }
+.close-dialog-title { font-size:13px; font-weight:500; color:var(--text-secondary); margin-bottom:12px; }
+.close-dialog-opt {
+  display:block; width:100%; padding:6px 0; margin:4px 0; border:none; border-radius:8px;
+  background:rgba(255,255,255,0.20); cursor:pointer;
+  font-size:12px; font-weight:500; color:var(--text-primary); font-family:var(--font);
+  transition:all 0.15s ease;
+}
+.close-dialog-opt:hover { background:rgba(0,0,0,0.06); }
+.close-dialog-opt.danger:hover { color:#D03030; }
+.close-dialog-opt.danger:hover { color:#D03030; }
+.close-dialog-opt[data-action="cancel"] {
+  margin-top:6px; border-radius:8px;
+}
+body.dark .close-dialog {
+  background: rgba(30,30,30,0.80);
+  backdrop-filter:blur(20px) saturate(150%);
+  -webkit-backdrop-filter:blur(20px) saturate(150%);
+  border-color: rgba(255,255,255,0.12);
+  box-shadow:0 8px 32px rgba(0,0,0,0.25), inset 0 0 0 1px rgba(255,255,255,0.06);
+}
+
+body.dark .close-dialog-title { color:#ccc; }
+body.dark .close-dialog-opt { color:#ddd; }
+body.dark .close-dialog-opt:hover { background:rgba(255,255,255,0.08); }

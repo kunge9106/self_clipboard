@@ -1,4 +1,4 @@
-/**
+﻿/**
  * self_clipboard — Windows 透明磨砂毛玻璃剪贴板工具
  * 
  * 主进程文件：负责创建窗口、设置毛玻璃效果、监听系统剪贴板，
@@ -9,8 +9,11 @@
  * @module main
  */
 
-const { app, BrowserWindow, ipcMain, nativeImage, clipboard, nativeTheme } = require("electron");
+const { app, BrowserWindow, ipcMain, nativeImage, clipboard, nativeTheme, Tray, Menu } = require("electron");
 const path = require("path");
+
+// Suppress EPIPE errors in packaged app (console unavailable)
+try { process.stdout.on("error", () => {}); process.stderr.on("error", () => {}); } catch(e) {}
 
 // ========== 应用配置 ==========
 
@@ -24,6 +27,7 @@ const POLL_INTERVAL = 1000;
 
 /** 主窗口引用 */
 let mainWindow = null;
+let tray = null;
 
 /** 剪贴板历史记录列表 */
 let history = [];
@@ -174,16 +178,56 @@ ipcMain.handle("copy-to-clipboard", (event, item) => {
 /** 处理关闭窗口请求 */
 ipcMain.handle("close-window", () => {
   console.log("[ipc] close-window");
-  if (mainWindow) mainWindow.close();
+  const cfg = loadConfig();
+  if (cfg.trayOnClose) {
+    // 不再提示，直接到托盘
+    if (mainWindow) mainWindow.hide();
+    createTray();
+  } else {
+    // 显示弹窗
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("show-close-dialog");
+    }
+  }
 });
 
 /** 处理最小化窗口请求 */
+ipcMain.handle("close-action", (event, action) => {
+  console.log("[ipc] close-action:", action);
+  if (action === "tray") {
+    if (mainWindow) mainWindow.hide();
+    createTray();
+  } else if (action === "quit") {
+    if (tray) { tray.destroy(); tray = null; }
+    if (pollingTimer) clearInterval(pollingTimer);
+    app.quit();
+  }
+});
+
+ipcMain.handle("get-config", () => {
+  return loadConfig();
+});
+
+ipcMain.handle("set-config", (event, cfg) => {
+  saveConfig(cfg);
+  console.log("[config] saved:", cfg);
+});
+
 ipcMain.handle("minimize-window", () => {
   console.log("[ipc] minimize-window");
   if (mainWindow) mainWindow.minimize();
 });
 
-/** 处理清空请求 */
+/** ?????? */
+ipcMain.on("window-drag", (event, dx, dy) => {
+  if (mainWindow) {
+    const bounds = mainWindow.getBounds();
+    mainWindow.setBounds({ x: bounds.x + dx, y: bounds.y + dy });
+  }
+});
+
+/** ?????? */
+
 ipcMain.handle("clear-all", () => {
   console.log("[ipc] clear-all");
   clearHistory();
@@ -215,13 +259,20 @@ ipcMain.handle("get-auto-start", () => {
     return false;
   }
 });
+ipcMain.handle("refresh-acrylic", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+    console.log("[window] acrylic refreshed (IME/composition)");
+  }
+});
+
 ipcMain.handle("set-auto-start", (event, enable) => {
   if (!app.isPackaged) {
     console.log("[auto-start] skipped in dev mode");
     return;
   }
   const { execSync } = require("child_process");
-  // ?? template literal ??????
+  // 禁用 template literal ??????
   const exe = process.execPath;
   if (enable) {
     try {
@@ -246,6 +297,60 @@ ipcMain.handle("set-auto-start", (event, enable) => {
   }
 });
 
+
+
+// ========== 用户配置 ==========
+const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
+
+function loadConfig() {
+  try {
+    const fs = require("fs");
+    if (fs.existsSync(CONFIG_PATH)) {
+      return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+    }
+  } catch(e) {}
+  return {};
+}
+
+function saveConfig(cfg) {
+  try {
+    const fs = require("fs");
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf-8");
+  } catch(e) {}
+}
+
+// ========== 托盘 ==========
+
+/**
+ * 创建系统托盘图标
+ */
+function createTray() {
+  if (tray) return;
+  try {
+    const iconPath = path.join(__dirname, "assets", "icon.ico");
+    const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+    tray = new Tray(icon);
+    const ctxMenu = Menu.buildFromTemplate([
+      { label: "打开界面", click: () => {
+        if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+      }},
+      { type: "separator" },
+      { label: "退出", click: () => {
+        if (tray) { tray.destroy(); tray = null; }
+        if (pollingTimer) clearInterval(pollingTimer);
+        app.quit();
+      }},
+    ]);
+    tray.setToolTip("轻贴 - 剪贴板管理器");
+    tray.setContextMenu(ctxMenu);
+    tray.on("double-click", () => {
+      if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+    });
+    console.log("[tray] created");
+  } catch(e) {
+    console.log("[tray] create failed:", e.message);
+  }
+}
 
 // ========== 窗口创建 ==========
 /**
@@ -272,10 +377,10 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       devTools: true,
-      // ?? Chromium ??????????????
+      // 禁用 Chromium 自适应模式
       enablePreferredSizeMode: false,
     },
-    // ?????????
+    // 等待背景材质初始化
     backgroundColor: "#00000000",
   });
 
@@ -314,7 +419,7 @@ function createWindow() {
     }
   }
 
-  // ??????/????????-webkit-app-region:drag ?? DOM ???
+  // 监听鼠标/拖拽消息，关闭弹窗
   if (process.platform === "win32") {
     try {
       mainWindow.hookWindowMessage(0x0201, () => { // WM_LBUTTONDOWN
@@ -327,11 +432,20 @@ function createWindow() {
       console.log("[window] hookWindowMessage failed:", e.message);
     }
   }
+  // Re-apply acrylic on blur (fixes IME overlay graying)
+  mainWindow.on("blur", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      setTimeout(() => {
+        try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+      }, 100);
+    }
+  });
+
   mainWindow.on("will-move", () => {
     try { mainWindow.webContents.send("close-panels"); } catch(e) {}
   });
 
-  // ???????? acrylic ?????????
+  // 监听窗口移动? acrylic ?????????
   let themeReady = false;
   setTimeout(() => { themeReady = true; console.log("[window] theme handler ready"); }, 2000);
   
@@ -343,18 +457,30 @@ function createWindow() {
     }
   };
   
-  // ???????????? acrylic ????????
+  // 标记主题处理器就绪? acrylic ????????
   let pendingTheme = null;
   nativeTheme.on("updated", () => {
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+        console.log("[window] acrylic refreshed on theme switch");
+      }
+    }, 100);
+    // Retry after 300ms for DWM to fully settle after theme change
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+        console.log("[window] acrylic re-refreshed on theme switch (retry)");
+      }
+    }, 300);
     if (themeReady) {
-      setTimeout(sendThemeCSS, 50);
+      setTimeout(sendThemeCSS, 150);
     } else {
-      // acrylic ??????????
-      pendingTheme = setTimeout(sendThemeCSS, 50);
+      pendingTheme = setTimeout(sendThemeCSS, 150);
       console.log("[window] theme change queued (acrylic not ready)");
     }
   });
-  // ??/????????? acrylic ????
+  // WM_SETTINGCHANGE ????? acrylic
   if (process.platform === "win32") {
     try {
       mainWindow.hookWindowMessage(0x001A, () => { // WM_SETTINGCHANGE
@@ -369,6 +495,17 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
+  // 从托盘显示时重新设置 acrylic
+  mainWindow.on("show", () => {
+    // Directly re-apply acrylic without none step (avoids gray flash)
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+        console.log("[window] acrylic re-applied on show");
+      }
+    }, 200);
+  });
+
   mainWindow.on("closed", () => {
     console.log("[window] closed");
     mainWindow = null;
@@ -378,19 +515,14 @@ function createWindow() {
   mainWindow.webContents.on("did-finish-load", () => {
     console.log("[window] page loaded");
     sendHistoryToRenderer();
-    // acrylic ?????????????? DWM ???????
+    // acrylic ???DWM ???
     setTimeout(() => {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        try { mainWindow.setBackgroundMaterial("none"); } catch(e) {}
-        setTimeout(() => {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
-            console.log("[window] acrylic warm-up done");
-          }
-        }, 200);
+        try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+        console.log("[window] acrylic warm-up done");
       }
     }, 500);
-    // ? acrylic ????????????? themeReady ???
+    // 主题切换时重新应用
     setTimeout(() => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("theme-changed", nativeTheme.shouldUseDarkColors);
@@ -403,84 +535,44 @@ function createWindow() {
 
 app.whenReady().then(() => {
   console.log("[app] ready");
-  
-  // ????????????????? exe + HKLM ??????
-  if (app.isPackaged) {
-    const { execSync } = require("child_process");
-    const { homedir } = require("os");
-    const path = require("path");
 
-    // 1. Clean known self_clipboard entries with electron.exe
-    const regLocations = [
-      "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-      "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-      "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
-    ];
-    for (const loc of regLocations) {
-      try {
-        const buf = execSync(`reg query "${loc}" /v self_clipboard`, { timeout: 3000 });
-        if (buf.toString().includes("electron.exe")) {
-          execSync(`reg delete "${loc}" /v self_clipboard /f`, { timeout: 3000 });
-          console.log("[cleanup] deleted stale self_clipboard with electron.exe");
-        }
-      } catch(e) { /* key not found */ }
-    }
-
-    // 2. Full scan: delete ANY value containing electron.exe in Run keys
-    for (const loc of regLocations) {
-      try {
-        const buf = execSync(`reg query "${loc}"`, { timeout: 3000 });
-        const lines = buf.toString().split(/\r?\n/);
-        for (const line of lines) {
-          if (line.includes("electron.exe") && line.includes("REG_")) {
-            const parts = line.trim().split(/\s{2,}/);
-            const valName = parts[0] || "";
-            if (valName && valName !== "(Default)") {
-              try {
-                execSync(`reg delete "${loc}" /v "${valName}" /f`, { timeout: 3000 });
-                console.log("[cleanup] deleted stale entry:", valName);
-              } catch(e2) { /* skip */ }
-            }
-          }
-        }
-      } catch(e) { /* key not found */ }
-    }
-
-    // 3. Clean Startup folder shortcuts
-    try {
-      const startupDir = path.join(homedir(), "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
-      const { readdirSync, unlinkSync } = require("fs");
-      const files = readdirSync(startupDir);
-      for (const f of files) {
-        const lower = f.toLowerCase();
-        if (lower.endsWith(".lnk") && (lower.includes("self") || lower.includes("clipboard") || lower.includes("electron") || lower.includes("light"))) {
-          // Use PowerShell to read shortcut target
-          try {
-            const psCmd = "powershell -NoProfile -Command \"$w = New-Object -ComObject WScript.Shell; $s = $w.CreateShortcut('" + path.join(startupDir, f).replace(/'/g, "''") + "'); Write-Output $s.TargetPath\"";
-            const psResult = execSync(psCmd, { timeout: 5000 });
-            const target = psResult.toString().trim();
-            if (target && (target.includes("electron.exe") || target.includes("self_clipboard"))) {
-              unlinkSync(path.join(startupDir, f));
-              console.log("[cleanup] deleted startup shortcut:", f);
-            }
-          } catch(e3) { /* skip */ }
-        }
-      }
-    } catch(e) { /* startup dir not accessible */ }
-  }
-
+  // 立即创建窗口
   createWindow();
   pollingTimer = setInterval(pollClipboard, POLL_INTERVAL);
   setTimeout(() => {
     console.log("[app] first poll");
     pollClipboard();
   }, 1000);
+
+  // 延迟执行后台清理
+  if (app.isPackaged) {
+    mainWindow?.webContents?.once("did-finish-load", () => {
+      setTimeout(() => {
+        try {
+          const { execSync } = require("child_process");
+          const regLocations = ["HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"];
+          for (const loc of regLocations) {
+            try {
+              const buf = execSync(`reg query "${loc}" /v self_clipboard`, { timeout: 2000 });
+              if (buf.toString().includes("electron.exe")) {
+                execSync(`reg delete "${loc}" /v self_clipboard /f`, { timeout: 2000 });
+                console.log("[cleanup] fixed stale entry");
+              }
+            } catch(e) { /* not found */ }
+          }
+        } catch(e) { /* skip */ }
+        console.log("[app] startup cleanup done");
+      }, 5000);
+    });
+  }
 });
 
 app.on("window-all-closed", () => {
-  console.log("[app] all windows closed, quit");
-  if (pollingTimer) clearInterval(pollingTimer);
-  app.quit();
+  console.log("[app] all windows closed");
+  if (!tray) {
+    if (pollingTimer) clearInterval(pollingTimer);
+    app.quit();
+  }
 });
 
 app.on("activate", () => {

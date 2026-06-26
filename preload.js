@@ -11,5 +11,10 @@ contextBridge.exposeInMainWorld("clipboardAPI", {
   setAutoStart: (enable) => ipcRenderer.invoke("set-auto-start", enable),
   onThemeChanged: (cb) => ipcRenderer.on("theme-changed", (e, isDark) => cb(isDark)),
   onClosePanels: (cb) => ipcRenderer.on("close-panels", () => cb()),
+  onShowCloseDialog: (cb) => ipcRenderer.on("show-close-dialog", () => cb()),
+  sendCloseAction: (action) => ipcRenderer.invoke("close-action", action),
+  getConfig: () => ipcRenderer.invoke("get-config"),
+  setConfig: (cfg) => ipcRenderer.invoke("set-config", cfg),
+  refreshAcrylic: () => ipcRenderer.invoke("refresh-acrylic"),
   dragWindow: (dx, dy) => ipcRenderer.send("window-drag", dx, dy),
 });
