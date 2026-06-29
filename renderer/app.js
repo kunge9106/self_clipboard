@@ -48,7 +48,7 @@ function render(items) {
     const emptyDesc = emptyState.querySelector(".empty-desc");
     if (emptyTitle && emptyDesc) {
       if (searchQuery && searchQuery.trim()) {
-        emptyTitle.textContent = "暂无" + searchQuery.trim() + "相关内容";
+        emptyTitle.textContent = "暂无" + (searchQuery.trim().length > 12 ? searchQuery.trim().substring(0, 12) + "..." : searchQuery.trim()) + "相关内容";
         emptyDesc.textContent = "";
       } else {
         emptyTitle.textContent = "暂无相关记录";
