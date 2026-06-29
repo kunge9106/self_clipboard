@@ -387,7 +387,20 @@ ipcMain.on("window-drag", (event, dx, dy) => {
 
 ipcMain.handle("clear-all", () => {
   console.log("[ipc] clear-all");
+  // ??????????
+  const dir = getImageDir();
+  try {
+    if (fs.existsSync(dir)) {
+      const files = fs.readdirSync(dir);
+      for (const f of files) {
+        if (f.endsWith(".png")) {
+          try { fs.unlinkSync(path.join(dir, f)); } catch(e) {}
+        }
+      }
+    }
+  } catch(e) {}
   clearHistory();
+  saveHistory();
 });
 
 /** 处理历史加载请求 */
@@ -401,7 +414,9 @@ ipcMain.handle("delete-item", (event, itemId) => {
   // delete cache file
   const deleted = history.find(i => i.id === itemId);
   if (deleted && deleted.type === "image" && typeof deleted.content === "string" && deleted.content.startsWith("file://")) {
-    deleteImageFile(deleted.content.replace(/^file:\/\//, "").replace(/\//g, "\\"));
+    var imgPath = deleted.content.replace(/^file:\/\/\//, "").replace(/\//g, "\\");
+    if (imgPath[0] === "\\") imgPath = imgPath.slice(1);
+    deleteImageFile(imgPath);
   }
   history = history.filter(i => i.id !== itemId);
   saveHistory();
