@@ -110,6 +110,7 @@ async function init() {
 
   window.clipboardAPI.onHistoryUpdate((data) => { allItems = data || []; render(filterItems(searchQuery)); });
   searchInput.addEventListener("input", (e) => { searchQuery = e.target.value; render(filterItems(searchQuery)); });
+  document.getElementById("searchClear").classList.toggle("visible", searchQuery.length > 0);
 
   // IME composition events: re-apply acrylic when candidate window appears/disappears
   searchInput.addEventListener("compositionstart", () => {
@@ -118,6 +119,7 @@ async function init() {
   searchInput.addEventListener("compositionend", () => {
     setTimeout(() => window.clipboardAPI.refreshAcrylic(), 100);
   });
+  document.getElementById("searchClear").addEventListener("click", () => { searchInput.value = ""; searchQuery = ""; render(allItems); document.getElementById("searchClear").classList.remove("visible"); searchInput.focus(); });
   btnClear.addEventListener("click", async () => { await window.clipboardAPI.clearAll(); allItems = []; render([]); });
   const minimizeBtn = document.getElementById('btnMinimize'); if (minimizeBtn) minimizeBtn.addEventListener('click', async () => { await window.clipboardAPI.minimizeWindow(); });
   if (btnClose) btnClose.addEventListener("click", async () => { await window.clipboardAPI.closeWindow(); });
