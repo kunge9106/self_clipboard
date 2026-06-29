@@ -272,7 +272,9 @@ async function init() {
     try {
       const info = await window.clipboardAPI.getImageCacheInfo();
       if (info && cpd) {
-        cpd.textContent = info.dir + " (" + info.count + " pics, " + (info.size / 1024 / 1024).toFixed(1) + "MB)";
+        cpd.textContent = info.dir;
+        const st = document.getElementById("cacheStats");
+        if (st) st.textContent = "(" + info.count + " pics, " + (info.size / 1024 / 1024).toFixed(1) + "MB)";
       }
     } catch(e) {}
     try {

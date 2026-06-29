@@ -310,13 +310,21 @@ body.dark .close-dialog {
 body.dark .close-dialog-title { color:#ccc; }
 body.dark .close-dialog-opt { color:#ddd; }
 body.dark .close-dialog-opt:hover { background:rgba(255,255,255,0.08); }
-/* cache hint */
-.cache-hint {
+/* cache hint label */
+.cache-hint-label {
+  font-size: 9px;
+  color: rgba(0,0,0,0.3);
+  margin-left: 4px;
+}
+body.dark .cache-hint-label {
+  color: rgba(255,255,255,0.3);
+}
+/* cache stats */
+.cache-stats {
   font-size: 10px;
   color: rgba(0,0,0,0.35);
-  margin-top: 2px;
-  line-height: 1.2;
+  margin-top: 1px;
 }
-body.dark .cache-hint {
+body.dark .cache-stats {
   color: rgba(255,255,255,0.35);
 }

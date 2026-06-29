@@ -16,9 +16,9 @@
       <label class="settings-item"><span>关闭时后台运行</span><input type="checkbox" id="toggleTrayMode"></label>
       <div class="settings-divider"></div>
       <div class="settings-item settings-cache-info">
-        <span>缓存目录</span>
+        <span>缓存目录 <span class="cache-hint-label">仅保存近三天</span></span>
         <span class="cache-path" id="cachePathDisplay">加载中...</span>
-        <div class="cache-hint">仅保存近三天内容</div>
+        <div class="cache-stats" id="cacheStats"></div>
       </div>
       <button class="settings-btn" id="btnPickCache">更改目录</button>
       <label class="settings-item"><span>关闭时清理缓存</span><input type="checkbox" id="toggleCleanCache"></label>
