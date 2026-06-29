@@ -192,8 +192,14 @@ function pollClipboard() {
         console.log("[poll] new image detected");
         lastClipboardImageHash = hash;
         const pngBuffer = img.toPNG();
-        const dataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
-        addHistoryItem({ type: "image", content: dataUrl });
+        const filePath = saveImageToFile(pngBuffer);
+        if (filePath) {
+          const fileUrl = "file:///" + filePath.replace(/\\/g, "/");
+          addHistoryItem({ type: "image", content: fileUrl });
+        } else {
+          const dataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
+          addHistoryItem({ type: "image", content: dataUrl });
+        }
       }
     }
   } catch (e) {
@@ -265,7 +271,13 @@ ipcMain.handle("copy-to-clipboard", (event, item) => {
     clipboard.writeText(item.content);
     lastClipboardText = item.content;
   } else if (item.type === "image") {
-    const img = nativeImage.createFromDataURL(item.content);
+    let img;
+    if (item.content.startsWith("file://")) {
+      const filePath = item.content.replace(/^file:\/\//, "").replace(/\//g, "\\");
+      img = nativeImage.createFromPath(filePath);
+    } else {
+      img = nativeImage.createFromDataURL(item.content);
+    }
     clipboard.writeImage(img);
     lastClipboardImageHash = getImageHash(img);
   }
