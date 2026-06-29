@@ -30,28 +30,23 @@ let IMAGE_DIR;
  * ????????????C??
  */
 function getDefaultCacheDir() {
-  // ?? D: E: F: ?????
-  for (const drive of ["D:", "E:", "F:", "G:", "H:"]) {
-    try {
-      const testPath = drive + "\\self_clipboard_images";
-      if (!fs.existsSync(testPath)) {
-        fs.mkdirSync(testPath, { recursive: true });
-      }
-      // ????
-      fs.accessSync(testPath, fs.constants.W_OK);
-      return testPath;
-    } catch(e) { /* ???????? */ }
-  }
-  // ??????
-  loadHistory();
-  
-  // ???????
-  const fallback = path.join(app.getPath("home"), ".self_clipboard_images");
+  // 使用安装目录作为默认缓存目录
+  const baseDir = app.isPackaged
+    ? path.dirname(process.execPath)
+    : __dirname;
+  const dir = path.join(baseDir, "self_clipboard_images");
   try {
-    if (!fs.existsSync(fallback)) fs.mkdirSync(fallback, { recursive: true });
-  } catch(e) {}
-  return fallback;
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.accessSync(dir, fs.constants.W_OK);
+    return dir;
+  } catch(e) {
+    console.log("[cache] failed to create in install dir, fallback to userData");
+    const fallback = path.join(app.getPath("userData"), "self_clipboard_images");
+    try { if (!fs.existsSync(fallback)) fs.mkdirSync(fallback, { recursive: true }); } catch(e2) {}
+    return fallback;
+  }
 }
+
 
 function getImageDir() {
   if (!IMAGE_DIR) {
@@ -311,13 +306,31 @@ ipcMain.handle("pick-cache-dir", async () => {
   const { dialog } = require("electron");
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ["openDirectory", "createDirectory"],
-    title: "????????"
+    title: "选择缓存目录"
   });
   if (!result.canceled && result.filePaths.length > 0) {
-    return result.filePaths[0];
+    const newDir = result.filePaths[0];
+    // 同步移动已有缓存文件到新目录
+    try {
+      const oldDir = getImageDir();
+      if (oldDir && oldDir !== newDir && fs.existsSync(oldDir)) {
+        const files = fs.readdirSync(oldDir);
+        for (const f of files) {
+          if (f.endsWith(".png")) {
+            try {
+              fs.renameSync(path.join(oldDir, f), path.join(newDir, f));
+            } catch(e) { /* file may be in use, skip */ }
+          }
+        }
+        console.log("[cache] moved", files.filter(f => f.endsWith(".png")).length, "files from", oldDir, "to", newDir);
+      }
+    } catch(e) {}
+    IMAGE_DIR = newDir;
+    return newDir;
   }
   return null;
 });
+
 ipcMain.handle("get-image-cache-info", () => {
   const dir = getImageDir();
   let count = 0, size = 0;
