@@ -748,13 +748,12 @@ app.on("before-quit", () => {
             try { fs.unlinkSync(path.join(dir, f)); } catch(e) {}
           }
         }
-        console.log("[cleanup] image cache cleared");
       }
-    } catch(e) {
-      console.log("[cleanup] error:", e.message);
-    }
-  }
-});
+    } catch(e) {}
+    history = [];
+    saveHistory();
+    console.log("[cleanup] history and image cache cleared");
+  }});
 app.on("window-all-closed", () => {
   console.log("[app] all windows closed");
   if (!tray) {
