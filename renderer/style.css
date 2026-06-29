@@ -63,7 +63,7 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
 /* ===== 搜索区域 ===== */
 .search-area { padding:26px 16px 6px; flex-shrink:0; }
 .search-box {
-  display:flex; align-items:center; height:30px; padding:0 14px;
+  display:flex; align-items:center; height:30px; padding:0 10px; gap:4px;
   border-radius:var(--radius-card);
   background:rgba(255,255,255,0.30);
   border:1px solid rgba(255,255,255,0.20);
