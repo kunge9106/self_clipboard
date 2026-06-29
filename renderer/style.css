@@ -310,3 +310,13 @@ body.dark .close-dialog {
 body.dark .close-dialog-title { color:#ccc; }
 body.dark .close-dialog-opt { color:#ddd; }
 body.dark .close-dialog-opt:hover { background:rgba(255,255,255,0.08); }
+/* cache hint */
+.cache-hint {
+  font-size: 10px;
+  color: rgba(0,0,0,0.35);
+  margin-top: 2px;
+  line-height: 1.2;
+}
+body.dark .cache-hint {
+  color: rgba(255,255,255,0.35);
+}
