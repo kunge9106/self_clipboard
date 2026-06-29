@@ -153,12 +153,10 @@ async function init() {
     ctxM.style.left = e.clientX + "px";
     ctxM.style.top = e.clientY + "px";
     ctxM.classList.add("visible");
-    dialogOverlay.classList.add("visible");
   });
   ctxM.querySelector("[data-action='delete']").addEventListener("click", async () => {
     if (ctxId != null) { await window.clipboardAPI.deleteItem(ctxId); ctxId = null; }
     ctxM.classList.remove("visible");
-    dialogOverlay.classList.remove("visible");
   });
 
 
