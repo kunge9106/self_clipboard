@@ -21,3 +21,5 @@ node_modules/
 
 # Build
 electron-builder-output/
+
+self_clipboard_images/
