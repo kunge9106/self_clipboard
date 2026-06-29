@@ -398,7 +398,13 @@ ipcMain.handle("get-history", () => {
 
 // 删除指定条目
 ipcMain.handle("delete-item", (event, itemId) => {
+  // delete cache file
+  const deleted = history.find(i => i.id === itemId);
+  if (deleted && deleted.type === "image" && typeof deleted.content === "string" && deleted.content.startsWith("file://")) {
+    deleteImageFile(deleted.content.replace(/^file:\/\//, "").replace(/\//g, "\\"));
+  }
   history = history.filter(i => i.id !== itemId);
+  saveHistory();
   sendHistoryToRenderer();
 });
 
