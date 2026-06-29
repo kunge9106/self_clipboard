@@ -340,6 +340,7 @@ ipcMain.handle("get-config", () => {
 });
 
 ipcMain.handle("set-config", (event, cfg) => {
+  IMAGE_DIR = null;
   saveConfig(cfg);
   console.log("[config] saved:", cfg);
 });
