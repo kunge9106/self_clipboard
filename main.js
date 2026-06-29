@@ -231,7 +231,7 @@ function addHistoryItem(item) {
     }
   }
 
-  history.unshift(entry);
+  history.unshift(entry);saveHistory();
   
 
   lastClipboardText = clipboard.readText();
@@ -666,6 +666,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   console.log("[app] ready");
+  loadHistory();
+  console.log("[history] loaded from disk, count:", history.length);
   loadHistory();
   console.log("[history] loaded from disk, count:", history.length);
 
