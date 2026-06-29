@@ -718,7 +718,16 @@ app.whenReady().then(() => {
   loadHistory();
   console.log("[history] loaded from disk, count:", history.length);
 
-  // 立即创建窗口
+  // 立即创建窗口
+  // init clipboard tracker - avoid re-adding existing content on restart
+  try {
+    const txt = clipboard.readText();
+  if (txt) lastClipboardText = txt;
+  const img = clipboard.readImage();
+  if (!img.isEmpty()) lastClipboardImageHash = getImageHash(img);
+    console.log("[app] clipboard init, text:", (lastClipboardText || "(empty)").substring(0, 40));
+} catch(e) { console.log("[app] clipboard init error:", e.message); }
+
   createWindow();
   pollingTimer = setInterval(pollClipboard, POLL_INTERVAL);
   setTimeout(() => {
