@@ -666,6 +666,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   console.log("[app] ready");
+  loadHistory();
+  console.log("[history] loaded from disk, count:", history.length);
 
   // 立即创建窗口
   createWindow();

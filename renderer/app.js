@@ -246,6 +246,42 @@ async function init() {
   });
 
   log("init done");
+  // cache settings
+  const bpc = document.getElementById("btnPickCache");
+  const tcc = document.getElementById("toggleCleanCache");
+  const cpd = document.getElementById("cachePathDisplay");
+  if (bpc) {
+    bpc.addEventListener("click", async () => {
+      const dir = await window.clipboardAPI.pickCacheDir();
+      if (dir) {
+        const cfg = await window.clipboardAPI.getConfig();
+        cfg.imageCacheDir = dir;
+        await window.clipboardAPI.setConfig(cfg);
+        updateCacheDisplay();
+      }
+    });
+  }
+  if (tcc) {
+    tcc.addEventListener("change", async () => {
+      const cfg = await window.clipboardAPI.getConfig();
+      cfg.cleanImagesOnClose = tcc.checked;
+      await window.clipboardAPI.setConfig(cfg);
+    });
+  }
+  async function updateCacheDisplay() {
+    try {
+      const info = await window.clipboardAPI.getImageCacheInfo();
+      if (info && cpd) {
+        cpd.textContent = "??: " + info.dir + " (" + info.count + " pics, " + (info.size / 1024 / 1024).toFixed(1) + "MB)";
+      }
+    } catch(e) {}
+    try {
+      const cfg = await window.clipboardAPI.getConfig();
+      if (tcc) tcc.checked = cfg.cleanImagesOnClose || false;
+    } catch(e) {}
+  }
+  updateCacheDisplay();
+
 }
 document.addEventListener("DOMContentLoaded", init);
 log("loaded");
