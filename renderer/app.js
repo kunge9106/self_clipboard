@@ -43,6 +43,18 @@ function render(items) {
     emptyState.classList.add("visible");
     btnClear.style.opacity = "0.3"; btnClear.style.pointerEvents = "none";
     itemCount.textContent = "";
+    // 搜索无结果时更新提示文字
+    const emptyTitle = emptyState.querySelector(".empty-title");
+    const emptyDesc = emptyState.querySelector(".empty-desc");
+    if (emptyTitle && emptyDesc) {
+      if (searchQuery && searchQuery.trim()) {
+        emptyTitle.textContent = "暂无" + searchQuery.trim() + "相关内容";
+        emptyDesc.textContent = "";
+      } else {
+        emptyTitle.textContent = "暂无相关记录";
+        emptyDesc.textContent = "您暂时没有任何剪贴板历史记录";
+      }
+    }
     return;
   }
   emptyState.classList.remove("visible");
