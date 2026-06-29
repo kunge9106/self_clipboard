@@ -11,6 +11,7 @@
 
 const { app, BrowserWindow, ipcMain, nativeImage, clipboard, nativeTheme, Tray, Menu } = require("electron");
 const path = require("path");
+const fs = require("fs");
 
 // Suppress EPIPE errors in packaged app (console unavailable)
 try { process.stdout.on("error", () => {}); process.stderr.on("error", () => {}); } catch(e) {}
@@ -22,6 +23,78 @@ try { process.stdout.on("error", () => {}); process.stderr.on("error", () => {})
 
 /** 剪贴板轮询间隔（毫秒） */
 const POLL_INTERVAL = 1000;
+/** ?????? */
+let IMAGE_DIR;
+
+/**
+ * ????????????C??
+ */
+function getDefaultCacheDir() {
+  // ?? D: E: F: ?????
+  for (const drive of ["D:", "E:", "F:", "G:", "H:"]) {
+    try {
+      const testPath = drive + "\\self_clipboard_images";
+      if (!fs.existsSync(testPath)) {
+        fs.mkdirSync(testPath, { recursive: true });
+      }
+      // ????
+      fs.accessSync(testPath, fs.constants.W_OK);
+      return testPath;
+    } catch(e) { /* ???????? */ }
+  }
+  // ??????
+  loadHistory();
+  
+  // ???????
+  const fallback = path.join(app.getPath("home"), ".self_clipboard_images");
+  try {
+    if (!fs.existsSync(fallback)) fs.mkdirSync(fallback, { recursive: true });
+  } catch(e) {}
+  return fallback;
+}
+
+function getImageDir() {
+  if (!IMAGE_DIR) {
+    // ??????????
+    const cfg = loadConfig();
+    IMAGE_DIR = cfg.imageCacheDir || getDefaultCacheDir();
+    try {
+      if (!fs.existsSync(IMAGE_DIR)) fs.mkdirSync(IMAGE_DIR, { recursive: true });
+    } catch(e) {
+      IMAGE_DIR = getDefaultCacheDir();
+    }
+    console.log("[image] cache dir:", IMAGE_DIR);
+  }
+  return IMAGE_DIR;
+}
+
+function saveImageToFile(pngBuffer) {
+  try {
+    const dir = getImageDir();
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(IMAGE_DIR, { recursive: true });
+    }
+    const filename = "img_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8) + ".png";
+    const filePath = path.join(dir, filename);
+    fs.writeFileSync(filePath, pngBuffer);
+    return filePath;
+  } catch(e) {
+    console.log("[image] save failed:", e.message);
+    return null;
+  }
+}
+
+function deleteImageFile(filePath) {
+  if (filePath) {
+    try {
+      const dir = getImageDir();
+      if (filePath.indexOf(dir) === 0) {
+        fs.unlinkSync(filePath);
+      }
+    } catch(e) {}
+  }
+}
+
 
 // ========== 全局状态 ==========
 
@@ -37,6 +110,34 @@ let lastClipboardText = "";
 
 /** 上一次读取到的剪贴板图片哈希值 */
 let lastClipboardImageHash = null;
+const HISTORY_PATH = path.join(app.getPath("userData"), "history.json");
+
+function saveHistory() {
+  try {
+    fs.writeFileSync(HISTORY_PATH, JSON.stringify(history), "utf-8");
+  } catch(e) {
+    console.log("[history] save error:", e.message);
+  }
+}
+
+function loadHistory() {
+  try {
+    if (fs.existsSync(HISTORY_PATH)) {
+      const raw = JSON.parse(fs.readFileSync(HISTORY_PATH, "utf-8"));
+      const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+      history = raw.filter(i => i.timestamp >= threeDaysAgo);
+      for (const item of raw) {
+        if (item.timestamp < threeDaysAgo && item.type === "image") {
+          deleteImageFile(item.content);
+        }
+      }
+      console.log("[history] loaded:", history.length, "/", raw.length);
+    }
+  } catch(e) {
+    console.log("[history] load error:", e.message);
+  }
+}
+
 
 /** 轮询定时器句柄 */
 let pollingTimer = null;
@@ -202,6 +303,36 @@ ipcMain.handle("close-action", (event, action) => {
     if (pollingTimer) clearInterval(pollingTimer);
     app.quit();
   }
+});
+
+
+/** ???????? */
+ipcMain.handle("pick-cache-dir", async () => {
+  const { dialog } = require("electron");
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openDirectory", "createDirectory"],
+    title: "????????"
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    return result.filePaths[0];
+  }
+  return null;
+});
+ipcMain.handle("get-image-cache-info", () => {
+  const dir = getImageDir();
+  let count = 0, size = 0;
+  try {
+    if (fs.existsSync(dir)) {
+      const files = fs.readdirSync(dir);
+      for (const f of files) {
+        if (f.endsWith(".png")) {
+          count++;
+          try { size += fs.statSync(path.join(dir, f)).size; } catch(e) {}
+        }
+      }
+    }
+  } catch(e) {}
+  return { dir, count, size };
 });
 
 ipcMain.handle("get-config", () => {
@@ -567,6 +698,27 @@ app.whenReady().then(() => {
   }
 });
 
+
+// ?????????
+app.on("before-quit", () => {
+  const cfg = loadConfig();
+  if (cfg.cleanImagesOnClose) {
+    const dir = getImageDir();
+    try {
+      if (fs.existsSync(dir)) {
+        const files = fs.readdirSync(dir);
+        for (const f of files) {
+          if (f.endsWith(".png")) {
+            try { fs.unlinkSync(path.join(dir, f)); } catch(e) {}
+          }
+        }
+        console.log("[cleanup] image cache cleared");
+      }
+    } catch(e) {
+      console.log("[cleanup] error:", e.message);
+    }
+  }
+});
 app.on("window-all-closed", () => {
   console.log("[app] all windows closed");
   if (!tray) {

@@ -1,22 +1,22 @@
-// ========== 日志 ==========
+﻿// ========== 鏃ュ織 ==========
 function log(m) { console.log("[app]", m); }
 
-// ========== 禁用 F12 ==========
+// ========== 绂佺敤 F12 ==========
 document.addEventListener("keydown", (e) => { if (e.key === "F12") e.preventDefault(); });
 
-// ========== 时间格式化 ==========
+// ========== 鏃堕棿鏍煎紡鍖?==========
 function formatTime(ts) {
   const now = Date.now(), diff = now - ts;
-  if (diff < 0) return "刚刚";
+  if (diff < 0) return "鍒氬垰";
   const s = Math.floor(diff / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60);
   const d = new Date(ts), t = new Date(now);
   const today = d.getFullYear() === t.getFullYear() && d.getMonth() === t.getMonth() && d.getDate() === t.getDate();
   if (!today) {
     return String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0") + ":" + String(d.getSeconds()).padStart(2,"0");
   }
-  if (s < 60) return Math.max(1,s) + "秒钟前";
-  if (m < 60) return m + "分钟前";
-  return h + "小时前";
+  if (s < 60) return Math.max(1,s) + "绉掗挓鍓?;
+  if (m < 60) return m + "鍒嗛挓鍓?;
+  return h + "灏忔椂鍓?;
 }
 
 // ========== DOM ==========
@@ -32,7 +32,7 @@ let allItems = [], searchQuery = "";
 function filterItems(q) {
   if (!q || !q.trim()) return allItems;
   const lq = q.trim().toLowerCase();
-  return allItems.filter(i => i.type === "image" ? lq.includes("图片") || lq.includes("image") || lq.includes("tupian") : i.content.toLowerCase().includes(lq));
+  return allItems.filter(i => i.type === "image" ? lq.includes("鍥剧墖") || lq.includes("image") || lq.includes("tupian") : i.content.toLowerCase().includes(lq));
 }
 
 function render(items) {
@@ -48,7 +48,7 @@ function render(items) {
   emptyState.classList.remove("visible");
   listEl.style.display = "";
   btnClear.style.opacity = "1"; btnClear.style.pointerEvents = "auto";
-  itemCount.textContent = searchQuery ? "找到 " + di.length + " 条结果" : "共 " + di.length + " 条";
+  itemCount.textContent = searchQuery ? "鎵惧埌 " + di.length + " 鏉＄粨鏋? : "鍏?" + di.length + " 鏉?;
   const frag = document.createDocumentFragment();
   for (const item of di) {
     const div = document.createElement("div");
@@ -60,7 +60,7 @@ function render(items) {
       const img = document.createElement("img"); img.className = "item-image"; img.src = item.content; img.draggable = false; body.appendChild(img);
     }
     const time = document.createElement("div"); time.className = "item-time"; time.textContent = formatTime(item.timestamp); body.appendChild(time);
-    const check = document.createElement("div"); check.className = "item-check"; check.textContent = "✓";
+    const check = document.createElement("div"); check.className = "item-check"; check.textContent = "鉁?;
     div.appendChild(body); div.appendChild(check);
     div.addEventListener("click", async () => {
       try {
@@ -75,7 +75,7 @@ function render(items) {
   listEl.innerHTML = ""; listEl.appendChild(frag);
 }
 
-// ========== 时间自动更新 ==========
+// ========== 鏃堕棿鑷姩鏇存柊 ==========
 let timer = null;
 function startTimer() {
   if (timer) clearInterval(timer);
@@ -86,7 +86,7 @@ function startTimer() {
   }, 1000);
 }
 
-// ========== 初始化 ==========
+// ========== 鍒濆鍖?==========
 async function init() {
   log("init");
   if (!window.clipboardAPI) { log("ERROR: no clipboardAPI"); return; }
@@ -112,7 +112,7 @@ async function init() {
   startTimer();
   
 
-  // 统一处理
+  // 缁熶竴澶勭悊
   document.addEventListener("mousedown", (e) => {
     if (!e.target.closest(".search-box")) searchInput.blur();
     if (!e.target.closest(".settings-panel") && !e.target.closest("#btnSettings")) {
@@ -129,7 +129,7 @@ async function init() {
     dialogOverlay.classList.remove("visible");
   });
 
-  // 右键删除菜单
+  // 鍙抽敭鍒犻櫎鑿滃崟
   const ctxM = document.getElementById("contextMenu");
   let ctxId = null;
   document.querySelector(".list").addEventListener("contextmenu", (e) => {
@@ -149,7 +149,7 @@ async function init() {
   });
 
 
-  // 设置面板
+  // 璁剧疆闈㈡澘
   const bSet = document.getElementById("btnSettings");
   const sPan = document.getElementById("settingsPanel");
   const tAuto = document.getElementById("toggleAutoStart");
@@ -158,7 +158,7 @@ async function init() {
     sPan.classList.toggle("visible");
     dialogOverlay.classList.toggle("visible", sPan.classList.contains("visible"));
   });
-  // 设置弹窗和右键菜单关闭时隐藏overlay
+  // 璁剧疆寮圭獥鍜屽彸閿彍鍗曞叧闂椂闅愯棌overlay
   document.addEventListener("mousedown", (e) => {
     if (!e.target.closest(".settings-panel") && !e.target.closest("#btnSettings") && !e.target.closest(".context-menu")) {
       dialogOverlay.classList.remove("visible");
@@ -200,19 +200,19 @@ async function init() {
     document.getElementById("contextMenu").classList.remove("visible");
   });
 
-  // 主题切换时设置 body class 配合 DWM acrylic
+  // 涓婚鍒囨崲鏃惰缃?body class 閰嶅悎 DWM acrylic
   window.clipboardAPI.onThemeChanged((isDark) => {
     document.body.classList.toggle("dark", isDark);
     document.body.classList.toggle("light", !isDark); // ??? DWM ???? acrylic ?
   });
 
-  // 初始化 body class
+  // 鍒濆鍖?body class
   document.body.classList.add(
     window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
   );
 
 
-  // 关闭弹窗交互
+  // 鍏抽棴寮圭獥浜や簰
   const closeDialog = document.getElementById("closeDialog");
   const dialogOverlay = document.getElementById("dialogOverlay");
   function showCloseDialog() {
@@ -235,7 +235,7 @@ async function init() {
   closeDialog.addEventListener("click", (e) => {
     if (e.target === closeDialog) hideCloseDialog();
   });
-  // 设置面板 - 关闭时到托盘
+  // 璁剧疆闈㈡澘 - 鍏抽棴鏃跺埌鎵樼洏
   const toggleTray = document.getElementById("toggleTrayMode");
   (async () => {
     const cfg = await window.clipboardAPI.getConfig();
@@ -246,6 +246,33 @@ async function init() {
   });
 
   log("init done");
+  // cache settings
+  const bpc = document.getElementById("btnPickCache");
+  const tcc = document.getElementById("toggleCleanCache");
+  const cpd = document.getElementById("cachePathDisplay");
+  bpc.addEventListener("click", async () => {
+    const dir = await window.clipboardAPI.pickCacheDir();
+    if (dir) {
+      const cfg = await window.clipboardAPI.getConfig();
+      cfg.imageCacheDir = dir;
+      await window.clipboardAPI.setConfig(cfg);
+      updateCacheDisplay();
+    }
+  });
+  tcc.addEventListener("change", async () => {
+    const cfg = await window.clipboardAPI.getConfig();
+    cfg.cleanImagesOnClose = tcc.checked;
+    await window.clipboardAPI.setConfig(cfg);
+  });
+  async function updateCacheDisplay() {
+    const info = await window.clipboardAPI.getImageCacheInfo();
+    if (info) {
+      cpd.textContent = info.dir + " (" + info.count + " pics, " + (info.size / 1024 / 1024).toFixed(1) + "MB)";
+    }
+    const cfg = await window.clipboardAPI.getConfig();
+    tcc.checked = cfg.cleanImagesOnClose || false;
+  }
+  updateCacheDisplay();
 }
 document.addEventListener("DOMContentLoaded", init);
 log("loaded");

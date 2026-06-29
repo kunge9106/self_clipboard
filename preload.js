@@ -16,5 +16,7 @@ contextBridge.exposeInMainWorld("clipboardAPI", {
   getConfig: () => ipcRenderer.invoke("get-config"),
   setConfig: (cfg) => ipcRenderer.invoke("set-config", cfg),
   refreshAcrylic: () => ipcRenderer.invoke("refresh-acrylic"),
+  pickCacheDir: () => ipcRenderer.invoke("pick-cache-dir"),
+  getImageCacheInfo: () => ipcRenderer.invoke("get-image-cache-info"),
   dragWindow: (dx, dy) => ipcRenderer.send("window-drag", dx, dy),
 });

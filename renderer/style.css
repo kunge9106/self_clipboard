@@ -153,6 +153,13 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
 .settings-panel.visible { display:block; }
 .settings-item { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:8px 14px; cursor:pointer; font-size:12px; color:var(--text-secondary); border-radius:10px; margin:2px 2px; }
 .settings-item:hover { background:rgba(255,255,255,0.20); }
+.settings-divider { height:1px; background:rgba(0,0,0,0.08); margin:4px 10px; }
+body.dark .settings-divider { background:rgba(255,255,255,0.08); }
+.settings-cache-info { flex-direction:column; align-items:flex-start; gap:2px; }
+.cache-path { font-size:10px; color:var(--text-muted); word-break:break-all; max-width:160px; line-height:1.3; }
+.settings-btn { display:block; width:calc(100% - 20px); margin:4px 10px; padding:4px 0; border:none; border-radius:8px; background:rgba(255,255,255,0.20); cursor:pointer; font-size:11px; font-weight:500; color:var(--text-primary); font-family:var(--font); transition:all 0.15s ease; -webkit-app-region:no-drag; }
+.settings-btn:hover { background:rgba(0,0,0,0.06); }
+body.dark .settings-btn:hover { background:rgba(255,255,255,0.08); }
 .settings-item input[type="checkbox"] { width:14px; height:14px; cursor:pointer; }
 .context-menu { display:none; position:fixed; z-index:100; padding:4px 0; border-radius:14px; background:rgba(255,255,255,0.85); backdrop-filter:blur(20px) saturate(150%); -webkit-backdrop-filter:blur(20px) saturate(150%); border:1px solid rgba(255,255,255,0.55); box-shadow:0 8px 32px rgba(0,0,0,0.10), inset 0 0 0 1px rgba(255,255,255,0.15); min-width:80px; -webkit-app-region:no-drag; }
 .context-menu.visible { display:block; }
