@@ -107,8 +107,8 @@ async function init() {
     setTimeout(() => window.clipboardAPI.refreshAcrylic(), 100);
   });
   btnClear.addEventListener("click", async () => { await window.clipboardAPI.clearAll(); allItems = []; render([]); });
-  document.getElementById('btnMinimize').addEventListener('click', async () => { await window.clipboardAPI.minimizeWindow(); });
-  btnClose.addEventListener("click", async () => { await window.clipboardAPI.closeWindow(); });
+  const minimizeBtn = document.getElementById('btnMinimize'); if (minimizeBtn) minimizeBtn.addEventListener('click', async () => { await window.clipboardAPI.minimizeWindow(); });
+  if (btnClose) btnClose.addEventListener("click", async () => { await window.clipboardAPI.closeWindow(); });
   startTimer();
   
 
