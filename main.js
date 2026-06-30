@@ -126,19 +126,7 @@ function loadHistory() {
           deleteImageFile(item.content);
         }
       }
-      // ?????????????
-  history = history.filter(i => {
-    if (i.type === "image" && i.content.startsWith("file://")) {
-      const fp = i.content.replace(/^file:\/\/\//, "").replace(/\//g, "\\");
-      try { return fs.existsSync(fp); } catch(e) { return false; }
-    }
-    return true;
-  });
-  if (history.length !== raw.filter(i => i.timestamp >= threeDaysAgo).length) {
-    saveHistory();
-    console.log("[history] cleaned stale images:", raw.filter(i => i.timestamp >= threeDaysAgo).length, "->", history.length);
-  }
-    console.log("[history] loaded:", history.length, "/", raw.length);
+console.log("[history] loaded:", history.length, "/", raw.length);
     }
   } catch(e) {
     console.log("[history] load error:", e.message);
