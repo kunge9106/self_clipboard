@@ -273,8 +273,9 @@ ipcMain.handle("copy-to-clipboard", (event, item) => {
   } else if (item.type === "image") {
     let img;
     if (item.content.startsWith("file://")) {
-      const filePath = item.content.replace(/^file:\/\//, "").replace(/\//g, "\\");
-      img = nativeImage.createFromPath(filePath);
+      var fp = item.content.replace(/^file:\/\/\//, "").replace(/\//g, "\\");
+      if (fp[0] === "\\") fp = fp.slice(1);
+      img = nativeImage.createFromPath(fp);
     } else {
       img = nativeImage.createFromDataURL(item.content);
     }
@@ -729,6 +730,7 @@ app.whenReady().then(() => {
 } catch(e) { console.log("[app] clipboard init error:", e.message); }
 
   createWindow();
+  createTray();
   pollingTimer = setInterval(pollClipboard, POLL_INTERVAL);
   setTimeout(() => {
     console.log("[app] first poll");
