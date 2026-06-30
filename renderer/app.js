@@ -69,7 +69,7 @@ function render(items) {
     if (item.type === "text") {
       const t = document.createElement("div"); t.className = "item-title"; t.textContent = item.content; body.appendChild(t);
     } else if (item.type === "image") {
-      const img = document.createElement("img"); img.className = "item-image"; img.src = item.content; img.draggable = false; body.appendChild(img);
+      const img = document.createElement("img"); img.className = "item-image"; img.src = item.content; img.draggable = false; img.onerror = function() { this.style.display = "none"; var err = document.createElement("div"); err.className = "item-title"; err.textContent = "[???????]"; err.style.color = "#999"; err.style.fontSize = "12px"; body.appendChild(err); }; body.appendChild(img);
     }
     const time = document.createElement("div"); time.className = "item-time"; time.textContent = formatTime(item.timestamp); body.appendChild(time);
     const check = document.createElement("div"); check.className = "item-check"; check.textContent = "✓";
@@ -253,7 +253,9 @@ async function init() {
     toggleTray.checked = cfg.trayOnClose || false;
   })();
   toggleTray.addEventListener("change", async () => {
-    await window.clipboardAPI.setConfig({ trayOnClose: toggleTray.checked });
+    const cfg = await window.clipboardAPI.getConfig();
+    cfg.trayOnClose = toggleTray.checked;
+    await window.clipboardAPI.setConfig(cfg);
   });
 
   log("init done");
