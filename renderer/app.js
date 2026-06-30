@@ -28,6 +28,7 @@ const itemCount = document.getElementById("itemCount");
 const searchInput = document.getElementById("searchInput");
 
 let allItems = [], searchQuery = "";
+let refreshCacheStats = null;
 
 function filterItems(q) {
   if (!q || !q.trim()) return allItems;
@@ -108,7 +109,7 @@ async function init() {
     allItems = h || []; render(filterItems(searchQuery));
   } catch(e) { log("getHistory err:", e.message); }
 
-  window.clipboardAPI.onHistoryUpdate((data) => { allItems = data || []; render(filterItems(searchQuery)); });
+  window.clipboardAPI.onHistoryUpdate((data) => { allItems = data || []; render(filterItems(searchQuery)); if (refreshCacheStats) refreshCacheStats(); });
   searchInput.addEventListener("input", (e) => { searchQuery = e.target.value; render(filterItems(searchQuery)); const sc = document.getElementById("searchClear"); if (sc) sc.classList.toggle("visible", searchQuery.length > 0); });
 
   // IME composition events: re-apply acrylic when candidate window appears/disappears
@@ -281,6 +282,7 @@ async function init() {
       await window.clipboardAPI.setConfig(cfg);
     });
   }
+  refreshCacheStats = updateCacheDisplay;
   async function updateCacheDisplay() {
     try {
       const info = await window.clipboardAPI.getImageCacheInfo();
