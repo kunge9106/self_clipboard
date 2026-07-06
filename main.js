@@ -123,14 +123,16 @@ function loadHistory() {
   try {
     if (fs.existsSync(HISTORY_PATH)) {
       const raw = JSON.parse(fs.readFileSync(HISTORY_PATH, "utf-8"));
+      // ?????????????? get-history ???? saveHistory ???????
+      history = raw;
+      // ????????????????
       const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
-      history = raw.filter(i => i.timestamp >= threeDaysAgo);
       for (const item of raw) {
         if (item.timestamp < threeDaysAgo && item.type === "image") {
           deleteImageFile(item.content);
         }
       }
-    console.log("[history] loaded:", history.length, "/", raw.length);
+      console.log("[history] loaded:", history.length);
     }
   } catch(e) {
     console.log("[history] load error:", e.message);
@@ -410,7 +412,8 @@ ipcMain.handle("clear-all", () => {
 
 /** 处理历史加载请求 */
 ipcMain.handle("get-history", () => {
-  return history;
+  const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+  return history.filter(i => i.timestamp >= threeDaysAgo);
 });
 
 
@@ -733,6 +736,17 @@ app.whenReady().then(() => {
 
   createWindow();
   createTray();
+  // ?????3????
+  setTimeout(() => {
+    var oldLen = history.length;
+    var threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    history = history.filter(i => i.timestamp >= threeDaysAgo);
+    if (history.length !== oldLen) {
+      saveHistory();
+      console.log("[history] cleaned old entries:", oldLen, "->", history.length);
+    }
+  }, 30000);
+
   pollingTimer = setInterval(pollClipboard, POLL_INTERVAL);
   setTimeout(() => {
     console.log("[app] first poll");
