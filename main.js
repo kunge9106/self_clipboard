@@ -80,14 +80,18 @@ function saveImageToFile(pngBuffer) {
 }
 
 function deleteImageFile(filePath) {
-  if (filePath) {
-    try {
-      const dir = getImageDir();
-      if (filePath.indexOf(dir) === 0) {
-        fs.unlinkSync(filePath);
-      }
-    } catch(e) {}
-  }
+  if (!filePath) return;
+  try {
+    var p = filePath;
+    if (p.indexOf("file://") === 0) {
+      p = p.replace(/^file:\/\/\//, "").replace(/\//g, "\\");
+      if (p[0] === "\\") p = p.slice(1);
+    }
+    var dir = getImageDir();
+    if (p.indexOf(dir) === 0) {
+      fs.unlinkSync(p);
+    }
+  } catch(e) {}
 }
 
 
@@ -126,7 +130,7 @@ function loadHistory() {
           deleteImageFile(item.content);
         }
       }
-console.log("[history] loaded:", history.length, "/", raw.length);
+    console.log("[history] loaded:", history.length, "/", raw.length);
     }
   } catch(e) {
     console.log("[history] load error:", e.message);
@@ -714,8 +718,6 @@ function createWindow() {
 
 app.whenReady().then(() => {
   console.log("[app] ready");
-  loadHistory();
-  console.log("[history] loaded from disk, count:", history.length);
   loadHistory();
   console.log("[history] loaded from disk, count:", history.length);
 
