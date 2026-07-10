@@ -548,7 +548,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     icon: iconPath,
     width: 300,
-    height: 485,
+    height: 510,
     resizable: true,
     frame: false,
     transparent: true,
@@ -556,7 +556,7 @@ function createWindow() {
     skipTaskbar: false,
     title: "self_clipboard",
     minWidth: 300,
-    minHeight: 485,
+    minHeight: 510,
     show: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
