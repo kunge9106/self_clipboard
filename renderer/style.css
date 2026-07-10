@@ -85,8 +85,8 @@ html,body { width:100%; height:100%; overflow:hidden; font-family:var(--font); c
 .search-box:focus-within .search-icon { stroke:#007AFF; opacity:1; }
 
 /* ===== 列表 ===== */
-.list { flex:1; overflow-y:auto; overflow-x:hidden; padding:4px 16px 8px; -webkit-app-region:no-drag; margin-right:6px; }
-.list::-webkit-scrollbar { width:4px; }
+.list { flex:1; overflow-y:auto; overflow-x:hidden; scrollbar-gutter:stable; padding:4px 10px 8px 16px; -webkit-app-region:no-drag; }
+.list::-webkit-scrollbar { width:6px; }
 .list::-webkit-scrollbar-track { background:transparent; cursor:default; }
 .list::-webkit-scrollbar-thumb { background:rgba(0,0,0,0.15); border-radius:999px; cursor:default; }
 

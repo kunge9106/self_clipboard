@@ -724,7 +724,8 @@ app.whenReady().then(() => {
   loadHistory();
   console.log("[history] loaded from disk, count:", history.length);
 
-  // 立即创建窗口
+  // 立即创建窗口
+
   // init clipboard tracker - avoid re-adding existing content on restart
   try {
     const txt = clipboard.readText();
@@ -745,7 +746,7 @@ app.whenReady().then(() => {
       saveHistory();
       console.log("[history] cleaned old entries:", oldLen, "->", history.length);
     }
-  }, 30000);
+  }, 10000);
 
   pollingTimer = setInterval(pollClipboard, POLL_INTERVAL);
   setTimeout(() => {
