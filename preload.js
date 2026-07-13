@@ -18,5 +18,6 @@ contextBridge.exposeInMainWorld("clipboardAPI", {
   refreshAcrylic: () => ipcRenderer.invoke("refresh-acrylic"),
   pickCacheDir: () => ipcRenderer.invoke("pick-cache-dir"),
   getImageCacheInfo: () => ipcRenderer.invoke("get-image-cache-info"),
+  openCacheDir: () => ipcRenderer.invoke("open-cache-dir"),
   dragWindow: (dx, dy) => ipcRenderer.send("window-drag", dx, dy),
 });

@@ -264,6 +264,7 @@ async function init() {
   const bpc = document.getElementById("btnPickCache");
   const tcc = document.getElementById("toggleCleanCache");
   const cpd = document.getElementById("cachePathDisplay");
+  if (cpd) { cpd.addEventListener("click", () => { window.clipboardAPI.openCacheDir(); }); }
   if (bpc) {
     bpc.addEventListener("click", async () => {
       const dir = await window.clipboardAPI.pickCacheDir();

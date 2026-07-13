@@ -9,7 +9,7 @@
  * @module main
  */
 
-const { app, BrowserWindow, ipcMain, nativeImage, clipboard, nativeTheme, Tray, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, nativeImage, clipboard, nativeTheme, Tray, Menu, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 
@@ -365,6 +365,13 @@ ipcMain.handle("get-image-cache-info", () => {
     }
   } catch(e) {}
   return { dir, count, size };
+});
+
+ipcMain.handle("open-cache-dir", () => {
+  const dir = getImageDir();
+  if (dir && fs.existsSync(dir)) {
+    shell.openPath(dir);
+  }
 });
 
 ipcMain.handle("get-config", () => {
@@ -744,6 +751,9 @@ app.whenReady().then(() => {
     history = history.filter(i => i.timestamp >= threeDaysAgo);
     if (history.length !== oldLen) {
       saveHistory();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("clipboard-history", history);
+      }
       console.log("[history] cleaned old entries:", oldLen, "->", history.length);
     }
   }, 10000);
