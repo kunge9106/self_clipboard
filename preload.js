@@ -1,4 +1,4 @@
-﻿const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("clipboardAPI", {
   onHistoryUpdate: (cb) => ipcRenderer.on("clipboard-history", (e, d) => cb(d)),
   copyToClipboard: (item) => ipcRenderer.invoke("copy-to-clipboard", item),
@@ -9,5 +9,15 @@ contextBridge.exposeInMainWorld("clipboardAPI", {
   deleteItem: (itemId) => ipcRenderer.invoke("delete-item", itemId),
   getAutoStart: () => ipcRenderer.invoke("get-auto-start"),
   setAutoStart: (enable) => ipcRenderer.invoke("set-auto-start", enable),
+  onThemeChanged: (cb) => ipcRenderer.on("theme-changed", (e, isDark) => cb(isDark)),
+  onClosePanels: (cb) => ipcRenderer.on("close-panels", () => cb()),
+  onShowCloseDialog: (cb) => ipcRenderer.on("show-close-dialog", () => cb()),
+  sendCloseAction: (action) => ipcRenderer.invoke("close-action", action),
+  getConfig: () => ipcRenderer.invoke("get-config"),
+  setConfig: (cfg) => ipcRenderer.invoke("set-config", cfg),
+  refreshAcrylic: () => ipcRenderer.invoke("refresh-acrylic"),
+  pickCacheDir: () => ipcRenderer.invoke("pick-cache-dir"),
+  getImageCacheInfo: () => ipcRenderer.invoke("get-image-cache-info"),
+  openCacheDir: () => ipcRenderer.invoke("open-cache-dir"),
   dragWindow: (dx, dy) => ipcRenderer.send("window-drag", dx, dy),
 });

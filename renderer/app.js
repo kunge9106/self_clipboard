@@ -1,4 +1,4 @@
-﻿// ========== 日志 ==========
+// ========== 日志 ==========
 function log(m) { console.log("[app]", m); }
 
 // ========== 禁用 F12 ==========
@@ -12,7 +12,7 @@ function formatTime(ts) {
   const d = new Date(ts), t = new Date(now);
   const today = d.getFullYear() === t.getFullYear() && d.getMonth() === t.getMonth() && d.getDate() === t.getDate();
   if (!today) {
-    return String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0") + ":" + String(d.getSeconds()).padStart(2,"0");
+    return String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0") + " " + String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0") + ":" + String(d.getSeconds()).padStart(2,"0");
   }
   if (s < 60) return Math.max(1,s) + "秒钟前";
   if (m < 60) return m + "分钟前";
@@ -28,6 +28,7 @@ const itemCount = document.getElementById("itemCount");
 const searchInput = document.getElementById("searchInput");
 
 let allItems = [], searchQuery = "";
+let refreshCacheStats = null;
 
 function filterItems(q) {
   if (!q || !q.trim()) return allItems;
@@ -43,6 +44,18 @@ function render(items) {
     emptyState.classList.add("visible");
     btnClear.style.opacity = "0.3"; btnClear.style.pointerEvents = "none";
     itemCount.textContent = "";
+    // 搜索无结果时更新提示文字
+    const emptyTitle = emptyState.querySelector(".empty-title");
+    const emptyDesc = emptyState.querySelector(".empty-desc");
+    if (emptyTitle && emptyDesc) {
+      if (searchQuery && searchQuery.trim()) {
+        emptyTitle.textContent = "暂无" + (searchQuery.trim().length > 12 ? searchQuery.trim().substring(0, 12) + "..." : searchQuery.trim()) + "相关内容";
+        emptyDesc.textContent = "";
+      } else {
+        emptyTitle.textContent = "暂无相关记录";
+        emptyDesc.textContent = "您暂时没有任何剪贴板历史记录";
+      }
+    }
     return;
   }
   emptyState.classList.remove("visible");
@@ -57,7 +70,7 @@ function render(items) {
     if (item.type === "text") {
       const t = document.createElement("div"); t.className = "item-title"; t.textContent = item.content; body.appendChild(t);
     } else if (item.type === "image") {
-      const img = document.createElement("img"); img.className = "item-image"; img.src = item.content; img.draggable = false; body.appendChild(img);
+      const img = document.createElement("img"); img.className = "item-image"; img.src = item.content; img.draggable = false; img.onerror = function() { this.style.display = "none"; var err = document.createElement("div"); err.className = "item-title"; err.textContent = "[???????]"; err.style.color = "#999"; err.style.fontSize = "12px"; body.appendChild(err); }; body.appendChild(img);
     }
     const time = document.createElement("div"); time.className = "item-time"; time.textContent = formatTime(item.timestamp); body.appendChild(time);
     const check = document.createElement("div"); check.className = "item-check"; check.textContent = "✓";
@@ -96,11 +109,20 @@ async function init() {
     allItems = h || []; render(filterItems(searchQuery));
   } catch(e) { log("getHistory err:", e.message); }
 
-  window.clipboardAPI.onHistoryUpdate((data) => { allItems = data || []; render(filterItems(searchQuery)); });
-  searchInput.addEventListener("input", (e) => { searchQuery = e.target.value; render(filterItems(searchQuery)); });
+  window.clipboardAPI.onHistoryUpdate((data) => { allItems = data || []; render(filterItems(searchQuery)); if (refreshCacheStats) refreshCacheStats(); });
+  searchInput.addEventListener("input", (e) => { searchQuery = e.target.value; render(filterItems(searchQuery)); const sc = document.getElementById("searchClear"); if (sc) sc.classList.toggle("visible", searchQuery.length > 0); });
+
+  // IME composition events: re-apply acrylic when candidate window appears/disappears
+  searchInput.addEventListener("compositionstart", () => {
+    window.clipboardAPI.refreshAcrylic();
+  });
+  searchInput.addEventListener("compositionend", () => {
+    setTimeout(() => window.clipboardAPI.refreshAcrylic(), 100);
+  });
+  const sc2 = document.getElementById("searchClear"); if (sc2) sc2.addEventListener("click", () => { searchInput.value = ""; searchQuery = ""; render(allItems); sc2.classList.remove("visible"); searchInput.focus(); });
   btnClear.addEventListener("click", async () => { await window.clipboardAPI.clearAll(); allItems = []; render([]); });
-  document.getElementById('btnMinimize').addEventListener('click', async () => { await window.clipboardAPI.minimizeWindow(); });
-  btnClose.addEventListener("click", async () => { await window.clipboardAPI.closeWindow(); });
+  const minimizeBtn = document.getElementById('btnMinimize'); if (minimizeBtn) minimizeBtn.addEventListener('click', async () => { await window.clipboardAPI.minimizeWindow(); });
+  if (btnClose) btnClose.addEventListener("click", async () => { await window.clipboardAPI.closeWindow(); });
   startTimer();
   
 
@@ -118,25 +140,8 @@ async function init() {
   window.addEventListener("blur", () => {
     document.getElementById("settingsPanel").classList.remove("visible");
     document.getElementById("contextMenu").classList.remove("visible");
+    dialogOverlay.classList.remove("visible");
   });
-
-  // 全窗拖拽（排除窗口边缘6px缩放区 + 交互元素）
-  let dragA = false, dragSX, dragSY;
-  document.querySelector(".window").addEventListener("mousedown", (e) => {
-    if (e.target.closest(".win-btn") || e.target.closest(".search-box") || 
-        e.target.closest(".item") || e.target.closest(".btn-clear") ||
-        e.target.closest(".settings-panel") || e.target.closest(".context-menu")) return;
-    dragA = true; dragSX = e.screenX; dragSY = e.screenY;
-  });
-  document.addEventListener("mousemove", (e) => {
-    if (!dragA) return;
-    const dx = e.screenX - dragSX, dy = e.screenY - dragSY;
-    if (dx !== 0 || dy !== 0) {
-      window.clipboardAPI.dragWindow(dx, dy);
-      dragSX = e.screenX; dragSY = e.screenY;
-    }
-  });
-  document.addEventListener("mouseup", () => { dragA = false; });
 
   // 右键删除菜单
   const ctxM = document.getElementById("contextMenu");
@@ -160,12 +165,141 @@ async function init() {
   const bSet = document.getElementById("btnSettings");
   const sPan = document.getElementById("settingsPanel");
   const tAuto = document.getElementById("toggleAutoStart");
-  bSet.addEventListener("click", (e) => { e.stopPropagation(); sPan.classList.toggle("visible"); });
+  bSet.addEventListener("click", (e) => {
+    e.stopPropagation();
+    sPan.classList.toggle("visible");
+    dialogOverlay.classList.toggle("visible", sPan.classList.contains("visible"));
+  });
+  // 设置弹窗和右键菜单关闭时隐藏overlay
+  document.addEventListener("mousedown", (e) => {
+    if (!e.target.closest(".settings-panel") && !e.target.closest("#btnSettings") && !e.target.closest(".context-menu")) {
+      dialogOverlay.classList.remove("visible");
+    }
+  });
   tAuto.addEventListener("change", async () => { await window.clipboardAPI.setAutoStart(tAuto.checked); });
   (async () => { tAuto.checked = await window.clipboardAPI.getAutoStart(); })();
 
 
+  // JS??????? CSS -webkit-app-region????????
+  let dragActive = false, dragStartX = 0, dragStartY = 0;
+  document.querySelector(".window").addEventListener("mousedown", (e) => {
+    // ????????????delete????????????
+    const target = e.target;
+    if (target.closest(".win-btn") || target.closest(".search-box") ||
+        target.closest(".btn-settings") || target.closest(".btn-clear") ||
+        target.closest(".settings-panel") || target.closest(".context-menu") ||
+        target.closest(".close-dialog") || target.closest(".dialog-overlay") ||
+        target.closest(".list") || target.closest(".empty-state")) {
+      return;
+    }
+    dragActive = true;
+    dragStartX = e.screenX;
+    dragStartY = e.screenY;
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!dragActive) return;
+    const dx = e.screenX - dragStartX;
+    const dy = e.screenY - dragStartY;
+    if (Math.abs(dx) > 0 || Math.abs(dy) > 0) {
+      window.clipboardAPI.dragWindow(dx, dy);
+      dragStartX = e.screenX;
+      dragStartY = e.screenY;
+    }
+  });
+  document.addEventListener("mouseup", () => { dragActive = false; });
+  window.clipboardAPI.onClosePanels(() => {
+    document.getElementById("settingsPanel").classList.remove("visible");
+    document.getElementById("contextMenu").classList.remove("visible");
+  });
+
+  // 主题切换时设置 body class 配合 DWM acrylic
+  window.clipboardAPI.onThemeChanged((isDark) => {
+    document.body.classList.toggle("dark", isDark);
+    document.body.classList.toggle("light", !isDark); // ??? DWM ???? acrylic ?
+  });
+
+  // 初始化 body class
+  document.body.classList.add(
+    window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+  );
+
+
+  // 关闭弹窗交互
+  const closeDialog = document.getElementById("closeDialog");
+  const dialogOverlay = document.getElementById("dialogOverlay");
+  function showCloseDialog() {
+    dialogOverlay.classList.add("visible");
+    closeDialog.classList.add("visible");
+  }
+  function hideCloseDialog() {
+    dialogOverlay.classList.remove("visible");
+    closeDialog.classList.remove("visible");
+  }
+  window.clipboardAPI.onShowCloseDialog(() => {
+    showCloseDialog();
+  });
+  closeDialog.querySelectorAll(".close-dialog-opt").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      hideCloseDialog();
+      await window.clipboardAPI.sendCloseAction(btn.dataset.action);
+    });
+  });
+  closeDialog.addEventListener("click", (e) => {
+    if (e.target === closeDialog) hideCloseDialog();
+  });
+  // 设置面板 - 关闭时到托盘
+  const toggleTray = document.getElementById("toggleTrayMode");
+  (async () => {
+    const cfg = await window.clipboardAPI.getConfig();
+    toggleTray.checked = cfg.trayOnClose || false;
+  })();
+  toggleTray.addEventListener("change", async () => {
+    const cfg = await window.clipboardAPI.getConfig();
+    cfg.trayOnClose = toggleTray.checked;
+    await window.clipboardAPI.setConfig(cfg);
+  });
+
   log("init done");
+  // cache settings
+  const bpc = document.getElementById("btnPickCache");
+  const tcc = document.getElementById("toggleCleanCache");
+  const cpd = document.getElementById("cachePathDisplay");
+  if (cpd) { cpd.addEventListener("click", () => { window.clipboardAPI.openCacheDir(); }); }
+  if (bpc) {
+    bpc.addEventListener("click", async () => {
+      const dir = await window.clipboardAPI.pickCacheDir();
+      if (dir) {
+        const cfg = await window.clipboardAPI.getConfig();
+        cfg.imageCacheDir = dir;
+        await window.clipboardAPI.setConfig(cfg);
+        updateCacheDisplay();
+      }
+    });
+  }
+  if (tcc) {
+    tcc.addEventListener("change", async () => {
+      const cfg = await window.clipboardAPI.getConfig();
+      cfg.cleanImagesOnClose = tcc.checked;
+      await window.clipboardAPI.setConfig(cfg);
+    });
+  }
+  refreshCacheStats = updateCacheDisplay;
+  async function updateCacheDisplay() {
+    try {
+      const info = await window.clipboardAPI.getImageCacheInfo();
+      if (info && cpd) {
+        cpd.textContent = info.dir;
+        const st = document.getElementById("cacheStats");
+        if (st) st.textContent = "(" + info.count + " pics, " + (info.size / 1024 / 1024).toFixed(1) + "MB)";
+      }
+    } catch(e) {}
+    try {
+      const cfg = await window.clipboardAPI.getConfig();
+      if (tcc) tcc.checked = cfg.cleanImagesOnClose || false;
+    } catch(e) {}
+  }
+  updateCacheDisplay();
+
 }
 document.addEventListener("DOMContentLoaded", init);
 log("loaded");

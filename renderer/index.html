@@ -10,7 +10,20 @@
   <div class="window" id="window">
   <div class="window-inner">
     <!-- macOS 风格窗口控制按钮 -->
-    <button class="btn-settings" id="btnSettings" title="设置"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button><div class="settings-panel" id="settingsPanel"><label class="settings-item"><span>开机自启</span><input type="checkbox" id="toggleAutoStart"></label></div><div class="window-controls">
+    <button class="btn-settings" id="btnSettings" title="设置"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+    <div class="settings-panel" id="settingsPanel">
+      <label class="settings-item"><span>开机自启</span><input type="checkbox" id="toggleAutoStart"></label>
+      <label class="settings-item"><span>关闭时后台运行</span><input type="checkbox" id="toggleTrayMode"></label>
+      <div class="settings-divider"></div>
+      <div class="settings-item settings-cache-info">
+        <span>缓存目录 <span class="cache-hint-label">仅保留近三天内容</span></span>
+        <span class="cache-path" id="cachePathDisplay">加载中...</span>
+        <div class="cache-stats" id="cacheStats"></div>
+      </div>
+      <button class="settings-btn" id="btnPickCache">更改目录</button>
+      <label class="settings-item"><span>关闭时清理缓存</span><input type="checkbox" id="toggleCleanCache"></label>
+    </div>
+    <div class="window-controls">
       <button class="win-btn win-btn-minimize" id="btnMinimize" title="最小化">
         <svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12"/></svg>
       </button>
@@ -19,6 +32,9 @@
       </button>
     </div>
 
+
+    <!-- 顶部拖拽区域 -->
+    
     <!-- 顶部搜索框 -->
     <div class="search-area">
       <div class="search-box">
@@ -27,6 +43,9 @@
           <line x1="21" y1="21" x2="16.65" y2="16.65"/>
         </svg>
         <input class="search-input" id="searchInput" type="text" placeholder="搜索历史记录..." autocomplete="off" spellcheck="false">
+      <button class="search-clear" id="searchClear" title="清空搜索">
+        <svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+      </button>
       </div>
     </div>
 
@@ -34,7 +53,8 @@
     <div class="list" id="list"></div>
 
     <!-- 空状态 -->
-    <div class="empty-state" id="emptyState"><svg class="empty-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+    <div class="empty-state" id="emptyState">
+      <svg class="empty-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
       <div class="empty-title">暂无相关记录</div>
       <div class="empty-desc">您暂时没有任何剪贴板历史记录</div>
     </div>
@@ -42,8 +62,9 @@
     <!-- 底部工具栏 -->
     <div class="toolbar">
       <span class="toolbar-count" id="itemCount"></span>
-      <button class="btn-clear" id="btnClear" title="清空全部">
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <span class="toolbar-version">Version：1.3.10-ikun</span>
+      <button class="btn-clear" id="btnClear" title="全部清空（含缓存）">
+        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="3 6 5 6 21 6"/>
           <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
         </svg>
@@ -51,8 +72,23 @@
     </div>
   </div>
   </div>
-  <script src="app.js"></script>
-<div class="context-menu" id="contextMenu"><div class="context-menu-item danger" data-action="delete">删除</div></div></body>
-</html>
 
+  <!-- 弹窗遮罩 -->
+  <div class="dialog-overlay" id="dialogOverlay"></div>
+  <!-- 关闭弹窗 -->
+  <div class="close-dialog" id="closeDialog">
+    <div class="close-dialog-title">关闭</div>
+    <button class="close-dialog-opt" data-action="tray">后台运行</button>
+    <button class="close-dialog-opt danger" data-action="quit">退出</button>
+    <button class="close-dialog-opt" data-action="cancel">取消</button>
+  </div>
+
+  <!-- 右键菜单 -->
+  <div class="context-menu" id="contextMenu">
+    <div class="context-menu-item danger" data-action="delete">删除</div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
 

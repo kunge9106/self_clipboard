@@ -9,8 +9,12 @@
  * @module main
  */
 
-const { app, BrowserWindow, ipcMain, nativeImage, clipboard } = require("electron");
+const { app, BrowserWindow, ipcMain, nativeImage, clipboard, nativeTheme, Tray, Menu, shell } = require("electron");
 const path = require("path");
+const fs = require("fs");
+
+// Suppress EPIPE errors in packaged app (console unavailable)
+try { process.stdout.on("error", () => {}); process.stderr.on("error", () => {}); } catch(e) {}
 
 // ========== 应用配置 ==========
 
@@ -19,11 +23,83 @@ const path = require("path");
 
 /** 剪贴板轮询间隔（毫秒） */
 const POLL_INTERVAL = 1000;
+/** ?????? */
+let IMAGE_DIR;
+
+/**
+ * ????????????C??
+ */
+function getDefaultCacheDir() {
+  // 使用安装目录作为默认缓存目录
+  const baseDir = app.isPackaged
+    ? path.dirname(process.execPath)
+    : __dirname;
+  const dir = path.join(baseDir, "self_clipboard_images");
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.accessSync(dir, fs.constants.W_OK);
+    return dir;
+  } catch(e) {
+    console.log("[cache] failed to create in install dir, fallback to userData");
+    const fallback = path.join(app.getPath("userData"), "self_clipboard_images");
+    try { if (!fs.existsSync(fallback)) fs.mkdirSync(fallback, { recursive: true }); } catch(e2) {}
+    return fallback;
+  }
+}
+
+
+function getImageDir() {
+  if (!IMAGE_DIR) {
+    // ??????????
+    const cfg = loadConfig();
+    IMAGE_DIR = cfg.imageCacheDir || getDefaultCacheDir();
+    try {
+      if (!fs.existsSync(IMAGE_DIR)) fs.mkdirSync(IMAGE_DIR, { recursive: true });
+    } catch(e) {
+      IMAGE_DIR = getDefaultCacheDir();
+    }
+    console.log("[image] cache dir:", IMAGE_DIR);
+  }
+  return IMAGE_DIR;
+}
+
+function saveImageToFile(pngBuffer) {
+  try {
+    const dir = getImageDir();
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(IMAGE_DIR, { recursive: true });
+    }
+    const filename = "img_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8) + ".png";
+    const filePath = path.join(dir, filename);
+    fs.writeFileSync(filePath, pngBuffer);
+    return filePath;
+  } catch(e) {
+    console.log("[image] save failed:", e.message);
+    return null;
+  }
+}
+
+function deleteImageFile(filePath) {
+  if (!filePath) return;
+  try {
+    var p = filePath;
+    if (p.indexOf("file://") === 0) {
+      p = p.replace(/^file:\/\/\//, "").replace(/\//g, "\\");
+      if (p[0] === "\\") p = p.slice(1);
+    }
+    var dir = getImageDir();
+    if (p.indexOf(dir) === 0) {
+      fs.unlinkSync(p);
+    }
+  } catch(e) {}
+}
+
 
 // ========== 全局状态 ==========
 
 /** 主窗口引用 */
 let mainWindow = null;
+let tray = null;
 
 /** 剪贴板历史记录列表 */
 let history = [];
@@ -33,6 +109,36 @@ let lastClipboardText = "";
 
 /** 上一次读取到的剪贴板图片哈希值 */
 let lastClipboardImageHash = null;
+const HISTORY_PATH = path.join(app.getPath("userData"), "history.json");
+
+function saveHistory() {
+  try {
+    fs.writeFileSync(HISTORY_PATH, JSON.stringify(history), "utf-8");
+  } catch(e) {
+    console.log("[history] save error:", e.message);
+  }
+}
+
+function loadHistory() {
+  try {
+    if (fs.existsSync(HISTORY_PATH)) {
+      const raw = JSON.parse(fs.readFileSync(HISTORY_PATH, "utf-8"));
+      // ?????????????? get-history ???? saveHistory ???????
+      history = raw;
+      // ????????????????
+      const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+      for (const item of raw) {
+        if (item.timestamp < threeDaysAgo && item.type === "image") {
+          deleteImageFile(item.content);
+        }
+      }
+      console.log("[history] loaded:", history.length);
+    }
+  } catch(e) {
+    console.log("[history] load error:", e.message);
+  }
+}
+
 
 /** 轮询定时器句柄 */
 let pollingTimer = null;
@@ -92,8 +198,14 @@ function pollClipboard() {
         console.log("[poll] new image detected");
         lastClipboardImageHash = hash;
         const pngBuffer = img.toPNG();
-        const dataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
-        addHistoryItem({ type: "image", content: dataUrl });
+        const filePath = saveImageToFile(pngBuffer);
+        if (filePath) {
+          const fileUrl = "file:///" + encodeURI(filePath.replace(/\\/g, "/"));
+          addHistoryItem({ type: "image", content: fileUrl });
+        } else {
+          const dataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
+          addHistoryItem({ type: "image", content: dataUrl });
+        }
       }
     }
   } catch (e) {
@@ -126,7 +238,7 @@ function addHistoryItem(item) {
     }
   }
 
-  history.unshift(entry);
+  history.unshift(entry);saveHistory();
   
 
   lastClipboardText = clipboard.readText();
@@ -165,7 +277,14 @@ ipcMain.handle("copy-to-clipboard", (event, item) => {
     clipboard.writeText(item.content);
     lastClipboardText = item.content;
   } else if (item.type === "image") {
-    const img = nativeImage.createFromDataURL(item.content);
+    let img;
+    if (item.content.startsWith("file://")) {
+      var fp = item.content.replace(/^file:\/\/\//, "").replace(/\//g, "\\");
+      if (fp[0] === "\\") fp = fp.slice(1);
+      img = nativeImage.createFromPath(fp);
+    } else {
+      img = nativeImage.createFromDataURL(item.content);
+    }
     clipboard.writeImage(img);
     lastClipboardImageHash = getImageHash(img);
   }
@@ -174,30 +293,148 @@ ipcMain.handle("copy-to-clipboard", (event, item) => {
 /** 处理关闭窗口请求 */
 ipcMain.handle("close-window", () => {
   console.log("[ipc] close-window");
-  if (mainWindow) mainWindow.close();
+  const cfg = loadConfig();
+  if (cfg.trayOnClose) {
+    // 不再提示，直接到托盘
+    if (mainWindow) mainWindow.hide();
+    createTray();
+  } else {
+    // 显示弹窗
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("show-close-dialog");
+    }
+  }
 });
 
 /** 处理最小化窗口请求 */
+ipcMain.handle("close-action", (event, action) => {
+  console.log("[ipc] close-action:", action);
+  if (action === "tray") {
+    if (mainWindow) mainWindow.hide();
+    createTray();
+  } else if (action === "quit") {
+    if (tray) { tray.destroy(); tray = null; }
+    if (pollingTimer) clearInterval(pollingTimer);
+    app.quit();
+  }
+});
+
+
+/** ???????? */
+ipcMain.handle("pick-cache-dir", async () => {
+  const { dialog } = require("electron");
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openDirectory", "createDirectory"],
+    title: "选择缓存目录"
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    const newDir = result.filePaths[0];
+    // 同步移动已有缓存文件到新目录
+    try {
+      const oldDir = getImageDir();
+      if (oldDir && oldDir !== newDir && fs.existsSync(oldDir)) {
+        const files = fs.readdirSync(oldDir);
+        for (const f of files) {
+          if (f.endsWith(".png")) {
+            try {
+              fs.renameSync(path.join(oldDir, f), path.join(newDir, f));
+            } catch(e) { /* file may be in use, skip */ }
+          }
+        }
+        console.log("[cache] moved", files.filter(f => f.endsWith(".png")).length, "files from", oldDir, "to", newDir);
+      }
+    } catch(e) {}
+    IMAGE_DIR = newDir;
+    return newDir;
+  }
+  return null;
+});
+
+ipcMain.handle("get-image-cache-info", () => {
+  const dir = getImageDir();
+  let count = 0, size = 0;
+  try {
+    if (fs.existsSync(dir)) {
+      const files = fs.readdirSync(dir);
+      for (const f of files) {
+        if (f.endsWith(".png")) {
+          count++;
+          try { size += fs.statSync(path.join(dir, f)).size; } catch(e) {}
+        }
+      }
+    }
+  } catch(e) {}
+  return { dir, count, size };
+});
+
+ipcMain.handle("open-cache-dir", () => {
+  const dir = getImageDir();
+  if (dir && fs.existsSync(dir)) {
+    shell.openPath(dir);
+  }
+});
+
+ipcMain.handle("get-config", () => {
+  return loadConfig();
+});
+
+ipcMain.handle("set-config", (event, cfg) => {
+  IMAGE_DIR = null;
+  saveConfig(cfg);
+  console.log("[config] saved:", cfg);
+});
+
 ipcMain.handle("minimize-window", () => {
   console.log("[ipc] minimize-window");
   if (mainWindow) mainWindow.minimize();
 });
 
-/** 处理清空请求 */
+/** ?????? */
+ipcMain.on("window-drag", (event, dx, dy) => {
+  if (mainWindow) {
+    const bounds = mainWindow.getBounds();
+    mainWindow.setBounds({ x: bounds.x + dx, y: bounds.y + dy });
+  }
+});
+
+/** ?????? */
+
 ipcMain.handle("clear-all", () => {
   console.log("[ipc] clear-all");
+  // ??????????
+  const dir = getImageDir();
+  try {
+    if (fs.existsSync(dir)) {
+      const files = fs.readdirSync(dir);
+      for (const f of files) {
+        if (f.endsWith(".png")) {
+          try { fs.unlinkSync(path.join(dir, f)); } catch(e) {}
+        }
+      }
+    }
+  } catch(e) {}
   clearHistory();
+  saveHistory();
 });
 
 /** 处理历史加载请求 */
 ipcMain.handle("get-history", () => {
-  return history;
+  const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+  return history.filter(i => i.timestamp >= threeDaysAgo);
 });
 
 
 // 删除指定条目
 ipcMain.handle("delete-item", (event, itemId) => {
+  // delete cache file
+  const deleted = history.find(i => i.id === itemId);
+  if (deleted && deleted.type === "image" && typeof deleted.content === "string" && deleted.content.startsWith("file://")) {
+    var imgPath = deleted.content.replace(/^file:\/\/\//, "").replace(/\//g, "\\");
+    if (imgPath[0] === "\\") imgPath = imgPath.slice(1);
+    deleteImageFile(imgPath);
+  }
   history = history.filter(i => i.id !== itemId);
+  saveHistory();
   sendHistoryToRenderer();
 });
 
@@ -206,32 +443,107 @@ ipcMain.handle("delete-item", (event, itemId) => {
 ipcMain.handle("get-auto-start", () => {
   try {
     const { execSync } = require("child_process");
-    const r = execSync("reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard 2>nul", { encoding: "utf8", timeout: 3000 });
-    return !!(r && r.includes("self_clipboard"));
+    const buf = execSync("reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard", { timeout: 3000 });
+    const ok = buf.toString().includes("self_clipboard");
+    console.log("[auto-start] check:", ok);
+    return ok;
   } catch(e) {
+    console.log("[auto-start] check: key not found");
     return false;
   }
 });
-ipcMain.handle("set-auto-start", (event, enable) => {
-  const { execSync } = require("child_process");
-  const exePath = process.execPath.replace(/\\/g, "\\\\");
-  const args = process.argv.slice(1).map(a => a.includes(" ") ? `\"${a}\"` : a).join(" ");
-  const cmd = `"${process.execPath}" ${args}`;
-  if (enable) {
-    execSync(`reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /t REG_SZ /d "${cmd}" /f`, { timeout: 3000 });
-  } else {
-    execSync(`reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v self_clipboard /f`, { timeout: 3000 });
+ipcMain.handle("refresh-acrylic", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+    console.log("[window] acrylic refreshed (IME/composition)");
   }
-  console.log("[auto-start]", enable ? "enabled" : "disabled");
+});
+
+ipcMain.handle("set-auto-start", (event, enable) => {
+  if (!app.isPackaged) {
+    console.log("[auto-start] skipped in dev mode");
+    return;
+  }
+  const { execSync } = require("child_process");
+  // 禁用 template literal ??????
+  const exe = process.execPath;
+  if (enable) {
+    try {
+      execSync(
+        `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v self_clipboard /t REG_SZ /d "${exe}" /f`,
+        { timeout: 3000 }
+      );
+      console.log("[auto-start] enabled:", exe);
+    } catch(e) {
+      console.error("[auto-start] enable failed:", e.message);
+    }
+  } else {
+    try {
+      execSync(
+        `reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v self_clipboard /f`,
+        { timeout: 3000 }
+      );
+      console.log("[auto-start] disabled - registry key removed");
+    } catch(e) {
+      console.log("[auto-start] disable - key not found");
+    }
+  }
 });
 
 
-// 窗口拖拽
-ipcMain.on("window-drag", (event, dx, dy) => {
-  if (!mainWindow) return;
-  const b = mainWindow.getBounds();
-  mainWindow.setBounds({ x: b.x + dx, y: b.y + dy, width: b.width, height: b.height });
-});
+
+// ========== 用户配置 ==========
+const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
+
+function loadConfig() {
+  try {
+    const fs = require("fs");
+    if (fs.existsSync(CONFIG_PATH)) {
+      return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+    }
+  } catch(e) {}
+  return {};
+}
+
+function saveConfig(cfg) {
+  try {
+    const fs = require("fs");
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf-8");
+  } catch(e) {}
+}
+
+// ========== 托盘 ==========
+
+/**
+ * 创建系统托盘图标
+ */
+function createTray() {
+  if (tray) return;
+  try {
+    const iconPath = path.join(__dirname, "assets", "icon.ico");
+    const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+    tray = new Tray(icon);
+    const ctxMenu = Menu.buildFromTemplate([
+      { label: "打开界面", click: () => {
+        if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+      }},
+      { type: "separator" },
+      { label: "退出", click: () => {
+        if (tray) { tray.destroy(); tray = null; }
+        if (pollingTimer) clearInterval(pollingTimer);
+        app.quit();
+      }},
+    ]);
+    tray.setToolTip("轻贴 - 剪贴板管理器");
+    tray.setContextMenu(ctxMenu);
+    tray.on("double-click", () => {
+      if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+    });
+    console.log("[tray] created");
+  } catch(e) {
+    console.log("[tray] create failed:", e.message);
+  }
+}
 
 // ========== 窗口创建 ==========
 /**
@@ -243,7 +555,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     icon: iconPath,
     width: 300,
-    height: 485,
+    height: 510,
     resizable: true,
     frame: false,
     transparent: true,
@@ -251,14 +563,18 @@ function createWindow() {
     skipTaskbar: false,
     title: "self_clipboard",
     minWidth: 300,
-    minHeight: 485,
+    minHeight: 510,
     show: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       devTools: true,
+      // 禁用 Chromium 自适应模式
+      enablePreferredSizeMode: false,
     },
+    // 等待背景材质初始化
+    backgroundColor: "#00000000",
   });
 
   // 调试模式自动打开开发者工具
@@ -291,12 +607,97 @@ function createWindow() {
       }
     }
     if (!glassOk) {
-      console.log("[window] glass unavailable, fallback to css");
-      mainWindow.setBackgroundMaterial("none");
+      console.log("[window] acrylic/mica unavailable, CSS backdrop-filter is primary glass");
+      // No destructive fallback, CSS backdrop-filter handles it
     }
   }
 
+  // 监听鼠标/拖拽消息，关闭弹窗
+  if (process.platform === "win32") {
+    try {
+      mainWindow.hookWindowMessage(0x0201, () => { // WM_LBUTTONDOWN
+        try { mainWindow.webContents.send("close-panels"); } catch(e) {}
+      });
+      mainWindow.hookWindowMessage(0x00A1, () => { // WM_NCLBUTTONDOWN (drag)
+        try { mainWindow.webContents.send("close-panels"); } catch(e) {}
+      });
+    } catch(e) {
+      console.log("[window] hookWindowMessage failed:", e.message);
+    }
+  }
+  // Re-apply acrylic on blur (fixes IME overlay graying)
+  mainWindow.on("blur", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      setTimeout(() => {
+        try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+      }, 100);
+    }
+  });
+
+  mainWindow.on("will-move", () => {
+    try { mainWindow.webContents.send("close-panels"); } catch(e) {}
+  });
+
+  // 监听窗口移动? acrylic ?????????
+  let themeReady = false;
+  setTimeout(() => { themeReady = true; console.log("[window] theme handler ready"); }, 2000);
+  
+  const sendThemeCSS = () => {
+    if (mainWindow && !mainWindow.isDestroyed() && themeReady) {
+      const isDark = nativeTheme.shouldUseDarkColors;
+      console.log("[window] theme changed, isDark:", isDark);
+      mainWindow.webContents.send("theme-changed", isDark);
+    }
+  };
+  
+  // 标记主题处理器就绪? acrylic ????????
+  let pendingTheme = null;
+  nativeTheme.on("updated", () => {
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+        console.log("[window] acrylic refreshed on theme switch");
+      }
+    }, 100);
+    // Retry after 300ms for DWM to fully settle after theme change
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+        console.log("[window] acrylic re-refreshed on theme switch (retry)");
+      }
+    }, 300);
+    if (themeReady) {
+      setTimeout(sendThemeCSS, 150);
+    } else {
+      pendingTheme = setTimeout(sendThemeCSS, 150);
+      console.log("[window] theme change queued (acrylic not ready)");
+    }
+  });
+  // WM_SETTINGCHANGE ????? acrylic
+  if (process.platform === "win32") {
+    try {
+      mainWindow.hookWindowMessage(0x001A, () => { // WM_SETTINGCHANGE
+        setTimeout(() => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+          }
+        }, 100);
+      });
+    } catch(e) {}
+  }
+
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+
+  // 从托盘显示时重新设置 acrylic
+  mainWindow.on("show", () => {
+    // Directly re-apply acrylic without none step (avoids gray flash)
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+        console.log("[window] acrylic re-applied on show");
+      }
+    }, 200);
+  });
 
   mainWindow.on("closed", () => {
     console.log("[window] closed");
@@ -307,6 +708,19 @@ function createWindow() {
   mainWindow.webContents.on("did-finish-load", () => {
     console.log("[window] page loaded");
     sendHistoryToRenderer();
+    // acrylic ???DWM ???
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try { mainWindow.setBackgroundMaterial("acrylic"); } catch(e) {}
+        console.log("[window] acrylic warm-up done");
+      }
+    }, 500);
+    // 主题切换时重新应用
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("theme-changed", nativeTheme.shouldUseDarkColors);
+      }
+    }, 1000);
   });
 }
 
@@ -314,18 +728,91 @@ function createWindow() {
 
 app.whenReady().then(() => {
   console.log("[app] ready");
+  loadHistory();
+  console.log("[history] loaded from disk, count:", history.length);
+
+  // 立即创建窗口
+
+  // init clipboard tracker - avoid re-adding existing content on restart
+  try {
+    const txt = clipboard.readText();
+  if (txt) lastClipboardText = txt;
+  const img = clipboard.readImage();
+  if (!img.isEmpty()) lastClipboardImageHash = getImageHash(img);
+    console.log("[app] clipboard init, text:", (lastClipboardText || "(empty)").substring(0, 40));
+} catch(e) { console.log("[app] clipboard init error:", e.message); }
+
   createWindow();
+  createTray();
+  // ?????3????
+  setTimeout(() => {
+    var oldLen = history.length;
+    var threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    history = history.filter(i => i.timestamp >= threeDaysAgo);
+    if (history.length !== oldLen) {
+      saveHistory();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("clipboard-history", history);
+      }
+      console.log("[history] cleaned old entries:", oldLen, "->", history.length);
+    }
+  }, 10000);
+
   pollingTimer = setInterval(pollClipboard, POLL_INTERVAL);
   setTimeout(() => {
     console.log("[app] first poll");
     pollClipboard();
   }, 1000);
+
+  // 延迟执行后台清理
+  if (app.isPackaged) {
+    mainWindow?.webContents?.once("did-finish-load", () => {
+      setTimeout(() => {
+        try {
+          const { execSync } = require("child_process");
+          const regLocations = ["HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"];
+          for (const loc of regLocations) {
+            try {
+              const buf = execSync(`reg query "${loc}" /v self_clipboard`, { timeout: 2000 });
+              if (buf.toString().includes("electron.exe")) {
+                execSync(`reg delete "${loc}" /v self_clipboard /f`, { timeout: 2000 });
+                console.log("[cleanup] fixed stale entry");
+              }
+            } catch(e) { /* not found */ }
+          }
+        } catch(e) { /* skip */ }
+        console.log("[app] startup cleanup done");
+      }, 5000);
+    });
+  }
 });
 
+
+// ?????????
+app.on("before-quit", () => {
+  const cfg = loadConfig();
+  if (cfg.cleanImagesOnClose) {
+    const dir = getImageDir();
+    try {
+      if (fs.existsSync(dir)) {
+        const files = fs.readdirSync(dir);
+        for (const f of files) {
+          if (f.endsWith(".png")) {
+            try { fs.unlinkSync(path.join(dir, f)); } catch(e) {}
+          }
+        }
+      }
+    } catch(e) {}
+    history = [];
+    saveHistory();
+    console.log("[cleanup] history and image cache cleared");
+  }});
 app.on("window-all-closed", () => {
-  console.log("[app] all windows closed, quit");
-  if (pollingTimer) clearInterval(pollingTimer);
-  app.quit();
+  console.log("[app] all windows closed");
+  if (!tray) {
+    if (pollingTimer) clearInterval(pollingTimer);
+    app.quit();
+  }
 });
 
 app.on("activate", () => {

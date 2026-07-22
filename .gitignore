@@ -24,3 +24,5 @@ electron-builder-output/
 
 # Zip archives
 *.zip
+self_clipboard_images/
+nul
