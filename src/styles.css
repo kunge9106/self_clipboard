@@ -124,6 +124,18 @@ body {
 
 /* 深色下主体色由 --material-rgb / --glass-alpha 一并切换，无需额外覆盖 */
 
+/* 纯净模式（无系统模糊）：窗口退化为纯透明 layered 窗口，四角是**真透明**，
+   100% 干净——代价是背后的壁纸不再被模糊。
+   少了 acrylic 那层「底层填色」后，同浓度的面板会显得更薄，
+   所以在基础浓度上补一层厚度，让两种模式在同一滑块值下观感接近。 */
+body.pure .app {
+  background: linear-gradient(
+    160deg,
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.24))),
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.12))) 62%
+  );
+}
+
 /* 噪点层：真·Windows 亚克力 = 模糊 + 色调 + **噪点** + 亮度层。
    我们之前只有「模糊 + 色调」，缺了噪点，所以看着像「平模糊」不够高级。
    这里叠一层极淡的噪点（约 4%），模拟 Fluent 材质的颗粒感。 */

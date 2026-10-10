@@ -22,12 +22,32 @@ fn effect_info() -> serde_json::Value {
             "tier": tier.as_str(),
             "build": effects::current_build(),
             "maxRadius": tier.max_radius(),
+            "pure": settings::get().pure_mode,
         })
     }
     #[cfg(not(windows))]
     {
-        serde_json::json!({ "tier": "solid", "build": 0, "maxRadius": 12 })
+        serde_json::json!({ "tier": "solid", "build": 0, "maxRadius": 12, "pure": false })
     }
+}
+
+/// 纯净模式开关：不用系统 blur（四角真透明、100% 干净），立即生效
+#[tauri::command]
+fn set_pure_mode(app: tauri::AppHandle, value: bool) -> Result<(), String> {
+    settings::update(|c| c.pure_mode = value);
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        if let Some(w) = app.get_webview_window("main") {
+            if let Ok(h) = w.hwnd() {
+                let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
+                effects::apply_pure_mode(h.0 as isize, dark);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+    Ok(())
 }
 
 /// 材质浓度（设置页滑块）：更新 tint alpha 并立即重刷亚克力
@@ -141,6 +161,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             effect_info,
             set_material_alpha,
+            set_pure_mode,
             effects::drag_start,
             effects::resize_start,
             clipboard::get_history,

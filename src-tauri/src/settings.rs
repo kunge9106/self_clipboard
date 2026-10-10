@@ -29,9 +29,17 @@ pub struct Config {
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
-    /// 材质浓度：亚克力 tint 的 alpha 百分比（40–90，默认 74）
+    /// 材质浓度：窗口主体层的不透明度百分比（25–90，默认 62）
     #[serde(default = "default_material_alpha")]
     pub material_alpha: u32,
+    /// 纯净模式：**不用系统 blur**（窗口为纯透明 layered）
+    ///
+    /// 为什么需要它：Win10 的 acrylic 恒为**矩形**、`SetWindowRgn` 对它无效
+    /// （社区实证 SO 63324480 等），所以「圆角 + 系统模糊」必然在四角留下
+    /// 一圈矩形残留。关掉系统 blur 后窗口四角是**真透明**，100% 干净，
+    /// 代价是背后的壁纸不再被模糊。两种观感不可兼得，故交给用户自选。
+    #[serde(default)]
+    pub pure_mode: bool,
     /// 自定义缓存目录（None = 使用 app_data_dir/clipboard）
     #[serde(default)]
     pub cache_dir: Option<String>,
@@ -56,6 +64,7 @@ impl Default for Config {
             clean_confirm_exit: false,
             retention_days: default_retention(),
             material_alpha: default_material_alpha(),
+            pure_mode: false,
             cache_dir: None,
         }
     }
@@ -129,6 +138,7 @@ pub fn get_settings() -> serde_json::Value {
         "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
         "materialAlpha": cfg.material_alpha,
+        "pureMode": cfg.pure_mode,
         "cacheDir": cfg.cache_dir,
         "autoStart": autostart::is_enabled(),
     })

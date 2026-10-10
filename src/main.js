@@ -31,6 +31,8 @@ async function applyEffectInfo() {
   }
 
   document.body.classList.add(TIER_CLASS[info.tier] || "tier-solid");
+  // 纯净模式（无系统模糊）也在启动时就同步，避免首帧闪一下模糊
+  if (info.pure) document.body.classList.add("pure");
 
   // 窗口圆角取后端给出的档位上限（Win10 acrylic 为 20px，必须与 SetWindowRgn 一致）
   const radius =
@@ -59,6 +61,15 @@ function applyGlassAlpha(pct) {
   if (document.body.classList.contains("tier-solid")) return;
   const a = Math.max(10, Math.min(95, Number(pct) || 0)) / 100;
   document.documentElement.style.setProperty("--glass-alpha", String(a));
+}
+
+/**
+ * 纯净模式：关掉系统 blur（Windows 的 acrylic 恒为矩形、无法裁圆角，
+ * 四角必然留下一圈矩形残留）。关掉后窗口是纯透明 layered 窗口，
+ * 四角 100% 干净；材质观感全部由 CSS 层负责（见 styles.css 的 body.pure）。
+ */
+function applyPureMode(on) {
+  document.body.classList.toggle("pure", !!on);
 }
 
 function bindWindowControls() {
@@ -583,6 +594,9 @@ function settingsHtml() {
     <div class="row"><label>材质浓度</label>
       <input type="range" id="set-material" min="25" max="90" value="${s.materialAlpha ?? 62}" />
       <span class="hint" id="material-val">${s.materialAlpha ?? 62}%（越高越厚实 · 越低越通透）</span></div>
+    <div class="row"><label>纯净模式</label>
+      <input type="checkbox" id="set-pure" ${s.pureMode ? "checked" : ""} />
+      <span class="hint">关闭系统背景模糊：四角完全干净、无残留；代价是壁纸不再被模糊</span></div>
     <div class="cache-box">
       <div class="cache-title">缓存目录 <span class="hint">仅保留近 ${s.retentionDays ?? 3} 天内容</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
@@ -674,6 +688,21 @@ function bindSettings(view) {
     });
   }
 
+  // 纯净模式：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启
+  const pure = view.querySelector("#set-pure");
+  if (pure)
+    pure.onchange = async () => {
+      try {
+        await invoke("set_pure_mode", { value: pure.checked });
+        applyPureMode(pure.checked);
+        settings = await invoke("get_settings");
+        toast(pure.checked ? "已开启纯净模式（无背景模糊）" : "已恢复背景模糊");
+      } catch (e) {
+        toast("保存失败：" + e);
+        pure.checked = !pure.checked;
+      }
+    };
+
   view.querySelector("#btn-pick-dir").onclick = async () => {
     try {
       const res = await invoke("pick_cache_dir");
@@ -734,6 +763,8 @@ async function main() {
     settings = await invoke("get_settings");
     // 应用材质浓度（CSS 层，窗口主体的不透明度）
     applyGlassAlpha(settings.materialAlpha ?? 62);
+    // 纯净模式（无系统模糊）
+    applyPureMode(settings.pureMode);
   } catch (e) {
     console.error("load settings failed", e);
   }

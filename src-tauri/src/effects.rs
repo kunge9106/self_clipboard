@@ -32,6 +32,9 @@ const DWMWCP_ROUND: u32 = 2;
 // SetWindowCompositionAttribute
 const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
+/// accent_state = 0：彻底关闭系统 blur。窗口变成纯透明的 layered 窗口，
+/// 四角是真透明，不再有 acrylic 铺满矩形留下的残留。见 `pure_mode`。
+const ACCENT_DISABLED: u32 = 0;
 
 /// Win10 acrylic 的 tint，格式为 **0xAABBGGRR**（注意不是 RGBA）。
 ///
@@ -556,10 +559,32 @@ fn apply_mica(hwnd: isize) -> Result<(), i32> {
     }
 }
 
+/// 是否处于「纯净模式」（不用系统 blur，四角真透明）
+pub fn is_pure() -> bool {
+    crate::settings::get().pure_mode
+}
+
+/// 关闭系统模糊（纯净模式）。窗口退化为纯透明 layered 窗口：
+/// 四角 100% 干净（没有 acrylic 的矩形残留），材质观感全部由 CSS 层负责。
+fn clear_accent(hwnd: isize) {
+    let _ = set_accent_state(hwnd, ACCENT_DISABLED, 0);
+    nudge(hwnd);
+}
+
 /// Win10 1809–22H2：真·acrylic（tint 透明度取自「材质浓度」配置）
 fn apply_acrylic(hwnd: isize, dark: bool) -> Result<(), i32> {
+    if is_pure() {
+        // 纯净模式：不施加任何系统 blur
+        clear_accent(hwnd);
+        return Ok(());
+    }
     let alpha = crate::settings::get().material_alpha;
     set_accent_state(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, tint_for(dark, alpha))
+}
+
+/// 切换「纯净模式」后立即生效（无需重启）
+pub fn apply_pure_mode(hwnd: isize, dark: bool) {
+    let _ = apply_acrylic(hwnd, dark);
 }
 
 /// 材质浓度变化后立即重刷 acrylic（设置页滑块用）
