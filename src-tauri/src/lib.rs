@@ -183,6 +183,7 @@ pub fn run() {
             settings::exit_app,
             settings::set_retention_days,
             settings::set_autostart,
+            settings::set_file_copy,
         ]);
 
     #[cfg(windows)]

@@ -229,6 +229,16 @@ pub fn on_clipboard_update() {
         if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
             return;
         }
+        // 剪贴板 owner 就是我们自己窗口 → 这是「点击条目复制回去」写下的内容，不能再当成
+        // 一次新的系统复制回灌成重复条目。
+        // 为什么不能只靠 mark_skip() 的序号比对：copy_back 跑在 Tauri 的工作线程上，
+        // 而 WM_CLIPBOARDUPDATE 是投递到主线程的——主线程完全可能在 mark_skip() 执行之前
+        // 就处理掉这条消息。owner 由系统在 SetClipboardData 时原子设置，没有这个窗口期。
+        let me = MAIN_HWND.get().copied().unwrap_or(0);
+        if me != 0 && GetClipboardOwner() == me {
+            LAST_SEQ.store(seq, Ordering::Relaxed);
+            return;
+        }
         if seq == SKIP_SEQ.load(Ordering::Relaxed) {
             SKIP_SEQ.store(0, Ordering::Relaxed);
             LAST_SEQ.store(seq, Ordering::Relaxed);
@@ -261,6 +271,10 @@ unsafe fn read_clipboard() -> Option<RawClip> {
     const CF_DIB: u32 = 8;
     const CF_HDROP: u32 = 15;
 
+    // 「文件复制」开关（设置页，默认关闭）：关掉后完全不看 CF_HDROP。
+    // 在 OpenClipboard 之前读取，避免持有剪贴板锁时再去碰 settings 的互斥锁。
+    let file_copy = crate::settings::get().file_copy;
+
     if OpenClipboard(0) == 0 {
         return None;
     }
@@ -288,7 +302,7 @@ unsafe fn read_clipboard() -> Option<RawClip> {
             }
         }
 
-        if IsClipboardFormatAvailable(CF_HDROP) != 0 {
+        if file_copy && IsClipboardFormatAvailable(CF_HDROP) != 0 {
             if let Some(h) = non_null(GetClipboardData(CF_HDROP)) {
                 const ALL: u32 = 0xFFFFFFFF;
                 let count = DragQueryFileW(h, ALL, std::ptr::null_mut(), 0);
@@ -299,7 +313,23 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                     DragQueryFileW(h, i, buf.as_mut_ptr(), len);
                     files.push(String::from_utf16_lossy(&buf[..buf.len() - 1]));
                 }
-                DragFinish(h);
+                // ⚠️ 这里**绝对不能**调用 DragFinish(h)。
+                //
+                // h 来自 GetClipboardData(CF_HDROP)，它的内存归**剪贴板**所有（不是
+                // WM_DROPFILES 里那个临时 HDROP）。DragFinish 会把它 GlobalFree 掉，而剪贴板
+                // 仍然持有同一个句柄，于是下一次 OpenClipboard()/EmptyClipboard() 会二次释放
+                // → 堆损坏 → 进程直接崩溃且无任何 Rust 层报错。
+                //
+                // 实证（症状逐字吻合）：
+                //   Appeon 社区 “Clipboard and DragQueryFile - Need DragFinish?”：
+                //   “Calling DragFinish() will cause the application to crash on the next
+                //    OpenClipboard() call … I ended up just calling EmptyClipboard() with no
+                //    DragFinish() and then the crash went away.”
+                //   zabkat shellFAQ 亦建议剪贴板 HDROP 不要调用 DragFinish（只适用于
+                //   WM_DROPFILES 处理）。
+                // 对应到轻贴的现象：复制文件（读一次）→ 之后点击文件条目（写回 → OpenClipboard）
+                // → 崩溃。这正是本次上报的 bug。
+                // 内存无需手动释放：CloseClipboard 后由剪贴板自身管理。
                 return Some(RawClip::Files(files));
             }
         }
@@ -906,5 +936,6 @@ extern "system" {
     fn GlobalSize(handle: isize) -> usize;
 
     fn DragQueryFileW(hdrop: isize, i: u32, buf: *mut u16, buflen: u32) -> u32;
-    fn DragFinish(hdrop: isize);
+    // 注意：这里**故意不声明 DragFinish**。它只适用于 WM_DROPFILES 的临时 HDROP，
+    // 用在本模块的剪贴板 HDROP 上会导致二次释放崩溃（详见 read_clipboard 内的说明）。
 }

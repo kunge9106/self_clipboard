@@ -212,11 +212,20 @@ function bindSearch() {
 // 历史渲染
 // ---------------------------------------------------------------------------
 
+/** 「文件复制」是否开启。默认关闭：不采集文件、也不展示任何文件条目。 */
+function fileCopyOn() {
+  return !!(settings && settings.fileCopy);
+}
+
 function filtered() {
   let list = items;
   if (currentView === "pinned") list = list.filter((i) => i.favorite);
   else if (currentView === "images") list = list.filter((i) => i.kind === "image");
   else if (currentView === "files") list = list.filter((i) => i.kind === "files");
+
+  // 文件复制开关关闭（默认）→ 文件条目一律不展示。旧条目只是隐藏，数据仍在磁盘上，
+  // 重新打开开关就回来了。
+  if (!fileCopyOn()) list = list.filter((i) => i.kind !== "files");
 
   if (query) {
     list = list.filter(
@@ -280,13 +289,23 @@ function render() {
     return;
   }
 
+  // 「文件」入口保留，但文件复制关闭时（默认）只给一个说明页，不列任何条目
+  if (currentView === "files" && !fileCopyOn()) {
+    document.getElementById("status-count").textContent = "共 0 条";
+    view.innerHTML = `<div class="empty">
+      <div class="empty-title">文件复制功能已关闭</div>
+      <div class="empty-sub">需要记录资源管理器里复制的文件时，可在「设置 → 文件复制」中打开</div>
+    </div>`;
+    return;
+  }
+
   const list = filtered();
   // 状态栏：搜索中显示「找到 X 条结果」，否则显示总数
   const countEl = document.getElementById("status-count");
   if (countEl)
     countEl.textContent = query
       ? `找到 ${list.length} 条结果`
-      : `共 ${items.length} 条`;
+      : `共 ${fileCopyOn() ? items.length : items.filter((i) => i.kind !== "files").length} 条`;
 
   if (list.length === 0) {
     view.innerHTML = emptyHtml();
@@ -745,6 +764,9 @@ function settingsHtml() {
   const fmtMB = (b) => (b / 1024 / 1024).toFixed(1);
   return `<div class="settings">
     <h2>设置</h2>
+    <div class="row"><label>文件复制</label>
+      <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
+      <span class="hint">开启后记录在资源管理器里复制的文件（默认关闭，关闭时不采集也不显示文件条目）</span></div>
     <div class="row"><label>开机自启</label>
       <input type="checkbox" id="set-autostart" ${s.autoStart ? "checked" : ""} />
       <span class="hint">登录 Windows 后自动运行轻贴</span></div>
@@ -819,6 +841,7 @@ function bindSettings(view) {
   };
   bindCheck("set-autostart", "set_autostart");
   bindCheck("set-tray", "set_tray_on_close");
+  bindCheck("set-file-copy", "set_file_copy");
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
   bindCheck("set-clean-confirm", "set_clean_confirm_exit");

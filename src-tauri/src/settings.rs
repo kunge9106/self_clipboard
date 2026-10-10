@@ -43,6 +43,13 @@ pub struct Config {
     ///     同样没有任何残留。
     #[serde(default)]
     pub round_mode: bool,
+    /// 文件复制：是否记录「资源管理器里复制的文件」（CF_HDROP）。
+    ///
+    /// **默认关闭**——这是用户明确要求的默认值：文件复制涉及真实文件路径，
+    /// 且其读/写都走 shell 层（历史上这里有一个二次释放崩溃），默认不参与采集最稳妥。
+    /// 关闭时：read_clipboard 完全不看 CF_HDROP；前端「文件」入口保留但显示已关闭提示。
+    #[serde(default)]
+    pub file_copy: bool,
     /// 自定义缓存目录（None = 使用 app_data_dir/clipboard）
     #[serde(default)]
     pub cache_dir: Option<String>,
@@ -68,6 +75,7 @@ impl Default for Config {
             retention_days: default_retention(),
             material_alpha: default_material_alpha(),
             round_mode: false,
+            file_copy: false, // 默认关闭：不记录文件复制
             cache_dir: None,
         }
     }
@@ -142,6 +150,7 @@ pub fn get_settings() -> serde_json::Value {
         "retentionDays": cfg.retention_days,
         "materialAlpha": cfg.material_alpha,
         "roundMode": cfg.round_mode,
+        "fileCopy": cfg.file_copy,
         "cacheDir": cfg.cache_dir,
         "autoStart": autostart::is_enabled(),
     })
@@ -150,6 +159,13 @@ pub fn get_settings() -> serde_json::Value {
 #[tauri::command]
 pub fn set_clean_on_close(value: bool) -> Result<(), String> {
     update(|c| c.clean_on_close = value);
+    Ok(())
+}
+
+/// 「文件复制」开关（设置页，默认关闭）
+#[tauri::command]
+pub fn set_file_copy(value: bool) -> Result<(), String> {
+    update(|c| c.file_copy = value);
     Ok(())
 }
 
