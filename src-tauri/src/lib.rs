@@ -185,6 +185,8 @@ pub fn run() {
             settings::set_retention_days,
             settings::set_autostart,
             settings::set_file_copy,
+            tray::tray_show_main,
+            tray::tray_quit,
         ]);
 
     #[cfg(windows)]
@@ -192,6 +194,8 @@ pub fn run() {
         settings::init(app.handle());
         clipboard::init(app.handle());
         setup_effects(app.handle());
+        // 托盘图标常驻：程序一运行就显示（不再依赖「关闭时后台运行」开关）
+        tray::create_tray(app.handle());
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
         }

@@ -192,10 +192,8 @@ pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn set_tray_on_close(app: tauri::AppHandle, value: bool) -> Result<(), String> {
     update(|c| c.tray_on_close = value);
-    // 开关即时生效：关闭 → 移除托盘；开启 → 不立即建托盘，等首次关闭时再建
-    if !value {
-        crate::tray::remove_tray();
-    }
+    // 托盘图标现在**常驻**（程序运行期间一直在），所以这个开关只决定「点关闭按钮」的
+    // 行为：开 = 隐藏到托盘继续后台运行；关 = 直接退出。这里不再增删托盘图标。
     let _ = app;
     Ok(())
 }

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>轻贴菜单</title>
+    <link rel="stylesheet" href="/src/tray.css" />
+  </head>
+  <body>
+    <!-- 托盘右键菜单：刻意做成独立的最小页面（而不是复用 index.html 再替换 DOM），
+         这样窗口被 show 出来的瞬间不会有任何「主界面残影」。
+         样式与变量完全复用主界面那一套，观感才一致。 -->
+    <div class="tray-menu">
+      <button class="tray-item" id="tray-show">
+        <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" /><path d="M1.5 6h13" /></svg>
+        <span>显示轻贴</span>
+      </button>
+      <button class="tray-item danger" id="tray-quit">
+        <svg viewBox="0 0 16 16"><path d="M8 2.2v6.3" /><path d="M11.7 4.3a5.2 5.2 0 11-7.4 0" /></svg>
+        <span>退出</span>
+      </button>
+    </div>
+    <script type="module" src="/src/tray.js"></script>
+  </body>
+</html>

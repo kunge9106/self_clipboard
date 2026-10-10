@@ -848,7 +848,7 @@ function settingsHtml() {
       <span class="hint">登录 Windows 后自动运行轻贴</span></div>
     <div class="row"><label>关闭时后台运行</label>
       <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
-      <span class="hint">点关闭按钮时隐藏到托盘，双击托盘图标可唤回</span></div>
+      <span class="hint">点关闭按钮时隐藏到托盘继续后台运行（托盘图标始终常驻，右键可开菜单、双击唤回窗口）</span></div>
     <div class="row"><label>保留天数</label>
       <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
       <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
