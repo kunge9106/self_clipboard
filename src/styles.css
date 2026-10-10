@@ -143,6 +143,18 @@ body.round .app {
   );
 }
 
+/* 圆角模式（窗口接近实心）下，不止历史卡片，侧栏选中项与设置页的
+   缓存卡片同样会与窗口底面糊在一起——用同一套阴影把边界立起来。
+   常态的 .nav-item 是透明背景，加阴影会变成「无底的浮影」，故只给有底色的状态。 */
+body.round .nav-item:hover,
+body.round .nav-item.is-active {
+  box-shadow: var(--card-shadow);
+}
+
+body.round .cache-box {
+  box-shadow: var(--card-shadow);
+}
+
 /* 噪点层：真·Windows 亚克力 = 模糊 + 色调 + **噪点** + 亮度层。
    我们之前只有「模糊 + 色调」，缺了噪点，所以看着像「平模糊」不够高级。
    这里叠一层极淡的噪点（约 4%），模拟 Fluent 材质的颗粒感。 */
@@ -304,7 +316,7 @@ body.dark .app::after {
   font-size: 13px;
   text-align: left;
   cursor: default;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .nav-item:hover {
