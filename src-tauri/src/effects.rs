@@ -352,6 +352,31 @@ pub fn apply_rounded_corners(hwnd: isize) {
     }
 }
 
+/// 缩放代际号：连续缩放的每个 Resized 事件都会 +1，
+/// 只有「静止 120ms」后仍是最新代际的那次才恢复圆角。
+static RESIZE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 缩放中调用：先清掉窗口圆角区域（变直角），停止缩放后再恢复圆角。
+///
+/// 逐帧 SetWindowRgn 对窗口本体做区域裁剪非常贵（大窗口尤甚），
+/// 会让缩放明显卡顿。这里改成「缩放中不裁剪、缩放后补一次」。
+pub fn begin_resize(hwnd: isize) {
+    unsafe {
+        extern "system" {
+            fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
+        }
+        // rgn=0 → 移除区域裁剪（直角）
+        SetWindowRgn(hwnd, 0, 1);
+    }
+    let gen = RESIZE_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        if RESIZE_GEN.load(std::sync::atomic::Ordering::Relaxed) == gen {
+            apply_rounded_corners(hwnd);
+        }
+    });
+}
+
 fn set_immersive_dark(hwnd: isize, dark: bool) {
     unsafe {
         let v: u32 = if dark { 1 } else { 0 };

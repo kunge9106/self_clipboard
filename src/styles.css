@@ -622,7 +622,7 @@ body.dark .ctx-menu {
   color: var(--text);
 }
 
-/* 图片条目缩略图（同 V1：max-height 80px） */
+/* 图片条目缩略图（同 V1：max-height 80px，左对齐） */
 .card-image {
   max-width: 100%;
   max-height: 80px;
@@ -631,6 +631,10 @@ body.dark .ctx-menu {
   border: 1px solid var(--stroke);
   margin-top: 4px;
   display: block;
+  /* flex 列默认 align-items:stretch 会把图片拉伸到整行宽、再被 contain 居中，
+     这里改为不拉伸，图片按原始比例靠左显示 */
+  align-self: flex-start;
+  margin-right: auto;
 }
 
 /* 退出确认弹窗 */

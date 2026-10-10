@@ -197,7 +197,7 @@ function timeStr(ts) {
   const m = Math.floor(s / 60);
   const h = Math.floor(m / 60);
   // 1 秒起 → 秒；满 60 秒 → 分钟；满 60 分 → 小时；满 3 小时 → 绝对时间
-  if (s < 60) return `${Math.max(1, s)} 秒钟前`;
+  if (s < 60) return `${Math.max(1, s)} 秒前`;
   if (m < 60) return `${m} 分钟前`;
   if (h < 3) return `${h} 小时前`;
   const d = new Date(ts);

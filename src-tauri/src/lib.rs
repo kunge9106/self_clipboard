@@ -76,9 +76,10 @@ fn setup_effects(app: &tauri::AppHandle) {
                 println!("[effects] 系统主题切换 → {:?}", theme);
                 effects::refresh_theme(hwnd, matches!(theme, Theme::Dark));
             }
-            // SetWindowRgn 的区域不会随窗口缩放自动跟随，必须重设
+            // SetWindowRgn 的区域不会随窗口缩放自动跟随，必须重设。
+            // 但逐帧重建区域会让缩放卡顿 → 改为缩放中清区域、停止后恢复。
             tauri::WindowEvent::Resized(_) => {
-                effects::apply_rounded_corners(hwnd);
+                effects::begin_resize(hwnd);
             }
             // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）
             tauri::WindowEvent::Focused(_) => {
