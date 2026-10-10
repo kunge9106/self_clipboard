@@ -196,7 +196,8 @@ body.dark .app::after {
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.3px;
-  color: var(--text-dim);
+  /* 用正文色（浅色主题下即近黑色），不要灰色 */
+  color: var(--text);
 }
 
 .titlebar-spacer {
@@ -278,7 +279,8 @@ body.dark .app::after {
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-dim);
+  /* 常态即用正文色（近黑），选中态靠加粗 + 底色区分 */
+  color: var(--text);
   font-family: var(--font);
   font-size: 13px;
   text-align: left;
@@ -294,7 +296,8 @@ body.dark .app::after {
 .nav-item.is-active {
   background: var(--glass-strong);
   color: var(--text);
-  font-weight: 600;
+  /* 常态与选中态同为黑色，靠加粗（中文会落到 Bold）明确区分 */
+  font-weight: 700;
 }
 
 .nav-icon {
