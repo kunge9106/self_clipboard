@@ -26,7 +26,7 @@
         "visible": false,
         "center": true,
         "dragDropEnabled": false,
-        "additionalBrowserArgs": "--disable-features=RendererCodeIntegrity"
+        "additionalBrowserArgs": "--disable-features=RendererCodeIntegrity,msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion,OptimizationGuideModelDownloading,Translate --renderer-process-limit=1 --disable-extensions --disable-component-update --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --js-flags=--max-old-space-size=96"
       }
     ],
     "security": {

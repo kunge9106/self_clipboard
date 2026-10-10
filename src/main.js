@@ -383,9 +383,12 @@ function cardEl(item) {
  * 函数返回后即可回收，绝不常驻。
  */
 const imageCache = new Map();
-const IMAGE_CACHE_MAX = 60;
-// 卡片缩略图最大 160×60、悬浮预览最大 340×260，720 对高 DPI 屏也绰绰有余
-const IMAGE_MAX_EDGE = 720;
+const IMAGE_CACHE_MAX = 30;
+// 卡片缩略图最大 160×60、悬浮预览最大 340×260；512 对 1.5x 高 DPI 也够用。
+// 注意：dataURL 字符串很小，但 Chromium 会为每张图保留**解码后的位图**
+// （RGBA 约 边长²×4 字节），512 时约 1MB/张、30 张约 30MB；若放到 720
+// 则约 2MB/张、60 张可达 120MB —— 这才是图片真正吃掉的内存。
+const IMAGE_MAX_EDGE = 512;
 let previewBox = null;
 let previewTimer = null;
 
