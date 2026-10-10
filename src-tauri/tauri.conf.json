@@ -26,7 +26,7 @@
         "visible": false,
         "center": true,
         "dragDropEnabled": false,
-        "additionalBrowserArgs": "--disable-features=RendererCodeIntegrity,msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion,OptimizationGuideModelDownloading,Translate --renderer-process-limit=1 --disable-extensions --disable-component-update --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --js-flags=--max-old-space-size=96"
+        "additionalBrowserArgs": "--disable-features=RendererCodeIntegrity,msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion,OptimizationGuideModelDownloading,Translate,AutofillServerCommunication,MediaRouter,DialMediaRouteProvider,WebRtcHideLocalIpsWithMdns,GlobalMediaControls,InterestFeedContentSuggestions,IdleDetection,HeavyAdPrivacyMitigations,SpeculationRulesPrefetchProxy,BackForwardCache,NetworkTimeServiceQuerying,SpellcheckService --renderer-process-limit=1 --disable-extensions --disable-component-update --disable-default-apps --disable-sync --disable-notifications --disable-background-networking --disable-client-side-phishing-detection --disable-domain-reliability --disable-speech-api --disable-breakpad --no-first-run --no-default-browser-check --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --js-flags=--max-old-space-size=64"
       }
     ],
     "security": {
