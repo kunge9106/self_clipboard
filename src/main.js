@@ -300,6 +300,7 @@ function render() {
   }
   view.innerHTML = "";
   view.appendChild(wrap);
+  observeImages(wrap); // 缩略图按需加载（见 observeImages）
 }
 
 /** 各视图的空态文案（需求 #5），搜索时显示「暂无 xxx 相关内容」（需求 #3） */
@@ -342,12 +343,9 @@ function cardEl(item) {
     const img = document.createElement("img");
     img.className = "card-image";
     img.alt = "图片";
-    img.loading = "lazy";
-    loadImage(item.id)
-      .then((url) => {
-        img.src = url;
-      })
-      .catch(() => img.remove()); // 文件缺失/损坏 → 不占位
+    // 不在此处读图：交给 observeImages() 等卡片滚入可视区再加载，
+    // 否则一次渲染几十张图会同时产生几十个大 BMP 字符串（内存峰值飙升）
+    img.dataset.imgId = item.id;
     body.appendChild(img);
     bindImagePreview(card, item);
   } else {
@@ -375,23 +373,87 @@ function cardEl(item) {
 // 同一张图第二次悬浮不再走 IPC / 磁盘。
 // ---------------------------------------------------------------------------
 
-/** id → dataURL，已读过的图片缓存，避免反复读取 */
+/**
+ * 图片缓存：key = 条目 id，value = **降采样后**的小尺寸 JPEG dataURL。
+ *
+ * ⚠️ 关键约束：`get_image` 返回的是**未压缩的 BMP**（1080p 一张 ≈ 8MB，
+ * base64 后 ≈ 11MB）。若把原图直接缓存或塞进 <img>，几十张图就能吃掉几百 MB
+ * —— 实测 WebView2 峰值 528MB，元凶就在这里。所以一律先用 canvas 缩到
+ * 最长边 ≤ IMAGE_MAX_EDGE 再缓存，单张降到几十 KB；原始字符串只是局部变量，
+ * 函数返回后即可回收，绝不常驻。
+ */
 const imageCache = new Map();
-const IMAGE_CACHE_MAX = 24;
+const IMAGE_CACHE_MAX = 60;
+// 卡片缩略图最大 160×60、悬浮预览最大 340×260，720 对高 DPI 屏也绰绰有余
+const IMAGE_MAX_EDGE = 720;
 let previewBox = null;
 let previewTimer = null;
 
-/** 读取图片（dataURL）；命中缓存则不再走 IPC / 磁盘。列表缩略图与悬浮预览共用。 */
+/** 把原始 dataURL 降采样成小尺寸 JPEG（最长边 ≤ maxEdge） */
+function shrinkImage(dataUrl, maxEdge, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth;
+        const h = img.naturalHeight;
+        if (!w || !h) return reject(new Error("图片尺寸无效"));
+        const scale = Math.min(1, maxEdge / Math.max(w, h));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(w * scale));
+        canvas.height = Math.max(1, Math.round(h * scale));
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    img.onerror = () => reject(new Error("图片解码失败"));
+    img.src = dataUrl;
+  });
+}
+
+/** 读取图片（返回降采样后的 dataURL）；命中缓存则不再走 IPC / 磁盘。缩略图与预览共用。 */
 async function loadImage(id) {
   const hit = imageCache.get(id);
   if (hit) return hit;
-  const url = await invoke("get_image", { id: id });
+  const raw = await invoke("get_image", { id: id }); // 原始 BMP（大）→ 用完即弃
+  const url = await shrinkImage(raw, IMAGE_MAX_EDGE);
   imageCache.set(id, url);
-  // 只保留最近若干张，避免长时间使用后 dataURL 撑爆内存
   if (imageCache.size > IMAGE_CACHE_MAX) {
     imageCache.delete(imageCache.keys().next().value);
   }
   return url;
+}
+
+/**
+ * 缩略图懒加载：卡片滚入可视区才读图。
+ *
+ * 为什么必须懒加载：一次 render 若给几十张图并发 invoke，会同时产生几十个
+ * BMP 字符串（单张 ≈11MB base64），内存峰值瞬间几百 MB。交给
+ * IntersectionObserver 后，同时加载的只有可视区那几张（多的顺带预载 240px）。
+ */
+let imgObserver = null;
+function observeImages(rootEl) {
+  if (imgObserver) imgObserver.disconnect();
+  imgObserver = new IntersectionObserver(
+    (entries) => {
+      for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        const img = en.target;
+        imgObserver.unobserve(img);
+        loadImage(img.dataset.imgId)
+          .then((url) => {
+            if (img.isConnected) img.src = url;
+          })
+          .catch(() => img.remove()); // 文件缺失/损坏 → 不占位
+      }
+    },
+    { root: rootEl, rootMargin: "240px 0px" }
+  );
+  rootEl
+    .querySelectorAll(".card-image[data-img-id]")
+    .forEach((el) => imgObserver.observe(el));
 }
 
 function ensurePreviewBox() {
