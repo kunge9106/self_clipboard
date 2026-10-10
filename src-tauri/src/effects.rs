@@ -309,20 +309,15 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     }
 }
 
-/// 触发 DWM 重算，并逼 WebView2 重新量一次尺寸。
+/// 触发 DWM 重算。Win10 acrylic 有时需要动一下窗口才真正铺开。
 ///
-/// 单纯 `SetWindowPos(..., SWP_NOSIZE)` 只会产生 WM_MOVE —— DWM 未必重算，
-/// WebView2 更不会重新布局。这里把宽度 **+1px 再还原**，制造一次真实的 WM_SIZE：
-///   - Win10 acrylic 有时要动一下窗口才真正铺开；
-///   - 窗口隐藏（托盘）或最小化后恢复时，WebView2 的内容尺寸可能停在隐藏前的大小，
-///     表现为「排版错位、点两下才好」——一次 WM_SIZE 就能让它重新量一遍。
-///
-/// 最大化状态不能改尺寸（由系统接管），退化为请求一次边框重算。
+/// 注意：这里刻意**不改窗口尺寸** —— 它会被 `apply`（圆角模式下走 `clear_accent`）
+/// 和启动补涂流程反复调用，一旦真的改变尺寸，用户就会看到窗口抖动/闪烁。
+/// 需要「逼 WebView2 重新布局」的场景请用 `relayout()`。
 pub fn nudge(hwnd: isize) {
     unsafe {
         extern "system" {
             fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
-            fn IsZoomed(hwnd: isize) -> i32;
             fn SetWindowPos(
                 hwnd: isize,
                 insert_after: isize,
@@ -335,30 +330,58 @@ pub fn nudge(hwnd: isize) {
         }
 
         const SWP_NOSIZE: u32 = 0x0001;
-        const SWP_NOMOVE: u32 = 0x0002;
         const SWP_NOZORDER: u32 = 0x0004;
         const SWP_NOACTIVATE: u32 = 0x0010;
-        const SWP_FRAMECHANGED: u32 = 0x0020;
 
         let mut r: Rect = std::mem::zeroed();
         if GetWindowRect(hwnd, &mut r as *mut _) == 0 {
             return;
         }
-        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        // 原样重设一次位置：产生 WM_WINDOWPOSCHANGED，够 DWM 重算，且没有任何视觉变化
+        SetWindowPos(hwnd, 0, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
 
-        if IsZoomed(hwnd) != 0 {
-            SetWindowPos(
-                hwnd,
-                0,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            );
-            return;
+/// 逼 WebView2 重新量一次尺寸（**会产生真实的 WM_SIZE**）。
+///
+/// 为什么需要它：隐藏到托盘走的是 `hide()`，窗口尺寸**没有变**，也就没有 WM_SIZE，
+/// WebView2 的内容尺寸可能一直停在隐藏前的大小 —— 表现为「唤回来排版不对」。
+/// （最小化不同：尺寸会归零再恢复，天然有一次 WM_SIZE，所以不会有这个问题。）
+///
+/// 因为要改尺寸，**必须在窗口不可见时调用**（隐藏期间或显示之前），否则会闪。
+/// 最小化状态直接跳过：此时 `GetWindowRect` 返回的是任务栏上那个小图标矩形，
+/// 拿它去改尺寸会破坏还原后的大小。
+pub fn relayout(hwnd: isize) {
+    unsafe {
+        extern "system" {
+            fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+            fn IsIconic(hwnd: isize) -> i32;
+            fn SetWindowPos(
+                hwnd: isize,
+                insert_after: isize,
+                x: i32,
+                y: i32,
+                cx: i32,
+                cy: i32,
+                flags: u32,
+            ) -> i32;
         }
 
+        const SWP_NOZORDER: u32 = 0x0004;
+        const SWP_NOACTIVATE: u32 = 0x0010;
+
+        if IsIconic(hwnd) != 0 {
+            return;
+        }
+        let mut r: Rect = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut r as *mut _) == 0 {
+            return;
+        }
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        // 宽度 +1px 再还原 → 一次真实的 WM_SIZE
         SetWindowPos(hwnd, 0, r.left, r.top, w + 1, h, SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(hwnd, 0, r.left, r.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     }

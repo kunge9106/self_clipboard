@@ -104,15 +104,11 @@ function bindWindowControls() {
 
   // 窗口尺寸变化时同步图标
   appWindow.onResized(() => syncMaxState());
-  // 从最小化 / 托盘恢复时尺寸未必变化 → onResized 不触发，图标会停在旧状态。
-  // 获得焦点时补一次同步，顺带把「材质浓度 / 圆角模式」按当前配置重放一遍。
+  // 从最小化 / 托盘恢复时尺寸未必变化 → onResized 不触发，图标会停在旧状态，这里补一次。
+  // 刻意不在这里重放材质浓度/圆角模式：它们是「即时生效」的（改设置页当场就应用了），
+  // 在聚焦时重设样式变量纯属多余，还有概率引起一次重绘闪烁。
   appWindow.onFocusChanged(({ payload: focused }) => {
-    if (!focused) return;
-    syncMaxState();
-    if (settings) {
-      applyGlassAlpha(settings.materialAlpha ?? 62);
-      applyRoundMode(settings.roundMode);
-    }
+    if (focused) syncMaxState();
   });
   syncMaxState();
 }

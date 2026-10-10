@@ -120,16 +120,13 @@ fn setup_effects(app: &tauri::AppHandle) {
             tauri::WindowEvent::Resized(_) => {
                 effects::begin_resize(hwnd);
             }
-            // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）；
-            // 另外窗口隐藏（托盘）/最小化再恢复时，DWM 可能把 accent 材质丢掉，
-            // 表现为「回来变成一层没有毛玻璃的半透明」。两者都幂等，恢复时补刷一次。
-            tauri::WindowEvent::Focused(focused) => {
+            // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）。
+            //
+            // 这里刻意**不**重刷材质：聚焦是高频动作，重刷会让窗口肉眼可见地闪一下。
+            // 材质真正会被丢掉的路径是「隐藏 → 显示」，那一条已经在 tray::show_main
+            // 里于窗口可见之前补好了。
+            tauri::WindowEvent::Focused(_) => {
                 effects::apply_rounded_corners(hwnd);
-                if *focused {
-                    let dark =
-                        matches!(window_for_events.theme().unwrap_or(Theme::Light), Theme::Dark);
-                    effects::apply(hwnd, dark);
-                }
             }
             // 跨屏拖动 DPI 变化后，半径要按新 DPI 重新换算
             tauri::WindowEvent::ScaleFactorChanged { .. } => {

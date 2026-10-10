@@ -220,23 +220,24 @@ pub fn tray_quit(app: AppHandle) -> Result<(), String> {
 
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-
-        // 窗口隐藏（托盘）/最小化期间，DWM 会把 accent 材质丢掉，WebView2 的内容尺寸
-        // 也可能停在隐藏前的大小 —— 表现为「从托盘唤回来排版不对，点两下才好」。
-        // 这里补刷一次材质，再做一次真实尺寸微调逼 WebView2 重新布局。
+        // 所有「补齐」动作都必须在窗口可见**之前**做完。显示之后再改材质或尺寸，
+        // 用户会看到「先出现、再变样」的闪烁（上一版就是这么闪的）。
         #[cfg(windows)]
         {
             use tauri::Theme;
             if let Ok(h) = w.hwnd() {
                 let hwnd = h.0 as isize;
+                // 隐藏期间 DWM 会把 accent 材质丢掉 —— 先补回来
                 let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
                 crate::effects::apply(hwnd, dark);
-                crate::effects::apply_rounded_corners(hwnd);
-                crate::effects::nudge(hwnd);
+                // hide() 不产生 WM_SIZE，WebView2 的内容尺寸可能停在隐藏前的大小
+                // （表现为唤回来排版不对）。此刻窗口还不可见，尺寸微调看不见。
+                crate::effects::relayout(hwnd);
             }
         }
+
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
     }
 }
