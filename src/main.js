@@ -90,6 +90,22 @@ function bindDrag() {
   });
 }
 
+// 窗口缩放热区：系统缩放循环在 Win10 acrylic 下无法节流（缩放滞后），
+// 改由边缘热区触发自定义缩放（Rust 侧 SetCapture + 16ms 节流）
+function bindResize() {
+  const maxed = () =>
+    document.getElementById("btn-maximize")?.classList.contains("is-max");
+  document.querySelectorAll(".rz").forEach((el) => {
+    el.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || maxed()) return;
+      e.preventDefault();
+      invoke("resize_start", { edge: Number(el.dataset.edge) }).catch((err) =>
+        console.error("resize failed", err)
+      );
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 退出确认弹窗（需求 #2）
 // ---------------------------------------------------------------------------
@@ -674,6 +690,7 @@ async function main() {
   // 控件绑定优先（即便后续异步步骤出错，也能保证可交互）
   bindWindowControls();
   bindDrag();
+  bindResize();
   bindExitModal();
   bindClearView();
   bindNav();

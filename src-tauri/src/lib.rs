@@ -142,6 +142,7 @@ pub fn run() {
             effect_info,
             set_material_alpha,
             effects::drag_start,
+            effects::resize_start,
             clipboard::get_history,
             clipboard::delete_item,
             clipboard::delete_items,

@@ -86,6 +86,19 @@
       </div>
     </div>
 
+    <!-- 窗口缩放热区：系统缩放循环无法节流（Win10 acrylic 下缩放严重滞后），
+         这里把边界判定收回，改由这些热区触发自定义缩放（见 effects.rs） -->
+    <div class="rz-layer">
+      <div class="rz rz-n" data-edge="1"></div>
+      <div class="rz rz-s" data-edge="2"></div>
+      <div class="rz rz-w" data-edge="4"></div>
+      <div class="rz rz-e" data-edge="8"></div>
+      <div class="rz rz-nw" data-edge="5"></div>
+      <div class="rz rz-ne" data-edge="9"></div>
+      <div class="rz rz-sw" data-edge="6"></div>
+      <div class="rz rz-se" data-edge="10"></div>
+    </div>
+
     <!-- 退出确认弹窗（关闭时清理缓存 + 弹窗提醒开启时） -->
     <div class="modal-mask" id="exit-modal" hidden>
       <div class="modal">
