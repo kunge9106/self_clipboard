@@ -19,6 +19,9 @@ let currentView = "history";
 let query = "";
 let settings = null; // 后端配置（get_settings）
 
+/** 窗口圆角上限（后端按材质档位下发，Win10 acrylic = 20px） */
+let maxRadius = 20;
+
 async function applyEffectInfo() {
   let info;
   try {
@@ -31,18 +34,13 @@ async function applyEffectInfo() {
   }
 
   document.body.classList.add(TIER_CLASS[info.tier] || "tier-solid");
-  // 纯净模式（无系统模糊）也在启动时就同步，避免首帧闪一下模糊
-  if (info.pure) document.body.classList.add("pure");
 
-  // 窗口圆角取后端给出的档位上限（Win10 acrylic 为 20px，必须与 SetWindowRgn 一致）
-  const radius =
-    info.tier === "system-backdrop" ? 12 : Math.min(info.maxRadius || 20, 20);
-  document.documentElement.style.setProperty("--radius", radius + "px");
-  // 控件圆角（--radius-sm）保持 CSS 里的小值：大圆角只属于窗口本体，
-  // 否则按钮/卡片会被撑成胶囊形
+  maxRadius = info.tier === "system-backdrop" ? 12 : Math.min(info.maxRadius || 20, 20);
+  // 圆角模式在启动时就同步，避免首帧闪一下模糊或直角
+  applyRoundMode(info.round);
 
   document.getElementById("effect-debug").textContent =
-    `build ${info.build} · tier ${info.tier} · radius ${radius}px`;
+    `build ${info.build} · tier ${info.tier} · radius ${maxRadius}px`;
 }
 
 function applyTheme(dark) {
@@ -64,12 +62,19 @@ function applyGlassAlpha(pct) {
 }
 
 /**
- * 纯净模式：关掉系统 blur（Windows 的 acrylic 恒为矩形、无法裁圆角，
- * 四角必然留下一圈矩形残留）。关掉后窗口是纯透明 layered 窗口，
- * 四角 100% 干净；材质观感全部由 CSS 层负责（见 styles.css 的 body.pure）。
+ * 圆角模式：**圆角 + 不用系统模糊**。
+ *
+ * Win10 的 acrylic 由 DWM 合成、恒为矩形，裁不掉圆角，所以「圆角 + 系统模糊」
+ * 必然在四角留下一圈矩形残留。两种模式各自规避这个矛盾：
+ *   - 开（圆角）：Rust 侧清掉 accent（无系统 blur），窗口为纯透明 layered
+ *     窗口 → 四角真透明、100% 干净；
+ *   - 关（直角）：保留系统 blur，窗口改用直角 → 窗口矩形与 acrylic 完全吻合，
+ *     同样没有任何残留。
+ * 这里只负责 CSS 侧：窗口圆角开关 + 圆角模式下的主体加厚（见 body.round）。
  */
-function applyPureMode(on) {
-  document.body.classList.toggle("pure", !!on);
+function applyRoundMode(on) {
+  document.body.classList.toggle("round", !!on);
+  document.documentElement.style.setProperty("--radius", (on ? maxRadius : 0) + "px");
 }
 
 function bindWindowControls() {
@@ -594,9 +599,9 @@ function settingsHtml() {
     <div class="row"><label>材质浓度</label>
       <input type="range" id="set-material" min="25" max="90" value="${s.materialAlpha ?? 62}" />
       <span class="hint" id="material-val">${s.materialAlpha ?? 62}%（越高越厚实 · 越低越通透）</span></div>
-    <div class="row"><label>纯净模式</label>
-      <input type="checkbox" id="set-pure" ${s.pureMode ? "checked" : ""} />
-      <span class="hint">关闭系统背景模糊：四角完全干净、无残留；代价是壁纸不再被模糊</span></div>
+    <div class="row"><label>圆角模式</label>
+      <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
+      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊</span></div>
     <div class="cache-box">
       <div class="cache-title">缓存目录 <span class="hint">仅保留近 ${s.retentionDays ?? 3} 天内容</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
@@ -688,18 +693,22 @@ function bindSettings(view) {
     });
   }
 
-  // 纯净模式：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启
-  const pure = view.querySelector("#set-pure");
-  if (pure)
-    pure.onchange = async () => {
+  // 圆角模式：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启
+  const round = view.querySelector("#set-round");
+  if (round)
+    round.onchange = async () => {
       try {
-        await invoke("set_pure_mode", { value: pure.checked });
-        applyPureMode(pure.checked);
+        await invoke("set_round_mode", { value: round.checked });
+        applyRoundMode(round.checked);
         settings = await invoke("get_settings");
-        toast(pure.checked ? "已开启纯净模式（无背景模糊）" : "已恢复背景模糊");
+        toast(
+          round.checked
+            ? "已切换为圆角模式（无背景模糊）"
+            : "已切换为直角模式（保留背景模糊）"
+        );
       } catch (e) {
         toast("保存失败：" + e);
-        pure.checked = !pure.checked;
+        round.checked = !round.checked;
       }
     };
 
@@ -763,8 +772,8 @@ async function main() {
     settings = await invoke("get_settings");
     // 应用材质浓度（CSS 层，窗口主体的不透明度）
     applyGlassAlpha(settings.materialAlpha ?? 62);
-    // 纯净模式（无系统模糊）
-    applyPureMode(settings.pureMode);
+    // 圆角模式（圆角 + 无系统模糊）
+    applyRoundMode(settings.roundMode);
   } catch (e) {
     console.error("load settings failed", e);
   }

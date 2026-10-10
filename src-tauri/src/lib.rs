@@ -22,26 +22,26 @@ fn effect_info() -> serde_json::Value {
             "tier": tier.as_str(),
             "build": effects::current_build(),
             "maxRadius": tier.max_radius(),
-            "pure": settings::get().pure_mode,
+            "round": settings::get().round_mode,
         })
     }
     #[cfg(not(windows))]
     {
-        serde_json::json!({ "tier": "solid", "build": 0, "maxRadius": 12, "pure": false })
+        serde_json::json!({ "tier": "solid", "build": 0, "maxRadius": 12, "round": false })
     }
 }
 
-/// 纯净模式开关：不用系统 blur（四角真透明、100% 干净），立即生效
+/// 圆角模式开关：圆角 + 不用系统 blur（四角真透明、100% 干净），立即生效
 #[tauri::command]
-fn set_pure_mode(app: tauri::AppHandle, value: bool) -> Result<(), String> {
-    settings::update(|c| c.pure_mode = value);
+fn set_round_mode(app: tauri::AppHandle, value: bool) -> Result<(), String> {
+    settings::update(|c| c.round_mode = value);
     #[cfg(windows)]
     {
         use tauri::Manager;
         if let Some(w) = app.get_webview_window("main") {
             if let Ok(h) = w.hwnd() {
                 let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
-                effects::apply_pure_mode(h.0 as isize, dark);
+                effects::apply_round_mode(h.0 as isize, dark);
             }
         }
     }
@@ -161,7 +161,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             effect_info,
             set_material_alpha,
-            set_pure_mode,
+            set_round_mode,
             effects::drag_start,
             effects::resize_start,
             clipboard::get_history,
