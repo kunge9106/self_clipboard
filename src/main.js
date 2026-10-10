@@ -488,11 +488,16 @@ async function loadImage(id) {
 }
 
 /**
- * 缩略图懒加载：卡片滚入可视区才读图。
+ * 缩略图：按需加载 + 视野外释放解码位图。
  *
- * 为什么必须懒加载：一次 render 若给几十张图并发 invoke，会同时产生几十个
- * BMP 字符串（单张 ≈11MB base64），内存峰值瞬间几百 MB。交给
- * IntersectionObserver 后，同时加载的只有可视区那几张（多的顺带预载 240px）。
+ * 为什么必须做「释放」：渲染进程的内存大头不是 DOM 节点，而是**图片的解码位图**
+ * （canvas 降采样后仍是 ≤512px 的位图，每张约 0.5–1MB；实测 54 张图滚过一遍后
+ * 渲染进程专用工作集从 ~40MB 涨到 ~110MB）。Chromium 只要 <img> 还挂着 src，
+ * 就会一直持有解码数据，所以必须主动清掉。
+ *
+ * 释放前先把图片盒子的实际尺寸写进行内样式：清掉 src 后盒子不会塌陷，
+ * **布局与滚动条位置完全不变**，观感零影响。再次滚回来时从 imageCache 命中
+ * dataURL（不再走 IPC/磁盘），重新解码即可。
  */
 let imgObserver = null;
 function observeImages(rootEl) {
@@ -500,21 +505,39 @@ function observeImages(rootEl) {
   imgObserver = new IntersectionObserver(
     (entries) => {
       for (const en of entries) {
-        if (!en.isIntersecting) continue;
         const img = en.target;
-        imgObserver.unobserve(img);
-        // 取出 id 后立刻摘掉标记：渐进渲染追加下一批时会重新扫描整个容器，
-        // 摘掉标记可保证已在加载/已加载的图片不会被重复读一次。
-        const id = img.dataset.imgId;
-        img.removeAttribute("data-img-id");
-        loadImage(id)
-          .then((url) => {
-            if (img.isConnected) img.src = url;
-          })
-          .catch(() => img.remove()); // 文件缺失/损坏 → 不占位
+        if (!img.isConnected) continue;
+        const state = img.dataset.imgLoaded;
+
+        if (en.isIntersecting) {
+          // 已加载 / 正在加载 → 无需处理
+          if (state === "1" || state === "loading") continue;
+          const id = img.dataset.imgId;
+          if (!id) continue;
+          img.dataset.imgLoaded = "loading";
+          loadImage(id)
+            .then((url) => {
+              if (!img.isConnected) return;
+              img.src = url;
+              img.dataset.imgLoaded = "1";
+            })
+            .catch(() => {
+              img.dataset.imgLoaded = "0";
+              img.remove(); // 文件缺失/损坏 → 不占位
+            });
+        } else if (state === "1") {
+          // 远离视野（>700px）→ 固化尺寸后释放解码位图
+          const r = img.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) {
+            img.style.width = r.width + "px";
+            img.style.height = r.height + "px";
+          }
+          img.removeAttribute("src");
+          img.dataset.imgLoaded = "0";
+        }
       }
     },
-    { root: rootEl, rootMargin: "240px 0px" }
+    { root: rootEl, rootMargin: "700px 0px" }
   );
   rootEl
     .querySelectorAll(".card-image[data-img-id]")
