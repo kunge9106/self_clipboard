@@ -515,15 +515,31 @@ pub fn begin_custom_drag(hwnd: isize) {
             *o = (cur.left, cur.top, wr.left, wr.top);
         }
         DRAG_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
+        // 归零节流计时，保证第一次移动立即生效
+        LAST_MOVE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
         SetCapture(hwnd);
     }
 }
 
-/// 处理拖动期间的鼠标消息；返回 true 表示已处理（调用方应直接 return）
-fn handle_drag_msg(hwnd: isize, msg: u32) -> bool {
-    if !DRAG_ARMED.load(std::sync::atomic::Ordering::Relaxed) {
-        return false;
-    }
+/// 拖动移动节流（毫秒）。
+///
+/// Win10 上 acrylic 的已知性能 bug：高轮询率鼠标（250–1000Hz）会让**每个**
+/// WM_MOUSEMOVE 都触发一次 SetWindowPos → DWM 逐帧重算模糊，事件队列迅速积压，
+/// 表现为「窗口追不上鼠标」、松手后仍漂移（幽灵光标）。
+/// 业界公认的绕过办法：把移动事件**节流到刷新率级别**（见 vscode-vibrancy#80）。
+/// 因为我们是按「绝对光标坐标 − 起点」算目标位置，丢弃中间事件不影响落点精度。
+const MOVE_THROTTLE_MS: u64 = 16; // ≈60Hz，匹配 DWM 合成节奏
+static LAST_MOVE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 把窗口移动到「光标起点 → 当前位置」的位移处
+fn drag_move_to_cursor(hwnd: isize) {
     unsafe {
         extern "system" {
             fn GetCursorPos(pt: *mut Rect) -> i32;
@@ -536,29 +552,51 @@ fn handle_drag_msg(hwnd: isize, msg: u32) -> bool {
                 cy: i32,
                 flags: u32,
             ) -> i32;
-            fn ReleaseCapture() -> i32;
         }
         const SWP_NOSIZE: u32 = 0x0001;
         const SWP_NOZORDER: u32 = 0x0004;
         const SWP_NOACTIVATE: u32 = 0x0010;
 
+        let (sx, sy, wx, wy) = DRAG_ORIGIN.lock().map(|o| *o).unwrap_or((0, 0, 0, 0));
+        let mut cur: Rect = std::mem::zeroed();
+        if GetCursorPos(&mut cur) != 0 {
+            SetWindowPos(
+                hwnd,
+                0,
+                wx + (cur.left - sx),
+                wy + (cur.top - sy),
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
+/// 处理拖动期间的鼠标消息；返回 true 表示已处理（调用方应直接 return）
+fn handle_drag_msg(hwnd: isize, msg: u32) -> bool {
+    if !DRAG_ARMED.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    unsafe {
+        extern "system" {
+            fn ReleaseCapture() -> i32;
+        }
         if msg == WM_MOUSEMOVE {
-            let (sx, sy, wx, wy) = DRAG_ORIGIN.lock().map(|o| *o).unwrap_or((0, 0, 0, 0));
-            let mut cur: Rect = std::mem::zeroed();
-            if GetCursorPos(&mut cur) != 0 {
-                SetWindowPos(
-                    hwnd,
-                    0,
-                    wx + (cur.left - sx),
-                    wy + (cur.top - sy),
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+            // 节流：过密的移动直接丢弃，避免 DWM 事件积压（落点精度不受影响）
+            let now = now_ms();
+            if now.saturating_sub(LAST_MOVE_MS.load(std::sync::atomic::Ordering::Relaxed))
+                < MOVE_THROTTLE_MS
+            {
+                return true;
             }
+            LAST_MOVE_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+            drag_move_to_cursor(hwnd);
             return true;
         }
         if msg == WM_LBUTTONUP {
+            // 落点校正：确保最终位置精确对齐光标（最后一个 move 可能被节流丢弃）
+            drag_move_to_cursor(hwnd);
             DRAG_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
             ReleaseCapture();
             return true;
