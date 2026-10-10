@@ -51,7 +51,17 @@ pub struct HistoryItem {
     pub text_path: Option<String>,
     /// 图片落盘路径（相对 DIR/images/）
     pub img_path: Option<String>,
+    /// 文件路径清单落盘路径（相对 DIR/files/，每行一个完整路径）
+    ///
+    /// 和文本一样「内容落盘」：缓存目录里必须有这条记录的实体，否则用户打开缓存目录
+    /// 会发现文件条目一条数据都没有。copy_back 以这个文件为唯一数据源。
+    #[serde(default)]
+    pub files_path: Option<String>,
     /// 文件路径列表（仅 files 类有）
+    ///
+    /// 保留在内存/index.json 里是刻意的：它只有几百字节，是**元数据**而不是内容，
+    /// 用来做搜索（按文件名）和快速回写；真正的实体清单在 files_path 指向的文件里。
+    #[serde(default)]
     pub files: Option<Vec<String>>,
 }
 
@@ -132,7 +142,20 @@ pub fn copy_back(id: String) -> Result<(), String> {
             unsafe { write_text_to_clipboard(&text) }
         }
         "files" => {
-            let files = item.files.ok_or("文件列表缺失")?;
+            // 以落盘清单为唯一数据源（与文本条目走 text_path 一致）；
+            // 旧版 index.json 把路径内联在 files 里、没有 files_path，回退到内存中的 files。
+            let files: Vec<String> = match &item.files_path {
+                Some(rel) => fs::read_to_string(dir.join(rel))
+                    .map_err(|e| e.to_string())?
+                    .lines()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect(),
+                None => item.files.clone().ok_or("文件列表缺失")?,
+            };
+            if files.is_empty() {
+                return Err("文件列表为空".into());
+            }
             unsafe { write_files_to_clipboard(&files) }
         }
         "image" => {
@@ -192,9 +215,17 @@ pub fn init(app: &AppHandle) {
 
     let _ = fs::create_dir_all(dir.join("data"));
     let _ = fs::create_dir_all(dir.join("images"));
+    let _ = fs::create_dir_all(dir.join("files"));
     let _ = DIR.set(dir.clone());
 
-    let hist = load_index(&dir);
+    let mut hist = load_index(&dir);
+    // 老版本 index.json 把文件路径内联在 files 里、没有落盘清单 → 补一份，
+    // 让历史文件条目在缓存目录里也有实体（返回补了几条）
+    let backfilled = backfill_files(&dir, &mut hist);
+    if backfilled > 0 {
+        println!("[clipboard] 已为 {backfilled} 条历史文件条目补写 files/ 清单");
+        save_index(&dir, &hist);
+    }
 
     // 保留策略：按配置天数清理过期条目（0 = 永久保留）
     let days = crate::settings::get().retention_days;
@@ -370,6 +401,7 @@ fn store_raw(raw: RawClip) -> HistoryItem {
         size: 0,
         text_path: None,
         img_path: None,
+        files_path: None,
         files: None,
     };
 
@@ -405,6 +437,12 @@ fn store_raw(raw: RawClip) -> HistoryItem {
                     format!("{} 等 {} 个文件", name, files.len())
                 };
             }
+            // 路径清单落盘（每行一个完整路径）：缓存目录里必须有这条记录的实体，
+            // 否则「文件」条目的数据在缓存目录里完全看不到。
+            let rel = format!("files/{}.txt", id);
+            let body = files.join("\r\n");
+            let _ = fs::write(dir.join(&rel), body.as_bytes());
+            item.files_path = Some(rel);
             item.files = Some(files);
         }
         RawClip::Image(bytes) => {
@@ -625,11 +663,37 @@ fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
     }
 }
 
+/// 为「内联了 files、但缺 files_path」的历史文件条目补写 `files/<id>.txt`，
+/// 返回补写的条数。老版本 index.json 是这么存的，不补的话缓存目录里看不到这些条目。
+fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
+    let mut n = 0usize;
+    for item in hist.iter_mut() {
+        if item.kind != "files" || item.files_path.is_some() {
+            continue;
+        }
+        let Some(files) = item.files.as_ref() else {
+            continue;
+        };
+        if files.is_empty() {
+            continue;
+        }
+        let rel = format!("files/{}.txt", item.id);
+        if fs::write(dir.join(&rel), files.join("\r\n").as_bytes()).is_ok() {
+            item.files_path = Some(rel);
+            n += 1;
+        }
+    }
+    n
+}
+
 fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
     if let Some(rel) = &item.text_path {
         let _ = fs::remove_file(dir.join(rel));
     }
     if let Some(rel) = &item.img_path {
+        let _ = fs::remove_file(dir.join(rel));
+    }
+    if let Some(rel) = &item.files_path {
         let _ = fs::remove_file(dir.join(rel));
     }
 }
@@ -836,11 +900,11 @@ pub fn on_app_exit() {
     );
     if let Some(dir) = DIR.get() {
         if include_pinned {
-            // 全清：直接清空两个内容目录 + 历史
-            let _ = fs::remove_dir_all(dir.join("data"));
-            let _ = fs::remove_dir_all(dir.join("images"));
-            let _ = fs::create_dir_all(dir.join("data"));
-            let _ = fs::create_dir_all(dir.join("images"));
+            // 全清：直接清空三个内容目录 + 历史
+            for sub in ["data", "images", "files"] {
+                let _ = fs::remove_dir_all(dir.join(sub));
+                let _ = fs::create_dir_all(dir.join(sub));
+            }
             if let Some(h) = HISTORY.get() {
                 h.lock().unwrap().clear();
             }

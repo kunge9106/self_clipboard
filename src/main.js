@@ -281,9 +281,14 @@ function render() {
   hideImagePreview(); // 重绘后旧卡片已销毁，避免浮层残留
   const view = document.getElementById("view");
   const toolbar = document.querySelector(".toolbar");
+  const isSettings = currentView === "settings";
   // 设置页不需要搜索栏（需求 #1）
-  toolbar.style.display = currentView === "settings" ? "none" : "";
-  if (currentView === "settings") {
+  toolbar.style.display = isSettings ? "none" : "";
+  // 设置页底部状态栏只留版本号：左侧条数与右侧垃圾桶按钮隐藏。
+  // 用 visibility 而不是 display —— 网格是 1fr/auto/1fr 三列，display:none 会让版本号
+  // 掉进第一列（1fr）而不再居中；隐藏但占位才能保持居中。
+  document.querySelector(".statusbar").classList.toggle("is-settings", isSettings);
+  if (isSettings) {
     view.innerHTML = settingsHtml();
     bindSettings(view);
     return;

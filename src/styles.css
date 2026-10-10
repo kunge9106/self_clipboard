@@ -731,6 +731,13 @@ body.dark .ctx-menu {
   opacity: 0.75;
 }
 
+/* 设置页：底部状态栏只显示版本号。左右两侧用 visibility 隐藏（占位保留），
+   不然三列网格塌掉、版本号就不再居中。 */
+.statusbar.is-settings .statusbar-left,
+.statusbar.is-settings .statusbar-clear {
+  visibility: hidden;
+}
+
 .statusbar-clear {
   justify-self: end;
   width: 24px;
