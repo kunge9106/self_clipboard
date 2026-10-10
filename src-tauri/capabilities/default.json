@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "轻贴默认权限：仅核心能力，不给文件系统与网络",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:window:default", "core:webview:default"]
+}

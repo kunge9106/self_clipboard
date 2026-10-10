@@ -25,4 +25,10 @@ electron-builder-output/
 # Zip archives
 *.zip
 self_clipboard_images/
-nul
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# 运行时
+*.log

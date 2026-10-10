@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>轻贴</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- 顶部条：可拖拽 + 软件图标 + 窗口控制 -->
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="brand">
+          <img class="brand-logo" src="/src/assets/logo.png" alt="轻贴" />
+          <span class="brand-name">轻贴</span>
+        </div>
+        <div class="titlebar-spacer" data-tauri-drag-region></div>
+        <div class="window-controls">
+          <button class="wc-btn" id="btn-minimize" title="最小化" aria-label="最小化">
+            <svg viewBox="0 0 10 10"><path d="M0 5h10" /></svg>
+          </button>
+          <button class="wc-btn" id="btn-maximize" title="最大化" aria-label="最大化">
+            <svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" /></svg>
+          </button>
+          <button class="wc-btn wc-close" id="btn-close" title="关闭" aria-label="关闭">
+            <svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="body">
+        <!-- 左侧导航 -->
+        <aside class="sidebar">
+          <nav class="nav" id="nav">
+            <button class="nav-item is-active" data-view="history">
+              <svg class="nav-icon" viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM8 4v4l3 2"/></svg>
+              <span>历史</span>
+            </button>
+            <button class="nav-item" data-view="pinned">
+              <svg class="nav-icon" viewBox="0 0 16 16"><path d="M8 1.5l2 4.5 4.5.6-3.3 3.2.8 4.7L8 12l-4 2.5.8-4.7L1.5 6.6 6 6z"/></svg>
+              <span>收藏</span>
+            </button>
+            <button class="nav-item" data-view="images">
+              <svg class="nav-icon" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><circle cx="5.5" cy="6" r="1.2"/><path d="M1.5 11l4-3.5 3 2.5 2.5-2 3.5 3"/></svg>
+              <span>图片</span>
+            </button>
+            <button class="nav-item" data-view="files">
+              <svg class="nav-icon" viewBox="0 0 16 16"><path d="M1.5 4.5A1.5 1.5 0 013 3h3l1.5 2H13a1.5 1.5 0 011.5 1.5v6A1.5 1.5 0 0113 14H3a1.5 1.5 0 01-1.5-1.5z"/></svg>
+              <span>文件</span>
+            </button>
+          </nav>
+
+          <div class="sidebar-footer">
+            <button class="nav-item" data-view="settings">
+              <svg class="nav-icon" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1l1 2.2 2.4-.6 1 2.2 2.2 1-.6 2.4L15 9.4l-1 2.2-2.2 1 .6 2.4-2.2 1-1-2.2-2.4.6-1-2.2L1 10.6l.6-2.4L1 6.6l1-2.2 2.2-1L4.6 1l2.2 1z" opacity=".0"/></svg>
+              <span>设置</span>
+            </button>
+          </div>
+        </aside>
+
+        <!-- 右侧内容 -->
+        <main class="content">
+          <div class="toolbar">
+            <div class="search">
+              <svg class="search-icon" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
+              <input id="search" type="text" placeholder="搜索剪贴板历史…" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="toolbar-right">
+              <button class="btn-ghost" id="btn-pause" title="暂停录制">
+                <span id="pause-label">录制中</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="view" id="view">
+            <div class="empty">
+              <div class="empty-title">轻贴 v2 骨架已就绪</div>
+              <div class="empty-sub" id="effect-debug">正在读取材质档位…</div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

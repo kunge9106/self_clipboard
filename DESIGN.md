@@ -287,8 +287,19 @@ build == 22000（Win11 21H2）
     真·毛玻璃，tint 颜色与透明度可自定义（自由度高于 Win11）
 ```
 
-Rust 侧通过 `windows` crate 或直接 FFI 调用，**不需要 addon、不需要 node-gyp、
-不需要 electron-rebuild**——这是选 Tauri 而非 Electron 的核心收益之一。
+**实现方式：纯手写 Win32 FFI，不引入 `windows` crate**（已落地，见
+`src-tauri/src/effects.rs`）。理由：
+
+- 只需要 3 个 API（`SetWindowCompositionAttribute`、`DwmSetWindowAttribute`、
+  `RtlGetVersion`），为它们拖入整个 bindings crate 不划算（原则 10）
+- 避免 crate 元数据版本漂移（tauri 内部用的是 windows 0.62，自己再引一份易冲突）
+
+手写 FFI 的额外收益：**版本探测用 `RtlGetVersion`（ntdll）而非 `GetVersionEx`**。
+后者在没有 manifest 声明的进程里，Win10 上会返回 6.2（Win8）——正是「静默失败」
+的典型来源，必须避开。
+
+不需要 addon、不需要 node-gyp、不需要 electron-rebuild——这是选 Tauri 而非
+Electron 的核心收益之一。
 
 **验证要求**（对应原则 3、4）：
 
@@ -594,6 +605,17 @@ dist-web/
 2. GitHub Release 附 NSIS 安装包
 3. **安装包体积列为发布检查项**，目标 < 10MB
 4. Release notes 写明：新增 / 修复 / 已知问题
+
+### 11.9 开发环境与已知坑
+
+v2 开工第一天踩到的，全部已解决，留档避免重复排查。
+
+| 坑 | 现象 | 根因 | 解决 |
+|---|---|---|---|
+| 前端装依赖失败 | `npm install` 报 `EBUSY`，`spawnSync ... esbuild --version` 失败 | 托管 Node 的 spawn 被拦截 | **一律用系统 Node**（`E:\Program Files\nodejs`）跑 npm / vite |
+| `schemars` 编译失败 | `struct takes 3 generic arguments but 2 were supplied` | `indexmap` 1.9.3 **没有 default feature**，未显式开 `std` 时靠 build.rs 里的 autocfg 探测 sysroot，新版 rustc 上探测失败 | 在 `build-dependencies` 显式声明 `indexmap = { version = "1.9", features = ["std"] }`，仅影响构建期 |
+| 版本探测拿错 | `GetVersionEx` 在 Win10 返回 6.2 | 无 manifest 声明 | 改用 `RtlGetVersion` |
+| 材质不生效 | 调用成功但看不出变化 | 缺 DWM 重算 | 施加后做一次 `SetWindowPos` 微调（nudge），并在 200/600/1200ms 各补涂一次 |
 
 ---
 

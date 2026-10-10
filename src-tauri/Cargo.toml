@@ -1,0 +1,41 @@
+[package]
+name = "self-clipboard"
+version = "2.0.0"
+description = "轻贴 — 本地剪贴板管理工具"
+authors = ["kunge9106"]
+edition = "2021"
+rust-version = "1.77.2"
+default-run = "self-clipboard"
+
+[lib]
+name = "self_clipboard_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "self-clipboard"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# 传递依赖修复：tauri-build → schemars 0.8.22 → indexmap 1.x。
+# indexmap 1.9.3 没有 default feature，std 未显式开启时它靠 build.rs 里的 autocfg
+# 探测 sysroot，在新版 rustc 上探测失败 → cfg(has_std) 缺失 → schemars 编译报错
+# 「struct takes 3 generic arguments but 2 were supplied」。
+# 这里显式开启 std，让 schemars 走 CARGO_FEATURE_STD 分支。
+# 仅影响构建期，不进运行时产物。
+indexmap = { version = "1.9", features = ["std"] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-ico"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Windows 材质与剪贴板一律走手写 FFI，不引入 windows crate：
+# 避免元数据版本漂移，也避免为几个 API 拖入庞大依赖（开发原则 10）。
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
