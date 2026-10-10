@@ -66,13 +66,6 @@
               <svg class="search-icon" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
               <input id="search" type="text" placeholder="搜索剪贴板历史…" autocomplete="off" spellcheck="false" />
             </div>
-            <select class="age-filter" id="age-filter" title="按时间筛选">
-              <option value="0">全部时间</option>
-              <option value="1">近 1 天</option>
-              <option value="3">近 3 天</option>
-              <option value="7">近 7 天</option>
-              <option value="30">近 30 天</option>
-            </select>
           </div>
 
           <div class="view" id="view">
@@ -85,7 +78,7 @@
           <footer class="statusbar">
             <span class="statusbar-left" id="status-count">共 0 条</span>
             <span class="statusbar-version" id="status-version"></span>
-            <button class="statusbar-clear" id="btn-clear-view" title="清理（点击展开：清空当前列表 / 清理更早的内容）">
+            <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清搜索结果；置顶/收藏除外）">
               <svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>
             </button>
           </footer>

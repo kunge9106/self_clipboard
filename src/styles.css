@@ -349,46 +349,6 @@ body.dark .app::after {
   padding: 0 30px 0 16px;
 }
 
-/* 时间筛选下拉：与搜索框同高同风格（自绘箭头，避免原生外观在深浅主题下不搭） */
-.age-filter {
-  flex: 0 0 auto;
-  height: 32px;
-  padding: 0 26px 0 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--stroke);
-  background-color: var(--glass-strong);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b6b73' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-  color: var(--text);
-  font-family: var(--font);
-  font-size: 12.5px;
-  cursor: default;
-  outline: none;
-  appearance: none;
-  -webkit-appearance: none;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
-}
-
-.age-filter:hover {
-  background-color: var(--glass-hover);
-}
-
-.age-filter:focus {
-  border-color: var(--accent);
-}
-
-/* 展开项由系统绘制，只保证深浅主题下可读 */
-.age-filter option {
-  background: #ffffff;
-  color: #1b1b1f;
-}
-
-body.dark .age-filter option {
-  background: #2a2a2e;
-  color: #f2f2f5;
-}
-
 .search {
   flex: 1;
   max-width: none;
