@@ -293,14 +293,72 @@ function render() {
     return;
   }
 
-  const wrap = document.createElement("div");
-  wrap.className = "history";
-  for (const item of list) {
-    wrap.appendChild(cardEl(item));
-  }
+  // 渐进渲染：只先渲染第一批，滚到接近底部时再追加下一批（见 appendBatch）。
+  // 这样 DOM 规模有上界，渲染进程内存不再随历史条数增长；而列表的排序、滚动、
+  // 搜索、右键菜单、悬浮预览等行为与全量渲染完全一致。
+  renderList = list;
+  renderedUpTo = 0;
+  wrapEl = document.createElement("div");
+  wrapEl.className = "history";
   view.innerHTML = "";
-  view.appendChild(wrap);
-  observeImages(wrap); // 缩略图按需加载（见 observeImages）
+  view.appendChild(wrapEl);
+  setupMoreObserver(); // root 必须绑定到这个新的滚动容器
+  appendBatch();
+}
+
+// ---------------------------------------------------------------------------
+// 渐进渲染
+//
+// 为什么需要：渲染进程的内存主要由「实际渲染出多少个卡片」决定（实测历史 272 条
+// 时渲染进程专用工作集约 67MB，随条数线性上涨）。一次全量渲染会让内存随使用时间
+// 持续增长，这与「内容走磁盘、不常驻内存」的设计目标相悖。
+//
+// 做法：DOM 中最多保留约一屏 + 一批的量，其余滚动到时再生成。
+// ---------------------------------------------------------------------------
+const PAGE_SIZE = 60; // 每批渲染的条数
+let renderList = []; // 当前视图过滤后的完整列表（仅元数据，很轻）
+let renderedUpTo = 0; // 已渲染到的下标
+let wrapEl = null; // 当前列表滚动容器
+let moreObserver = null; // 观察「加载更多」哨兵
+let sentinelEl = null; // 哨兵元素本身
+
+function setupMoreObserver() {
+  if (moreObserver) moreObserver.disconnect();
+  moreObserver = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((e) => e.isIntersecting)) appendBatch();
+    },
+    { root: wrapEl, rootMargin: "600px 0px" } // 提前 600px 预渲染，滚动不卡顿
+  );
+}
+
+/** 追加下一批卡片；若仍有剩余，在末尾放一个不可见哨兵，滚到附近时触发下一批 */
+function appendBatch() {
+  if (!wrapEl || renderedUpTo >= renderList.length) return;
+
+  if (sentinelEl) {
+    moreObserver.unobserve(sentinelEl);
+    sentinelEl.remove();
+    sentinelEl = null;
+  }
+
+  const end = Math.min(renderedUpTo + PAGE_SIZE, renderList.length);
+  const frag = document.createDocumentFragment();
+  for (let i = renderedUpTo; i < end; i++) {
+    frag.appendChild(cardEl(renderList[i]));
+  }
+  wrapEl.appendChild(frag);
+  renderedUpTo = end;
+
+  // 只为本批新卡片里尚未加载的缩略图登记观察（已加载的已摘掉 data-img-id 标记）
+  observeImages(wrapEl);
+
+  if (renderedUpTo < renderList.length) {
+    sentinelEl = document.createElement("div");
+    sentinelEl.className = "load-more";
+    wrapEl.appendChild(sentinelEl);
+    moreObserver.observe(sentinelEl);
+  }
 }
 
 /** 各视图的空态文案（需求 #5），搜索时显示「暂无 xxx 相关内容」（需求 #3） */
@@ -445,7 +503,11 @@ function observeImages(rootEl) {
         if (!en.isIntersecting) continue;
         const img = en.target;
         imgObserver.unobserve(img);
-        loadImage(img.dataset.imgId)
+        // 取出 id 后立刻摘掉标记：渐进渲染追加下一批时会重新扫描整个容器，
+        // 摘掉标记可保证已在加载/已加载的图片不会被重复读一次。
+        const id = img.dataset.imgId;
+        img.removeAttribute("data-img-id");
+        loadImage(id)
           .then((url) => {
             if (img.isConnected) img.src = url;
           })

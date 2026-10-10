@@ -475,6 +475,14 @@ body.dark .app::after {
   gap: 8px;
 }
 
+/* 渐进渲染的「加载更多」哨兵：不可见，只用于 IntersectionObserver 触发下一批。
+   负 margin 抵消 .history 的 8px flex 间距，保证底部留白不变。 */
+.history .load-more {
+  flex: 0 0 auto;
+  height: 1px;
+  margin-top: -8px;
+}
+
 .card {
   display: flex;
   gap: 10px;
