@@ -48,14 +48,19 @@ function applyTheme(dark) {
 }
 
 function bindWindowControls() {
-  document.getElementById("btn-minimize").onclick = () => appWindow.minimize();
+  const guard = (label, p) =>
+    p.catch((err) => toast(label + "失败：" + err));
+  document.getElementById("btn-minimize").onclick = () =>
+    guard("最小化", appWindow.minimize());
   document.getElementById("btn-maximize").onclick = () =>
-    appWindow.toggleMaximize();
-  document.getElementById("btn-close").onclick = () => appWindow.close();
+    guard("最大化", appWindow.toggleMaximize());
+  document.getElementById("btn-close").onclick = () =>
+    guard("关闭", appWindow.close());
 }
 
 function bindNav() {
-  document.getElementById("nav").addEventListener("click", (e) => {
+  // 监听整个侧栏：历史/收藏/图片/文件 与 底部「设置」都在 .sidebar 内
+  document.querySelector(".sidebar").addEventListener("click", (e) => {
     const item = e.target.closest(".nav-item");
     if (!item) return;
     document
@@ -121,7 +126,6 @@ function timeStr(ts) {
 }
 
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
-const KIND_ICON = { text: "📝", image: "🖼", files: "📁" };
 
 function render() {
   const view = document.getElementById("view");
@@ -152,25 +156,6 @@ function cardEl(item) {
   card.className = "card" + (item.pinned ? " is-pinned" : "");
   card.dataset.id = item.id;
 
-  // 缩略区
-  const thumb = document.createElement("div");
-  thumb.className = "card-thumb";
-  if (item.kind === "image") {
-    const img = document.createElement("img");
-    img.alt = "图片";
-    img.loading = "lazy";
-    thumb.appendChild(img);
-    invoke("get_image", { id: item.id })
-      .then((b64) => {
-        img.src = b64;
-      })
-      .catch(() => {
-        thumb.textContent = "🖼";
-      });
-  } else {
-    thumb.textContent = KIND_ICON[item.kind] || "📄";
-  }
-
   // 内容区
   const body = document.createElement("div");
   body.className = "card-body";
@@ -183,51 +168,16 @@ function cardEl(item) {
   preview.textContent = item.preview || "";
   body.appendChild(meta);
   body.appendChild(preview);
-
-  // 操作区
-  const actions = document.createElement("div");
-  actions.className = "card-actions";
-  actions.appendChild(
-    actionBtn("fav", "★", item.favorite, async () => {
-      await invoke("toggle_favorite", { id: item.id });
-      item.favorite = !item.favorite;
-      render();
-    })
-  );
-  actions.appendChild(
-    actionBtn("pin", "📌", item.pinned, async () => {
-      await invoke("toggle_pin", { id: item.id });
-      item.pinned = !item.pinned;
-      render();
-    })
-  );
-  actions.appendChild(
-    actionBtn("del", "🗑", false, async () => {
-      await invoke("delete_item", { id: item.id });
-      items = items.filter((i) => i.id !== item.id);
-      render();
-    })
-  );
-
-  // 点击卡片（非按钮）→ 复制回剪贴板
-  card.addEventListener("click", (e) => {
-    if (e.target.closest(".act")) return;
-    copyBack(item);
-  });
-
-  card.appendChild(thumb);
   card.appendChild(body);
-  card.appendChild(actions);
-  return card;
-}
 
-function actionBtn(cls, glyph, on, onClick) {
-  const b = document.createElement("button");
-  b.className = "act " + cls + (on ? " is-on" : "");
-  b.textContent = glyph;
-  b.title = cls === "fav" ? "收藏" : cls === "pin" ? "置顶" : "删除";
-  b.onclick = onClick;
-  return b;
+  // 左键 → 复制回剪贴板；右键 → 上下文菜单
+  card.addEventListener("click", () => copyBack(item));
+  card.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(e.clientX, e.clientY, item);
+  });
+  return card;
 }
 
 async function copyBack(item) {
@@ -238,6 +188,83 @@ async function copyBack(item) {
     toast("复制失败：" + e);
   }
 }
+
+// ---------------------------------------------------------------------------
+// 右键上下文菜单
+// ---------------------------------------------------------------------------
+
+let ctxMenuEl = null;
+
+function closeContextMenu() {
+  if (ctxMenuEl) {
+    ctxMenuEl.remove();
+    ctxMenuEl = null;
+  }
+}
+
+function openContextMenu(x, y, item) {
+  closeContextMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "ctx-menu";
+
+  const entries = [
+    { label: "复制", act: () => copyBack(item) },
+    {
+      label: item.pinned ? "取消置顶" : "置顶",
+      act: async () => {
+        await invoke("toggle_pin", { id: item.id });
+        item.pinned = !item.pinned;
+        render();
+      },
+    },
+    {
+      label: item.favorite ? "取消收藏" : "收藏",
+      act: async () => {
+        await invoke("toggle_favorite", { id: item.id });
+        item.favorite = !item.favorite;
+        render();
+      },
+    },
+    {
+      label: "删除",
+      danger: true,
+      act: async () => {
+        await invoke("delete_item", { id: item.id });
+        items = items.filter((i) => i.id !== item.id);
+        render();
+      },
+    },
+  ];
+
+  for (const entry of entries) {
+    const btn = document.createElement("button");
+    btn.className = "ctx-item" + (entry.danger ? " danger" : "");
+    btn.textContent = entry.label;
+    btn.onclick = () => {
+      closeContextMenu();
+      entry.act();
+    };
+    menu.appendChild(btn);
+  }
+
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 8)) + "px";
+  menu.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 8)) + "px";
+  ctxMenuEl = menu;
+}
+
+// 点空白处 / 滚动 / Esc → 关闭；非卡片区域右键 → 只关不弹
+document.addEventListener("click", closeContextMenu);
+document.addEventListener("scroll", closeContextMenu, true);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeContextMenu();
+});
+document.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  closeContextMenu();
+});
 
 let toastTimer = null;
 function toast(msg) {
@@ -265,7 +292,7 @@ function settingsHtml() {
       <span class="hint">0 表示永不自动清理（收藏/置顶除外，永久保留）</span></div>
     <div class="row"><label>全局热键</label>
       <input type="checkbox" checked />
-      <span class="hint">用 Ctrl+` 唤起/隐藏窗口（开关功能开发中）</span></div>
+      <span class="hint">用 Ctrl+反引号(\`) 唤起/隐藏窗口（开关功能开发中）</span></div>
     <div class="row"><label>录制状态</label>
       <button class="btn-ghost" id="set-pause">${paused ? "已暂停 → 恢复" : "录制中 → 暂停"}</button></div>
     <button class="btn-danger" id="clear-all">清空全部历史</button>
@@ -297,15 +324,21 @@ function bindSettings(view) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  await applyEffectInfo();
-  applyTheme(await appWindow.theme().catch(() => "light") === "dark");
-
-  await appWindow.onThemeChanged(({ payload }) => applyTheme(payload === "dark"));
-
+  // 控件绑定优先（即便后续异步步骤出错，也能保证可交互）
   bindWindowControls();
   bindNav();
   bindSearch();
   bindPause();
+
+  await applyEffectInfo();
+
+  // 主题相关：单独 try，避免权限缺失时中断其余绑定
+  try {
+    applyTheme((await appWindow.theme().catch(() => "light")) === "dark");
+    await appWindow.onThemeChanged(({ payload }) => applyTheme(payload === "dark"));
+  } catch (e) {
+    console.error("theme setup failed", e);
+  }
 
   // 初始历史
   try {
