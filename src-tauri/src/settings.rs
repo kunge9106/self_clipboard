@@ -42,7 +42,9 @@ fn default_retention() -> u32 {
 }
 
 fn default_material_alpha() -> u32 {
-    74
+    // 现在这个值控制的是 CSS 主体层的不透明度（acrylic 的 tint 已固定压到 8%），
+    // 62% 相当于「看得出模糊、文字也清楚」的中间值
+    62
 }
 
 impl Default for Config {

@@ -47,6 +47,20 @@ function applyTheme(dark) {
   document.body.classList.toggle("dark", !!dark);
 }
 
+/**
+ * 材质浓度 → 控制 CSS 层 --glass-alpha（窗口主体的不透明度）。
+ *
+ * 为什么不再调 Rust 的 tint：SetWindowRgn 对 acrylic 无效，acrylic 恒为矩形，
+ * 四角切不掉。把 acrylic 的 tint 压到 8%（只提供模糊）后，四角的矩形残留几乎
+ * 看不见；窗口的明暗改由 CSS 这一层负责，浓度也就可以在这里实时调。
+ */
+function applyGlassAlpha(pct) {
+  // 兜底档（没有真材质）必须保持不透明，否则会直接看见桌面
+  if (document.body.classList.contains("tier-solid")) return;
+  const a = Math.max(10, Math.min(95, Number(pct) || 0)) / 100;
+  document.documentElement.style.setProperty("--glass-alpha", String(a));
+}
+
 function bindWindowControls() {
   const guard = (label, p) =>
     p.catch((err) => toast(label + "失败：" + err));
@@ -567,8 +581,8 @@ function settingsHtml() {
       <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
       <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
     <div class="row"><label>材质浓度</label>
-      <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 74}" />
-      <span class="hint" id="material-val">${s.materialAlpha ?? 74}%（越高越厚实 · 越低越通透）</span></div>
+      <input type="range" id="set-material" min="25" max="90" value="${s.materialAlpha ?? 62}" />
+      <span class="hint" id="material-val">${s.materialAlpha ?? 62}%（越高越厚实 · 越低越通透）</span></div>
     <div class="cache-box">
       <div class="cache-title">缓存目录 <span class="hint">仅保留近 ${s.retentionDays ?? 3} 天内容</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
@@ -655,6 +669,7 @@ function bindSettings(view) {
     material.addEventListener("input", () => {
       const v = parseInt(material.value, 10);
       if (label) label.textContent = `${v}%（越高越厚实 · 越低越通透）`;
+      applyGlassAlpha(v); // 实时生效（CSS 层，无需重启）
       invoke("set_material_alpha", { value: v }).catch(() => {});
     });
   }
@@ -717,6 +732,8 @@ async function main() {
   // 配置与版本号（状态栏）
   try {
     settings = await invoke("get_settings");
+    // 应用材质浓度（CSS 层，窗口主体的不透明度）
+    applyGlassAlpha(settings.materialAlpha ?? 62);
   } catch (e) {
     console.error("load settings failed", e);
   }

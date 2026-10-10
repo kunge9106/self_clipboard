@@ -41,10 +41,21 @@ const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 const TINT_RGB_LIGHT: u32 = 0x00_FF_FF_FF; // 白
 const TINT_RGB_DARK: u32 = 0x00_1C_1C_1E; // #1E1C1C
 
-/// 由「材质浓度」(tint alpha 百分比 40–90) 计算最终 tint 值
-pub fn tint_for(dark: bool, alpha_pct: u32) -> u32 {
-    let a = alpha_pct.clamp(40, 90);
-    (a << 24) | if dark { TINT_RGB_DARK } else { TINT_RGB_LIGHT }
+/// acrylic 的 tint alpha：**固定压到 8%**，不再由「材质浓度」控制。
+///
+/// 关键事实（社区实证，SO 63324480 等多处印证）：
+/// **`SetWindowRgn` 对 SetWindowCompositionAttribute 的 acrylic 完全无效**——
+/// acrylic 永远铺满整个窗口矩形，四角**切不掉**。tint alpha 越高，四角那圈
+/// 「直角」越显眼（这正是用户反复反馈的直角来源）。
+///
+/// 所以策略改为：acrylic 只负责**模糊**（几乎不带色调），窗口主体的明暗与
+/// 颜色交给 CSS 层（styles.css 的 --glass-alpha），这样四角的矩形残留就淡到
+/// 看不出来了。副作用是多了一层「高亮度半透明」的观感，反而更接近 macOS。
+const TINT_ALPHA: u32 = 0x14; // ≈8%
+
+/// 计算 tint 值（格式 0xAABBGGRR）。alpha 固定为 TINT_ALPHA，参数保留仅为兼容调用方。
+pub fn tint_for(dark: bool, _alpha_pct: u32) -> u32 {
+    (TINT_ALPHA << 24) | if dark { TINT_RGB_DARK } else { TINT_RGB_LIGHT }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,9 +178,8 @@ impl Tier {
         }
     }
 
-    /// 该档位下 CSS 圆角能安全用多大（逻辑 px）。
-    /// Win10 acrylic 铺满整个窗口矩形、不认 CSS 圆角，只能靠 SetWindowRgn 裁。
-    /// 裁剪半径必须与 CSS 圆角**一致**，否则两者的边缘会错开露出硬边。
+    /// 前端 --radius 允许用多大（逻辑 px）。圆角现在纯由 CSS 绘制（带抗锯齿），
+    /// 不再受窗口区域裁剪的限制，所以可以直接给到位。
     pub fn max_radius(&self) -> u32 {
         match self {
             Tier::Acrylic => 20,
@@ -178,13 +188,16 @@ impl Tier {
     }
 
     /// 窗口区域裁剪用的圆角（逻辑 px）。返回 0 表示不需要 RGN 裁剪。
-    /// SystemBackdrop 档系统直接给圆角，裁剪反而会破坏它。
+    ///
+    /// **现在全部返回 0——不再做任何区域裁剪。** 原因：
+    ///   1. `SetWindowRgn` **管不住 acrylic**（实测 + 社区实证），acrylic 恒为
+    ///      矩形，四角根本切不掉，所以它挡不住「直角」；
+    ///   2. 1-bit 区域**没有抗锯齿**，圆角边缘是一排像素台阶
+    ///      （用户反馈「圆角锯齿很重」的元凶）。
+    /// 既然既挡不住 acrylic 又带来锯齿，就干脆不做裁剪：圆角完全交给 CSS 的
+    /// border-radius（自带抗锯齿），四角残留的 acrylic 靠低 tint 压到看不见。
     pub fn region_radius(&self) -> u32 {
-        match self {
-            Tier::SystemBackdrop => 0,
-            Tier::Acrylic => 20,
-            Tier::Mica | Tier::Solid => 12,
-        }
+        0
     }
 }
 
@@ -752,9 +765,11 @@ static RESIZE_EDGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 static RESIZE_ORIGIN: std::sync::Mutex<(i32, i32, i32, i32, i32, i32)> =
     std::sync::Mutex::new((0, 0, 0, 0, 0, 0));
 
-/// 窗口最小尺寸（物理 px）
-const MIN_W: i32 = 480;
-const MIN_H: i32 = 360;
+/// 窗口最小尺寸（**逻辑 px**，运行时按窗口 DPI 换算成物理 px）。
+/// 侧栏是固定的 208px，窗口再窄内容区就放不下设置页的标签 + 说明文字，
+/// 会被挤成一列竖排（用户实测）。
+const MIN_LOGICAL_W: i32 = 720;
+const MIN_LOGICAL_H: i32 = 480;
 
 pub fn begin_custom_resize(hwnd: isize, edge: u32) {
     if edge == 0 {
@@ -797,9 +812,15 @@ fn resize_move_to_cursor(hwnd: isize) {
                 cy: i32,
                 flags: u32,
             ) -> i32;
+            fn GetDpiForWindow(hwnd: isize) -> u32;
         }
         const SWP_NOZORDER: u32 = 0x0004;
         const SWP_NOACTIVATE: u32 = 0x0010;
+
+        // 最小尺寸按逻辑 px 定义，这里按窗口 DPI 换算成物理像素
+        let dpi = GetDpiForWindow(hwnd).max(96) as f64 / 96.0;
+        let min_w = (MIN_LOGICAL_W as f64 * dpi).round() as i32;
+        let min_h = (MIN_LOGICAL_H as f64 * dpi).round() as i32;
 
         let (sx, sy, l0, t0, r0, b0) = RESIZE_ORIGIN
             .lock()
@@ -827,18 +848,18 @@ fn resize_move_to_cursor(hwnd: isize) {
         }
 
         // 最小尺寸：只夹住被拖动的那条边，另一侧保持不动
-        if r - l < MIN_W {
+        if r - l < min_w {
             if edge & 4 != 0 {
-                l = r - MIN_W;
+                l = r - min_w;
             } else if edge & 8 != 0 {
-                r = l + MIN_W;
+                r = l + min_w;
             }
         }
-        if b - t < MIN_H {
+        if b - t < min_h {
             if edge & 1 != 0 {
-                t = b - MIN_H;
+                t = b - min_h;
             } else if edge & 2 != 0 {
-                b = t + MIN_H;
+                b = t + min_h;
             }
         }
 

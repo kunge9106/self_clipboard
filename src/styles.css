@@ -22,6 +22,11 @@
   --glass-strong: rgba(255, 255, 255, 0.28);
   --glass-hover: rgba(255, 255, 255, 0.24);
   --stroke: rgba(255, 255, 255, 0.35);
+  /* 材质主体：系统 acrylic 只负责「模糊」（tint 已压到 8%，因为 SetWindowRgn
+     管不住 acrylic，四角切不掉），窗口的明暗与浓淡由这一层负责。
+     好处：四角的矩形残留淡到看不见，材质浓度也能在设置页实时调。 */
+  --material-rgb: 255 255 255;
+  --glass-alpha: 0.62;
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
@@ -33,6 +38,8 @@ body.dark {
   --glass-strong: rgba(40, 40, 44, 0.38);
   --glass-hover: rgba(255, 255, 255, 0.1);
   --stroke: rgba(255, 255, 255, 0.12);
+  --material-rgb: 22 22 24;
+  --glass-alpha: 0.62;
   --text: #f2f2f5;
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
@@ -45,12 +52,17 @@ body.tier-solid {
   --glass-strong: rgba(255, 255, 255, 0.98);
   --glass-hover: rgba(0, 0, 0, 0.05);
   --stroke: rgba(0, 0, 0, 0.08);
+  /* 兜底档没有 acrylic，直接给近不透明实色 */
+  --material-rgb: 248 249 251;
+  --glass-alpha: 0.99;
 }
 body.dark.tier-solid {
   --glass: rgba(32, 32, 34, 0.97);
   --glass-strong: rgba(44, 44, 48, 0.98);
   --glass-hover: rgba(255, 255, 255, 0.08);
   --stroke: rgba(255, 255, 255, 0.08);
+  --material-rgb: 32 32 34;
+  --glass-alpha: 0.99;
 }
 
 * {
@@ -100,18 +112,17 @@ body {
   /* 窗口外框：acrylic 档下靠这条描边勾出圆角 */
   border-radius: var(--radius);
   overflow: hidden;
-  /* 在丙烯之上、内容之下再叠一层极淡的对角渐变，
-     给 Win10 单色 tint 的「平背景」补一点纵深（纯色壁纸下尤其明显） */
-  background:
-    linear-gradient(160deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0) 46%),
-    linear-gradient(0deg, rgba(0, 0, 0, 0.035), rgba(0, 0, 0, 0) 28%);
+  /* 主体材质层：浓度由 --glass-alpha 控制（设置页「材质浓度」实时调）。
+     系统 blur 会从这层半透明里透出来，所以窗口既有一层可控的明暗、
+     又保留下面的模糊。 */
+  background: linear-gradient(
+    160deg,
+    rgb(var(--material-rgb) / calc(var(--glass-alpha) + 0.05)),
+    rgb(var(--material-rgb) / calc(var(--glass-alpha) - 0.05)) 62%
+  );
 }
 
-body.dark .app {
-  background:
-    linear-gradient(160deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 46%),
-    linear-gradient(0deg, rgba(0, 0, 0, 0.10), rgba(0, 0, 0, 0) 30%);
-}
+/* 深色下主体色由 --material-rgb / --glass-alpha 一并切换，无需额外覆盖 */
 
 /* 噪点层：真·Windows 亚克力 = 模糊 + 色调 + **噪点** + 亮度层。
    我们之前只有「模糊 + 色调」，缺了噪点，所以看着像「平模糊」不够高级。
@@ -388,8 +399,8 @@ body.dark .app::after {
 .view {
   flex: 1;
   min-height: 0;
-  /* 右侧 10px：让滚动条整体更靠窗口右边（滚动条离卡片的间距交给 .history） */
-  padding: 0 10px 16px;
+  /* 右侧 12px：与 .history 的 padding-right 相等 → 滚动条在卡片与窗口右缘之间居中 */
+  padding: 0 12px 16px;
   overflow: hidden;
 }
 
@@ -423,8 +434,8 @@ body.dark .app::after {
   overflow-y: auto;
   /* 始终保留滚动条留白，避免有无滚动条时内容宽度跳动 */
   scrollbar-gutter: stable;
-  /* 滚动条与卡片之间拉开距离（原先几乎贴着卡片右缘） */
-  padding-right: 14px;
+  /* 与 .view 的右内边距相等（12px）→ 滚动条在两侧留白中视觉居中 */
+  padding-right: 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -562,6 +573,8 @@ body.dark .ctx-menu {
 .settings .row {
   display: flex;
   align-items: center;
+  /* 窗口变窄时允许换行：否则说明文字会被挤成一列竖排（用户截图） */
+  flex-wrap: wrap;
   gap: 12px;
   font-size: 13px;
   color: var(--text);
@@ -569,6 +582,7 @@ body.dark .ctx-menu {
 
 .settings .row label {
   flex: 0 0 160px;
+  min-width: 0;
 }
 
 .settings input[type="number"] {
@@ -593,6 +607,9 @@ body.dark .ctx-menu {
 .settings .hint {
   font-size: 12px;
   color: var(--text-dim);
+  /* 至少留 150px 宽，放不下就整块换到下一行，避免文字被压成竖排 */
+  flex: 1 1 150px;
+  min-width: 0;
 }
 
 .settings input[type="checkbox"] {
