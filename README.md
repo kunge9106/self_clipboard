@@ -7,6 +7,7 @@
     <img src="https://img.shields.io/badge/platform-Windows%2010%2B-0a7cd6" alt="Platform">
     <img src="https://img.shields.io/badge/Tauri-2-24c8db?logo=tauri&logoColor=white" alt="Tauri 2">
     <img src="https://img.shields.io/badge/installer-1.3%20MB-4b6fe0" alt="Installer size">
+    <img src="https://img.shields.io/badge/license-MIT-2ea043" alt="License: MIT">
   </p>
 </div>
 
@@ -198,7 +199,9 @@ v2.0 已经可用，后续仍在推进：
 
 ## 开源协议
 
-本项目目前**尚未添加开源协议文件**。在协议确定前，代码默认保留所有权利；如果你希望复用其中的部分实现，请先开 Issue 说明用途。
+[MIT](./LICENSE) © 2026 kunge9106
+
+可自由使用、修改、分发（含商用），只需保留版权声明与许可声明。
 
 ## 致谢
 

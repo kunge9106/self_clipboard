@@ -4,6 +4,7 @@
   "version": "2.0.0",
   "type": "module",
   "description": "轻贴 — 本地剪贴板管理工具（Tauri 2）",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
