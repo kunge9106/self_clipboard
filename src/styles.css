@@ -100,6 +100,17 @@ body {
   /* 窗口外框：acrylic 档下靠这条描边勾出圆角 */
   border-radius: var(--radius);
   overflow: hidden;
+  /* 在丙烯之上、内容之下再叠一层极淡的对角渐变，
+     给 Win10 单色 tint 的「平背景」补一点纵深（纯色壁纸下尤其明显） */
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0) 46%),
+    linear-gradient(0deg, rgba(0, 0, 0, 0.035), rgba(0, 0, 0, 0) 28%);
+}
+
+body.dark .app {
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 46%),
+    linear-gradient(0deg, rgba(0, 0, 0, 0.10), rgba(0, 0, 0, 0) 30%);
 }
 
 /* 噪点层：真·Windows 亚克力 = 模糊 + 色调 + **噪点** + 亮度层。
@@ -112,7 +123,7 @@ body {
   z-index: 998;
   pointer-events: none;
   border-radius: inherit;
-  opacity: 0.04;
+  opacity: 0.025;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   background-size: 140px 140px;
 }
@@ -544,6 +555,14 @@ body.dark .ctx-menu {
   background: var(--glass-strong);
   color: var(--text);
   font-family: var(--font);
+}
+
+/* 材质浓度滑块 */
+.settings input[type="range"] {
+  width: 180px;
+  height: 20px;
+  accent-color: var(--accent);
+  cursor: default;
 }
 
 .settings .hint {

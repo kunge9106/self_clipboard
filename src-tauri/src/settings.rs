@@ -29,6 +29,9 @@ pub struct Config {
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
+    /// 材质浓度：亚克力 tint 的 alpha 百分比（40–90，默认 74）
+    #[serde(default = "default_material_alpha")]
+    pub material_alpha: u32,
     /// 自定义缓存目录（None = 使用 app_data_dir/clipboard）
     #[serde(default)]
     pub cache_dir: Option<String>,
@@ -36,6 +39,10 @@ pub struct Config {
 
 fn default_retention() -> u32 {
     3
+}
+
+fn default_material_alpha() -> u32 {
+    74
 }
 
 impl Default for Config {
@@ -46,6 +53,7 @@ impl Default for Config {
             clean_include_pinned: false,
             clean_confirm_exit: false,
             retention_days: default_retention(),
+            material_alpha: default_material_alpha(),
             cache_dir: None,
         }
     }
@@ -118,6 +126,7 @@ pub fn get_settings() -> serde_json::Value {
         "cleanIncludePinned": cfg.clean_include_pinned,
         "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
+        "materialAlpha": cfg.material_alpha,
         "cacheDir": cfg.cache_dir,
         "autoStart": autostart::is_enabled(),
     })

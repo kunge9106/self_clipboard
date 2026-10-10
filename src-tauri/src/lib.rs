@@ -30,6 +30,25 @@ fn effect_info() -> serde_json::Value {
     }
 }
 
+/// 材质浓度（设置页滑块）：更新 tint alpha 并立即重刷亚克力
+#[tauri::command]
+fn set_material_alpha(app: tauri::AppHandle, value: u32) -> Result<(), String> {
+    settings::update(|c| c.material_alpha = value.clamp(40, 90));
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        if let Some(w) = app.get_webview_window("main") {
+            if let Ok(h) = w.hwnd() {
+                let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
+                effects::reapply_material(h.0 as isize, dark);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+    Ok(())
+}
+
 #[cfg(windows)]
 fn setup_effects(app: &tauri::AppHandle) {
     // —— 诊断：确认运行时配置与窗口实际状态是否一致 ——
@@ -121,6 +140,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             effect_info,
+            set_material_alpha,
             effects::drag_start,
             clipboard::get_history,
             clipboard::delete_item,

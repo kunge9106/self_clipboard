@@ -450,6 +450,9 @@ function settingsHtml() {
     <div class="row"><label>保留天数</label>
       <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
       <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
+    <div class="row"><label>材质浓度</label>
+      <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 74}" />
+      <span class="hint" id="material-val">${s.materialAlpha ?? 74}%（越高越厚实 · 越低越通透）</span></div>
     <div class="cache-box">
       <div class="cache-title">缓存目录 <span class="hint">仅保留近 ${s.retentionDays ?? 3} 天内容</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
@@ -529,6 +532,16 @@ function bindSettings(view) {
         toast("保存失败：" + e);
       }
     };
+
+  const material = view.querySelector("#set-material");
+  if (material) {
+    const label = view.querySelector("#material-val");
+    material.addEventListener("input", () => {
+      const v = parseInt(material.value, 10);
+      if (label) label.textContent = `${v}%（越高越厚实 · 越低越通透）`;
+      invoke("set_material_alpha", { value: v }).catch(() => {});
+    });
+  }
 
   view.querySelector("#btn-pick-dir").onclick = async () => {
     try {

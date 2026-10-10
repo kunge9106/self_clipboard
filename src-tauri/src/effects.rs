@@ -34,11 +34,18 @@ const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
 /// Win10 acrylic 的 tint，格式为 **0xAABBGGRR**（注意不是 RGBA）。
-/// alpha 太低（≤66%）时壁纸颜色会大量透出，观感发脏；太高（≥90%）
-/// 则模糊被盖死。80% 左右是「模糊清晰可见 + 壁纸脏色被压住」的平衡点，
-/// 再配合前端一层玻璃光泽渐变（styles.css .app::after）提升质感。
-const TINT_LIGHT: u32 = 0xCC_FF_FF_FF; // 白色 80%
-const TINT_DARK: u32 = 0xCC_1C_1C_1E; // #1E1C1C 80%
+///
+/// Fluent 规范：窗口级亚克力的 tint 透明度约 **70%–85%** 最自然——
+/// 太低会大量透出壁纸脏色、观感发脏；太高会把模糊盖死、发闷发平。
+/// 这里不写死，改由「材质浓度」配置（40–90%）动态计算，便于用户按壁纸微调。
+const TINT_RGB_LIGHT: u32 = 0x00_FF_FF_FF; // 白
+const TINT_RGB_DARK: u32 = 0x00_1C_1C_1E; // #1E1C1C
+
+/// 由「材质浓度」(tint alpha 百分比 40–90) 计算最终 tint 值
+pub fn tint_for(dark: bool, alpha_pct: u32) -> u32 {
+    let a = alpha_pct.clamp(40, 90);
+    (a << 24) | if dark { TINT_RGB_DARK } else { TINT_RGB_LIGHT }
+}
 
 // ---------------------------------------------------------------------------
 // FFI 声明
@@ -434,13 +441,18 @@ fn apply_mica(hwnd: isize) -> Result<(), i32> {
     }
 }
 
-/// Win10 1809–22H2：真·acrylic
+/// Win10 1809–22H2：真·acrylic（tint 透明度取自「材质浓度」配置）
 fn apply_acrylic(hwnd: isize, dark: bool) -> Result<(), i32> {
-    set_accent_state(
-        hwnd,
-        ACCENT_ENABLE_ACRYLICBLURBEHIND,
-        if dark { TINT_DARK } else { TINT_LIGHT },
-    )
+    let alpha = crate::settings::get().material_alpha;
+    set_accent_state(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, tint_for(dark, alpha))
+}
+
+/// 材质浓度变化后立即重刷 acrylic（设置页滑块用）
+pub fn reapply_material(hwnd: isize, dark: bool) {
+    if current_tier() == Tier::Acrylic {
+        let _ = apply_acrylic(hwnd, dark);
+        nudge(hwnd);
+    }
 }
 
 fn set_accent_state(hwnd: isize, accent_state: u32, tint: u32) -> Result<(), i32> {
