@@ -31,6 +31,10 @@
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  /* 卡片阴影：材质浓度拉高时（窗口接近不透明）卡片底色与窗口几乎同色，
+     1px 描边会糊在里面看不见，靠这层阴影把卡片「托起来」以便识别。 */
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.06),
+    0 2px 8px -2px rgba(0, 0, 0, 0.14);
 }
 
 body.dark {
@@ -44,6 +48,8 @@ body.dark {
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 2px 8px -2px rgba(0, 0, 0, 0.36);
 }
 
 /* 兜底档：没有真材质时不透明，观感不能崩 */
@@ -504,6 +510,8 @@ body.dark .age-filter option {
   border-radius: var(--radius-sm);
   background: var(--glass);
   border: 1px solid var(--stroke);
+  /* 高浓度下描边会与窗口底色糊在一起，靠阴影保证卡片可识别 */
+  box-shadow: var(--card-shadow);
   cursor: default;
   transition: background 0.12s ease, transform 0.08s ease;
 }
