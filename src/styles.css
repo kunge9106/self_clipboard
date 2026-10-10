@@ -622,12 +622,12 @@ body.dark .ctx-menu {
   color: var(--text);
 }
 
-/* 图片条目缩略图 */
+/* 图片条目缩略图（同 V1：max-height 80px） */
 .card-image {
   max-width: 100%;
-  max-height: 140px;
+  max-height: 80px;
   object-fit: contain;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--stroke);
   margin-top: 4px;
   display: block;

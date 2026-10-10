@@ -182,7 +182,7 @@ pub fn init(app: &AppHandle) {
 
     // 目录优先级：用户自定义缓存目录 > app_data_dir/clipboard（同 v1 imageCacheDir）
     let dir = match crate::settings::get().cache_dir {
-        Some(d) => PathBuf::from(d),
+        Some(d) => PathBuf::from(strip_ext_prefix(&d)),
         None => app
             .path()
             .app_data_dir()
@@ -666,12 +666,24 @@ pub struct CacheInfo {
     pub size: u64,
 }
 
+/// 去掉 Windows `canonicalize` 产生的扩展长度前缀，让路径显示为普通形式：
+/// `\\?\E:\a` → `E:\a`；`\\?\UNC\server\share` → `\\server\share`。
+fn strip_ext_prefix(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 #[tauri::command]
 pub fn cache_info() -> CacheInfo {
     let dir = DIR.get().cloned().unwrap_or_default();
     let (count, size) = dir_stats(&dir);
     CacheInfo {
-        dir: dir.to_string_lossy().to_string(),
+        dir: strip_ext_prefix(&dir.to_string_lossy()),
         count,
         size,
     }
@@ -697,16 +709,25 @@ fn dir_stats(dir: &PathBuf) -> (u64, u64) {
     (count, size)
 }
 
-/// 选择新的缓存目录：移动全部数据 → 写配置 → 短暂延迟后重启应用使 DIR 生效
+/// 选择新的缓存目录：移动全部数据 → 写配置 → 短暂延迟后重启应用使 DIR 生效。
+///
+/// 关键：`blocking_pick_folder` 不能在主线程调用（会死锁，表现为「点了没反应」），
+/// 因此放到阻塞线程池上执行，本命令声明为 async。
 #[tauri::command]
-pub fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let picked = app
-        .dialog()
-        .file()
-        .set_title("选择缓存目录")
-        .blocking_pick_folder();
+    let app_for_dialog = app.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app_for_dialog
+            .dialog()
+            .file()
+            .set_title("选择缓存目录")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
     let Some(picked) = picked else {
         return Ok(None); // 用户取消
     };
@@ -719,19 +740,18 @@ pub fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
     if !new_dir.is_dir() {
         return Err("所选路径不是目录".into());
     }
-    let new_dir = new_dir
-        .canonicalize()
-        .unwrap_or(new_dir);
+    // 不做 canonicalize（会引入 \\?\ 前缀），仅清理可能存在的扩展前缀
+    let new_dir_str = strip_ext_prefix(&new_dir.to_string_lossy());
 
     if let Some(old) = DIR.get() {
-        if old == &new_dir {
-            return Ok(Some(new_dir.to_string_lossy().to_string()));
+        if old.to_string_lossy() == new_dir_str {
+            return Ok(Some(new_dir_str));
         }
         move_dir_contents(old, &new_dir).map_err(|e| format!("迁移缓存文件失败：{e}"))?;
     }
 
-    crate::settings::update(|c| c.cache_dir = Some(new_dir.to_string_lossy().to_string()));
-    println!("[clipboard] 缓存目录已迁移至 {}，即将重启", new_dir.display());
+    crate::settings::update(|c| c.cache_dir = Some(new_dir_str.clone()));
+    println!("[clipboard] 缓存目录已迁移至 {new_dir_str}，即将重启");
 
     // DIR 是 OnceLock，运行期不可变：迁移完成后重启进程，让新目录在下次启动生效
     let handle = app.clone();
@@ -739,7 +759,7 @@ pub fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
         std::thread::sleep(std::time::Duration::from_millis(600));
         handle.restart();
     });
-    Ok(Some(new_dir.to_string_lossy().to_string()))
+    Ok(Some(new_dir_str))
 }
 
 /// 递归把 old 内所有内容移动到 new（跨卷也适用：rename 失败退回 copy+delete）

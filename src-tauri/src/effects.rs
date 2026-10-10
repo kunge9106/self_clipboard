@@ -31,7 +31,6 @@ const DWMWCP_ROUND: u32 = 2;
 
 // SetWindowCompositionAttribute
 const WCA_ACCENT_POLICY: u32 = 19;
-const ACCENT_ENABLE_GRADIENT: u32 = 1;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
 /// Win10 acrylic 的 tint，格式为 **0xAABBGGRR**（注意不是 RGBA）。
@@ -40,14 +39,6 @@ const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 /// 再配合前端一层玻璃光泽渐变（styles.css .app::after）提升质感。
 const TINT_LIGHT: u32 = 0xCC_FF_FF_FF; // 白色 80%
 const TINT_DARK: u32 = 0xCC_1C_1C_1E; // #1E1C1C 80%
-
-/// 拖动期间的纯色（ACCENT_ENABLE_GRADIENT，不做模糊）色调。
-/// 与上面的 acrylic tint 同色系，alpha 提到 95%，避免拖动时透出清晰桌面。
-const DRAG_TINT_LIGHT: u32 = 0xF2_FF_FF_FF;
-const DRAG_TINT_DARK: u32 = 0xF2_1C_1C_1E;
-
-/// 记住当前是否深色，供拖动开始/结束时恢复对应色调
-static CURRENT_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // FFI 声明
@@ -245,7 +236,6 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     let tier = classify(build);
     let _ = BUILD.set(build);
     let _ = TIER.set(tier);
-    CURRENT_DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
 
     println!(
         "[effects] windows build={} → tier={} (radius≤{}px)",
@@ -463,41 +453,105 @@ pub fn refresh_theme(hwnd: isize, dark: bool) {
 }
 
 // ---------------------------------------------------------------------------
-// 拖动与材质：
-// Win10 真 acrylic 在窗口移动/缩放时逐帧重算模糊，DWM 跟不上就会退化成
-// 一张「幽灵窗口」（白框 + 原生标题栏），而且它会盖住标题栏按钮，
-// 导致最大化/最小化点不动（用户实测）。
+// 自定义拖动（替代系统移动循环 startDragging/SC_MOVE）
 //
-// 修法：移动期间把材质临时压成**同色调的纯色**（ACCENT_ENABLE_GRADIENT，
-// 完全不做模糊，DWM 零开销即可实时合成 → 不再产生幽灵窗口），松手立刻
-// 恢复 acrylic。注意这不是之前被否决的 BLURBEHIND 方案——这里换的是
-// 「同一色调的纯色」，不会引入第二种模糊观感造成突兀。
+// 问题：系统移动循环在 Win10 acrylic 下会触发 DWM 的「幽灵窗口」
+// （白框 + 原生标题栏，且盖住标题栏按钮 → 最大化/最小化点不动）；
+// 之前用「拖动时改材质」绕开，但会造成拖动瞬间变色（用户否决）。
+//
+// 现在的做法：完全不进系统移动循环，自己拖——
+//   标题栏按下 → SetCapture 抢占鼠标 → WndProc 里按光标位移调 SetWindowPos
+//   → 抬起释放。全程材质保持 acrylic（不变色），也无幽灵窗口。
 // ---------------------------------------------------------------------------
 
-const WM_ENTERSIZEMOVE: u32 = 0x0231;
-const WM_EXITSIZEMOVE: u32 = 0x0232;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONUP: u32 = 0x0201;
 
-fn set_dragging(hwnd: isize, dragging: bool) {
-    if current_tier() != Tier::Acrylic {
-        return;
+static DRAG_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// (起始光标 X, 起始光标 Y, 起始窗口 X, 起始窗口 Y)
+static DRAG_ORIGIN: std::sync::Mutex<(i32, i32, i32, i32)> =
+    std::sync::Mutex::new((0, 0, 0, 0));
+
+/// 前端在标题栏按下时调用：记录起点并抢占鼠标
+pub fn begin_custom_drag(hwnd: isize) {
+    unsafe {
+        extern "system" {
+            fn GetCursorPos(pt: *mut Rect) -> i32;
+            fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+            fn SetCapture(hwnd: isize) -> isize;
+        }
+        let mut cur: Rect = std::mem::zeroed();
+        let mut wr: Rect = std::mem::zeroed();
+        // GetCursorPos 写入的是 POINT（x,y），与 Rect 前两个字段(left,top)布局一致
+        if GetCursorPos(&mut cur) == 0 || GetWindowRect(hwnd, &mut wr) == 0 {
+            return;
+        }
+        if let Ok(mut o) = DRAG_ORIGIN.lock() {
+            *o = (cur.left, cur.top, wr.left, wr.top);
+        }
+        DRAG_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
+        SetCapture(hwnd);
     }
-    let dark = CURRENT_DARK.load(std::sync::atomic::Ordering::Relaxed);
-    let (state, tint) = if dragging {
-        (
-            ACCENT_ENABLE_GRADIENT,
-            if dark { DRAG_TINT_DARK } else { DRAG_TINT_LIGHT },
-        )
-    } else {
-        (
-            ACCENT_ENABLE_ACRYLICBLURBEHIND,
-            if dark { TINT_DARK } else { TINT_LIGHT },
-        )
-    };
-    let _ = set_accent_state(hwnd, state, tint);
-    if !dragging {
-        // 恢复后动一下窗口，强制 DWM 立刻重算回模糊
-        nudge(hwnd);
+}
+
+/// 处理拖动期间的鼠标消息；返回 true 表示已处理（调用方应直接 return）
+fn handle_drag_msg(hwnd: isize, msg: u32) -> bool {
+    if !DRAG_ARMED.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
     }
+    unsafe {
+        extern "system" {
+            fn GetCursorPos(pt: *mut Rect) -> i32;
+            fn SetWindowPos(
+                hwnd: isize,
+                after: isize,
+                x: i32,
+                y: i32,
+                cx: i32,
+                cy: i32,
+                flags: u32,
+            ) -> i32;
+            fn ReleaseCapture() -> i32;
+        }
+        const SWP_NOSIZE: u32 = 0x0001;
+        const SWP_NOZORDER: u32 = 0x0004;
+        const SWP_NOACTIVATE: u32 = 0x0010;
+
+        if msg == WM_MOUSEMOVE {
+            let (sx, sy, wx, wy) = DRAG_ORIGIN.lock().map(|o| *o).unwrap_or((0, 0, 0, 0));
+            let mut cur: Rect = std::mem::zeroed();
+            if GetCursorPos(&mut cur) != 0 {
+                SetWindowPos(
+                    hwnd,
+                    0,
+                    wx + (cur.left - sx),
+                    wy + (cur.top - sy),
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            return true;
+        }
+        if msg == WM_LBUTTONUP {
+            DRAG_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
+            ReleaseCapture();
+            return true;
+        }
+    }
+    false
+}
+
+/// 前端调用入口（标题栏 mousedown 时 invoke）
+#[tauri::command]
+pub fn drag_start(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("main") {
+        if let Ok(h) = w.hwnd() {
+            begin_custom_drag(h.0 as isize);
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -549,12 +603,9 @@ pub fn install_focus_hook(hwnd: isize) {
             crate::clipboard::on_clipboard_update();
             return 0;
         }
-        // 拖动/缩放窗口：临时把 acrylic 压成纯色，避免 DWM 追不上逐帧模糊
-        // 而退化成「幽灵窗口」（白框 + 原生标题栏，会挡住标题栏按钮）
-        if msg == WM_ENTERSIZEMOVE {
-            set_dragging(hwnd, true);
-        } else if msg == WM_EXITSIZEMOVE {
-            set_dragging(hwnd, false);
+        // 自定义拖动：接管鼠标移动/抬起（不进入系统移动循环 → 无幽灵窗口、不变色）
+        if handle_drag_msg(hwnd, msg) {
+            return 0;
         }
         let orig = ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
         unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }

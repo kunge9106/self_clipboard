@@ -75,6 +75,22 @@ function bindWindowControls() {
   syncMaxState();
 }
 
+// 自定义拖动（不用系统移动循环，避免 Win10 acrylic 的幽灵窗口 & 拖动变色）
+function bindDrag() {
+  const bar = document.querySelector(".titlebar");
+  if (!bar) return;
+  bar.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest(".window-controls")) return; // 窗口按钮不参与拖动
+    invoke("drag_start").catch((err) => console.error("drag failed", err));
+  });
+  // 双击标题栏空白处 → 最大化/还原
+  bar.addEventListener("dblclick", (e) => {
+    if (e.target.closest(".window-controls")) return;
+    appWindow.toggleMaximize().catch(() => {});
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 退出确认弹窗（需求 #2）
 // ---------------------------------------------------------------------------
@@ -174,9 +190,37 @@ function filtered() {
 }
 
 function timeStr(ts) {
+  const now = Date.now();
+  const diff = now - ts;
+  if (diff < 0) return "刚刚";
+  const s = Math.floor(diff / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  // 1 秒起 → 秒；满 60 秒 → 分钟；满 60 分 → 小时；满 3 小时 → 绝对时间
+  if (s < 60) return `${Math.max(1, s)} 秒钟前`;
+  if (m < 60) return `${m} 分钟前`;
+  if (h < 3) return `${h} 小时前`;
   const d = new Date(ts);
+  const t = new Date(now);
   const p = (n) => String(n).padStart(2, "0");
-  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const sameDay =
+    d.getFullYear() === t.getFullYear() &&
+    d.getMonth() === t.getMonth() &&
+    d.getDate() === t.getDate();
+  return sameDay ? hm : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
+}
+
+/** 每秒刷新相对时间标签（只改文本，不重渲染列表，避免图片闪烁） */
+function startTimeTicker() {
+  setInterval(() => {
+    document.querySelectorAll(".card-time").forEach((el) => {
+      const ts = Number(el.dataset.ts);
+      if (!ts) return;
+      const next = timeStr(ts);
+      if (el.textContent !== next) el.textContent = next;
+    });
+  }, 1000);
 }
 
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
@@ -245,7 +289,7 @@ async function cardEl(item) {
   const meta = document.createElement("div");
   meta.className = "card-meta";
   meta.innerHTML = `<span class="card-kind">${KIND_LABEL[item.kind] || item.kind}</span>
-    <span>${timeStr(item.ts)}</span>${item.pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
+    <span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>${item.pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
   body.appendChild(meta);
 
   // 文本 / 文件摘要；图片加载失败时才回退显示 [图片] 占位
@@ -476,6 +520,10 @@ function bindSettings(view) {
       retention.value = days;
       try {
         await invoke("set_retention_days", { days });
+        // 立即按新天数清理并刷新列表，让「修改生效」可见
+        items = await invoke("get_history");
+        settings = await invoke("get_settings");
+        render();
         toast(days === 0 ? "已改为永久保留" : `仅保留近 ${days} 天内容`);
       } catch (e) {
         toast("保存失败：" + e);
@@ -512,10 +560,12 @@ function bindSettings(view) {
 async function main() {
   // 控件绑定优先（即便后续异步步骤出错，也能保证可交互）
   bindWindowControls();
+  bindDrag();
   bindExitModal();
   bindClearView();
   bindNav();
   bindSearch();
+  startTimeTicker();
 
   await applyEffectInfo();
 

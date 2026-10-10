@@ -120,6 +120,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             effect_info,
+            effects::drag_start,
             clipboard::get_history,
             clipboard::delete_item,
             clipboard::delete_items,
