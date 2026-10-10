@@ -293,14 +293,26 @@ function cardEl(item) {
     <span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>${item.pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
   body.appendChild(meta);
 
-  // 摘要文本：图片条目也走同一套布局（只显示「[图片]」），
-  // 真正的大图改为鼠标悬浮时在卡片旁弹出（见 bindImagePreview）
-  const preview = document.createElement("div");
-  preview.className = "card-preview";
-  preview.textContent = item.preview || "";
-  body.appendChild(preview);
-
-  if (item.kind === "image") bindImagePreview(card, item);
+  if (item.kind === "image") {
+    // 图片条目：内容区放小缩略图（不显示「[图片]」占位字），
+    // 大图仍由鼠标悬浮时的浮层给出（见 bindImagePreview）
+    const img = document.createElement("img");
+    img.className = "card-image";
+    img.alt = "图片";
+    img.loading = "lazy";
+    loadImage(item.id)
+      .then((url) => {
+        img.src = url;
+      })
+      .catch(() => img.remove()); // 文件缺失/损坏 → 不占位
+    body.appendChild(img);
+    bindImagePreview(card, item);
+  } else {
+    const preview = document.createElement("div");
+    preview.className = "card-preview";
+    preview.textContent = item.preview || "";
+    body.appendChild(preview);
+  }
   card.appendChild(body);
 
   // 左键 → 复制回剪贴板；右键 → 上下文菜单
@@ -322,8 +334,22 @@ function cardEl(item) {
 
 /** id → dataURL，已读过的图片缓存，避免反复读取 */
 const imageCache = new Map();
+const IMAGE_CACHE_MAX = 24;
 let previewBox = null;
 let previewTimer = null;
+
+/** 读取图片（dataURL）；命中缓存则不再走 IPC / 磁盘。列表缩略图与悬浮预览共用。 */
+async function loadImage(id) {
+  const hit = imageCache.get(id);
+  if (hit) return hit;
+  const url = await invoke("get_image", { id: id });
+  imageCache.set(id, url);
+  // 只保留最近若干张，避免长时间使用后 dataURL 撑爆内存
+  if (imageCache.size > IMAGE_CACHE_MAX) {
+    imageCache.delete(imageCache.keys().next().value);
+  }
+  return url;
+}
 
 function ensurePreviewBox() {
   if (previewBox) return previewBox;
@@ -377,18 +403,11 @@ async function showImagePreview(card, item) {
   previewTimer = null;
   if (!card.isConnected || !card.matches(":hover")) return;
 
-  let url = imageCache.get(item.id);
-  if (!url) {
-    try {
-      url = await invoke("get_image", { id: item.id });
-      imageCache.set(item.id, url);
-      // 只保留最近若干张，避免长时间使用后 dataURL 撑爆内存
-      if (imageCache.size > 24) {
-        imageCache.delete(imageCache.keys().next().value);
-      }
-    } catch {
-      return; // 图片文件缺失/损坏 → 不弹预览
-    }
+  let url;
+  try {
+    url = await loadImage(item.id);
+  } catch {
+    return; // 图片文件缺失/损坏 → 不弹预览
   }
   // 读取期间鼠标可能已移开
   if (!card.isConnected || !card.matches(":hover")) return;
