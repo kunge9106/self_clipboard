@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="840" viewBox="0 0 1280 840" role="img" aria-label="轻贴主界面示意：左侧为历史/文本/图片/文件/收藏导航，右侧为搜索与剪贴板历史列表">
+  <defs>
+    <linearGradient id="wall" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e7edf7"/>
+      <stop offset="0.5" stop-color="#d5deee"/>
+      <stop offset="1" stop-color="#c3cfe4"/>
+    </linearGradient>
+    <radialGradient id="blobA" cx="0.2" cy="0.15" r="0.7">
+      <stop offset="0" stop-color="#8fb0ff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#8fb0ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="blobB" cx="0.9" cy="0.9" r="0.7">
+      <stop offset="0" stop-color="#ffb9d6" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#ffb9d6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sheet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.82"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.68"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.22"/>
+    </linearGradient>
+    <linearGradient id="thumb" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9db8ff"/>
+      <stop offset="1" stop-color="#6a8cf0"/>
+    </linearGradient>
+    <filter id="cardShadow" x="-10%" y="-20%" width="120%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#33406b" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="840" fill="url(#wall)"/>
+  <rect width="1280" height="840" fill="url(#blobA)"/>
+  <rect width="1280" height="840" fill="url(#blobB)"/>
+
+  <!-- 窗口 -->
+  <rect x="40" y="40" width="1200" height="760" rx="18" fill="url(#sheet)" stroke="#ffffff" stroke-opacity="0.75"/>
+  <rect x="40" y="40" width="1200" height="760" rx="18" fill="none" stroke="#3a465e" stroke-opacity="0.10"/>
+
+  <!-- 标题栏 -->
+  <g>
+    <rect x="52" y="62" width="26" height="26" rx="8" fill="#4b6fe0"/>
+    <rect x="60" y="68" width="10" height="4" rx="2" fill="#fff" fill-opacity="0.9"/>
+    <rect x="59" y="71" width="12" height="12" rx="3" fill="none" stroke="#fff" stroke-opacity="0.85" stroke-width="2"/>
+    <text x="88" y="82" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="19" font-weight="600" fill="#1b2029">轻贴</text>
+
+    <g fill="none" stroke="#4a5468" stroke-width="1.7" stroke-linecap="round">
+      <path d="M1080 75h14" />
+      <rect x="1114" y="69" width="12" height="12" rx="2"/>
+      <path d="M1152 68l12 12M1164 68l-12 12"/>
+    </g>
+  </g>
+
+  <path d="M40 104h1200" stroke="#3a465e" stroke-opacity="0.10"/>
+
+  <!-- 侧栏 -->
+  <rect x="40" y="104" width="188" height="696" fill="url(#side)"/>
+  <path d="M228 104v696" stroke="#3a465e" stroke-opacity="0.10"/>
+
+  <!-- 导航项：历史（选中）/ 文本 / 图片 / 文件 / 收藏 -->
+  <rect x="56" y="126" width="156" height="40" rx="10" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.08"/>
+  <g font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15.5">
+    <g transform="translate(70,136)">
+      <circle cx="8" cy="8" r="6.6" fill="none" stroke="#4b6fe0" stroke-width="1.7"/>
+      <path d="M8 4.6V8l2.4 1.6" stroke="#4b6fe0" stroke-width="1.7" fill="none" stroke-linecap="round"/>
+      <text x="26" y="13.5" fill="#111318" font-weight="700">历史</text>
+    </g>
+
+    <g transform="translate(70,182)" fill="#3b4354">
+      <path d="M1 2.5h14M1 8h14M1 13.5h9" stroke="#5a6478" stroke-width="1.7" fill="none" stroke-linecap="round"/>
+      <text x="26" y="13.5" font-weight="600">文本</text>
+    </g>
+
+    <g transform="translate(70,228)" fill="#3b4354">
+      <rect x="1" y="2" width="14" height="12" rx="2.4" fill="none" stroke="#5a6478" stroke-width="1.7"/>
+      <circle cx="5.6" cy="6" r="1.3" fill="#5a6478"/>
+      <path d="M2 12l4-3.6 2.6 2.2 2.4-2 3.6 3.2" fill="none" stroke="#5a6478" stroke-width="1.7" stroke-linecap="round"/>
+      <text x="26" y="13.5" font-weight="600">图片</text>
+    </g>
+
+    <g transform="translate(70,274)" fill="#3b4354">
+      <path d="M1 4.6A1.6 1.6 0 012.6 3h3.4l1.6 2.2h6A1.6 1.6 0 0115 6.8v6.6A1.6 1.6 0 0113.4 13.4H2.6A1.6 1.6 0 011 11.8z" fill="none" stroke="#5a6478" stroke-width="1.7" stroke-linejoin="round"/>
+      <text x="26" y="13.5" font-weight="600">文件</text>
+    </g>
+
+    <g transform="translate(70,320)" fill="#3b4354">
+      <path d="M8 1.6l1.9 4.2 4.3.6-3.1 3 .8 4.4L8 11.7l-3.9 2.1.8-4.4-3.1-3 4.3-.6z" fill="none" stroke="#5a6478" stroke-width="1.6" stroke-linejoin="round"/>
+      <text x="26" y="13.5" font-weight="600">收藏</text>
+    </g>
+
+    <!-- 设置（底部） -->
+    <g transform="translate(70,742)" fill="#3b4354">
+      <circle cx="8" cy="8" r="3" fill="none" stroke="#5a6478" stroke-width="1.6"/>
+      <circle cx="8" cy="8" r="6.6" fill="none" stroke="#5a6478" stroke-width="1.6" stroke-dasharray="2.6 2.4"/>
+      <text x="26" y="13.5" font-weight="600">设置</text>
+    </g>
+  </g>
+
+  <!-- 搜索栏 -->
+  <rect x="256" y="126" width="952" height="40" rx="10" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.10"/>
+  <g transform="translate(276,138)" fill="none" stroke="#7c8698" stroke-width="1.8">
+    <circle cx="6.5" cy="6.5" r="4.6"/>
+    <path d="M10.2 10.2L14 14" stroke-linecap="round"/>
+  </g>
+  <text x="302" y="152" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="14" fill="#98a1b2">搜索剪贴板历史…</text>
+
+  <!-- 卡片 1：文本 -->
+  <g filter="url(#cardShadow)">
+    <rect x="256" y="186" width="952" height="86" rx="12" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.09"/>
+  </g>
+  <text x="280" y="212" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12.5" font-weight="600" fill="#6d7686">文本 · 2 分钟前</text>
+  <rect x="280" y="226" width="700" height="9" rx="4.5" fill="#c9cfdb"/>
+  <rect x="280" y="244" width="520" height="9" rx="4.5" fill="#d8dde6"/>
+
+  <!-- 卡片 2：图片 -->
+  <g filter="url(#cardShadow)">
+    <rect x="256" y="288" width="952" height="86" rx="12" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.09"/>
+  </g>
+  <rect x="280" y="302" width="58" height="58" rx="8" fill="url(#thumb)"/>
+  <circle cx="297" cy="319" r="4" fill="#ffffff" fill-opacity="0.85"/>
+  <path d="M284 352l16-14 10 9 9-8 13 13" fill="none" stroke="#ffffff" stroke-opacity="0.9" stroke-width="2.2" stroke-linejoin="round"/>
+  <text x="354" y="322" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12.5" font-weight="600" fill="#6d7686">图片 · 1920 × 1080 · 5 分钟前</text>
+  <rect x="354" y="336" width="320" height="9" rx="4.5" fill="#c9cfdb"/>
+
+  <!-- 卡片 3：文本 -->
+  <g filter="url(#cardShadow)">
+    <rect x="256" y="390" width="952" height="86" rx="12" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.09"/>
+  </g>
+  <text x="280" y="416" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12.5" font-weight="600" fill="#6d7686">文本 · 12 分钟前</text>
+  <rect x="280" y="430" width="640" height="9" rx="4.5" fill="#c9cfdb"/>
+  <rect x="280" y="448" width="430" height="9" rx="4.5" fill="#d8dde6"/>
+
+  <!-- 卡片 4：文件（半透明，示意） -->
+  <g filter="url(#cardShadow)" opacity="0.55">
+    <rect x="256" y="492" width="952" height="86" rx="12" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.09"/>
+  </g>
+  <g opacity="0.55">
+    <rect x="280" y="508" width="54" height="54" rx="8" fill="#eef1f7" stroke="#3a465e" stroke-opacity="0.08"/>
+    <path d="M298 522h9l4 5h13v15h-26z" fill="none" stroke="#8b93a5" stroke-width="2" stroke-linejoin="round"/>
+    <text x="352" y="526" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12.5" font-weight="600" fill="#6d7686">文件 · report.xlsx 等 3 个文件 · 20 分钟前</text>
+    <rect x="352" y="540" width="300" height="9" rx="4.5" fill="#d8dde6"/>
+  </g>
+
+  <!-- 状态栏 -->
+  <path d="M228 756h1012" stroke="#3a465e" stroke-opacity="0.10"/>
+  <text x="276" y="792" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13.5" fill="#6d7686">共 128 条</text>
+  <text x="640" y="792" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13.5" fill="#98a1b2">v2.0.0</text>
+  <g transform="translate(1168,776)" fill="none" stroke="#8b93a5" stroke-width="1.7" stroke-linecap="round">
+    <path d="M1.5 4h13M6 2h3M3 4l.7 9a1.4 1.4 0 001.4 1.3h4.8A1.4 1.4 0 0011.3 13L12 4M6.5 7v4.6M9.5 7v4.6"/>
+  </g>
+</svg>
