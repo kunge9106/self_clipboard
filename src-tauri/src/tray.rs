@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
 static TRAY: Mutex<Option<tauri::tray::TrayIcon>> = Mutex::new(None);
@@ -149,6 +149,43 @@ fn open_menu(app: &AppHandle, pos: PhysicalPosition<f64>) {
     let _ = win.show();
     let _ = win.set_focus();
     apply_material(&win);
+
+    // 菜单页是常驻的，只在加载时读一次配置的话，用户改完「材质浓度 / 圆角模式」再右键
+    // 还是旧的观感。所以每次弹出都把**当前**外观参数随事件推给页面。
+    // 参数由 Rust 直接算好放在 payload 里（不让页面再发两次 IPC 回来查），
+    // 页面收到即同步应用，基本不会出现旧样式闪一下。
+    // 首次弹出时页面可能还没加载完、事件会丢——但那种情况下页面刚好在做首次读取，
+    // 读到的本来就是最新值，没有影响。
+    let _ = app.emit_to(MENU_LABEL, "tray-menu-open", look(&win));
+}
+
+/// 托盘菜单需要的外观参数（与主窗口同一份配置，保证观感一致）
+#[derive(Clone, serde::Serialize)]
+pub struct MenuLook {
+    /// 没有真材质（solid 兜底档）→ 菜单必须给不透明底色
+    solid: bool,
+    /// 圆角模式 → 菜单用 CSS 圆角；否则直角（与系统 acrylic 的矩形吻合，四角零残留）
+    round: bool,
+    /// 材质浓度 → --glass-alpha（0–1）
+    alpha: f64,
+    dark: bool,
+}
+
+fn look(win: &WebviewWindow) -> MenuLook {
+    let cfg = crate::settings::get();
+    MenuLook {
+        solid: crate::effects::current_tier().as_str() == "solid",
+        round: cfg.round_mode,
+        alpha: cfg.material_alpha.clamp(10, 95) as f64 / 100.0,
+        dark: matches!(win.theme().unwrap_or(tauri::Theme::Light), tauri::Theme::Dark),
+    }
+}
+
+/// 菜单页首次加载时拉一次当前外观参数
+#[tauri::command]
+pub fn tray_menu_look(app: AppHandle) -> Result<MenuLook, String> {
+    let win = app.get_webview_window(MENU_LABEL).ok_or("菜单窗口不存在")?;
+    Ok(look(&win))
 }
 
 #[cfg(windows)]

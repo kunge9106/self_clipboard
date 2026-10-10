@@ -187,6 +187,7 @@ pub fn run() {
             settings::set_file_copy,
             tray::tray_show_main,
             tray::tray_quit,
+            tray::tray_menu_look,
         ]);
 
     #[cfg(windows)]
