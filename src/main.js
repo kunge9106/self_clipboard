@@ -216,7 +216,7 @@ function bindClearView() {
     try {
       await invoke("delete_items", { ids: targets.map((i) => i.id) });
       items = items.filter((i) => !targets.some((t) => t.id === i.id));
-      render();
+      render({ keepScroll: true });
       toast(query ? `已清理 ${targets.length} 条搜索结果` : `已清理 ${targets.length} 条`);
     } catch (e) {
       toast("清理失败：" + e);
@@ -329,8 +329,21 @@ function startTimeTicker() {
 
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
 
-function render() {
+/**
+ * 重绘列表。
+ *
+ * @param {{keepScroll?: boolean}} [opts]
+ *   keepScroll：保留当前滚动位置。适用于「列表就地变化」的场景——删除条目、
+ *   置顶/取消置顶、收藏、后台来了新内容。这些都不会改变用户正在看的位置，
+ *   跳回顶部属于纯粹的干扰。
+ *   切视图、改搜索词时**不要**开：那是换了一批数据，本来就该从头看。
+ *
+ * 为什么需要这个参数：本函数会 `view.innerHTML = ""` 并新建 `.history` 容器，
+ * 容器一换，scrollTop 必然归零。所以必须在重建**之前**把位置记下来。
+ */
+function render({ keepScroll = false } = {}) {
   hideImagePreview(); // 重绘后旧卡片已销毁，避免浮层残留
+  const prevTop = keepScroll && wrapEl ? wrapEl.scrollTop : 0;
   const view = document.getElementById("view");
   const toolbar = document.querySelector(".toolbar");
   const isSettings = currentView === "settings";
@@ -380,7 +393,28 @@ function render() {
   view.appendChild(wrapEl);
   setupMoreObserver(); // root 必须绑定到这个新的滚动容器
   appendBatch();
+  restoreScroll(prevTop);
   refreshMissing(list); // 文件条目的原路径可能已被移动/删除 → 打「已失效」标记
+}
+
+/**
+ * 还原滚动位置。
+ *
+ * 渐进渲染下第一批只有 PAGE_SIZE 条，撑不到原来的位置，所以边追加批次边还原，
+ * 直到内容够高（或全部渲染完）。追加的批数正好等于重建前 DOM 里的卡片数，
+ * 因此内存占用不会比渲染前更高。
+ */
+function restoreScroll(top) {
+  if (!wrapEl || top <= 0) return;
+  let guard = 0;
+  while (
+    wrapEl.scrollHeight - wrapEl.clientHeight < top &&
+    renderedUpTo < renderList.length &&
+    guard++ < 1000
+  ) {
+    appendBatch();
+  }
+  wrapEl.scrollTop = top;
 }
 
 // ---------------------------------------------------------------------------
@@ -811,7 +845,7 @@ function openContextMenu(x, y, item) {
         const idx = vs.indexOf(currentView);
         if (idx >= 0) vs.splice(idx, 1);
         else vs.push(currentView);
-        render();
+        render({ keepScroll: true });
       },
     },
     {
@@ -819,7 +853,7 @@ function openContextMenu(x, y, item) {
       act: async () => {
         await invoke("toggle_favorite", { id: item.id });
         item.favorite = !item.favorite;
-        render();
+        render({ keepScroll: true });
       },
     },
     {
@@ -828,7 +862,7 @@ function openContextMenu(x, y, item) {
       act: async () => {
         await invoke("delete_item", { id: item.id });
         items = items.filter((i) => i.id !== item.id);
-        render();
+        render({ keepScroll: true });
       },
     },
   ]);
@@ -1097,7 +1131,8 @@ async function main() {
     const item = e.payload;
     if (!items.some((i) => i.id === item.id)) {
       items.unshift(item);
-      render();
+      // 新内容插到顶部，但用户可能正在看下面的内容 → 别把位置顶掉
+      render({ keepScroll: true });
     }
   });
 }
