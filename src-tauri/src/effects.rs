@@ -168,11 +168,11 @@ impl Tier {
     }
 
     /// 该档位下 CSS 圆角能安全用多大（逻辑 px）。
-    /// Win10 acrylic 铺满整个窗口矩形、不认 CSS 圆角，
-    /// 超过 10px 时窗口裁剪圆角与内容圆角会互相打架。
+    /// Win10 acrylic 铺满整个窗口矩形、不认 CSS 圆角，只能靠 SetWindowRgn 裁。
+    /// 裁剪半径必须与 CSS 圆角**一致**，否则两者的边缘会错开露出硬边。
     pub fn max_radius(&self) -> u32 {
         match self {
-            Tier::Acrylic => 10,
+            Tier::Acrylic => 20,
             _ => 12,
         }
     }
@@ -182,7 +182,7 @@ impl Tier {
     pub fn region_radius(&self) -> u32 {
         match self {
             Tier::SystemBackdrop => 0,
-            Tier::Acrylic => 10,
+            Tier::Acrylic => 20,
             Tier::Mica | Tier::Solid => 12,
         }
     }
@@ -256,6 +256,12 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
 
     // 标题栏/系统区域跟随深色
     set_immersive_dark(hwnd, dark);
+
+    // 关掉 DWM 的非客户区渲染，消除沿窗口矩形绘制的直角边框/阴影
+    // （它不受 SetWindowRgn 影响，正是「圆角外那圈直角」的来源）
+    if tier != Tier::SystemBackdrop {
+        disable_nc_rendering(hwnd);
+    }
 
     let result = match tier {
         Tier::SystemBackdrop => apply_system_backdrop(hwnd),
@@ -382,6 +388,32 @@ pub fn begin_resize(hwnd: isize) {
             apply_rounded_corners(hwnd);
         }
     });
+}
+
+/// 关闭 DWM 对非客户区的渲染（标题栏边框 + 窗口阴影）。
+///
+/// 背景：tao 的无边框实现**保留了 WS_CAPTION 样式位**，只是用 WM_NCCALCSIZE
+/// 把非客户区吞掉。于是 DWM 依然认为这是个带标题栏的窗口，会沿着
+/// **窗口矩形**画一圈 1px 边框和投影——它是 DWM 合成层，**不受 SetWindowRgn
+/// 影响**。结果就是：四角被 SetWindowRgn 裁成圆角，但圆角外还留着一圈
+/// 直角的亮线/阴影（用户截图里那个「直角」就是这么来的）。
+///
+/// DWMNCRP_DISABLED 让 DWM 完全不管非客户区，窗口形状就只剩我们的区域裁剪。
+fn disable_nc_rendering(hwnd: isize) {
+    const DWMWA_NCRENDERING_POLICY: u32 = 2;
+    const DWMNCRP_DISABLED: u32 = 1;
+    unsafe {
+        let policy: u32 = DWMNCRP_DISABLED;
+        let hr = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const _ as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        if hr < 0 {
+            eprintln!("[effects] 关闭 NC 渲染失败 hr=0x{:08X}", hr);
+        }
+    }
 }
 
 fn set_immersive_dark(hwnd: isize, dark: bool) {

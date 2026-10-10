@@ -32,13 +32,12 @@ async function applyEffectInfo() {
 
   document.body.classList.add(TIER_CLASS[info.tier] || "tier-solid");
 
+  // 窗口圆角取后端给出的档位上限（Win10 acrylic 为 20px，必须与 SetWindowRgn 一致）
   const radius =
-    info.tier === "system-backdrop" ? 12 : Math.min(info.maxRadius || 10, 12);
+    info.tier === "system-backdrop" ? 12 : Math.min(info.maxRadius || 20, 20);
   document.documentElement.style.setProperty("--radius", radius + "px");
-  document.documentElement.style.setProperty(
-    "--radius-sm",
-    Math.max(6, radius - 2) + "px"
-  );
+  // 控件圆角（--radius-sm）保持 CSS 里的小值：大圆角只属于窗口本体，
+  // 否则按钮/卡片会被撑成胶囊形
 
   document.getElementById("effect-debug").textContent =
     `build ${info.build} · tier ${info.tier} · radius ${radius}px`;
