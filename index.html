@@ -9,18 +9,19 @@
   <body>
     <div class="app">
       <!-- 顶部条：可拖拽 + 软件图标 + 窗口控制 -->
-      <header class="titlebar" data-tauri-drag-region>
+      <header class="titlebar">
         <div class="brand">
           <img class="brand-logo" src="/src/assets/logo.png" alt="轻贴" />
           <span class="brand-name">轻贴</span>
         </div>
-        <div class="titlebar-spacer" data-tauri-drag-region></div>
+        <div class="titlebar-spacer"></div>
         <div class="window-controls">
           <button class="wc-btn" id="btn-minimize" title="最小化" aria-label="最小化">
             <svg viewBox="0 0 10 10"><path d="M0 5h10" /></svg>
           </button>
           <button class="wc-btn" id="btn-maximize" title="最大化" aria-label="最大化">
-            <svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" /></svg>
+            <svg class="ic-max" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9"/></svg>
+            <svg class="ic-restore" viewBox="0 0 10 10"><rect x="0.5" y="2.5" width="7" height="7"/><path d="M2.8 2.5V0.5H9.5V7.2H7.5"/></svg>
           </button>
           <button class="wc-btn wc-close" id="btn-close" title="关闭" aria-label="关闭">
             <svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" /></svg>
@@ -36,9 +37,9 @@
               <svg class="nav-icon" viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM8 4v4l3 2"/></svg>
               <span>历史</span>
             </button>
-            <button class="nav-item" data-view="pinned">
-              <svg class="nav-icon" viewBox="0 0 16 16"><path d="M8 1.5l2 4.5 4.5.6-3.3 3.2.8 4.7L8 12l-4 2.5.8-4.7L1.5 6.6 6 6z"/></svg>
-              <span>收藏</span>
+            <button class="nav-item" data-view="text">
+              <svg class="nav-icon" viewBox="0 0 16 16"><path d="M3 2.5h10M3 6.5h10M3 10.5h6.5"/></svg>
+              <span>文本</span>
             </button>
             <button class="nav-item" data-view="images">
               <svg class="nav-icon" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><circle cx="5.5" cy="6" r="1.2"/><path d="M1.5 11l4-3.5 3 2.5 2.5-2 3.5 3"/></svg>
@@ -48,11 +49,15 @@
               <svg class="nav-icon" viewBox="0 0 16 16"><path d="M1.5 4.5A1.5 1.5 0 013 3h3l1.5 2H13a1.5 1.5 0 011.5 1.5v6A1.5 1.5 0 0113 14H3a1.5 1.5 0 01-1.5-1.5z"/></svg>
               <span>文件</span>
             </button>
+            <button class="nav-item" data-view="favorites">
+              <svg class="nav-icon" viewBox="0 0 16 16"><path d="M8 1.5l2 4.5 4.5.6-3.3 3.2.8 4.7L8 12l-4 2.5.8-4.7L1.5 6.6 6 6z"/></svg>
+              <span>收藏</span>
+            </button>
           </nav>
 
           <div class="sidebar-footer">
             <button class="nav-item" data-view="settings">
-              <svg class="nav-icon" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1l1 2.2 2.4-.6 1 2.2 2.2 1-.6 2.4L15 9.4l-1 2.2-2.2 1 .6 2.4-2.2 1-1-2.2-2.4.6-1-2.2L1 10.6l.6-2.4L1 6.6l1-2.2 2.2-1L4.6 1l2.2 1z" opacity=".0"/></svg>
+              <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.6 1.8h2.8l.42 1.85c.5.17.96.42 1.37.74l1.8-.62 1.4 2.42-1.38 1.23a5.3 5.3 0 010 1.56l1.38 1.23-1.4 2.42-1.8-.62c-.41.32-.87.57-1.37.74L9.4 14.2H6.6l-.42-1.85a5.3 5.3 0 01-1.37-.74l-1.8.62-1.4-2.42 1.38-1.23a5.3 5.3 0 010-1.56L1.61 6.19l1.4-2.42 1.8.62c.41-.32.87-.57 1.37-.74z"/><circle cx="8" cy="8" r="2.1"/></svg>
               <span>设置</span>
             </button>
           </div>
@@ -65,11 +70,6 @@
               <svg class="search-icon" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
               <input id="search" type="text" placeholder="搜索剪贴板历史…" autocomplete="off" spellcheck="false" />
             </div>
-            <div class="toolbar-right">
-              <button class="btn-ghost" id="btn-pause" title="暂停录制">
-                <span id="pause-label">录制中</span>
-              </button>
-            </div>
           </div>
 
           <div class="view" id="view">
@@ -78,7 +78,40 @@
               <div class="empty-sub" id="effect-debug">正在读取材质档位…</div>
             </div>
           </div>
+
+          <footer class="statusbar">
+            <span class="statusbar-left" id="status-count">共 0 条</span>
+            <span class="statusbar-version" id="status-version"></span>
+            <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清搜索结果；置顶/收藏除外）">
+              <svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>
+            </button>
+          </footer>
         </main>
+      </div>
+    </div>
+
+    <!-- 窗口缩放热区：系统缩放循环无法节流（Win10 acrylic 下缩放严重滞后），
+         这里把边界判定收回，改由这些热区触发自定义缩放（见 effects.rs） -->
+    <div class="rz-layer">
+      <div class="rz rz-n" data-edge="1"></div>
+      <div class="rz rz-s" data-edge="2"></div>
+      <div class="rz rz-w" data-edge="4"></div>
+      <div class="rz rz-e" data-edge="8"></div>
+      <div class="rz rz-nw" data-edge="5"></div>
+      <div class="rz rz-ne" data-edge="9"></div>
+      <div class="rz rz-sw" data-edge="6"></div>
+      <div class="rz rz-se" data-edge="10"></div>
+    </div>
+
+    <!-- 退出确认弹窗（关闭时清理缓存 + 弹窗提醒开启时） -->
+    <div class="modal-mask" id="exit-modal" hidden>
+      <div class="modal">
+        <div class="modal-title">退出轻贴</div>
+        <div class="modal-text" id="exit-modal-text">退出时将清理缓存内容，确定退出吗？</div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="exit-cancel">取消</button>
+          <button class="btn-danger" id="exit-confirm">退出并清理</button>
+        </div>
       </div>
     </div>
 

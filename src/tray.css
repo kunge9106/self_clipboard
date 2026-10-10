@@ -1,0 +1,62 @@
+/* 托盘右键菜单样式。
+   直接 @import 主界面样式表，复用同一套 CSS 变量（材质色 / 描边 / 悬浮色 / 深色模式），
+   这样这个菜单和软件本体是同一套设计语言，不会出现「系统菜单」那种割裂感。
+   主界面里用不到的规则（.app/.card/...）多打包几 KB，换取零重复定义。 */
+@import "./styles.css";
+
+.tray-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  height: 100vh;
+  padding: 6px;
+  /* --menu-radius 由 tray.js 按「圆角模式」下发：直角模式下必须是 0，
+     否则 CSS 圆角会把系统 acrylic 的直角矩形露出来（主窗口踩过的同一个坑）。 */
+  border-radius: var(--menu-radius, 0px);
+  border: 1px solid var(--stroke);
+  background: rgb(var(--material-rgb) / var(--glass-alpha));
+  overflow: hidden;
+}
+
+.tray-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: default;
+}
+
+.tray-item:hover {
+  background: var(--glass-hover);
+}
+
+.tray-item:active {
+  background: var(--glass-strong);
+}
+
+.tray-item.danger {
+  color: #e81123;
+}
+
+.tray-item.danger:hover {
+  background: rgba(232, 17, 35, 0.12);
+}
+
+.tray-item svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

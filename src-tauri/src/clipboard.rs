@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -30,8 +30,6 @@ static HISTORY: OnceLock<Mutex<Vec<HistoryItem>>> = OnceLock::new();
 static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
 /// 本程序写回剪贴板后产生的序列号（应被忽略，避免自读）
 static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
-/// 暂停录制开关
-static PAUSED: AtomicBool = AtomicBool::new(false);
 /// id 计数器，避免同毫秒碰撞
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -44,6 +42,18 @@ pub struct HistoryItem {
     pub id: String,
     pub kind: String, // "text" | "image" | "files"
     pub ts: u64,
+    /// 置顶：**按分类（视图）独立** —— 记录这条内容在哪些分类里被置顶。
+    /// 取值与前端 `data-view` 一致："history" | "text" | "images" | "files" | "favorites"。
+    /// 在「文本」里置顶不会影响它在「历史」里的位置。
+    ///
+    /// 注意 `rename = "pinnedViews"`：这个结构体同时用于 IPC 与 index.json 持久化，
+    /// 整体加 camelCase 会让旧 index.json（text_path/img_path…）解析失败、丢掉数据，
+    /// 所以只给这个新字段单独改名，保证前端拿到的直接是 pinnedViews。
+    #[serde(default, rename = "pinnedViews")]
+    pub pinned_views: Vec<String>,
+    /// 兼容 v2.0 早期的**全局**置顶字段（已废弃）：只读不写，
+    /// 载入时迁移成 pinned_views = ["history"]。字段名保留是为了还能解析旧 index.json。
+    #[serde(default, skip_serializing)]
     pub pinned: bool,
     pub favorite: bool,
     /// 文本前若干字符 / "[图片]" / "N 个文件"
@@ -53,7 +63,17 @@ pub struct HistoryItem {
     pub text_path: Option<String>,
     /// 图片落盘路径（相对 DIR/images/）
     pub img_path: Option<String>,
+    /// 文件路径清单落盘路径（相对 DIR/files/，每行一个完整路径）
+    ///
+    /// 和文本一样「内容落盘」：缓存目录里必须有这条记录的实体，否则用户打开缓存目录
+    /// 会发现文件条目一条数据都没有。copy_back 以这个文件为唯一数据源。
+    #[serde(default)]
+    pub files_path: Option<String>,
     /// 文件路径列表（仅 files 类有）
+    ///
+    /// 保留在内存/index.json 里是刻意的：它只有几百字节，是**元数据**而不是内容，
+    /// 用来做搜索（按文件名）和快速回写；真正的实体清单在 files_path 指向的文件里。
+    #[serde(default)]
     pub files: Option<Vec<String>>,
 }
 
@@ -70,13 +90,6 @@ pub fn get_history() -> Vec<HistoryItem> {
 }
 
 #[tauri::command]
-pub fn set_paused(paused: bool) -> Result<(), String> {
-    PAUSED.store(paused, Ordering::Relaxed);
-    println!("[clipboard] 录制{}", if paused { "已暂停" } else { "已恢复" });
-    Ok(())
-}
-
-#[tauri::command]
 pub fn delete_item(id: String) -> Result<(), String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
@@ -90,8 +103,14 @@ pub fn delete_item(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn toggle_pin(id: String) -> Result<(), String> {
-    patch_item(&id, |i| i.pinned = !i.pinned)
+pub fn toggle_pin(id: String, view: String) -> Result<(), String> {
+    patch_item(&id, |i| {
+        if let Some(pos) = i.pinned_views.iter().position(|v| v == &view) {
+            i.pinned_views.remove(pos);
+        } else {
+            i.pinned_views.push(view.clone());
+        }
+    })
 }
 
 #[tauri::command]
@@ -124,9 +143,12 @@ pub fn get_image(id: String) -> Result<String, String> {
     Ok(format!("data:image/bmp;base64,{}", b64))
 }
 
-/// 把历史条目内容写回系统剪贴板（文本 + 文件列表；图片暂仅展示）
+/// 把历史条目内容写回系统剪贴板（文本 / 图片 / 文件列表）。
+///
+/// 返回 Ok(Some(提示)) 时前端用该提示替代默认的「已复制到剪贴板」——
+/// 目前只有文件条目会用到（部分原文件已失效、已跳过）。
 #[tauri::command]
-pub fn copy_back(id: String) -> Result<(), String> {
+pub fn copy_back(id: String) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let hist = HISTORY.get().unwrap().lock().unwrap();
     let item = hist.iter().find(|i| i.id == id).cloned().ok_or("条目不存在")?;
@@ -138,15 +160,113 @@ pub fn copy_back(id: String) -> Result<(), String> {
                 Some(rel) => fs::read_to_string(dir.join(rel)).map_err(|e| e.to_string())?,
                 None => item.preview.clone(),
             };
-            unsafe { write_text_to_clipboard(&text) }
+            unsafe { write_text_to_clipboard(&text) }.map(|_| None)
         }
         "files" => {
-            let files = item.files.ok_or("文件列表缺失")?;
-            unsafe { write_files_to_clipboard(&files) }
+            // 以落盘清单为唯一数据源（与文本条目走 text_path 一致）；
+            // 旧版 index.json 把路径内联在 files 里、没有 files_path，回退到内存中的 files。
+            let files: Vec<String> = match &item.files_path {
+                Some(rel) => fs::read_to_string(dir.join(rel))
+                    .map_err(|e| e.to_string())?
+                    .lines()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect(),
+                None => item.files.clone().ok_or("文件列表缺失")?,
+            };
+            if files.is_empty() {
+                return Err("文件列表为空".into());
+            }
+            // —— 失效检测 ——
+            // 文件条目存的是**路径引用**而不是文件副本，原文件被移动/改名/删除后就粘不出来了。
+            // 全部失效直接报错；部分失效就跳过失效的那几个，并把情况带回前端提示。
+            let total = files.len();
+            let alive: Vec<String> = files
+                .into_iter()
+                .filter(|p| std::path::Path::new(p).exists())
+                .collect();
+            if alive.is_empty() {
+                return Err(format!(
+                    "原文件已不存在（{total} 个都找不到了），可能已被移动、改名或删除"
+                ));
+            }
+            unsafe { write_files_to_clipboard(&alive)? }
+            let missing = total - alive.len();
+            Ok(if missing > 0 {
+                Some(format!(
+                    "已复制 {} 个文件（{missing} 个原文件已不存在，已跳过）",
+                    alive.len()
+                ))
+            } else {
+                None
+            })
         }
-        "image" => Err("图片写回暂未实现（当前版本仅展示）".into()),
+        "image" => {
+            // BMP 文件去掉 14 字节文件头即为 DIB，直接放回 CF_DIB
+            let rel = item.img_path.ok_or("图片文件缺失")?;
+            let bmp = fs::read(dir.join(rel)).map_err(|e| e.to_string())?;
+            if bmp.len() < 54 || &bmp[0..2] != b"BM" {
+                return Err("图片数据损坏".into());
+            }
+            unsafe { write_dib_to_clipboard(&bmp[14..]) }.map(|_| None)
+        }
         _ => Err("未知类型".into()),
     }
+}
+
+/// 失效检测（前端列表标记用）：传入条目 id，返回其中**至少有一个原路径已不存在**的 id。
+///
+/// 只做 `Path::exists()`（纯元数据查询，不读文件内容），几十条也是微秒级，
+/// 所以可以在每次渲染后调用。
+#[tauri::command]
+pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
+    let dir = DIR.get().cloned().unwrap_or_default();
+    let Some(hist) = HISTORY.get() else {
+        return Vec::new();
+    };
+    let hist = hist.lock().unwrap();
+    let mut dead = Vec::new();
+    for id in ids {
+        let Some(item) = hist.iter().find(|i| i.id == id) else {
+            continue;
+        };
+        if item.kind != "files" {
+            continue;
+        }
+        let paths: Vec<String> = match &item.files_path {
+            Some(rel) => fs::read_to_string(dir.join(rel))
+                .unwrap_or_default()
+                .lines()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+            None => item.files.clone().unwrap_or_default(),
+        };
+        if paths.is_empty() || paths.iter().any(|p| !std::path::Path::new(p).exists()) {
+            dead.push(id);
+        }
+    }
+    dead
+}
+
+#[tauri::command]
+pub fn delete_items(ids: Vec<String>) -> Result<(), String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    let mut removed = 0usize;
+    hist.retain(|i| {
+        if ids.iter().any(|id| id == &i.id) {
+            remove_item_files(&dir, i);
+            removed += 1;
+            false
+        } else {
+            true
+        }
+    });
+    drop(hist);
+    save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
+    println!("[clipboard] 批量删除 {removed} 条");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -161,18 +281,34 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| eprintln!("[clipboard] 取 app_data_dir 失败：{e}"))
-        .unwrap_or_else(|_| PathBuf::from("./clipboard-data"));
-    let dir = dir.join("clipboard");
+    // 目录优先级：用户自定义缓存目录 > app_data_dir/clipboard（同 v1 imageCacheDir）
+    let dir = match crate::settings::get().cache_dir {
+        Some(d) => PathBuf::from(strip_ext_prefix(&d)),
+        None => app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("./clipboard-data"))
+            .join("clipboard"),
+    };
 
     let _ = fs::create_dir_all(dir.join("data"));
     let _ = fs::create_dir_all(dir.join("images"));
+    let _ = fs::create_dir_all(dir.join("files"));
     let _ = DIR.set(dir.clone());
 
-    let hist = load_index(&dir);
+    let mut hist = load_index(&dir);
+    // 老版本 index.json 把文件路径内联在 files 里、没有落盘清单 → 补一份，
+    // 让历史文件条目在缓存目录里也有实体（返回补了几条）
+    let backfilled = backfill_files(&dir, &mut hist);
+    if backfilled > 0 {
+        println!("[clipboard] 已为 {backfilled} 条历史文件条目补写 files/ 清单");
+        save_index(&dir, &hist);
+    }
+
+    // 保留策略：按配置天数清理过期条目（0 = 永久保留）
+    let days = crate::settings::get().retention_days;
+    let hist = prune_history(hist, &dir, days);
+
     let _ = HISTORY.set(Mutex::new(hist));
 
     // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
@@ -197,12 +333,19 @@ pub fn init(app: &AppHandle) {
 
 /// 由 WndProc 子类在收到 WM_CLIPBOARDUPDATE 时调用。
 pub fn on_clipboard_update() {
-    if PAUSED.load(Ordering::Relaxed) {
-        return;
-    }
     unsafe {
         let seq = GetClipboardSequenceNumber();
         if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
+            return;
+        }
+        // 剪贴板 owner 就是我们自己窗口 → 这是「点击条目复制回去」写下的内容，不能再当成
+        // 一次新的系统复制回灌成重复条目。
+        // 为什么不能只靠 mark_skip() 的序号比对：copy_back 跑在 Tauri 的工作线程上，
+        // 而 WM_CLIPBOARDUPDATE 是投递到主线程的——主线程完全可能在 mark_skip() 执行之前
+        // 就处理掉这条消息。owner 由系统在 SetClipboardData 时原子设置，没有这个窗口期。
+        let me = MAIN_HWND.get().copied().unwrap_or(0);
+        if me != 0 && GetClipboardOwner() == me {
+            LAST_SEQ.store(seq, Ordering::Relaxed);
             return;
         }
         if seq == SKIP_SEQ.load(Ordering::Relaxed) {
@@ -237,6 +380,10 @@ unsafe fn read_clipboard() -> Option<RawClip> {
     const CF_DIB: u32 = 8;
     const CF_HDROP: u32 = 15;
 
+    // 「文件复制」开关（设置页，默认关闭）：关掉后完全不看 CF_HDROP。
+    // 在 OpenClipboard 之前读取，避免持有剪贴板锁时再去碰 settings 的互斥锁。
+    let file_copy = crate::settings::get().file_copy;
+
     if OpenClipboard(0) == 0 {
         return None;
     }
@@ -264,7 +411,7 @@ unsafe fn read_clipboard() -> Option<RawClip> {
             }
         }
 
-        if IsClipboardFormatAvailable(CF_HDROP) != 0 {
+        if file_copy && IsClipboardFormatAvailable(CF_HDROP) != 0 {
             if let Some(h) = non_null(GetClipboardData(CF_HDROP)) {
                 const ALL: u32 = 0xFFFFFFFF;
                 let count = DragQueryFileW(h, ALL, std::ptr::null_mut(), 0);
@@ -275,7 +422,23 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                     DragQueryFileW(h, i, buf.as_mut_ptr(), len);
                     files.push(String::from_utf16_lossy(&buf[..buf.len() - 1]));
                 }
-                DragFinish(h);
+                // ⚠️ 这里**绝对不能**调用 DragFinish(h)。
+                //
+                // h 来自 GetClipboardData(CF_HDROP)，它的内存归**剪贴板**所有（不是
+                // WM_DROPFILES 里那个临时 HDROP）。DragFinish 会把它 GlobalFree 掉，而剪贴板
+                // 仍然持有同一个句柄，于是下一次 OpenClipboard()/EmptyClipboard() 会二次释放
+                // → 堆损坏 → 进程直接崩溃且无任何 Rust 层报错。
+                //
+                // 实证（症状逐字吻合）：
+                //   Appeon 社区 “Clipboard and DragQueryFile - Need DragFinish?”：
+                //   “Calling DragFinish() will cause the application to crash on the next
+                //    OpenClipboard() call … I ended up just calling EmptyClipboard() with no
+                //    DragFinish() and then the crash went away.”
+                //   zabkat shellFAQ 亦建议剪贴板 HDROP 不要调用 DragFinish（只适用于
+                //   WM_DROPFILES 处理）。
+                // 对应到轻贴的现象：复制文件（读一次）→ 之后点击文件条目（写回 → OpenClipboard）
+                // → 崩溃。这正是本次上报的 bug。
+                // 内存无需手动释放：CloseClipboard 后由剪贴板自身管理。
                 return Some(RawClip::Files(files));
             }
         }
@@ -311,11 +474,13 @@ fn store_raw(raw: RawClip) -> HistoryItem {
         kind: String::new(),
         ts,
         pinned: false,
+        pinned_views: Vec::new(),
         favorite: false,
         preview: String::new(),
         size: 0,
         text_path: None,
         img_path: None,
+        files_path: None,
         files: None,
     };
 
@@ -351,6 +516,12 @@ fn store_raw(raw: RawClip) -> HistoryItem {
                     format!("{} 等 {} 个文件", name, files.len())
                 };
             }
+            // 路径清单落盘（每行一个完整路径）：缓存目录里必须有这条记录的实体，
+            // 否则「文件」条目的数据在缓存目录里完全看不到。
+            let rel = format!("files/{}.txt", id);
+            let body = files.join("\r\n");
+            let _ = fs::write(dir.join(&rel), body.as_bytes());
+            item.files_path = Some(rel);
             item.files = Some(files);
         }
         RawClip::Image(bytes) => {
@@ -380,30 +551,55 @@ fn store_raw(raw: RawClip) -> HistoryItem {
     item
 }
 
-// DIB（BITMAPINFOHEADER + 像素）包装成 BMP 文件头
+// DIB（BITMAPINFOHEADER + 调色板/掩码 + 像素）包装成 BMP 文件头。
+//
+// BMP 文件 = 14 字节文件头 + **完整 DIB**（信息头 + 掩码/调色板 + 像素）。
+// 之前这里写成 `&dib[bi_size..]`，把 40 字节的 BITMAPINFOHEADER 整个丢掉了，
+// 生成的是无效 BMP，浏览器一律无法解码——这正是「图片永远不显示缩略图」的根因。
 fn dib_to_bmp(dib: &[u8]) -> Result<Vec<u8>, String> {
     if dib.len() < 40 {
         return Err("DIB 过短".into());
     }
     let bi_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
-    let bi_bit_count =
-        u16::from_le_bytes([dib[14], dib[15]]) as usize;
-    let palette_size = if bi_bit_count <= 8 {
-        let used = u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]]);
-        let used = if used == 0 { 1u32 << bi_bit_count } else { used };
-        used as usize * 4
-    } else {
-        0
+    if bi_size < 40 || dib.len() < bi_size {
+        return Err("DIB 头不完整".into());
+    }
+    let bi_bit_count = u16::from_le_bytes([dib[14], dib[15]]) as usize;
+    let bi_compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
+    // 压缩类型：0=BI_RGB；3=BI_BITFIELDS（header 后跟 3 个 RGB 掩码）；
+    // 6=BI_ALPHABITFIELDS（4 个掩码）。漏算掩码会让像素整体错位偏色。
+    let mask_size = match (bi_compression, bi_bit_count) {
+        (3, 16) | (3, 32) => 3 * 4,
+        (6, _) => 4 * 4,
+        (0, _) if bi_bit_count > 8 => 0,
+        (0, _) => {
+            let used = u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]]);
+            let used = if used == 0 { 1u32 << bi_bit_count } else { used };
+            used as usize * 4
+        }
+        _ => return Err(format!("不支持的 DIB 压缩类型 {}", bi_compression)),
     };
-    let pixel_offset = 14 + bi_size + palette_size;
-    let file_size = pixel_offset + (dib.len() - bi_size);
+    // 像素数据在文件中的偏移（文件头 14 + 信息头 + 掩码/调色板）
+    let pixel_offset = 14 + bi_size + mask_size;
+    let file_size = 14 + dib.len();
 
     let mut out = Vec::with_capacity(file_size);
     out.extend_from_slice(b"BM");
     out.extend_from_slice(&(file_size as u32).to_le_bytes());
     out.extend_from_slice(&[0, 0, 0, 0]); // reserved
     out.extend_from_slice(&(pixel_offset as u32).to_le_bytes());
-    out.extend_from_slice(&dib[bi_size..]); // info header + palette + pixels
+    out.extend_from_slice(dib); // 完整 DIB：信息头 + 掩码/调色板 + 像素
+
+    // 32bpp：Chromium 会把每像素第 4 字节当作 alpha，而剪贴板 DIB 该字节
+    // 常常是 0（未使用）→ 整图被判为全透明而不显示。强制置 255 保持不透明。
+    if bi_bit_count == 32 && pixel_offset < out.len() {
+        let px = &mut out[pixel_offset..];
+        let mut i = 3;
+        while i < px.len() {
+            px[i] = 255;
+            i += 4;
+        }
+    }
     Ok(out)
 }
 
@@ -496,6 +692,34 @@ unsafe fn mark_skip() {
     SKIP_SEQ.store(GetClipboardSequenceNumber(), Ordering::Relaxed);
 }
 
+/// DIB（BITMAPINFOHEADER + 像素）写入 CF_DIB
+unsafe fn write_dib_to_clipboard(dib: &[u8]) -> Result<(), String> {
+    let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+    if OpenClipboard(hwnd) == 0 {
+        return Err("OpenClipboard 失败".into());
+    }
+    EmptyClipboard();
+    let h = GlobalAlloc(GMEM_MOVEABLE, dib.len());
+    if h == 0 {
+        CloseClipboard();
+        return Err("GlobalAlloc 失败".into());
+    }
+    let p = GlobalLock(h) as *mut u8;
+    if p.is_null() {
+        CloseClipboard();
+        return Err("GlobalLock 失败".into());
+    }
+    std::ptr::copy_nonoverlapping(dib.as_ptr(), p, dib.len());
+    GlobalUnlock(h);
+    let ok = SetClipboardData(8, h); // CF_DIB
+    CloseClipboard();
+    if ok == 0 {
+        return Err("SetClipboardData(CF_DIB) 失败".into());
+    }
+    mark_skip();
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // 存储辅助
 // ---------------------------------------------------------------------------
@@ -503,10 +727,25 @@ unsafe fn mark_skip() {
 fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     let path = dir.join("index.json");
     match fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-            eprintln!("[clipboard] index.json 解析失败：{e}，返回空");
-            Vec::new()
-        }),
+        Ok(s) => {
+            let mut v: Vec<HistoryItem> = serde_json::from_str(&s).unwrap_or_else(|e| {
+                eprintln!("[clipboard] index.json 解析失败：{e}，返回空");
+                Vec::new()
+            });
+            // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
+            // 历史是默认视图，用户当初置顶的内容在历史里仍然浮顶，行为不变。
+            let mut migrated = 0usize;
+            for i in v.iter_mut() {
+                if i.pinned && !i.pinned_views.iter().any(|x| x == "history") {
+                    i.pinned_views.push("history".to_string());
+                    migrated += 1;
+                }
+            }
+            if migrated > 0 {
+                println!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
+            }
+            v
+        }
         Err(_) => Vec::new(),
     }
 }
@@ -518,11 +757,37 @@ fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
     }
 }
 
+/// 为「内联了 files、但缺 files_path」的历史文件条目补写 `files/<id>.txt`，
+/// 返回补写的条数。老版本 index.json 是这么存的，不补的话缓存目录里看不到这些条目。
+fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
+    let mut n = 0usize;
+    for item in hist.iter_mut() {
+        if item.kind != "files" || item.files_path.is_some() {
+            continue;
+        }
+        let Some(files) = item.files.as_ref() else {
+            continue;
+        };
+        if files.is_empty() {
+            continue;
+        }
+        let rel = format!("files/{}.txt", item.id);
+        if fs::write(dir.join(&rel), files.join("\r\n").as_bytes()).is_ok() {
+            item.files_path = Some(rel);
+            n += 1;
+        }
+    }
+    n
+}
+
 fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
     if let Some(rel) = &item.text_path {
         let _ = fs::remove_file(dir.join(rel));
     }
     if let Some(rel) = &item.img_path {
+        let _ = fs::remove_file(dir.join(rel));
+    }
+    if let Some(rel) = &item.files_path {
         let _ = fs::remove_file(dir.join(rel));
     }
 }
@@ -536,6 +801,221 @@ fn patch_item<F: FnOnce(&mut HistoryItem)>(id: &str, f: F) -> Result<(), String>
         Ok(())
     } else {
         Err("条目不存在".into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 保留策略（迁移自 v1 RETENTION_DAYS = 3）
+// ---------------------------------------------------------------------------
+
+/// 按天数清理过期条目（0 = 不清理），返回清理后的历史。
+/// v1 语义：严格按时间戳过滤，不豁免置顶/收藏。
+pub fn prune_retention(days: u32) {
+    if let Some(dir) = DIR.get() {
+        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        let before = hist.len();
+        *hist = prune_history(hist.clone(), dir, days);
+        let removed = before - hist.len();
+        if removed > 0 {
+            println!("[clipboard] 保留策略清理 {removed} 条过期条目");
+        }
+    }
+}
+
+/// 纯函数版本：过滤 + 删文件 + 存索引
+fn prune_history(hist: Vec<HistoryItem>, dir: &PathBuf, days: u32) -> Vec<HistoryItem> {
+    if days == 0 {
+        return hist;
+    }
+    let deadline = now_ms().saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
+    let kept: Vec<HistoryItem> = hist
+        .into_iter()
+        .filter(|i| {
+            if i.ts >= deadline {
+                true
+            } else {
+                remove_item_files(dir, i);
+                false
+            }
+        })
+        .collect();
+    save_index(dir, &kept);
+    kept
+}
+
+// ---------------------------------------------------------------------------
+// 缓存目录管理（迁移自 v1 pick-cache-dir / get-image-cache-info / open-cache-dir）
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct CacheInfo {
+    pub dir: String,
+    pub count: u64,
+    pub size: u64,
+}
+
+/// 去掉 Windows `canonicalize` 产生的扩展长度前缀，让路径显示为普通形式：
+/// `\\?\E:\a` → `E:\a`；`\\?\UNC\server\share` → `\\server\share`。
+fn strip_ext_prefix(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+#[tauri::command]
+pub fn cache_info() -> CacheInfo {
+    let dir = DIR.get().cloned().unwrap_or_default();
+    let (count, size) = dir_stats(&dir);
+    CacheInfo {
+        dir: strip_ext_prefix(&dir.to_string_lossy()),
+        count,
+        size,
+    }
+}
+
+/// 递归统计目录内文件数与总字节
+fn dir_stats(dir: &PathBuf) -> (u64, u64) {
+    let (mut count, mut size) = (0u64, 0u64);
+    let Ok(rd) = fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    for entry in rd.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
+            let (c, s) = dir_stats(&entry.path());
+            count += c;
+            size += s;
+        } else if let Ok(meta) = entry.metadata() {
+            count += 1;
+            size += meta.len();
+        }
+    }
+    (count, size)
+}
+
+/// 选择新的缓存目录：移动全部数据 → 写配置 → 短暂延迟后重启应用使 DIR 生效。
+///
+/// 关键：`blocking_pick_folder` 不能在主线程调用（会死锁，表现为「点了没反应」），
+/// 因此放到阻塞线程池上执行，本命令声明为 async。
+#[tauri::command]
+pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let app_for_dialog = app.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app_for_dialog
+            .dialog()
+            .file()
+            .set_title("选择缓存目录")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let Some(picked) = picked else {
+        return Ok(None); // 用户取消
+    };
+    let new_dir: PathBuf = match picked {
+        tauri_plugin_dialog::FilePath::Path(p) => p,
+        tauri_plugin_dialog::FilePath::Url(u) => {
+            return Err(format!("不支持的路径：{u}"))
+        }
+    };
+    if !new_dir.is_dir() {
+        return Err("所选路径不是目录".into());
+    }
+    // 不做 canonicalize（会引入 \\?\ 前缀），仅清理可能存在的扩展前缀
+    let new_dir_str = strip_ext_prefix(&new_dir.to_string_lossy());
+
+    if let Some(old) = DIR.get() {
+        if old.to_string_lossy() == new_dir_str {
+            return Ok(Some(new_dir_str));
+        }
+        move_dir_contents(old, &new_dir).map_err(|e| format!("迁移缓存文件失败：{e}"))?;
+    }
+
+    crate::settings::update(|c| c.cache_dir = Some(new_dir_str.clone()));
+    println!("[clipboard] 缓存目录已迁移至 {new_dir_str}，即将重启");
+
+    // DIR 是 OnceLock，运行期不可变：迁移完成后重启进程，让新目录在下次启动生效
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        handle.restart();
+    });
+    Ok(Some(new_dir_str))
+}
+
+/// 递归把 old 内所有内容移动到 new（跨卷也适用：rename 失败退回 copy+delete）
+fn move_dir_contents(old: &PathBuf, new: &PathBuf) -> std::io::Result<()> {
+    fs::create_dir_all(new)?;
+    for entry in fs::read_dir(old)?.flatten() {
+        let from = entry.path();
+        let to = new.join(entry.file_name());
+        if from.is_dir() {
+            move_dir_contents(&from, &to)?;
+            fs::remove_dir_all(&from).ok();
+        } else if fs::rename(&from, &to).is_err() {
+            fs::copy(&from, &to)?;
+            let _ = fs::remove_file(&from);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_cache_dir() -> Result<(), String> {
+    let dir = DIR.get().ok_or("存储目录未初始化")?;
+    std::process::Command::new("explorer")
+        .arg(dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 退出清理（迁移自 v1 cleanImagesOnClose：清空内容缓存 + 历史）
+// ---------------------------------------------------------------------------
+
+/// 在 RunEvent::Exit 时调用。clean_on_close 开启则清空全部内容文件与历史索引。
+pub fn on_app_exit() {
+    let cfg = crate::settings::get();
+    if !cfg.clean_on_close {
+        return;
+    }
+    let include_pinned = cfg.clean_include_pinned;
+    println!(
+        "[clipboard] 关闭时清理缓存（include_pinned={}）",
+        include_pinned
+    );
+    if let Some(dir) = DIR.get() {
+        if include_pinned {
+            // 全清：直接清空三个内容目录 + 历史
+            for sub in ["data", "images", "files"] {
+                let _ = fs::remove_dir_all(dir.join(sub));
+                let _ = fs::create_dir_all(dir.join(sub));
+            }
+            if let Some(h) = HISTORY.get() {
+                h.lock().unwrap().clear();
+            }
+            save_index(dir, &Vec::new());
+        } else {
+            // 保留置顶/收藏：只删普通条目的内容文件
+            let mut hist = HISTORY.get().unwrap().lock().unwrap();
+            hist.retain(|i| {
+                if !i.pinned_views.is_empty() || i.favorite {
+                    true
+                } else {
+                    remove_item_files(dir, i);
+                    false
+                }
+            });
+            save_index(dir, &hist);
+        }
     }
 }
 
@@ -614,5 +1094,6 @@ extern "system" {
     fn GlobalSize(handle: isize) -> usize;
 
     fn DragQueryFileW(hdrop: isize, i: u32, buf: *mut u16, buflen: u32) -> u32;
-    fn DragFinish(hdrop: isize);
+    // 注意：这里**故意不声明 DragFinish**。它只适用于 WM_DROPFILES 的临时 HDROP，
+    // 用在本模块的剪贴板 HDROP 上会导致二次释放崩溃（详见 read_clipboard 内的说明）。
 }

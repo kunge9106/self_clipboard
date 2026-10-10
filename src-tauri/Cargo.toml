@@ -29,6 +29,8 @@ indexmap = { version = "1.9", features = ["std"] }
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 缓存目录「更改目录」的文件夹选择框（仅 Rust 侧调用，无需前端 JS 包与权限）
+tauri-plugin-dialog = "2"
 
 # Windows 材质与剪贴板一律走手写 FFI，不引入 windows crate：
 # 避免元数据版本漂移，也避免为几个 API 拖入庞大依赖（开发原则 10）。

@@ -9,9 +9,9 @@
   --sidebar-w: 208px;
   --titlebar-h: 40px;
 
-  /* 圆角：默认按 acrylic 的安全上限 10px；
-     Rust 端若判定为 Win11（可用系统圆角），JS 会把它放大。 */
-  --radius: 10px;
+  /* 窗口圆角；JS 会按后端返回的档位上限覆盖它（Win10 acrylic = 20px）。
+     控件圆角固定 8px：大圆角只属于窗口本体，否则按钮/卡片会变成胶囊形。 */
+  --radius: 20px;
   --radius-sm: 8px;
 
   --font: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
@@ -22,10 +22,19 @@
   --glass-strong: rgba(255, 255, 255, 0.28);
   --glass-hover: rgba(255, 255, 255, 0.24);
   --stroke: rgba(255, 255, 255, 0.35);
+  /* 材质主体：系统 acrylic 只负责「模糊」（tint 已压到 8%，因为 SetWindowRgn
+     管不住 acrylic，四角切不掉），窗口的明暗与浓淡由这一层负责。
+     好处：四角的矩形残留淡到看不见，材质浓度也能在设置页实时调。 */
+  --material-rgb: 255 255 255;
+  --glass-alpha: 0.62;
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  /* 卡片阴影：材质浓度拉高时（窗口接近不透明）卡片底色与窗口几乎同色，
+     1px 描边会糊在里面看不见，靠这层阴影把卡片「托起来」以便识别。 */
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.06),
+    0 2px 8px -2px rgba(0, 0, 0, 0.14);
 }
 
 body.dark {
@@ -33,10 +42,14 @@ body.dark {
   --glass-strong: rgba(40, 40, 44, 0.38);
   --glass-hover: rgba(255, 255, 255, 0.1);
   --stroke: rgba(255, 255, 255, 0.12);
+  --material-rgb: 22 22 24;
+  --glass-alpha: 0.62;
   --text: #f2f2f5;
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 2px 8px -2px rgba(0, 0, 0, 0.36);
 }
 
 /* 兜底档：没有真材质时不透明，观感不能崩 */
@@ -45,18 +58,35 @@ body.tier-solid {
   --glass-strong: rgba(255, 255, 255, 0.98);
   --glass-hover: rgba(0, 0, 0, 0.05);
   --stroke: rgba(0, 0, 0, 0.08);
+  /* 兜底档没有 acrylic，直接给近不透明实色 */
+  --material-rgb: 248 249 251;
+  --glass-alpha: 0.99;
 }
 body.dark.tier-solid {
   --glass: rgba(32, 32, 34, 0.97);
   --glass-strong: rgba(44, 44, 48, 0.98);
   --glass-hover: rgba(255, 255, 255, 0.08);
   --stroke: rgba(255, 255, 255, 0.08);
+  --material-rgb: 32 32 34;
+  --glass-alpha: 0.99;
 }
 
 * {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+}
+
+/* 焦点环：屏蔽各平台默认焦点环（Windows 下会渲染成突兀的彩色/红色描边），
+   统一改成设计语言内的强调色柔环，且仅在键盘聚焦时出现 */
+button:focus,
+input:focus,
+textarea:focus {
+  outline: none;
+}
+button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.4);
 }
 
 html,
@@ -81,12 +111,92 @@ body {
 /* ---------------------------------------------------------------- */
 
 .app {
+  position: relative;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  /* 窗口外框：accrylic 档下靠这条描边勾出圆角 */
+  /* 窗口外框：acrylic 档下靠这条描边勾出圆角 */
   border-radius: var(--radius);
   overflow: hidden;
+  /* 主体材质层：浓度由 --glass-alpha 控制（设置页「材质浓度」实时调）。
+     系统 blur 会从这层半透明里透出来，所以窗口既有一层可控的明暗、
+     又保留下面的模糊。 */
+  background: linear-gradient(
+    160deg,
+    rgb(var(--material-rgb) / calc(var(--glass-alpha) + 0.05)),
+    rgb(var(--material-rgb) / calc(var(--glass-alpha) - 0.05)) 62%
+  );
+}
+
+/* 深色下主体色由 --material-rgb / --glass-alpha 一并切换，无需额外覆盖 */
+
+/* 圆角模式（圆角 + 无系统模糊）：窗口退化为纯透明 layered 窗口，四角是
+   **真透明**、100% 干净——代价是背后的壁纸不再被模糊，所以「透」会变成
+   「直接看到清晰的桌面」，很干扰观感。因此这一档把主体**明显加厚**
+   （默认 62% → 94%），接近一块实心面板，只留一点通透感；
+   想再实一点，把「材质浓度」拉到 90 就是完全不透明。 */
+body.round .app {
+  background: linear-gradient(
+    160deg,
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32))),
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.20))) 62%
+  );
+}
+
+/* 圆角模式（窗口接近实心）下，不止历史卡片，侧栏选中项与设置页的
+   缓存卡片同样会与窗口底面糊在一起——用同一套阴影把边界立起来。
+   常态的 .nav-item 是透明背景，加阴影会变成「无底的浮影」，故只给有底色的状态。 */
+body.round .nav-item:hover,
+body.round .nav-item.is-active {
+  box-shadow: var(--card-shadow);
+}
+
+body.round .cache-box {
+  box-shadow: var(--card-shadow);
+}
+
+/* 噪点层：真·Windows 亚克力 = 模糊 + 色调 + **噪点** + 亮度层。
+   我们之前只有「模糊 + 色调」，缺了噪点，所以看着像「平模糊」不够高级。
+   这里叠一层极淡的噪点（约 4%），模拟 Fluent 材质的颗粒感。 */
+.app::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 998;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: 0.028;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 140px 140px;
+}
+
+/* 玻璃质感层：一层极淡的左上→右下光泽 + 顶部高光 + 发丝内描边，
+   让系统 acrylic 的「平模糊」有层次（不拦截任何交互） */
+.app::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 999;
+  pointer-events: none;
+  border-radius: inherit;
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0) 34%),
+    radial-gradient(130% 52% at 50% -8%, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0) 58%);
+  /* Apple 毛玻璃最关键的细节就是这圈 1px 内描边（30%~50% 白）：
+     它模拟玻璃边缘的折光，也是「高级」与「塑料感」的分界线。
+     底部再补一点极淡暗角表示厚度，但压得很轻，避免画面发闷。 */
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.36),
+    inset 0 -24px 40px -32px rgba(0, 0, 0, 0.05);
+}
+
+body.dark .app::after {
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 34%),
+    radial-gradient(130% 52% at 50% -8%, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0) 58%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -24px 40px -32px rgba(0, 0, 0, 0.16);
 }
 
 /* 顶部条 */
@@ -117,7 +227,8 @@ body {
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.3px;
-  color: var(--text-dim);
+  /* 用正文色（浅色主题下即近黑色），不要灰色 */
+  color: var(--text);
 }
 
 .titlebar-spacer {
@@ -193,17 +304,19 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
   height: 34px;
   padding: 0 10px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-dim);
+  /* 常态即用正文色（近黑），选中态靠加粗 + 底色区分 */
+  color: var(--text);
   font-family: var(--font);
   font-size: 13px;
   text-align: left;
   cursor: default;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .nav-item:hover {
@@ -214,7 +327,8 @@ body {
 .nav-item.is-active {
   background: var(--glass-strong);
   color: var(--text);
-  font-weight: 600;
+  /* 常态与选中态同为黑色，靠加粗（中文会落到 Bold）明确区分 */
+  font-weight: 700;
 }
 
 .nav-icon {
@@ -242,12 +356,14 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 16px;
+  /* 右侧 = 16(view padding) + 6(滚动条) + 8(.history padding-right)，
+     让搜索栏与列表卡片右缘保持齐平 */
+  padding: 0 30px 0 16px;
 }
 
 .search {
   flex: 1;
-  max-width: 420px;
+  max-width: none;
   height: 32px;
   display: flex;
   align-items: center;
@@ -256,6 +372,13 @@ body {
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
   border: 1px solid var(--stroke);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* 聚焦时描边高亮（同 V1） */
+.search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(47, 107, 255, 0.25);
 }
 
 .search-icon {
@@ -310,7 +433,8 @@ body {
 .view {
   flex: 1;
   min-height: 0;
-  padding: 0 16px 16px;
+  /* 右侧 12px：与 .history 的 padding-right 相等 → 滚动条在卡片与窗口右缘之间居中 */
+  padding: 0 12px 16px;
   overflow: hidden;
 }
 
@@ -342,10 +466,21 @@ body {
 .history {
   height: 100%;
   overflow-y: auto;
+  /* 始终保留滚动条留白，避免有无滚动条时内容宽度跳动 */
+  scrollbar-gutter: stable;
+  /* 与 .view 的右内边距相等（12px）→ 滚动条在两侧留白中视觉居中 */
+  padding-right: 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-right: 4px;
+}
+
+/* 渐进渲染的「加载更多」哨兵：不可见，只用于 IntersectionObserver 触发下一批。
+   负 margin 抵消 .history 的 8px flex 间距，保证底部留白不变。 */
+.history .load-more {
+  flex: 0 0 auto;
+  height: 1px;
+  margin-top: -8px;
 }
 
 .card {
@@ -355,6 +490,8 @@ body {
   border-radius: var(--radius-sm);
   background: var(--glass);
   border: 1px solid var(--stroke);
+  /* 高浓度下描边会与窗口底色糊在一起，靠阴影保证卡片可识别 */
+  box-shadow: var(--card-shadow);
   cursor: default;
   transition: background 0.12s ease, transform 0.08s ease;
 }
@@ -365,6 +502,18 @@ body {
 
 .card.is-pinned {
   border-color: var(--accent);
+}
+
+/* 文件条目的原路径已失效（被移动 / 改名 / 删除）——整条压暗 + 标「已失效」 */
+.card.is-missing .card-preview {
+  color: var(--text-dim);
+}
+
+.tag-missing {
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #e81123;
+  background: rgba(232, 17, 35, 0.12);
 }
 
 .card-body {
@@ -401,6 +550,22 @@ body {
   user-select: text;
 }
 
+/* 图片条目小缩略图（按原宽高比缩到 160×60 内，左对齐；大图见 .img-preview） */
+.card-image {
+  display: block;
+  max-width: 160px;
+  max-height: 60px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 6px;
+  border: 1px solid var(--stroke);
+  margin-top: 2px;
+  /* .card-body 是 flex 列，默认 align-items:stretch 会把图拉到整行宽 → 改为按比例左对齐 */
+  align-self: flex-start;
+  margin-right: auto;
+}
+
 /* 右键上下文菜单 */
 .ctx-menu {
   position: fixed;
@@ -410,9 +575,14 @@ body {
   display: flex;
   flex-direction: column;
   border-radius: var(--radius-sm);
-  background: var(--glass-strong);
+  /* 右键菜单要贴着内容读：用高不透明底色，不吃玻璃透（需求 #8） */
+  background: rgba(252, 252, 252, 0.94);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
+}
+
+body.dark .ctx-menu {
+  background: rgba(40, 40, 44, 0.95);
 }
 
 .ctx-item {
@@ -441,12 +611,27 @@ body {
   color: #fff;
 }
 
+/* 不可用项（例如「清理 N 天前」但确实没有旧内容） */
+.ctx-item:disabled {
+  opacity: 0.42;
+  pointer-events: none;
+}
+
+/* 菜单分组分隔线 */
+.ctx-sep {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--stroke);
+}
+
 /* 设置页 */
 .settings {
   display: flex;
   flex-direction: column;
   gap: 18px;
   max-width: 520px;
+  /* 设置页隐藏了工具栏，标题需与搜索栏距离顶部一致（52-32)/2 = 10px */
+  padding-top: 10px;
 }
 
 .settings h2 {
@@ -457,6 +642,8 @@ body {
 .settings .row {
   display: flex;
   align-items: center;
+  /* 窗口变窄时允许换行：否则说明文字会被挤成一列竖排（用户截图） */
+  flex-wrap: wrap;
   gap: 12px;
   font-size: 13px;
   color: var(--text);
@@ -464,6 +651,7 @@ body {
 
 .settings .row label {
   flex: 0 0 160px;
+  min-width: 0;
 }
 
 .settings input[type="number"] {
@@ -477,9 +665,196 @@ body {
   font-family: var(--font);
 }
 
+/* 材质浓度滑块 */
+.settings input[type="range"] {
+  width: 180px;
+  height: 20px;
+  accent-color: var(--accent);
+  cursor: default;
+}
+
 .settings .hint {
   font-size: 12px;
   color: var(--text-dim);
+  /* 至少留 150px 宽，放不下就整块换到下一行，避免文字被压成竖排 */
+  flex: 1 1 150px;
+  min-width: 0;
+}
+
+.settings input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: default;
+}
+
+/* 缓存目录块（迁移自 v1 缓存信息区） */
+.cache-box {
+  padding: 12px 14px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.cache-title {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cache-path {
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-all;
+  user-select: text;
+}
+
+.cache-stats {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.cache-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 底部状态栏：左条目数 · 中版本号 · 右垃圾桶 */
+.statusbar {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  height: 28px;
+  padding: 0 8px 0 12px;
+  border-top: 1px solid var(--stroke);
+  font-size: 11px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.statusbar-version {
+  justify-self: center;
+  opacity: 0.75;
+}
+
+/* 设置页：底部状态栏只显示版本号。左右两侧用 visibility 隐藏（占位保留），
+   不然三列网格塌掉、版本号就不再居中。 */
+.statusbar.is-settings .statusbar-left,
+.statusbar.is-settings .statusbar-clear {
+  visibility: hidden;
+}
+
+.statusbar-clear {
+  justify-self: end;
+  width: 24px;
+  height: 22px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  display: grid;
+  place-items: center;
+  cursor: default;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.statusbar-clear svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.statusbar-clear:hover {
+  background: var(--glass-hover);
+  color: var(--text);
+}
+
+/* 图片悬浮预览浮层（卡片布局保持统一，大图在悬浮时弹出） */
+.img-preview {
+  position: fixed;
+  z-index: 1500;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(252, 252, 252, 0.96);
+  border: 1px solid var(--stroke);
+  box-shadow: var(--shadow);
+  /* 纯展示层：不吃鼠标事件，避免遮挡卡片自身的 hover/click */
+  pointer-events: none;
+}
+
+/* hidden 属性依赖 UA 的 display:none，作者样式会覆盖，需显式声明 */
+.img-preview[hidden] {
+  display: none;
+}
+
+.img-preview img {
+  display: block;
+  max-width: 340px;
+  max-height: 260px;
+  border-radius: 4px;
+}
+
+body.dark .img-preview {
+  background: rgba(40, 40, 44, 0.96);
+}
+
+/* 退出确认弹窗 */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.32);
+}
+
+/* hidden 属性依赖 UA 的 display:none，但会被上面的 display:grid 覆盖，必须显式声明 */
+.modal-mask[hidden] {
+  display: none;
+}
+
+.modal {
+  min-width: 260px;
+  max-width: 320px;
+  padding: 18px 20px;
+  border-radius: var(--radius-sm);
+  background: rgba(252, 252, 252, 0.97);
+  border: 1px solid var(--stroke);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+body.dark .modal {
+  background: rgba(40, 40, 44, 0.97);
+}
+
+.modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.modal-text {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .btn-danger {
@@ -500,23 +875,144 @@ body {
   color: #fff;
 }
 
-/* 复制反馈 toast */
+/* 复制反馈 toast：与整体玻璃风格一致 */
 .toast {
   position: absolute;
   left: 50%;
   bottom: 20px;
   transform: translateX(-50%) translateY(10px);
-  padding: 8px 16px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.78);
-  color: #fff;
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+  background: rgba(252, 252, 252, 0.94);
+  border: 1px solid var(--stroke);
+  box-shadow: var(--shadow);
+  color: var(--text);
   font-size: 13px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.18s ease, transform 0.18s ease;
 }
 
+body.dark .toast {
+  background: rgba(40, 40, 44, 0.95);
+}
+
 .toast.show {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+}
+
+/* 滚动条：细圆角半透明，融入玻璃风格 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+body.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+body.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+/* 最大化 ↔ 还原：图标随窗口状态切换 */
+.wc-btn .ic-restore {
+  display: none;
+}
+
+.wc-btn.is-max .ic-max {
+  display: none;
+}
+
+.wc-btn.is-max .ic-restore {
+  display: block;
+}
+
+/* ---------------------------------------------------------------- */
+/* 窗口缩放热区                                                       */
+/* 系统缩放循环在 Win10 acrylic 下无法节流（缩放严重滞后），           */
+/* 所以 Rust 端把 WM_NCHITTEST 收回成 HTCLIENT，改由这 8 个热区       */
+/* 触发自定义缩放。光标形状也由这里给（系统不再提供 resize 光标）。    */
+/* ---------------------------------------------------------------- */
+
+.rz-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  pointer-events: none;
+}
+
+.rz {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.rz-n,
+.rz-s {
+  left: 10px;
+  right: 10px;
+  height: 5px;
+  cursor: ns-resize;
+}
+.rz-n {
+  top: 0;
+}
+.rz-s {
+  bottom: 0;
+}
+
+.rz-w,
+.rz-e {
+  top: 10px;
+  bottom: 10px;
+  width: 5px;
+  cursor: ew-resize;
+}
+.rz-w {
+  left: 0;
+}
+.rz-e {
+  right: 0;
+}
+
+.rz-nw,
+.rz-ne,
+.rz-sw,
+.rz-se {
+  width: 10px;
+  height: 10px;
+}
+.rz-nw {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+.rz-ne {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+.rz-sw {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+.rz-se {
+  bottom: 0;
+  right: 0;
+  cursor: nwse-resize;
 }
