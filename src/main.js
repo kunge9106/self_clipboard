@@ -225,7 +225,8 @@ function startTimeTicker() {
 
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
 
-async function render() {
+function render() {
+  hideImagePreview(); // 重绘后旧卡片已销毁，避免浮层残留
   const view = document.getElementById("view");
   const toolbar = document.querySelector(".toolbar");
   // 设置页不需要搜索栏（需求 #1）
@@ -252,7 +253,7 @@ async function render() {
   const wrap = document.createElement("div");
   wrap.className = "history";
   for (const item of list) {
-    wrap.appendChild(await cardEl(item));
+    wrap.appendChild(cardEl(item));
   }
   view.innerHTML = "";
   view.appendChild(wrap);
@@ -278,7 +279,7 @@ function emptyHtml() {
     <div class="empty-sub">${sub || ""}</div></div>`;
 }
 
-async function cardEl(item) {
+function cardEl(item) {
   const card = document.createElement("div");
   card.className = "card" + (item.pinned ? " is-pinned" : "");
   card.dataset.id = item.id;
@@ -292,34 +293,14 @@ async function cardEl(item) {
     <span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>${item.pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
   body.appendChild(meta);
 
-  // 文本 / 文件摘要；图片加载失败时才回退显示 [图片] 占位
+  // 摘要文本：图片条目也走同一套布局（只显示「[图片]」），
+  // 真正的大图改为鼠标悬浮时在卡片旁弹出（见 bindImagePreview）
   const preview = document.createElement("div");
   preview.className = "card-preview";
   preview.textContent = item.preview || "";
-  const appendPreview = () => {
-    if (preview.parentNode !== body) body.appendChild(preview);
-  };
+  body.appendChild(preview);
 
-  if (item.kind === "image") {
-    // 图片条目：显示真实缩略图
-    const img = document.createElement("img");
-    img.className = "card-image";
-    img.alt = "图片";
-    img.loading = "lazy";
-    img.onerror = () => {
-      img.remove();
-      appendPreview();
-    };
-    try {
-      img.src = await invoke("get_image", { id: item.id });
-      body.appendChild(img);
-    } catch {
-      /* 图片文件缺失/损坏 → 回退为 [图片] 文本 */
-      appendPreview();
-    }
-  } else {
-    appendPreview();
-  }
+  if (item.kind === "image") bindImagePreview(card, item);
   card.appendChild(body);
 
   // 左键 → 复制回剪贴板；右键 → 上下文菜单
@@ -330,6 +311,97 @@ async function cardEl(item) {
     openContextMenu(e.clientX, e.clientY, item);
   });
   return card;
+}
+
+// ---------------------------------------------------------------------------
+// 图片悬浮预览
+// 卡片布局与其它类型完全一致（图片条目只显示「[图片]」一行），
+// 鼠标移入后再在卡片旁弹出大图。效率取舍：按需读取 + 内存缓存，
+// 同一张图第二次悬浮不再走 IPC / 磁盘。
+// ---------------------------------------------------------------------------
+
+/** id → dataURL，已读过的图片缓存，避免反复读取 */
+const imageCache = new Map();
+let previewBox = null;
+let previewTimer = null;
+
+function ensurePreviewBox() {
+  if (previewBox) return previewBox;
+  const box = document.createElement("div");
+  box.className = "img-preview";
+  box.hidden = true;
+  const img = document.createElement("img");
+  img.alt = "预览";
+  box.appendChild(img);
+  document.body.appendChild(box);
+  previewBox = box;
+  return box;
+}
+
+function hideImagePreview() {
+  if (previewTimer) {
+    clearTimeout(previewTimer);
+    previewTimer = null;
+  }
+  if (previewBox && !previewBox.hidden) {
+    previewBox.hidden = true;
+    previewBox.firstChild.removeAttribute("src");
+  }
+}
+
+/** 优先放卡片右侧；右侧空间不足改左侧；最后夹回视口内 */
+function placePreview(box, card) {
+  const r = card.getBoundingClientRect();
+  const w = box.offsetWidth;
+  const h = box.offsetHeight;
+  const gap = 12;
+  let x = r.right + gap;
+  if (x + w > window.innerWidth - 8) x = r.left - gap - w;
+  let y = r.top + r.height / 2 - h / 2;
+  const clamp = (v, min, max) => Math.max(min, Math.min(v, max));
+  x = clamp(x, 8, Math.max(8, window.innerWidth - w - 8));
+  y = clamp(y, 8, Math.max(8, window.innerHeight - h - 8));
+  box.style.left = `${x}px`;
+  box.style.top = `${y}px`;
+}
+
+function bindImagePreview(card, item) {
+  card.addEventListener("mouseenter", () => {
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => showImagePreview(card, item), 120);
+  });
+  card.addEventListener("mouseleave", hideImagePreview);
+}
+
+async function showImagePreview(card, item) {
+  previewTimer = null;
+  if (!card.isConnected || !card.matches(":hover")) return;
+
+  let url = imageCache.get(item.id);
+  if (!url) {
+    try {
+      url = await invoke("get_image", { id: item.id });
+      imageCache.set(item.id, url);
+      // 只保留最近若干张，避免长时间使用后 dataURL 撑爆内存
+      if (imageCache.size > 24) {
+        imageCache.delete(imageCache.keys().next().value);
+      }
+    } catch {
+      return; // 图片文件缺失/损坏 → 不弹预览
+    }
+  }
+  // 读取期间鼠标可能已移开
+  if (!card.isConnected || !card.matches(":hover")) return;
+
+  const box = ensurePreviewBox();
+  const img = box.firstChild;
+  // 图片尺寸只有加载完才准，加载后重新定位一次
+  img.onload = () => {
+    if (!box.hidden) placePreview(box, card);
+  };
+  img.src = url;
+  box.hidden = false;
+  placePreview(box, card);
 }
 
 async function copyBack(item) {
@@ -409,9 +481,19 @@ function openContextMenu(x, y, item) {
 
 // 点空白处 / 滚动 / Esc → 关闭；非卡片区域右键 → 只关不弹
 document.addEventListener("click", closeContextMenu);
-document.addEventListener("scroll", closeContextMenu, true);
+document.addEventListener(
+  "scroll",
+  () => {
+    closeContextMenu();
+    hideImagePreview();
+  },
+  true
+);
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeContextMenu();
+  if (e.key === "Escape") {
+    closeContextMenu();
+    hideImagePreview();
+  }
 });
 document.addEventListener("contextmenu", (e) => {
   e.preventDefault();
