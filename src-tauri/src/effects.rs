@@ -443,3 +443,59 @@ pub fn refresh_theme(hwnd: isize, dark: bool) {
         let _ = apply_acrylic(hwnd, dark);
     }
 }
+
+// ---------------------------------------------------------------------------
+// WndProc 子类：修焦点切换时的原生标题栏闪现
+// ---------------------------------------------------------------------------
+
+const WM_NCACTIVATE: u32 = 0x0086;
+
+static ORIG_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// tao 用「保留 WS_CAPTION 样式位 + WM_NCCALCSIZE 吞掉非客户区」实现无边框，
+/// 但窗口**失焦/聚焦**时 Windows 发 WM_NCACTIVATE，仍会把原生标题栏画出来
+/// （用户实测：一点外部就出现原生标题栏 + 白边）。
+///
+/// 修法是给窗口过程挂子类（subclass），拦截这条消息后用 `lparam = -1`
+/// 调 DefWindowProc——微软文档认可的做法，含义是「激活状态变更，但
+/// 不要重绘非客户区」。只拦这一条消息，其余全部原样转交 tao。
+pub fn install_focus_hook(hwnd: isize) {
+    unsafe extern "system" {
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+    }
+
+    const GWLP_WNDPROC: i32 = -4;
+
+    unsafe extern "system" fn hook_proc(
+        hwnd: isize,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> isize {
+        unsafe extern "system" {
+            fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+            fn CallWindowProcW(
+                prev: isize,
+                hwnd: isize,
+                msg: u32,
+                wparam: usize,
+                lparam: isize,
+            ) -> isize;
+        }
+
+        if msg == WM_NCACTIVATE {
+            // lparam = -1 → 禁止重绘非客户区，原生标题栏就永远画不出来
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, -1) };
+        }
+        let orig = ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
+        unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }
+    }
+
+    let orig = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as isize) };
+    if orig == 0 {
+        eprintln!("[effects] WndProc 子类挂载失败（SetWindowLongPtrW 返回 0）");
+        return;
+    }
+    ORIG_WNDPROC.store(orig, std::sync::atomic::Ordering::Relaxed);
+    println!("[effects] 焦点 hook 已挂载（WM_NCACTIVATE → 不重绘 NC 区）");
+}

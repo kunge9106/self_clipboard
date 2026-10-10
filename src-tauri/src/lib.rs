@@ -60,6 +60,8 @@ fn setup_effects(app: &tauri::AppHandle) {
 
     effects::apply(hwnd, dark);
     effects::apply_rounded_corners(hwnd);
+    // 失焦/聚焦时 Windows 会发 WM_NCACTIVATE 重绘原生标题栏，必须拦截
+    effects::install_focus_hook(hwnd);
 
     window.on_window_event(move |event| {
         match event {
@@ -69,6 +71,10 @@ fn setup_effects(app: &tauri::AppHandle) {
             }
             // SetWindowRgn 的区域不会随窗口缩放自动跟随，必须重设
             tauri::WindowEvent::Resized(_) => {
+                effects::apply_rounded_corners(hwnd);
+            }
+            // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）
+            tauri::WindowEvent::Focused(_) => {
                 effects::apply_rounded_corners(hwnd);
             }
             // 跨屏拖动 DPI 变化后，半径要按新 DPI 重新换算
