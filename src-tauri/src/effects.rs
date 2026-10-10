@@ -33,9 +33,11 @@ const DWMWCP_ROUND: u32 = 2;
 const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
-/// Win10 acrylic 的 tint，格式为 **0xAABBGGRR**（注意不是 RGBA）
-const TINT_LIGHT: u32 = 0xE6_FF_FF_FF; // 白色 90%
-const TINT_DARK: u32 = 0xCC_1C_1C_1E; // #1E1C1C 80%
+/// Win10 acrylic 的 tint，格式为 **0xAABBGGRR**（注意不是 RGBA）。
+/// alpha 越低模糊越明显：90% 白会把模糊完全盖住（实测反馈），
+/// 65% 左右能同时保住「看得出模糊」与「文字可读」。
+const TINT_LIGHT: u32 = 0xA8_FF_FF_FF; // 白色 66%
+const TINT_DARK: u32 = 0x99_1C_1C_1E; // #1E1C1C 60%
 
 // ---------------------------------------------------------------------------
 // FFI 声明
@@ -73,6 +75,15 @@ struct RtlOsVersionInfoExW {
 
 type SetWindowCompositionAttributeFn =
     unsafe extern "system" fn(isize, *mut WindowCompositionAttribData) -> i32;
+
+/// 物理坐标矩形，user32 的 GetWindowRect / SetWindowRgn 都用它
+#[repr(C)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
 
 /// Win10 真·毛玻璃的唯一入口，但它是**未公开 API**：
 /// user32.dll 里有导出，Windows SDK 的 `user32.lib` 里却没有对应的导入符号，
@@ -148,12 +159,23 @@ impl Tier {
         }
     }
 
-    /// 该档位下 CSS 圆角能安全用多大。
-    /// Win10 acrylic 铺满整个窗口矩形、不认 CSS 圆角，超过 10px 四角会露出色块。
+    /// 该档位下 CSS 圆角能安全用多大（逻辑 px）。
+    /// Win10 acrylic 铺满整个窗口矩形、不认 CSS 圆角，
+    /// 超过 10px 时窗口裁剪圆角与内容圆角会互相打架。
     pub fn max_radius(&self) -> u32 {
         match self {
             Tier::Acrylic => 10,
-            _ => u32::MAX,
+            _ => 12,
+        }
+    }
+
+    /// 窗口区域裁剪用的圆角（逻辑 px）。返回 0 表示不需要 RGN 裁剪。
+    /// SystemBackdrop 档系统直接给圆角，裁剪反而会破坏它。
+    pub fn region_radius(&self) -> u32 {
+        match self {
+            Tier::SystemBackdrop => 0,
+            Tier::Acrylic => 10,
+            Tier::Mica | Tier::Solid => 12,
         }
     }
 }
@@ -255,13 +277,6 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
 /// 触发 DWM 重算。Win10 acrylic 有时需要动一下窗口才真正铺开。
 pub fn nudge(hwnd: isize) {
     unsafe {
-        #[repr(C)]
-        struct Rect {
-            left: i32,
-            top: i32,
-            right: i32,
-            bottom: i32,
-        }
         extern "system" {
             fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
             fn SetWindowPos(
@@ -286,6 +301,53 @@ pub fn nudge(hwnd: isize) {
         // 先 +1 再还原，强制 DWM 重绘一次
         SetWindowPos(hwnd, 0, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(hwnd, 0, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// 把窗口区域裁成圆角矩形（Win10 上 acrylic 不认 CSS 圆角，只能裁窗口本体）。
+///
+/// - 半径按当前 DPI 从逻辑 px 换算成物理 px
+/// - 窗口尺寸变化后 region **不会**自动跟随，必须在 Resized 事件里重设
+/// - SystemBackdrop 档跳过（系统已经给了圆角）
+pub fn apply_rounded_corners(hwnd: isize) {
+    let radius = current_tier().region_radius();
+    if radius == 0 {
+        return;
+    }
+
+    unsafe {
+        extern "system" {
+            fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+            fn GetDpiForWindow(hwnd: isize) -> u32;
+            fn CreateRoundRectRgn(x1: i32, y1: i32, x2: i32, y2: i32, w: i32, h: i32) -> isize;
+            fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
+            fn DeleteObject(obj: isize) -> i32;
+        }
+
+        let mut r: Rect = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut r as *mut _) == 0 {
+            return;
+        }
+        let w = r.right - r.left;
+        let h = r.bottom - r.top;
+        if w <= 0 || h <= 0 {
+            return;
+        }
+
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        let rad = ((radius as f64) * (dpi as f64 / 96.0)).round() as i32;
+        let d = rad * 2; // 椭圆直径 = 2 × 半径
+
+        let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, d, d);
+        if rgn == 0 {
+            eprintln!("[effects] CreateRoundRectRgn 失败");
+            return;
+        }
+        if SetWindowRgn(hwnd, rgn, 1) == 0 {
+            // 失败时 region 所有权还在我们手里，要释放
+            DeleteObject(rgn);
+            eprintln!("[effects] SetWindowRgn 失败");
+        }
     }
 }
 

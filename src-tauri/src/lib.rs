@@ -27,6 +27,10 @@ fn effect_info() -> serde_json::Value {
 
 #[cfg(windows)]
 fn setup_effects(app: &tauri::AppHandle) {
+    // —— 诊断：确认运行时配置与窗口实际状态是否一致 ——
+    let cfg_win = &app.config().app.windows;
+    println!("[debug] config windows = {:?}", cfg_win);
+
     let window = match app.get_webview_window("main") {
         Some(w) => w,
         None => {
@@ -44,13 +48,34 @@ fn setup_effects(app: &tauri::AppHandle) {
     };
 
     let dark = matches!(window.theme().unwrap_or(Theme::Light), Theme::Dark);
-    effects::apply(hwnd, dark);
 
-    // 系统主题切换 → 重刷 tint
+    // —— 诊断：窗口运行时状态 ——
+    println!(
+        "[debug] runtime: decorated={} resizable={} visible={} title={:?}",
+        window.is_decorated().unwrap_or_default(),
+        window.is_resizable().unwrap_or_default(),
+        window.is_visible().unwrap_or_default(),
+        window.title().unwrap_or_default(),
+    );
+
+    effects::apply(hwnd, dark);
+    effects::apply_rounded_corners(hwnd);
+
     window.on_window_event(move |event| {
-        if let tauri::WindowEvent::ThemeChanged(theme) = event {
-            println!("[effects] 系统主题切换 → {:?}", theme);
-            effects::refresh_theme(hwnd, matches!(theme, Theme::Dark));
+        match event {
+            tauri::WindowEvent::ThemeChanged(theme) => {
+                println!("[effects] 系统主题切换 → {:?}", theme);
+                effects::refresh_theme(hwnd, matches!(theme, Theme::Dark));
+            }
+            // SetWindowRgn 的区域不会随窗口缩放自动跟随，必须重设
+            tauri::WindowEvent::Resized(_) => {
+                effects::apply_rounded_corners(hwnd);
+            }
+            // 跨屏拖动 DPI 变化后，半径要按新 DPI 重新换算
+            tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                effects::apply_rounded_corners(hwnd);
+            }
+            _ => {}
         }
     });
 
@@ -60,6 +85,7 @@ fn setup_effects(app: &tauri::AppHandle) {
         for delay in [200u64, 600, 1200] {
             std::thread::sleep(std::time::Duration::from_millis(delay));
             effects::apply(hwnd, dark);
+            effects::apply_rounded_corners(hwnd);
             effects::nudge(hwnd);
         }
         println!("[effects] 补涂流程结束，最终档位：{}", effects::current_tier().as_str());

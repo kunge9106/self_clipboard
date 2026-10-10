@@ -25,7 +25,8 @@
         "shadow": false,
         "visible": false,
         "center": true,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "additionalBrowserArgs": "--disable-features=RendererCodeIntegrity"
       }
     ],
     "security": {
