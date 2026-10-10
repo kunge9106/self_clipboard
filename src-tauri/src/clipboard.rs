@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -30,8 +30,6 @@ static HISTORY: OnceLock<Mutex<Vec<HistoryItem>>> = OnceLock::new();
 static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
 /// 本程序写回剪贴板后产生的序列号（应被忽略，避免自读）
 static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
-/// 暂停录制开关
-static PAUSED: AtomicBool = AtomicBool::new(false);
 /// id 计数器，避免同毫秒碰撞
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -67,13 +65,6 @@ pub fn get_history() -> Vec<HistoryItem> {
         .get()
         .map(|m| m.lock().unwrap().clone())
         .unwrap_or_default()
-}
-
-#[tauri::command]
-pub fn set_paused(paused: bool) -> Result<(), String> {
-    PAUSED.store(paused, Ordering::Relaxed);
-    println!("[clipboard] 录制{}", if paused { "已暂停" } else { "已恢复" });
-    Ok(())
 }
 
 #[tauri::command]
@@ -197,9 +188,6 @@ pub fn init(app: &AppHandle) {
 
 /// 由 WndProc 子类在收到 WM_CLIPBOARDUPDATE 时调用。
 pub fn on_clipboard_update() {
-    if PAUSED.load(Ordering::Relaxed) {
-        return;
-    }
     unsafe {
         let seq = GetClipboardSequenceNumber();
         if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {

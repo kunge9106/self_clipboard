@@ -16,7 +16,6 @@ const TIER_CLASS = {
 let items = []; // 历史条目（内存中仅元数据，内容在磁盘）
 let currentView = "history";
 let query = "";
-let paused = false;
 
 async function applyEffectInfo() {
   let info;
@@ -78,21 +77,6 @@ function bindSearch() {
     query = el.value.trim().toLowerCase();
     render();
   });
-}
-
-function bindPause() {
-  const btn = document.getElementById("btn-pause");
-  const label = document.getElementById("pause-label");
-  btn.onclick = async () => {
-    paused = !paused;
-    label.textContent = paused ? "已暂停" : "录制中";
-    btn.style.opacity = paused ? "0.5" : "1";
-    try {
-      await invoke("set_paused", { paused });
-    } catch (e) {
-      console.error(e);
-    }
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -293,8 +277,6 @@ function settingsHtml() {
     <div class="row"><label>全局热键</label>
       <input type="checkbox" checked />
       <span class="hint">用 Ctrl+反引号(\`) 唤起/隐藏窗口（开关功能开发中）</span></div>
-    <div class="row"><label>录制状态</label>
-      <button class="btn-ghost" id="set-pause">${paused ? "已暂停 → 恢复" : "录制中 → 暂停"}</button></div>
     <button class="btn-danger" id="clear-all">清空全部历史</button>
   </div>`;
 }
@@ -308,15 +290,6 @@ function bindSettings(view) {
       render();
       toast("已清空");
     };
-  const pause = view.querySelector("#set-pause");
-  if (pause)
-    pause.onclick = async () => {
-      paused = !paused;
-      try {
-        await invoke("set_paused", { paused });
-      } catch (e) {}
-      pause.textContent = paused ? "已暂停 → 恢复" : "录制中 → 暂停";
-    };
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +301,6 @@ async function main() {
   bindWindowControls();
   bindNav();
   bindSearch();
-  bindPause();
 
   await applyEffectInfo();
 

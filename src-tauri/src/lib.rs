@@ -104,7 +104,6 @@ pub fn run() {
     let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
         effect_info,
         clipboard::get_history,
-        clipboard::set_paused,
         clipboard::delete_item,
         clipboard::toggle_pin,
         clipboard::toggle_favorite,
