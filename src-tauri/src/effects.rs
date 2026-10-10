@@ -235,6 +235,7 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     let tier = classify(build);
     let _ = BUILD.set(build);
     let _ = TIER.set(tier);
+    LAST_DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
 
     println!(
         "[effects] windows build={} → tier={} (radius≤{}px)",
@@ -410,15 +411,22 @@ fn apply_mica(hwnd: isize) -> Result<(), i32> {
 
 /// Win10 1809–22H2：真·acrylic
 fn apply_acrylic(hwnd: isize, dark: bool) -> Result<(), i32> {
+    set_accent_state(
+        hwnd,
+        ACCENT_ENABLE_ACRYLICBLURBEHIND,
+        if dark { TINT_DARK } else { TINT_LIGHT },
+    )
+}
+
+fn set_accent_state(hwnd: isize, accent_state: u32, tint: u32) -> Result<(), i32> {
     let set_attr = match set_window_composition_attribute() {
         Some(f) => f,
         None => return Err(-1),
     };
 
     unsafe {
-        let tint = if dark { TINT_DARK } else { TINT_LIGHT };
         let mut policy = AccentPolicy {
-            accent_state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
+            accent_state,
             accent_flags: 2, // 四边都参与模糊
             gradient_color: tint,
             animation_id: 0,
@@ -442,6 +450,33 @@ pub fn refresh_theme(hwnd: isize, dark: bool) {
     if current_tier() == Tier::Acrylic {
         let _ = apply_acrylic(hwnd, dark);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 拖动性能：真 acrylic（ACCENT_ENABLE_ACRYLICBLURBEHIND）在窗口拖动时
+// 每帧都要重算模糊，实测鼠标迟滞、窗口跟随缓慢。
+// 标准做法：拖动期间临时降级为廉价的 BLURBEHIND（无逐帧高斯重算），
+// WM_EXITSIZEMOVE 后恢复真 acrylic。
+// ---------------------------------------------------------------------------
+
+const WM_ENTERSIZEMOVE: u32 = 0x0231;
+const WM_EXITSIZEMOVE: u32 = 0x0232;
+const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
+
+static LAST_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_dragging(hwnd: isize, dragging: bool) {
+    if current_tier() != Tier::Acrylic {
+        return;
+    }
+    let dark = LAST_DARK.load(std::sync::atomic::Ordering::Relaxed);
+    let state = if dragging {
+        ACCENT_ENABLE_BLURBEHIND
+    } else {
+        ACCENT_ENABLE_ACRYLICBLURBEHIND
+    };
+    let tint = if dark { TINT_DARK } else { TINT_LIGHT };
+    let _ = set_accent_state(hwnd, state, tint);
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +527,12 @@ pub fn install_focus_hook(hwnd: isize) {
             // WM_CLIPBOARDUPDATE
             crate::clipboard::on_clipboard_update();
             return 0;
+        }
+        // 拖动开始/结束：临时降级/恢复 acrylic，消除拖动迟滞
+        if msg == WM_ENTERSIZEMOVE {
+            set_dragging(hwnd, true);
+        } else if msg == WM_EXITSIZEMOVE {
+            set_dragging(hwnd, false);
         }
         let orig = ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
         unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }

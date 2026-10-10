@@ -122,6 +122,7 @@ pub fn run() {
             effect_info,
             clipboard::get_history,
             clipboard::delete_item,
+            clipboard::delete_items,
             clipboard::toggle_pin,
             clipboard::toggle_favorite,
             clipboard::clear_all,
@@ -133,6 +134,9 @@ pub fn run() {
             settings::get_settings,
             settings::set_tray_on_close,
             settings::set_clean_on_close,
+            settings::set_clean_include_pinned,
+            settings::set_clean_confirm_exit,
+            settings::exit_app,
             settings::set_retention_days,
             settings::set_autostart,
         ]);

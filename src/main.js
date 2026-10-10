@@ -55,8 +55,66 @@ function bindWindowControls() {
     guard("最小化", appWindow.minimize());
   document.getElementById("btn-maximize").onclick = () =>
     guard("最大化", appWindow.toggleMaximize());
-  document.getElementById("btn-close").onclick = () =>
-    guard("关闭", appWindow.close());
+  document.getElementById("btn-close").onclick = () => {
+    // 「关闭时清理缓存」+「退出前弹窗提醒」都开启时，先确认再退出（需求 #2）
+    if (settings && settings.cleanOnClose && settings.cleanConfirmExit) {
+      openExitModal();
+    } else {
+      guard("关闭", appWindow.close());
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 退出确认弹窗（需求 #2）
+// ---------------------------------------------------------------------------
+
+function openExitModal() {
+  const modal = document.getElementById("exit-modal");
+  const includePinned = settings && settings.cleanIncludePinned;
+  document.getElementById("exit-modal-text").textContent = includePinned
+    ? "退出时将清理全部缓存内容（含置顶/收藏），确定退出吗？"
+    : "退出时将清理缓存内容（置顶/收藏会保留），确定退出吗？";
+  modal.hidden = false;
+}
+
+function bindExitModal() {
+  const modal = document.getElementById("exit-modal");
+  document.getElementById("exit-cancel").onclick = () => {
+    modal.hidden = true;
+  };
+  document.getElementById("exit-confirm").onclick = async () => {
+    modal.hidden = true;
+    try {
+      await invoke("exit_app");
+    } catch (e) {
+      toast("退出失败：" + e);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 工具栏垃圾桶：搜索时只清搜索结果，否则清全部；置顶/收藏始终豁免（需求 #3）
+// ---------------------------------------------------------------------------
+
+function bindClearView() {
+  document.getElementById("btn-clear-view").onclick = async () => {
+    const targets = filtered().filter((i) => !i.pinned && !i.favorite);
+    if (targets.length === 0) {
+      toast("没有可清理的条目（置顶/收藏除外）");
+      return;
+    }
+    try {
+      await invoke("delete_items", { ids: targets.map((i) => i.id) });
+      items = items.filter(
+        (i) => !targets.some((t) => t.id === i.id)
+      );
+      render();
+      toast(query ? `已清理 ${targets.length} 条搜索结果` : `已清理 ${targets.length} 条`);
+    } catch (e) {
+      toast("清理失败：" + e);
+    }
+  };
 }
 
 function bindNav() {
@@ -113,8 +171,11 @@ function timeStr(ts) {
 
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
 
-function render() {
+async function render() {
   const view = document.getElementById("view");
+  const toolbar = document.querySelector(".toolbar");
+  // 设置页不需要搜索栏（需求 #1）
+  toolbar.style.display = currentView === "settings" ? "none" : "";
   if (currentView === "settings") {
     view.innerHTML = settingsHtml();
     bindSettings(view);
@@ -122,28 +183,48 @@ function render() {
   }
 
   const list = filtered();
-  updateStatusBar(list.length);
+  // 状态栏：搜索中显示「找到 X 条结果」，否则显示总数（需求 #3）
+  const countEl = document.getElementById("status-count");
+  if (countEl)
+    countEl.textContent = query
+      ? `找到 ${list.length} 条结果`
+      : `共 ${items.length} 条`;
+
   if (list.length === 0) {
-    view.innerHTML = `<div class="empty"><div class="empty-title">暂无内容</div>
-      <div class="empty-sub">复制点东西试试，会自动记录到这里</div></div>`;
+    view.innerHTML = emptyHtml();
     return;
   }
 
   const wrap = document.createElement("div");
   wrap.className = "history";
   for (const item of list) {
-    wrap.appendChild(cardEl(item));
+    wrap.appendChild(await cardEl(item));
   }
   view.innerHTML = "";
   view.appendChild(wrap);
 }
 
-function updateStatusBar(count) {
-  const el = document.getElementById("status-count");
-  if (el) el.textContent = `共 ${count} 条`;
+/** 各视图的空态文案（需求 #5），搜索时显示「暂无 xxx 相关内容」（需求 #3） */
+function emptyHtml() {
+  const trunc = (s, n = 12) =>
+    s.length > n ? s.slice(0, n) + "..." : s;
+  if (query) {
+    return `<div class="empty"><div class="empty-title">暂无 ${trunc(
+      query
+    )} 相关内容</div></div>`;
+  }
+  const titles = {
+    history: ["暂无内容", "复制点东西试试，会自动记录到这里"],
+    pinned: ["暂无收藏内容", "在条目上右键选择「收藏」，会出现在这里"],
+    images: ["暂无图片", "复制的图片会自动记录到这里"],
+    files: ["暂无文件", "复制的文件会自动记录到这里"],
+  };
+  const [title, sub] = titles[currentView] || titles.history;
+  return `<div class="empty"><div class="empty-title">${title}</div>
+    <div class="empty-sub">${sub || ""}</div></div>`;
 }
 
-function cardEl(item) {
+async function cardEl(item) {
   const card = document.createElement("div");
   card.className = "card" + (item.pinned ? " is-pinned" : "");
   card.dataset.id = item.id;
@@ -155,10 +236,26 @@ function cardEl(item) {
   meta.className = "card-meta";
   meta.innerHTML = `<span class="card-kind">${KIND_LABEL[item.kind] || item.kind}</span>
     <span>${timeStr(item.ts)}</span>${item.pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
+  body.appendChild(meta);
+
+  // 图片条目：显示真实缩略图（读取失败就不显示，降级为 [图片] 文本）
+  if (item.kind === "image") {
+    const img = document.createElement("img");
+    img.className = "card-image";
+    img.alt = "图片";
+    img.loading = "lazy";
+    try {
+      img.src = await invoke("get_image", { id: item.id });
+      img.onerror = () => img.remove();
+      body.appendChild(img);
+    } catch {
+      /* 图片文件缺失/损坏 → 仅显示 [图片] 预览文本 */
+    }
+  }
+
   const preview = document.createElement("div");
   preview.className = "card-preview";
   preview.textContent = item.preview || "";
-  body.appendChild(meta);
   body.appendChild(preview);
   card.appendChild(body);
 
@@ -175,7 +272,7 @@ function cardEl(item) {
 async function copyBack(item) {
   try {
     await invoke("copy_back", { id: item.id });
-    toast(item.kind === "image" ? "图片写回暂未支持" : "已复制到剪贴板");
+    toast("已复制到剪贴板");
   } catch (e) {
     toast("复制失败：" + e);
   }
@@ -301,7 +398,13 @@ function settingsHtml() {
     </div>
     <div class="row"><label>关闭时清理缓存</label>
       <input type="checkbox" id="set-clean" ${s.cleanOnClose ? "checked" : ""} />
-      <span class="hint">退出时清空内容缓存与全部历史（置顶/收藏也会删除）</span></div>
+      <span class="hint">退出时清理内容缓存与历史（置顶/收藏默认保留）</span></div>
+    <div class="row"><label>　└ 同时清理置顶/收藏</label>
+      <input type="checkbox" id="set-clean-pinned" ${s.cleanIncludePinned ? "checked" : ""} />
+      <span class="hint">不勾选则置顶/收藏单独存放，不受清理影响</span></div>
+    <div class="row"><label>　└ 退出前弹窗提醒</label>
+      <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
+      <span class="hint">每次退出时先弹窗确认</span></div>
     <button class="btn-danger" id="clear-all">清空全部历史</button>
   </div>`;
 }
@@ -332,6 +435,8 @@ function bindSettings(view) {
     el.onchange = async () => {
       try {
         await invoke(cmd, { value: el.checked });
+        // 同步本地缓存（退出弹窗文案等依赖最新配置）
+        settings = await invoke("get_settings");
         toast(el.checked ? "已开启" : "已关闭");
       } catch (e) {
         toast("保存失败：" + e);
@@ -342,6 +447,8 @@ function bindSettings(view) {
   bindCheck("set-autostart", "set_autostart");
   bindCheck("set-tray", "set_tray_on_close");
   bindCheck("set-clean", "set_clean_on_close");
+  bindCheck("set-clean-pinned", "set_clean_include_pinned");
+  bindCheck("set-clean-confirm", "set_clean_confirm_exit");
 
   const retention = view.querySelector("#set-retention");
   if (retention)
@@ -386,6 +493,8 @@ function bindSettings(view) {
 async function main() {
   // 控件绑定优先（即便后续异步步骤出错，也能保证可交互）
   bindWindowControls();
+  bindExitModal();
+  bindClearView();
   bindNav();
   bindSearch();
 

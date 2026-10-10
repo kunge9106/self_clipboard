@@ -17,9 +17,15 @@ pub struct Config {
     /// 关闭时后台运行（隐藏到托盘）
     #[serde(default)]
     pub tray_on_close: bool,
-    /// 关闭时清理缓存（退出时清空内容缓存与历史，同 v1 cleanImagesOnClose）
+    /// 关闭时清理缓存（退出时清空内容缓存与历史）
     #[serde(default)]
     pub clean_on_close: bool,
+    /// 清理时是否连置顶/收藏一起删（默认豁免，单独存放）
+    #[serde(default)]
+    pub clean_include_pinned: bool,
+    /// 退出前弹窗提醒确认
+    #[serde(default)]
+    pub clean_confirm_exit: bool,
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
@@ -37,6 +43,8 @@ impl Default for Config {
         Self {
             tray_on_close: false,
             clean_on_close: false,
+            clean_include_pinned: false,
+            clean_confirm_exit: false,
             retention_days: default_retention(),
             cache_dir: None,
         }
@@ -107,10 +115,38 @@ pub fn get_settings() -> serde_json::Value {
     serde_json::json!({
         "trayOnClose": cfg.tray_on_close,
         "cleanOnClose": cfg.clean_on_close,
+        "cleanIncludePinned": cfg.clean_include_pinned,
+        "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
         "cacheDir": cfg.cache_dir,
         "autoStart": autostart::is_enabled(),
     })
+}
+
+#[tauri::command]
+pub fn set_clean_on_close(value: bool) -> Result<(), String> {
+    update(|c| c.clean_on_close = value);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_clean_include_pinned(value: bool) -> Result<(), String> {
+    update(|c| c.clean_include_pinned = value);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_clean_confirm_exit(value: bool) -> Result<(), String> {
+    update(|c| c.clean_confirm_exit = value);
+    Ok(())
+}
+
+/// 前端确认弹窗后调用：立即执行退出清理并退出进程
+#[tauri::command]
+pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
+    crate::clipboard::on_app_exit();
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -121,12 +157,6 @@ pub fn set_tray_on_close(app: tauri::AppHandle, value: bool) -> Result<(), Strin
         crate::tray::remove_tray();
     }
     let _ = app;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn set_clean_on_close(value: bool) -> Result<(), String> {
-    update(|c| c.clean_on_close = value);
     Ok(())
 }
 

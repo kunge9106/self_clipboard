@@ -135,9 +135,37 @@ pub fn copy_back(id: String) -> Result<(), String> {
             let files = item.files.ok_or("文件列表缺失")?;
             unsafe { write_files_to_clipboard(&files) }
         }
-        "image" => Err("图片写回暂未实现（当前版本仅展示）".into()),
+        "image" => {
+            // BMP 文件去掉 14 字节文件头即为 DIB，直接放回 CF_DIB
+            let rel = item.img_path.ok_or("图片文件缺失")?;
+            let bmp = fs::read(dir.join(rel)).map_err(|e| e.to_string())?;
+            if bmp.len() < 54 || &bmp[0..2] != b"BM" {
+                return Err("图片数据损坏".into());
+            }
+            unsafe { write_dib_to_clipboard(&bmp[14..]) }
+        }
         _ => Err("未知类型".into()),
     }
+}
+
+#[tauri::command]
+pub fn delete_items(ids: Vec<String>) -> Result<(), String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    let mut removed = 0usize;
+    hist.retain(|i| {
+        if ids.iter().any(|id| id == &i.id) {
+            remove_item_files(&dir, i);
+            removed += 1;
+            false
+        } else {
+            true
+        }
+    });
+    drop(hist);
+    save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
+    println!("[clipboard] 批量删除 {removed} 条");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +520,34 @@ unsafe fn mark_skip() {
     SKIP_SEQ.store(GetClipboardSequenceNumber(), Ordering::Relaxed);
 }
 
+/// DIB（BITMAPINFOHEADER + 像素）写入 CF_DIB
+unsafe fn write_dib_to_clipboard(dib: &[u8]) -> Result<(), String> {
+    let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+    if OpenClipboard(hwnd) == 0 {
+        return Err("OpenClipboard 失败".into());
+    }
+    EmptyClipboard();
+    let h = GlobalAlloc(GMEM_MOVEABLE, dib.len());
+    if h == 0 {
+        CloseClipboard();
+        return Err("GlobalAlloc 失败".into());
+    }
+    let p = GlobalLock(h) as *mut u8;
+    if p.is_null() {
+        CloseClipboard();
+        return Err("GlobalLock 失败".into());
+    }
+    std::ptr::copy_nonoverlapping(dib.as_ptr(), p, dib.len());
+    GlobalUnlock(h);
+    let ok = SetClipboardData(8, h); // CF_DIB
+    CloseClipboard();
+    if ok == 0 {
+        return Err("SetClipboardData(CF_DIB) 失败".into());
+    }
+    mark_skip();
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // 存储辅助
 // ---------------------------------------------------------------------------
@@ -694,19 +750,39 @@ pub fn open_cache_dir() -> Result<(), String> {
 
 /// 在 RunEvent::Exit 时调用。clean_on_close 开启则清空全部内容文件与历史索引。
 pub fn on_app_exit() {
-    if !crate::settings::get().clean_on_close {
+    let cfg = crate::settings::get();
+    if !cfg.clean_on_close {
         return;
     }
-    println!("[clipboard] 关闭时清理缓存：清空内容与历史");
+    let include_pinned = cfg.clean_include_pinned;
+    println!(
+        "[clipboard] 关闭时清理缓存（include_pinned={}）",
+        include_pinned
+    );
     if let Some(dir) = DIR.get() {
-        let _ = fs::remove_dir_all(dir.join("data"));
-        let _ = fs::remove_dir_all(dir.join("images"));
-        let _ = fs::create_dir_all(dir.join("data"));
-        let _ = fs::create_dir_all(dir.join("images"));
-        if let Some(h) = HISTORY.get() {
-            h.lock().unwrap().clear();
+        if include_pinned {
+            // 全清：直接清空两个内容目录 + 历史
+            let _ = fs::remove_dir_all(dir.join("data"));
+            let _ = fs::remove_dir_all(dir.join("images"));
+            let _ = fs::create_dir_all(dir.join("data"));
+            let _ = fs::create_dir_all(dir.join("images"));
+            if let Some(h) = HISTORY.get() {
+                h.lock().unwrap().clear();
+            }
+            save_index(dir, &Vec::new());
+        } else {
+            // 保留置顶/收藏：只删普通条目的内容文件
+            let mut hist = HISTORY.get().unwrap().lock().unwrap();
+            hist.retain(|i| {
+                if i.pinned || i.favorite {
+                    true
+                } else {
+                    remove_item_files(dir, i);
+                    false
+                }
+            });
+            save_index(dir, &hist);
         }
-        save_index(dir, &Vec::new());
     }
 }
 

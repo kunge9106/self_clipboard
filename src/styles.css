@@ -410,9 +410,14 @@ body {
   display: flex;
   flex-direction: column;
   border-radius: var(--radius-sm);
-  background: var(--glass-strong);
+  /* 右键菜单要贴着内容读：用高不透明底色，不吃玻璃透（需求 #8） */
+  background: rgba(252, 252, 252, 0.94);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
+}
+
+body.dark .ctx-menu {
+  background: rgba(40, 40, 44, 0.95);
 }
 
 .ctx-item {
@@ -541,6 +546,81 @@ body {
 
 .statusbar-version {
   opacity: 0.75;
+}
+
+/* 工具栏垃圾桶按钮 */
+.toolbar-clear {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+.toolbar-clear svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 图片条目缩略图 */
+.card-image {
+  max-width: 100%;
+  max-height: 140px;
+  object-fit: contain;
+  border-radius: 6px;
+  border: 1px solid var(--stroke);
+  margin-top: 4px;
+  display: block;
+}
+
+/* 退出确认弹窗 */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.32);
+}
+
+.modal {
+  min-width: 260px;
+  max-width: 320px;
+  padding: 18px 20px;
+  border-radius: var(--radius-sm);
+  background: rgba(252, 252, 252, 0.97);
+  border: 1px solid var(--stroke);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+body.dark .modal {
+  background: rgba(40, 40, 44, 0.97);
+}
+
+.modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.modal-text {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .btn-danger {
