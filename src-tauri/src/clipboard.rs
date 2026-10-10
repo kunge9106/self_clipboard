@@ -168,6 +168,30 @@ pub fn delete_items(ids: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// 清理 N 天**以前**的内容（置顶/收藏豁免）。返回实际删除的条数。
+///
+/// 用于「清理多久以前复制的内容」：与 retention_days（启动时自动按天清理）不同，
+/// 这是用户手动触发的、一次性的大扫除。
+#[tauri::command]
+pub fn clear_older_than(days: u32) -> Result<usize, String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let cutoff = now_ms().saturating_sub((days as u64).saturating_mul(86_400_000));
+    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    let before = hist.len();
+    hist.retain(|i| {
+        let expired = i.ts < cutoff && !i.pinned && !i.favorite;
+        if expired {
+            remove_item_files(&dir, i);
+        }
+        !expired
+    });
+    let removed = before - hist.len();
+    drop(hist);
+    save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
+    println!("[clipboard] 清理 {days} 天前的内容：{removed} 条");
+    Ok(removed)
+}
+
 // ---------------------------------------------------------------------------
 // 初始化
 // ---------------------------------------------------------------------------

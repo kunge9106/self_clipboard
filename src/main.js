@@ -17,6 +17,7 @@ const TIER_CLASS = {
 let items = []; // 历史条目（内存中仅元数据，内容在磁盘）
 let currentView = "history";
 let query = "";
+let ageDays = 0; // 时间筛选：只显示近 N 天（0 = 全部）
 let settings = null; // 后端配置（get_settings）
 
 /** 窗口圆角上限（后端按材质档位下发，Win10 acrylic = 20px） */
@@ -168,24 +169,73 @@ function bindExitModal() {
 // 工具栏垃圾桶：搜索时只清搜索结果，否则清全部；置顶/收藏始终豁免（需求 #3）
 // ---------------------------------------------------------------------------
 
+/**
+ * 垃圾桶：点击弹出清理菜单。
+ *   - 「清空当前列表」只清当前视图 + 搜索 + 时间筛选命中的条目
+ *   - 「清理 N 天前的内容」按时间清理更早的内容（用户要的「清理多久以前的」）
+ * 两者都豁免置顶/收藏；菜单项带条数预览，点之前就知道会删多少。
+ */
 function bindClearView() {
-  document.getElementById("btn-clear-view").onclick = async () => {
-    const targets = filtered().filter((i) => !i.pinned && !i.favorite);
-    if (targets.length === 0) {
-      toast("没有可清理的条目（置顶/收藏除外）");
-      return;
+  const btn = document.getElementById("btn-clear-view");
+  btn.onclick = (e) => {
+    e.stopPropagation(); // 拦下 document 的 click，否则菜单会被立刻关掉
+
+    const cleanable = items.filter((i) => !i.pinned && !i.favorite);
+    const visible = filtered().filter((i) => !i.pinned && !i.favorite);
+    const olderCount = (days) => {
+      const cutoff = Date.now() - days * 86_400_000;
+      return cleanable.filter((i) => i.ts < cutoff).length;
+    };
+
+    const entries = [
+      {
+        label: visible.length
+          ? `清空当前列表（${visible.length} 条）`
+          : "清空当前列表",
+        danger: true,
+        disabled: visible.length === 0,
+        act: () => clearVisible(visible),
+      },
+      { sep: true },
+    ];
+    for (const days of [1, 7, 30]) {
+      const n = olderCount(days);
+      entries.push({
+        label: `清理 ${days} 天前的内容（${n} 条）`,
+        disabled: n === 0,
+        act: () => clearOlder(days),
+      });
     }
-    try {
-      await invoke("delete_items", { ids: targets.map((i) => i.id) });
-      items = items.filter(
-        (i) => !targets.some((t) => t.id === i.id)
-      );
-      render();
-      toast(query ? `已清理 ${targets.length} 条搜索结果` : `已清理 ${targets.length} 条`);
-    } catch (e) {
-      toast("清理失败：" + e);
-    }
+
+    const r = btn.getBoundingClientRect();
+    showMenu(r.left - 176, r.top - 190, entries);
   };
+}
+
+async function clearVisible(targets) {
+  if (targets.length === 0) {
+    toast("没有可清理的条目（置顶/收藏除外）");
+    return;
+  }
+  try {
+    await invoke("delete_items", { ids: targets.map((i) => i.id) });
+    items = items.filter((i) => !targets.some((t) => t.id === i.id));
+    render();
+    toast(`已清理 ${targets.length} 条`);
+  } catch (e) {
+    toast("清理失败：" + e);
+  }
+}
+
+async function clearOlder(days) {
+  try {
+    const n = await invoke("clear_older_than", { days });
+    items = await invoke("get_history");
+    render();
+    toast(n > 0 ? `已清理 ${n} 条（${days} 天前）` : `${days} 天前没有可清理的内容`);
+  } catch (e) {
+    toast("清理失败：" + e);
+  }
 }
 
 function bindNav() {
@@ -210,6 +260,16 @@ function bindSearch() {
   });
 }
 
+/** 时间筛选：只显示近 N 天复制的内容 */
+function bindAgeFilter() {
+  const el = document.getElementById("age-filter");
+  if (!el) return;
+  el.addEventListener("change", () => {
+    ageDays = parseInt(el.value, 10) || 0;
+    render();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 历史渲染
 // ---------------------------------------------------------------------------
@@ -226,6 +286,11 @@ function filtered() {
         (i.preview && i.preview.toLowerCase().includes(query)) ||
         (i.files && i.files.some((f) => f.toLowerCase().includes(query)))
     );
+  }
+  // 时间筛选（近 N 天）
+  if (ageDays > 0) {
+    const cutoff = Date.now() - ageDays * 86_400_000;
+    list = list.filter((i) => i.ts >= cutoff);
   }
   // pinned 优先，其余按时间倒序
   return [...list].sort((a, b) => {
@@ -283,12 +348,13 @@ function render() {
   }
 
   const list = filtered();
-  // 状态栏：搜索中显示「找到 X 条结果」，否则显示总数（需求 #3）
+  // 状态栏：搜索/筛选时显示命中条数，否则显示总数
   const countEl = document.getElementById("status-count");
-  if (countEl)
-    countEl.textContent = query
-      ? `找到 ${list.length} 条结果`
-      : `共 ${items.length} 条`;
+  if (countEl) {
+    if (query) countEl.textContent = `找到 ${list.length} 条结果`;
+    else if (ageDays > 0) countEl.textContent = `近 ${ageDays} 天 ${list.length} 条`;
+    else countEl.textContent = `共 ${items.length} 条`;
+  }
 
   if (list.length === 0) {
     view.innerHTML = emptyHtml();
@@ -312,6 +378,10 @@ function emptyHtml() {
     return `<div class="empty"><div class="empty-title">暂无 ${trunc(
       query
     )} 相关内容</div></div>`;
+  }
+  if (ageDays > 0) {
+    return `<div class="empty"><div class="empty-title">近 ${ageDays} 天内暂无内容</div>
+      <div class="empty-sub">换个时间范围看看</div></div>`;
   }
   const titles = {
     history: ["暂无内容", "复制点东西试试，会自动记录到这里"],
@@ -490,13 +560,40 @@ function closeContextMenu() {
   }
 }
 
-function openContextMenu(x, y, item) {
+/** 通用浮层菜单。entries = [{ label, act, danger?, disabled? } | { sep: true }] */
+function showMenu(x, y, entries) {
   closeContextMenu();
 
   const menu = document.createElement("div");
   menu.className = "ctx-menu";
 
-  const entries = [
+  for (const entry of entries) {
+    if (entry.sep) {
+      const sep = document.createElement("div");
+      sep.className = "ctx-sep";
+      menu.appendChild(sep);
+      continue;
+    }
+    const btn = document.createElement("button");
+    btn.className = "ctx-item" + (entry.danger ? " danger" : "");
+    btn.textContent = entry.label;
+    btn.disabled = !!entry.disabled;
+    btn.onclick = () => {
+      closeContextMenu();
+      entry.act();
+    };
+    menu.appendChild(btn);
+  }
+
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 8)) + "px";
+  menu.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 8)) + "px";
+  ctxMenuEl = menu;
+}
+
+function openContextMenu(x, y, item) {
+  showMenu(x, y, [
     { label: "复制", act: () => copyBack(item) },
     {
       label: item.pinned ? "取消置顶" : "置顶",
@@ -523,24 +620,7 @@ function openContextMenu(x, y, item) {
         render();
       },
     },
-  ];
-
-  for (const entry of entries) {
-    const btn = document.createElement("button");
-    btn.className = "ctx-item" + (entry.danger ? " danger" : "");
-    btn.textContent = entry.label;
-    btn.onclick = () => {
-      closeContextMenu();
-      entry.act();
-    };
-    menu.appendChild(btn);
-  }
-
-  document.body.appendChild(menu);
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 8)) + "px";
-  menu.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 8)) + "px";
-  ctxMenuEl = menu;
+  ]);
 }
 
 // 点空白处 / 滚动 / Esc → 关闭；非卡片区域右键 → 只关不弹
@@ -693,12 +773,22 @@ function bindSettings(view) {
     });
   }
 
-  // 圆角模式：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启
+  // 圆角模式：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启。
+  // 两种模式对「厚度」的要求不同，所以顺带把材质浓度也切到对应的档：
+  //   圆角模式没有背景模糊 → 半透就等于直接看到桌面，要更实（90）
+  //   直角模式有真模糊      → 50% 更通透好看
   const round = view.querySelector("#set-round");
   if (round)
     round.onchange = async () => {
       try {
         await invoke("set_round_mode", { value: round.checked });
+        const alpha = round.checked ? 90 : 50;
+        await invoke("set_material_alpha", { value: alpha });
+        applyGlassAlpha(alpha);
+        const slider = view.querySelector("#set-material");
+        if (slider) slider.value = alpha;
+        const label = view.querySelector("#material-val");
+        if (label) label.textContent = `${alpha}%（越高越厚实 · 越低越通透）`;
         applyRoundMode(round.checked);
         settings = await invoke("get_settings");
         toast(
@@ -748,6 +838,7 @@ async function main() {
   bindClearView();
   bindNav();
   bindSearch();
+  bindAgeFilter();
   startTimeTicker();
 
   await applyEffectInfo();

@@ -167,6 +167,7 @@ pub fn run() {
             clipboard::get_history,
             clipboard::delete_item,
             clipboard::delete_items,
+            clipboard::clear_older_than,
             clipboard::toggle_pin,
             clipboard::toggle_favorite,
             clipboard::clear_all,
