@@ -152,18 +152,26 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| eprintln!("[clipboard] 取 app_data_dir 失败：{e}"))
-        .unwrap_or_else(|_| PathBuf::from("./clipboard-data"));
-    let dir = dir.join("clipboard");
+    // 目录优先级：用户自定义缓存目录 > app_data_dir/clipboard（同 v1 imageCacheDir）
+    let dir = match crate::settings::get().cache_dir {
+        Some(d) => PathBuf::from(d),
+        None => app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("./clipboard-data"))
+            .join("clipboard"),
+    };
 
     let _ = fs::create_dir_all(dir.join("data"));
     let _ = fs::create_dir_all(dir.join("images"));
     let _ = DIR.set(dir.clone());
 
     let hist = load_index(&dir);
+
+    // 保留策略：按配置天数清理过期条目（0 = 永久保留）
+    let days = crate::settings::get().retention_days;
+    let hist = prune_history(hist, &dir, days);
+
     let _ = HISTORY.set(Mutex::new(hist));
 
     // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
@@ -524,6 +532,181 @@ fn patch_item<F: FnOnce(&mut HistoryItem)>(id: &str, f: F) -> Result<(), String>
         Ok(())
     } else {
         Err("条目不存在".into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 保留策略（迁移自 v1 RETENTION_DAYS = 3）
+// ---------------------------------------------------------------------------
+
+/// 按天数清理过期条目（0 = 不清理），返回清理后的历史。
+/// v1 语义：严格按时间戳过滤，不豁免置顶/收藏。
+pub fn prune_retention(days: u32) {
+    if let Some(dir) = DIR.get() {
+        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        let before = hist.len();
+        *hist = prune_history(hist.clone(), dir, days);
+        let removed = before - hist.len();
+        if removed > 0 {
+            println!("[clipboard] 保留策略清理 {removed} 条过期条目");
+        }
+    }
+}
+
+/// 纯函数版本：过滤 + 删文件 + 存索引
+fn prune_history(hist: Vec<HistoryItem>, dir: &PathBuf, days: u32) -> Vec<HistoryItem> {
+    if days == 0 {
+        return hist;
+    }
+    let deadline = now_ms().saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
+    let kept: Vec<HistoryItem> = hist
+        .into_iter()
+        .filter(|i| {
+            if i.ts >= deadline {
+                true
+            } else {
+                remove_item_files(dir, i);
+                false
+            }
+        })
+        .collect();
+    save_index(dir, &kept);
+    kept
+}
+
+// ---------------------------------------------------------------------------
+// 缓存目录管理（迁移自 v1 pick-cache-dir / get-image-cache-info / open-cache-dir）
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct CacheInfo {
+    pub dir: String,
+    pub count: u64,
+    pub size: u64,
+}
+
+#[tauri::command]
+pub fn cache_info() -> CacheInfo {
+    let dir = DIR.get().cloned().unwrap_or_default();
+    let (count, size) = dir_stats(&dir);
+    CacheInfo {
+        dir: dir.to_string_lossy().to_string(),
+        count,
+        size,
+    }
+}
+
+/// 递归统计目录内文件数与总字节
+fn dir_stats(dir: &PathBuf) -> (u64, u64) {
+    let (mut count, mut size) = (0u64, 0u64);
+    let Ok(rd) = fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    for entry in rd.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
+            let (c, s) = dir_stats(&entry.path());
+            count += c;
+            size += s;
+        } else if let Ok(meta) = entry.metadata() {
+            count += 1;
+            size += meta.len();
+        }
+    }
+    (count, size)
+}
+
+/// 选择新的缓存目录：移动全部数据 → 写配置 → 短暂延迟后重启应用使 DIR 生效
+#[tauri::command]
+pub fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("选择缓存目录")
+        .blocking_pick_folder();
+    let Some(picked) = picked else {
+        return Ok(None); // 用户取消
+    };
+    let new_dir: PathBuf = match picked {
+        tauri_plugin_dialog::FilePath::Path(p) => p,
+        tauri_plugin_dialog::FilePath::Url(u) => {
+            return Err(format!("不支持的路径：{u}"))
+        }
+    };
+    if !new_dir.is_dir() {
+        return Err("所选路径不是目录".into());
+    }
+    let new_dir = new_dir
+        .canonicalize()
+        .unwrap_or(new_dir);
+
+    if let Some(old) = DIR.get() {
+        if old == &new_dir {
+            return Ok(Some(new_dir.to_string_lossy().to_string()));
+        }
+        move_dir_contents(old, &new_dir).map_err(|e| format!("迁移缓存文件失败：{e}"))?;
+    }
+
+    crate::settings::update(|c| c.cache_dir = Some(new_dir.to_string_lossy().to_string()));
+    println!("[clipboard] 缓存目录已迁移至 {}，即将重启", new_dir.display());
+
+    // DIR 是 OnceLock，运行期不可变：迁移完成后重启进程，让新目录在下次启动生效
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        handle.restart();
+    });
+    Ok(Some(new_dir.to_string_lossy().to_string()))
+}
+
+/// 递归把 old 内所有内容移动到 new（跨卷也适用：rename 失败退回 copy+delete）
+fn move_dir_contents(old: &PathBuf, new: &PathBuf) -> std::io::Result<()> {
+    fs::create_dir_all(new)?;
+    for entry in fs::read_dir(old)?.flatten() {
+        let from = entry.path();
+        let to = new.join(entry.file_name());
+        if from.is_dir() {
+            move_dir_contents(&from, &to)?;
+            fs::remove_dir_all(&from).ok();
+        } else if fs::rename(&from, &to).is_err() {
+            fs::copy(&from, &to)?;
+            let _ = fs::remove_file(&from);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_cache_dir() -> Result<(), String> {
+    let dir = DIR.get().ok_or("存储目录未初始化")?;
+    std::process::Command::new("explorer")
+        .arg(dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 退出清理（迁移自 v1 cleanImagesOnClose：清空内容缓存 + 历史）
+// ---------------------------------------------------------------------------
+
+/// 在 RunEvent::Exit 时调用。clean_on_close 开启则清空全部内容文件与历史索引。
+pub fn on_app_exit() {
+    if !crate::settings::get().clean_on_close {
+        return;
+    }
+    println!("[clipboard] 关闭时清理缓存：清空内容与历史");
+    if let Some(dir) = DIR.get() {
+        let _ = fs::remove_dir_all(dir.join("data"));
+        let _ = fs::remove_dir_all(dir.join("images"));
+        let _ = fs::create_dir_all(dir.join("data"));
+        let _ = fs::create_dir_all(dir.join("images"));
+        if let Some(h) = HISTORY.get() {
+            h.lock().unwrap().clear();
+        }
+        save_index(dir, &Vec::new());
     }
 }
 

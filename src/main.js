@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const appWindow = getCurrentWindow();
@@ -16,6 +17,7 @@ const TIER_CLASS = {
 let items = []; // 历史条目（内存中仅元数据，内容在磁盘）
 let currentView = "history";
 let query = "";
+let settings = null; // 后端配置（get_settings）
 
 async function applyEffectInfo() {
   let info;
@@ -120,6 +122,7 @@ function render() {
   }
 
   const list = filtered();
+  updateStatusBar(list.length);
   if (list.length === 0) {
     view.innerHTML = `<div class="empty"><div class="empty-title">暂无内容</div>
       <div class="empty-sub">复制点东西试试，会自动记录到这里</div></div>`;
@@ -133,6 +136,11 @@ function render() {
   }
   view.innerHTML = "";
   view.appendChild(wrap);
+}
+
+function updateStatusBar(count) {
+  const el = document.getElementById("status-count");
+  if (el) el.textContent = `共 ${count} 条`;
 }
 
 function cardEl(item) {
@@ -269,19 +277,96 @@ function toast(msg) {
 // ---------------------------------------------------------------------------
 
 function settingsHtml() {
+  const s = settings || {};
+  const fmtMB = (b) => (b / 1024 / 1024).toFixed(1);
   return `<div class="settings">
     <h2>设置</h2>
-    <div class="row"><label>自动清理（天）</label>
-      <input type="number" min="0" value="30" />
-      <span class="hint">0 表示永不自动清理（收藏/置顶除外，永久保留）</span></div>
-    <div class="row"><label>全局热键</label>
-      <input type="checkbox" checked />
-      <span class="hint">用 Ctrl+反引号(\`) 唤起/隐藏窗口（开关功能开发中）</span></div>
+    <div class="row"><label>开机自启</label>
+      <input type="checkbox" id="set-autostart" ${s.autoStart ? "checked" : ""} />
+      <span class="hint">登录 Windows 后自动运行轻贴</span></div>
+    <div class="row"><label>关闭时后台运行</label>
+      <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
+      <span class="hint">点关闭按钮时隐藏到托盘，双击托盘图标可唤回</span></div>
+    <div class="row"><label>保留天数</label>
+      <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
+      <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
+    <div class="cache-box">
+      <div class="cache-title">缓存目录 <span class="hint">仅保留近 ${s.retentionDays ?? 3} 天内容</span></div>
+      <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
+      <div class="cache-stats" id="cache-stats"></div>
+      <div class="cache-actions">
+        <button class="btn-ghost" id="btn-pick-dir">更改目录</button>
+        <button class="btn-ghost" id="btn-open-dir">打开目录</button>
+      </div>
+    </div>
+    <div class="row"><label>关闭时清理缓存</label>
+      <input type="checkbox" id="set-clean" ${s.cleanOnClose ? "checked" : ""} />
+      <span class="hint">退出时清空内容缓存与全部历史（置顶/收藏也会删除）</span></div>
     <button class="btn-danger" id="clear-all">清空全部历史</button>
   </div>`;
 }
 
+async function refreshCacheInfo() {
+  try {
+    const info = await invoke("cache_info");
+    const pathEl = document.getElementById("cache-path");
+    const statsEl = document.getElementById("cache-stats");
+    if (pathEl) pathEl.textContent = info.dir;
+    if (statsEl)
+      statsEl.textContent = `${info.count} 个文件 · ${fmtSize(info.size)}`;
+  } catch (e) {
+    console.error("cache_info failed", e);
+  }
+}
+
+function fmtSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / 1024 / 1024).toFixed(1) + " MB";
+}
+
 function bindSettings(view) {
+  const bindCheck = (id, cmd) => {
+    const el = view.querySelector("#" + id);
+    if (!el) return;
+    el.onchange = async () => {
+      try {
+        await invoke(cmd, { value: el.checked });
+        toast(el.checked ? "已开启" : "已关闭");
+      } catch (e) {
+        toast("保存失败：" + e);
+        el.checked = !el.checked;
+      }
+    };
+  };
+  bindCheck("set-autostart", "set_autostart");
+  bindCheck("set-tray", "set_tray_on_close");
+  bindCheck("set-clean", "set_clean_on_close");
+
+  const retention = view.querySelector("#set-retention");
+  if (retention)
+    retention.onchange = async () => {
+      const days = Math.max(0, parseInt(retention.value, 10) || 0);
+      retention.value = days;
+      try {
+        await invoke("set_retention_days", { days });
+        toast(days === 0 ? "已改为永久保留" : `仅保留近 ${days} 天内容`);
+      } catch (e) {
+        toast("保存失败：" + e);
+      }
+    };
+
+  view.querySelector("#btn-pick-dir").onclick = async () => {
+    try {
+      const res = await invoke("pick_cache_dir");
+      if (res) toast("缓存目录已迁移，即将重启…");
+    } catch (e) {
+      toast("更改目录失败：" + e);
+    }
+  };
+  view.querySelector("#btn-open-dir").onclick = () =>
+    invoke("open_cache_dir").catch((e) => toast("打开失败：" + e));
+
   const clear = view.querySelector("#clear-all");
   if (clear)
     clear.onclick = async () => {
@@ -290,6 +375,8 @@ function bindSettings(view) {
       render();
       toast("已清空");
     };
+
+  refreshCacheInfo();
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +405,20 @@ async function main() {
   } catch (e) {
     console.error("load history failed", e);
   }
+
+  // 配置与版本号（状态栏）
+  try {
+    settings = await invoke("get_settings");
+  } catch (e) {
+    console.error("load settings failed", e);
+  }
+  try {
+    document.getElementById("status-version").textContent =
+      `Version：${(await getVersion())}-ikun`;
+  } catch (e) {
+    document.getElementById("status-version").textContent = "Version：2.0.0-ikun";
+  }
+
   render();
 
   // 增量：复制新内容时 Rust 推事件，直接插到顶部

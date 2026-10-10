@@ -482,6 +482,67 @@ body {
   color: var(--text-dim);
 }
 
+.settings input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: default;
+}
+
+/* 缓存目录块（迁移自 v1 缓存信息区） */
+.cache-box {
+  padding: 12px 14px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.cache-title {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cache-path {
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-all;
+  user-select: text;
+}
+
+.cache-stats {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.cache-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 底部状态栏：条目数 + 版本号 */
+.statusbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 26px;
+  padding: 0 12px;
+  border-top: 1px solid var(--stroke);
+  font-size: 11px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.statusbar-version {
+  opacity: 0.75;
+}
+
 .btn-danger {
   align-self: flex-start;
   height: 32px;

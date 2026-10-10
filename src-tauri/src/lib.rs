@@ -7,6 +7,9 @@ use tauri::Manager;
 mod effects;
 #[cfg(windows)]
 mod clipboard;
+mod settings;
+mod autostart;
+mod tray;
 
 /// 前端启动时调用，拿到实际生效的材质档位与圆角上限。
 /// 注意：返回的是「实际生效」而非「尝试应用」的档位——这是 v1 静默失败的直接教训。
@@ -65,6 +68,8 @@ fn setup_effects(app: &tauri::AppHandle) {
     // 失焦/聚焦时 Windows 会发 WM_NCACTIVATE 重绘原生标题栏，必须拦截
     effects::install_focus_hook(hwnd);
 
+    let app_for_events = app.clone();
+    let window_for_close = window.clone();
     window.on_window_event(move |event| {
         match event {
             tauri::WindowEvent::ThemeChanged(theme) => {
@@ -82,6 +87,16 @@ fn setup_effects(app: &tauri::AppHandle) {
             // 跨屏拖动 DPI 变化后，半径要按新 DPI 重新换算
             tauri::WindowEvent::ScaleFactorChanged { .. } => {
                 effects::apply_rounded_corners(hwnd);
+            }
+            // 「关闭时后台运行」：隐藏到托盘而不是退出（迁移自 v1 trayOnClose）
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                if settings::get().tray_on_close {
+                    api.prevent_close();
+                    let _ = window_for_close.hide();
+                    tray::create_tray(&app_for_events);
+                    println!("[tray] 窗口已隐藏到托盘");
+                }
+                // 未开启托盘模式 → 放行关闭，退出清理在 RunEvent::Exit 统一处理
             }
             _ => {}
         }
@@ -101,19 +116,30 @@ fn setup_effects(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
-    let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
-        effect_info,
-        clipboard::get_history,
-        clipboard::delete_item,
-        clipboard::toggle_pin,
-        clipboard::toggle_favorite,
-        clipboard::clear_all,
-        clipboard::get_image,
-        clipboard::copy_back,
-    ]);
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            effect_info,
+            clipboard::get_history,
+            clipboard::delete_item,
+            clipboard::toggle_pin,
+            clipboard::toggle_favorite,
+            clipboard::clear_all,
+            clipboard::get_image,
+            clipboard::copy_back,
+            clipboard::cache_info,
+            clipboard::pick_cache_dir,
+            clipboard::open_cache_dir,
+            settings::get_settings,
+            settings::set_tray_on_close,
+            settings::set_clean_on_close,
+            settings::set_retention_days,
+            settings::set_autostart,
+        ]);
 
     #[cfg(windows)]
     let builder = builder.setup(|app| {
+        settings::init(app.handle());
         clipboard::init(app.handle());
         setup_effects(app.handle());
         if let Some(w) = app.get_webview_window("main") {
@@ -122,7 +148,15 @@ pub fn run() {
         Ok(())
     });
 
-    builder
-        .run(tauri::generate_context!())
-        .expect("轻贴启动失败");
+    // 退出前统一清理：勾选「关闭时清理缓存」时清空内容缓存与历史（同 v1 before-quit）
+    match builder.build(tauri::generate_context!()) {
+        Ok(app) => {
+            app.run(|_app, event| {
+                if let tauri::RunEvent::Exit = event {
+                    clipboard::on_app_exit();
+                }
+            });
+        }
+        Err(e) => panic!("轻贴启动失败：{e}"),
+    }
 }
