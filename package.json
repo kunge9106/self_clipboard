@@ -22,7 +22,10 @@
       "output": "dist"
     },
     "compression": "maximum",
-    "asar": false,
+    "asar": true,
+    "asarUnpack": [
+      "assets/**"
+    ],
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"
