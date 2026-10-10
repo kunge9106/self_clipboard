@@ -309,11 +309,20 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     }
 }
 
-/// 触发 DWM 重算。Win10 acrylic 有时需要动一下窗口才真正铺开。
+/// 触发 DWM 重算，并逼 WebView2 重新量一次尺寸。
+///
+/// 单纯 `SetWindowPos(..., SWP_NOSIZE)` 只会产生 WM_MOVE —— DWM 未必重算，
+/// WebView2 更不会重新布局。这里把宽度 **+1px 再还原**，制造一次真实的 WM_SIZE：
+///   - Win10 acrylic 有时要动一下窗口才真正铺开；
+///   - 窗口隐藏（托盘）或最小化后恢复时，WebView2 的内容尺寸可能停在隐藏前的大小，
+///     表现为「排版错位、点两下才好」——一次 WM_SIZE 就能让它重新量一遍。
+///
+/// 最大化状态不能改尺寸（由系统接管），退化为请求一次边框重算。
 pub fn nudge(hwnd: isize) {
     unsafe {
         extern "system" {
             fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+            fn IsZoomed(hwnd: isize) -> i32;
             fn SetWindowPos(
                 hwnd: isize,
                 insert_after: isize,
@@ -326,16 +335,32 @@ pub fn nudge(hwnd: isize) {
         }
 
         const SWP_NOSIZE: u32 = 0x0001;
+        const SWP_NOMOVE: u32 = 0x0002;
         const SWP_NOZORDER: u32 = 0x0004;
         const SWP_NOACTIVATE: u32 = 0x0010;
+        const SWP_FRAMECHANGED: u32 = 0x0020;
 
         let mut r: Rect = std::mem::zeroed();
         if GetWindowRect(hwnd, &mut r as *mut _) == 0 {
             return;
         }
-        // 先 +1 再还原，强制 DWM 重绘一次
-        SetWindowPos(hwnd, 0, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(hwnd, 0, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+
+        if IsZoomed(hwnd) != 0 {
+            SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            return;
+        }
+
+        SetWindowPos(hwnd, 0, r.left, r.top, w + 1, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(hwnd, 0, r.left, r.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 

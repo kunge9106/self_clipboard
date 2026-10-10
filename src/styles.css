@@ -89,6 +89,14 @@ button:focus-visible {
   box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.4);
 }
 
+/* 悬浮态开关（html.hovers-off）。
+   Chromium 的 :hover 是「引擎内部状态」，只在收到真实鼠标移动时才重算。
+   窗口被最小化/隐藏时 WebView 收不到 WM_MOUSELEAVE，于是**最小化前光标停留的那个
+   元素会一直保持 :hover**——从任务栏/托盘恢复后，右上角那几个窗口按钮就带着背景色，
+   直到鼠标真的动一下才消失（用户实测反馈）。
+   所以所有 :hover 规则都挂在 html:not(.hovers-off) 下：窗口失焦时加上这个类整体屏蔽，
+   鼠标真正移动后再摘掉。JS 见 bindHoverGuard()。 */
+
 html,
 body {
   height: 100%;
@@ -146,8 +154,8 @@ body.round .app {
 /* 圆角模式（窗口接近实心）下，不止历史卡片，侧栏选中项与设置页的
    缓存卡片同样会与窗口底面糊在一起——用同一套阴影把边界立起来。
    常态的 .nav-item 是透明背景，加阴影会变成「无底的浮影」，故只给有底色的状态。 */
-body.round .nav-item:hover,
-body.round .nav-item.is-active {
+body.round .nav-item.is-active,
+html:not(.hovers-off) body.round .nav-item:hover {
   box-shadow: var(--card-shadow);
 }
 
@@ -262,11 +270,11 @@ body.dark .app::after {
   stroke-width: 1.1;
 }
 
-.wc-btn:hover {
+html:not(.hovers-off) .wc-btn:hover {
   background: var(--glass-hover);
 }
 
-.wc-close:hover {
+html:not(.hovers-off) .wc-close:hover {
   background: #e81123;
   color: #fff;
 }
@@ -319,7 +327,7 @@ body.dark .app::after {
   transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 
-.nav-item:hover {
+html:not(.hovers-off) .nav-item:hover {
   background: var(--glass-hover);
   color: var(--text);
 }
@@ -425,7 +433,7 @@ body.dark .app::after {
   cursor: default;
 }
 
-.btn-ghost:hover {
+html:not(.hovers-off) .btn-ghost:hover {
   background: var(--glass-hover);
 }
 
@@ -496,7 +504,7 @@ body.dark .app::after {
   transition: background 0.12s ease, transform 0.08s ease;
 }
 
-.card:hover {
+html:not(.hovers-off) .card:hover {
   background: var(--glass-hover);
 }
 
@@ -598,7 +606,7 @@ body.dark .ctx-menu {
   transition: background 0.1s ease;
 }
 
-.ctx-item:hover {
+html:not(.hovers-off) .ctx-item:hover {
   background: var(--glass-hover);
 }
 
@@ -606,7 +614,7 @@ body.dark .ctx-menu {
   color: #e81123;
 }
 
-.ctx-item.danger:hover {
+html:not(.hovers-off) .ctx-item.danger:hover {
   background: #e81123;
   color: #fff;
 }
@@ -774,7 +782,7 @@ body.dark .ctx-menu {
   stroke-linejoin: round;
 }
 
-.statusbar-clear:hover {
+html:not(.hovers-off) .statusbar-clear:hover {
   background: var(--glass-hover);
   color: var(--text);
 }
@@ -870,7 +878,7 @@ body.dark .modal {
   cursor: default;
 }
 
-.btn-danger:hover {
+html:not(.hovers-off) .btn-danger:hover {
   background: #e81123;
   color: #fff;
 }
@@ -917,7 +925,7 @@ body.dark .toast {
   border-radius: 999px;
 }
 
-::-webkit-scrollbar-thumb:hover {
+html:not(.hovers-off) ::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 0, 0, 0.28);
 }
 
@@ -925,7 +933,7 @@ body.dark ::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.16);
 }
 
-body.dark ::-webkit-scrollbar-thumb:hover {
+html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.28);
 }
 

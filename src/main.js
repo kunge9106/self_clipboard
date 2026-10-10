@@ -77,6 +77,15 @@ function applyRoundMode(on) {
   document.documentElement.style.setProperty("--radius", (on ? maxRadius : 0) + "px");
 }
 
+/** 最大化 ↔ 还原：图标与提示词跟随窗口状态（需求 #6） */
+async function syncMaxState() {
+  const maxBtn = document.getElementById("btn-maximize");
+  if (!maxBtn) return;
+  const max = await appWindow.isMaximized().catch(() => false);
+  maxBtn.classList.toggle("is-max", max);
+  maxBtn.title = max ? "还原" : "最大化";
+}
+
 function bindWindowControls() {
   const guard = (label, p) =>
     p.catch((err) => toast(label + "失败：" + err));
@@ -93,15 +102,48 @@ function bindWindowControls() {
     }
   };
 
-  // 最大化 ↔ 还原：图标与提示词跟随窗口状态（需求 #6）
-  const maxBtn = document.getElementById("btn-maximize");
-  const syncMaxState = async () => {
-    const max = await appWindow.isMaximized().catch(() => false);
-    maxBtn.classList.toggle("is-max", max);
-    maxBtn.title = max ? "还原" : "最大化";
-  };
+  // 窗口尺寸变化时同步图标
   appWindow.onResized(() => syncMaxState());
+  // 从最小化 / 托盘恢复时尺寸未必变化 → onResized 不触发，图标会停在旧状态。
+  // 获得焦点时补一次同步，顺带把「材质浓度 / 圆角模式」按当前配置重放一遍。
+  appWindow.onFocusChanged(({ payload: focused }) => {
+    if (!focused) return;
+    syncMaxState();
+    if (settings) {
+      applyGlassAlpha(settings.materialAlpha ?? 62);
+      applyRoundMode(settings.roundMode);
+    }
+  });
   syncMaxState();
+}
+
+/**
+ * 悬浮态防残留。
+ *
+ * Chromium 的 `:hover` 是引擎内部状态，只在收到**真实鼠标移动**时才重算。窗口最小化
+ * 或隐藏到托盘时，WebView 收不到 WM_MOUSELEAVE，于是「最小化前光标停着的那个元素」
+ * 会一直保持 `:hover` —— 从任务栏/托盘恢复后，右上角那几个窗口按钮就带着背景色，
+ * 直到鼠标真的动一下才消失。
+ *
+ * 做法：窗口失焦时给 `<html>` 挂上 `.hovers-off`，CSS 里所有 `:hover` 规则都写在
+ * `html:not(.hovers-off)` 之下，于是整体被屏蔽；等鼠标真的在本窗口里移动/按下之后
+ * 再摘掉 —— 那时 Chromium 会按新坐标重算 hover，得到的才是真实结果。
+ *
+ * 注意：只在**失焦**时挂载、不在聚焦时挂载。因为点击窗口的 `mousedown` 早于 `focus`，
+ * 若在 focus 时挂载，会出现「先摘掉又挂上」→ hover 再也不亮。
+ */
+function bindHoverGuard() {
+  const html = document.documentElement;
+  const off = () => html.classList.add("hovers-off");
+  const on = () => html.classList.remove("hovers-off");
+
+  appWindow.onFocusChanged(({ payload: focused }) => {
+    if (!focused) off();
+  });
+  window.addEventListener("mousemove", on, { passive: true });
+  window.addEventListener("mousedown", on, { passive: true });
+  document.addEventListener("mouseleave", off);
+  on();
 }
 
 // 自定义拖动（不用系统移动循环，避免 Win10 acrylic 的幽灵窗口 & 拖动变色）
@@ -1009,6 +1051,7 @@ function bindSettings(view) {
 async function main() {
   // 控件绑定优先（即便后续异步步骤出错，也能保证可交互）
   bindWindowControls();
+  bindHoverGuard();
   bindDrag();
   bindResize();
   bindExitModal();

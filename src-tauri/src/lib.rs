@@ -108,7 +108,7 @@ fn setup_effects(app: &tauri::AppHandle) {
     effects::install_focus_hook(hwnd);
 
     let app_for_events = app.clone();
-    let window_for_close = window.clone();
+    let window_for_events = window.clone();
     window.on_window_event(move |event| {
         match event {
             tauri::WindowEvent::ThemeChanged(theme) => {
@@ -120,9 +120,16 @@ fn setup_effects(app: &tauri::AppHandle) {
             tauri::WindowEvent::Resized(_) => {
                 effects::begin_resize(hwnd);
             }
-            // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）
-            tauri::WindowEvent::Focused(_) => {
+            // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）；
+            // 另外窗口隐藏（托盘）/最小化再恢复时，DWM 可能把 accent 材质丢掉，
+            // 表现为「回来变成一层没有毛玻璃的半透明」。两者都幂等，恢复时补刷一次。
+            tauri::WindowEvent::Focused(focused) => {
                 effects::apply_rounded_corners(hwnd);
+                if *focused {
+                    let dark =
+                        matches!(window_for_events.theme().unwrap_or(Theme::Light), Theme::Dark);
+                    effects::apply(hwnd, dark);
+                }
             }
             // 跨屏拖动 DPI 变化后，半径要按新 DPI 重新换算
             tauri::WindowEvent::ScaleFactorChanged { .. } => {
@@ -132,7 +139,7 @@ fn setup_effects(app: &tauri::AppHandle) {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if settings::get().tray_on_close {
                     api.prevent_close();
-                    let _ = window_for_close.hide();
+                    let _ = window_for_events.hide();
                     tray::create_tray(&app_for_events);
                     println!("[tray] 窗口已隐藏到托盘");
                 }

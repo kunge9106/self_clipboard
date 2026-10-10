@@ -68,8 +68,19 @@ function applyLook(look) {
   // 每次弹出都由 Rust 把当前外观参数推过来（菜单页常驻，不推的话改完设置不会变）
   await listen("tray-menu-open", (e) => applyLook(e.payload));
 
+  // 悬浮态防残留：与主窗口同一套机制（CSS 里 :hover 都挂在 html:not(.hovers-off) 下）。
+  // 菜单窗口是**复用**的，上次收起时悬停的那一项会被 Chromium 一直当作 :hover，
+  // 再弹出来就带着高亮。所以每次弹出先屏蔽，鼠标真动过再放开。
+  const html = document.documentElement;
+  const off = () => html.classList.add("hovers-off");
+  const on = () => html.classList.remove("hovers-off");
+  window.addEventListener("mousemove", on, { passive: true });
+  window.addEventListener("mousedown", on, { passive: true });
+  on();
+
   // 点别处 → 窗口失焦 → 自动收起（菜单的通用行为）
   await win.onFocusChanged(({ payload: focused }) => {
-    if (!focused) hide();
+    if (focused) off();
+    else hide();
   });
 })();

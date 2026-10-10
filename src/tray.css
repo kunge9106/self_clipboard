@@ -34,7 +34,7 @@
   cursor: default;
 }
 
-.tray-item:hover {
+html:not(.hovers-off) .tray-item:hover {
   background: var(--glass-hover);
 }
 
@@ -46,7 +46,7 @@
   color: #e81123;
 }
 
-.tray-item.danger:hover {
+html:not(.hovers-off) .tray-item.danger:hover {
   background: rgba(232, 17, 35, 0.12);
 }
 
