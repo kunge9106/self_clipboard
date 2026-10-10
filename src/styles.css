@@ -504,6 +504,18 @@ body.dark .app::after {
   border-color: var(--accent);
 }
 
+/* 文件条目的原路径已失效（被移动 / 改名 / 删除）——整条压暗 + 标「已失效」 */
+.card.is-missing .card-preview {
+  color: var(--text-dim);
+}
+
+.tag-missing {
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #e81123;
+  background: rgba(232, 17, 35, 0.12);
+}
+
 .card-body {
   flex: 1;
   min-width: 0;

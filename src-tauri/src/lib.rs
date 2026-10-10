@@ -172,6 +172,7 @@ pub fn run() {
             clipboard::clear_all,
             clipboard::get_image,
             clipboard::copy_back,
+            clipboard::check_files_alive,
             clipboard::cache_info,
             clipboard::pick_cache_dir,
             clipboard::open_cache_dir,

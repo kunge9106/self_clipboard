@@ -42,6 +42,18 @@ pub struct HistoryItem {
     pub id: String,
     pub kind: String, // "text" | "image" | "files"
     pub ts: u64,
+    /// 置顶：**按分类（视图）独立** —— 记录这条内容在哪些分类里被置顶。
+    /// 取值与前端 `data-view` 一致："history" | "text" | "images" | "files" | "favorites"。
+    /// 在「文本」里置顶不会影响它在「历史」里的位置。
+    ///
+    /// 注意 `rename = "pinnedViews"`：这个结构体同时用于 IPC 与 index.json 持久化，
+    /// 整体加 camelCase 会让旧 index.json（text_path/img_path…）解析失败、丢掉数据，
+    /// 所以只给这个新字段单独改名，保证前端拿到的直接是 pinnedViews。
+    #[serde(default, rename = "pinnedViews")]
+    pub pinned_views: Vec<String>,
+    /// 兼容 v2.0 早期的**全局**置顶字段（已废弃）：只读不写，
+    /// 载入时迁移成 pinned_views = ["history"]。字段名保留是为了还能解析旧 index.json。
+    #[serde(default, skip_serializing)]
     pub pinned: bool,
     pub favorite: bool,
     /// 文本前若干字符 / "[图片]" / "N 个文件"
@@ -91,8 +103,14 @@ pub fn delete_item(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn toggle_pin(id: String) -> Result<(), String> {
-    patch_item(&id, |i| i.pinned = !i.pinned)
+pub fn toggle_pin(id: String, view: String) -> Result<(), String> {
+    patch_item(&id, |i| {
+        if let Some(pos) = i.pinned_views.iter().position(|v| v == &view) {
+            i.pinned_views.remove(pos);
+        } else {
+            i.pinned_views.push(view.clone());
+        }
+    })
 }
 
 #[tauri::command]
@@ -125,9 +143,12 @@ pub fn get_image(id: String) -> Result<String, String> {
     Ok(format!("data:image/bmp;base64,{}", b64))
 }
 
-/// 把历史条目内容写回系统剪贴板（文本 + 文件列表；图片暂仅展示）
+/// 把历史条目内容写回系统剪贴板（文本 / 图片 / 文件列表）。
+///
+/// 返回 Ok(Some(提示)) 时前端用该提示替代默认的「已复制到剪贴板」——
+/// 目前只有文件条目会用到（部分原文件已失效、已跳过）。
 #[tauri::command]
-pub fn copy_back(id: String) -> Result<(), String> {
+pub fn copy_back(id: String) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let hist = HISTORY.get().unwrap().lock().unwrap();
     let item = hist.iter().find(|i| i.id == id).cloned().ok_or("条目不存在")?;
@@ -139,7 +160,7 @@ pub fn copy_back(id: String) -> Result<(), String> {
                 Some(rel) => fs::read_to_string(dir.join(rel)).map_err(|e| e.to_string())?,
                 None => item.preview.clone(),
             };
-            unsafe { write_text_to_clipboard(&text) }
+            unsafe { write_text_to_clipboard(&text) }.map(|_| None)
         }
         "files" => {
             // 以落盘清单为唯一数据源（与文本条目走 text_path 一致）；
@@ -156,7 +177,29 @@ pub fn copy_back(id: String) -> Result<(), String> {
             if files.is_empty() {
                 return Err("文件列表为空".into());
             }
-            unsafe { write_files_to_clipboard(&files) }
+            // —— 失效检测 ——
+            // 文件条目存的是**路径引用**而不是文件副本，原文件被移动/改名/删除后就粘不出来了。
+            // 全部失效直接报错；部分失效就跳过失效的那几个，并把情况带回前端提示。
+            let total = files.len();
+            let alive: Vec<String> = files
+                .into_iter()
+                .filter(|p| std::path::Path::new(p).exists())
+                .collect();
+            if alive.is_empty() {
+                return Err(format!(
+                    "原文件已不存在（{total} 个都找不到了），可能已被移动、改名或删除"
+                ));
+            }
+            unsafe { write_files_to_clipboard(&alive)? }
+            let missing = total - alive.len();
+            Ok(if missing > 0 {
+                Some(format!(
+                    "已复制 {} 个文件（{missing} 个原文件已不存在，已跳过）",
+                    alive.len()
+                ))
+            } else {
+                None
+            })
         }
         "image" => {
             // BMP 文件去掉 14 字节文件头即为 DIB，直接放回 CF_DIB
@@ -165,10 +208,45 @@ pub fn copy_back(id: String) -> Result<(), String> {
             if bmp.len() < 54 || &bmp[0..2] != b"BM" {
                 return Err("图片数据损坏".into());
             }
-            unsafe { write_dib_to_clipboard(&bmp[14..]) }
+            unsafe { write_dib_to_clipboard(&bmp[14..]) }.map(|_| None)
         }
         _ => Err("未知类型".into()),
     }
+}
+
+/// 失效检测（前端列表标记用）：传入条目 id，返回其中**至少有一个原路径已不存在**的 id。
+///
+/// 只做 `Path::exists()`（纯元数据查询，不读文件内容），几十条也是微秒级，
+/// 所以可以在每次渲染后调用。
+#[tauri::command]
+pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
+    let dir = DIR.get().cloned().unwrap_or_default();
+    let Some(hist) = HISTORY.get() else {
+        return Vec::new();
+    };
+    let hist = hist.lock().unwrap();
+    let mut dead = Vec::new();
+    for id in ids {
+        let Some(item) = hist.iter().find(|i| i.id == id) else {
+            continue;
+        };
+        if item.kind != "files" {
+            continue;
+        }
+        let paths: Vec<String> = match &item.files_path {
+            Some(rel) => fs::read_to_string(dir.join(rel))
+                .unwrap_or_default()
+                .lines()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+            None => item.files.clone().unwrap_or_default(),
+        };
+        if paths.is_empty() || paths.iter().any(|p| !std::path::Path::new(p).exists()) {
+            dead.push(id);
+        }
+    }
+    dead
 }
 
 #[tauri::command]
@@ -396,6 +474,7 @@ fn store_raw(raw: RawClip) -> HistoryItem {
         kind: String::new(),
         ts,
         pinned: false,
+        pinned_views: Vec::new(),
         favorite: false,
         preview: String::new(),
         size: 0,
@@ -648,10 +727,25 @@ unsafe fn write_dib_to_clipboard(dib: &[u8]) -> Result<(), String> {
 fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     let path = dir.join("index.json");
     match fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-            eprintln!("[clipboard] index.json 解析失败：{e}，返回空");
-            Vec::new()
-        }),
+        Ok(s) => {
+            let mut v: Vec<HistoryItem> = serde_json::from_str(&s).unwrap_or_else(|e| {
+                eprintln!("[clipboard] index.json 解析失败：{e}，返回空");
+                Vec::new()
+            });
+            // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
+            // 历史是默认视图，用户当初置顶的内容在历史里仍然浮顶，行为不变。
+            let mut migrated = 0usize;
+            for i in v.iter_mut() {
+                if i.pinned && !i.pinned_views.iter().any(|x| x == "history") {
+                    i.pinned_views.push("history".to_string());
+                    migrated += 1;
+                }
+            }
+            if migrated > 0 {
+                println!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
+            }
+            v
+        }
         Err(_) => Vec::new(),
     }
 }
@@ -913,7 +1007,7 @@ pub fn on_app_exit() {
             // 保留置顶/收藏：只删普通条目的内容文件
             let mut hist = HISTORY.get().unwrap().lock().unwrap();
             hist.retain(|i| {
-                if i.pinned || i.favorite {
+                if !i.pinned_views.is_empty() || i.favorite {
                     true
                 } else {
                     remove_item_files(dir, i);

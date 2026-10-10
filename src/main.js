@@ -170,7 +170,7 @@ function bindExitModal() {
 
 function bindClearView() {
   document.getElementById("btn-clear-view").onclick = async () => {
-    const targets = filtered().filter((i) => !i.pinned && !i.favorite);
+    const targets = filtered().filter((i) => !isPinnedAnywhere(i) && !i.favorite);
     if (targets.length === 0) {
       toast("没有可清理的条目（置顶/收藏除外）");
       return;
@@ -217,9 +217,20 @@ function fileCopyOn() {
   return !!(settings && settings.fileCopy);
 }
 
+/** 置顶按分类独立：这条内容是否在 view 这个分类里被置顶 */
+function isPinnedIn(item, view) {
+  return Array.isArray(item.pinnedViews) && item.pinnedViews.includes(view);
+}
+
+/** 是否在任何分类里置顶过（用于清理豁免，避免误删别处置顶的内容） */
+function isPinnedAnywhere(item) {
+  return Array.isArray(item.pinnedViews) && item.pinnedViews.length > 0;
+}
+
 function filtered() {
   let list = items;
-  if (currentView === "pinned") list = list.filter((i) => i.favorite);
+  if (currentView === "favorites") list = list.filter((i) => i.favorite);
+  else if (currentView === "text") list = list.filter((i) => i.kind === "text");
   else if (currentView === "images") list = list.filter((i) => i.kind === "image");
   else if (currentView === "files") list = list.filter((i) => i.kind === "files");
 
@@ -234,9 +245,12 @@ function filtered() {
         (i.files && i.files.some((f) => f.toLowerCase().includes(query)))
     );
   }
-  // pinned 优先，其余按时间倒序
+  // 置顶优先，其余按时间倒序。置顶是**按分类独立**的：只在当前这个分类里置顶过的
+  // 才浮到最上面，「文本」里置顶不会影响它在「历史」里的位置。
   return [...list].sort((a, b) => {
-    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    const ap = isPinnedIn(a, currentView);
+    const bp = isPinnedIn(b, currentView);
+    if (ap !== bp) return ap ? -1 : 1;
     return b.ts - a.ts;
   });
 }
@@ -328,6 +342,7 @@ function render() {
   view.appendChild(wrapEl);
   setupMoreObserver(); // root 必须绑定到这个新的滚动容器
   appendBatch();
+  refreshMissing(list); // 文件条目的原路径可能已被移动/删除 → 打「已失效」标记
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +391,7 @@ function appendBatch() {
 
   // 只为本批新卡片里尚未加载的缩略图登记观察（已加载的已摘掉 data-img-id 标记）
   observeImages(wrapEl);
+  applyMissingMarks(); // 新追加的批次也要补上失效标记
 
   if (renderedUpTo < renderList.length) {
     sentinelEl = document.createElement("div");
@@ -396,7 +412,8 @@ function emptyHtml() {
   }
   const titles = {
     history: ["暂无内容", "复制点东西试试，会自动记录到这里"],
-    pinned: ["暂无收藏内容", "在条目上右键选择「收藏」，会出现在这里"],
+    text: ["暂无文本", "复制的文本会自动记录到这里"],
+    favorites: ["暂无收藏内容", "在条目上右键选择「收藏」，会出现在这里"],
     images: ["暂无图片", "复制的图片会自动记录到这里"],
     files: ["暂无文件", "复制的文件会自动记录到这里"],
   };
@@ -407,7 +424,8 @@ function emptyHtml() {
 
 function cardEl(item) {
   const card = document.createElement("div");
-  card.className = "card" + (item.pinned ? " is-pinned" : "");
+  const pinned = isPinnedIn(item, currentView); // 置顶按分类独立，只看当前分类
+  card.className = "card" + (pinned ? " is-pinned" : "");
   card.dataset.id = item.id;
 
   // 内容区
@@ -416,7 +434,7 @@ function cardEl(item) {
   const meta = document.createElement("div");
   meta.className = "card-meta";
   meta.innerHTML = `<span class="card-kind">${KIND_LABEL[item.kind] || item.kind}</span>
-    <span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>${item.pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
+    <span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>${pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
   body.appendChild(meta);
 
   if (item.kind === "image") {
@@ -642,11 +660,58 @@ async function showImagePreview(card, item) {
 
 async function copyBack(item) {
   try {
-    await invoke("copy_back", { id: item.id });
-    toast("已复制到剪贴板");
+    // copy_back 返回可选的提示串（目前只有文件条目会返回：部分原文件已失效、已跳过）
+    const warn = await invoke("copy_back", { id: item.id });
+    toast(warn || "已复制到剪贴板");
   } catch (e) {
     toast("复制失败：" + e);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 文件条目失效检测
+//
+// 文件条目存的是**路径引用**（files/<id>.txt），不是文件副本。原文件被移动、改名或
+// 删除后，条目还在，但粘贴不出来。这里在渲染后异步查一次存在性，给失效的卡片打标记。
+// 只做 exists()（元数据查询，不读内容），开销可以忽略。
+// ---------------------------------------------------------------------------
+
+let missingFiles = new Set();
+
+async function refreshMissing(list) {
+  const ids = list.filter((i) => i.kind === "files").map((i) => i.id);
+  if (ids.length === 0) {
+    if (missingFiles.size) {
+      missingFiles = new Set();
+      applyMissingMarks();
+    }
+    return;
+  }
+  try {
+    missingFiles = new Set(await invoke("check_files_alive", { ids }));
+  } catch {
+    return; // 查询失败就不标记，不能因此打断列表渲染
+  }
+  applyMissingMarks();
+}
+
+/** 把失效状态同步到已渲染的卡片上（新追加的批次也要过一遍） */
+function applyMissingMarks() {
+  document.querySelectorAll(".card").forEach((el) => {
+    const missing = missingFiles.has(el.dataset.id);
+    el.classList.toggle("is-missing", missing);
+    const meta = el.querySelector(".card-meta");
+    if (!meta) return;
+    const tag = meta.querySelector(".tag-missing");
+    if (missing && !tag) {
+      const s = document.createElement("span");
+      s.className = "tag-missing";
+      s.textContent = "已失效";
+      meta.appendChild(s);
+    } else if (!missing && tag) {
+      tag.remove();
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -695,13 +760,19 @@ function showMenu(x, y, entries) {
 }
 
 function openContextMenu(x, y, item) {
+  const pinnedHere = isPinnedIn(item, currentView);
+  const viewName = { history: "历史", text: "文本", images: "图片", files: "文件", favorites: "收藏" }[currentView] || currentView;
   showMenu(x, y, [
     { label: "复制", act: () => copyBack(item) },
     {
-      label: item.pinned ? "取消置顶" : "置顶",
+      // 置顶按分类独立：这里动的是「当前分类」下的置顶状态
+      label: pinnedHere ? `取消置顶（${viewName}）` : `置顶（${viewName}）`,
       act: async () => {
-        await invoke("toggle_pin", { id: item.id });
-        item.pinned = !item.pinned;
+        await invoke("toggle_pin", { id: item.id, view: currentView });
+        const vs = Array.isArray(item.pinnedViews) ? item.pinnedViews : (item.pinnedViews = []);
+        const idx = vs.indexOf(currentView);
+        if (idx >= 0) vs.splice(idx, 1);
+        else vs.push(currentView);
         render();
       },
     },
