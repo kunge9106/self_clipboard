@@ -31,6 +31,7 @@ const DWMWCP_ROUND: u32 = 2;
 
 // SetWindowCompositionAttribute
 const WCA_ACCENT_POLICY: u32 = 19;
+const ACCENT_ENABLE_GRADIENT: u32 = 1;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
 /// Win10 acrylic 的 tint，格式为 **0xAABBGGRR**（注意不是 RGBA）。
@@ -39,6 +40,14 @@ const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 /// 再配合前端一层玻璃光泽渐变（styles.css .app::after）提升质感。
 const TINT_LIGHT: u32 = 0xCC_FF_FF_FF; // 白色 80%
 const TINT_DARK: u32 = 0xCC_1C_1C_1E; // #1E1C1C 80%
+
+/// 拖动期间的纯色（ACCENT_ENABLE_GRADIENT，不做模糊）色调。
+/// 与上面的 acrylic tint 同色系，alpha 提到 95%，避免拖动时透出清晰桌面。
+const DRAG_TINT_LIGHT: u32 = 0xF2_FF_FF_FF;
+const DRAG_TINT_DARK: u32 = 0xF2_1C_1C_1E;
+
+/// 记住当前是否深色，供拖动开始/结束时恢复对应色调
+static CURRENT_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // FFI 声明
@@ -236,6 +245,7 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     let tier = classify(build);
     let _ = BUILD.set(build);
     let _ = TIER.set(tier);
+    CURRENT_DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
 
     println!(
         "[effects] windows build={} → tier={} (radius≤{}px)",
@@ -454,10 +464,41 @@ pub fn refresh_theme(hwnd: isize, dark: bool) {
 
 // ---------------------------------------------------------------------------
 // 拖动与材质：
-// 曾在 WM_ENTERSIZEMOVE 时把 acrylic 降级为 BLURBEHIND、拖完再恢复，
-// 实测「拖动瞬间背景突兀变色」，比轻微的渲染开销更伤体验——已废弃。
-// 现在全程保持 acrylic 不切换：拖拽不再变色，DWM 在 GPU 上连续合成。
+// Win10 真 acrylic 在窗口移动/缩放时逐帧重算模糊，DWM 跟不上就会退化成
+// 一张「幽灵窗口」（白框 + 原生标题栏），而且它会盖住标题栏按钮，
+// 导致最大化/最小化点不动（用户实测）。
+//
+// 修法：移动期间把材质临时压成**同色调的纯色**（ACCENT_ENABLE_GRADIENT，
+// 完全不做模糊，DWM 零开销即可实时合成 → 不再产生幽灵窗口），松手立刻
+// 恢复 acrylic。注意这不是之前被否决的 BLURBEHIND 方案——这里换的是
+// 「同一色调的纯色」，不会引入第二种模糊观感造成突兀。
 // ---------------------------------------------------------------------------
+
+const WM_ENTERSIZEMOVE: u32 = 0x0231;
+const WM_EXITSIZEMOVE: u32 = 0x0232;
+
+fn set_dragging(hwnd: isize, dragging: bool) {
+    if current_tier() != Tier::Acrylic {
+        return;
+    }
+    let dark = CURRENT_DARK.load(std::sync::atomic::Ordering::Relaxed);
+    let (state, tint) = if dragging {
+        (
+            ACCENT_ENABLE_GRADIENT,
+            if dark { DRAG_TINT_DARK } else { DRAG_TINT_LIGHT },
+        )
+    } else {
+        (
+            ACCENT_ENABLE_ACRYLICBLURBEHIND,
+            if dark { TINT_DARK } else { TINT_LIGHT },
+        )
+    };
+    let _ = set_accent_state(hwnd, state, tint);
+    if !dragging {
+        // 恢复后动一下窗口，强制 DWM 立刻重算回模糊
+        nudge(hwnd);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // WndProc 子类：修焦点切换时的原生标题栏闪现
@@ -507,6 +548,13 @@ pub fn install_focus_hook(hwnd: isize) {
             // WM_CLIPBOARDUPDATE
             crate::clipboard::on_clipboard_update();
             return 0;
+        }
+        // 拖动/缩放窗口：临时把 acrylic 压成纯色，避免 DWM 追不上逐帧模糊
+        // 而退化成「幽灵窗口」（白框 + 原生标题栏，会挡住标题栏按钮）
+        if msg == WM_ENTERSIZEMOVE {
+            set_dragging(hwnd, true);
+        } else if msg == WM_EXITSIZEMOVE {
+            set_dragging(hwnd, false);
         }
         let orig = ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
         unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }

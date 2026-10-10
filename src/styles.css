@@ -59,6 +59,18 @@ body.dark.tier-solid {
   padding: 0;
 }
 
+/* 焦点环：屏蔽各平台默认焦点环（Windows 下会渲染成突兀的彩色/红色描边），
+   统一改成设计语言内的强调色柔环，且仅在键盘聚焦时出现 */
+button:focus,
+input:focus,
+textarea:focus {
+  outline: none;
+}
+button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.4);
+}
+
 html,
 body {
   height: 100%;

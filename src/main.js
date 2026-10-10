@@ -248,25 +248,34 @@ async function cardEl(item) {
     <span>${timeStr(item.ts)}</span>${item.pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
   body.appendChild(meta);
 
-  // 图片条目：显示真实缩略图（读取失败就不显示，降级为 [图片] 文本）
+  // 文本 / 文件摘要；图片加载失败时才回退显示 [图片] 占位
+  const preview = document.createElement("div");
+  preview.className = "card-preview";
+  preview.textContent = item.preview || "";
+  const appendPreview = () => {
+    if (preview.parentNode !== body) body.appendChild(preview);
+  };
+
   if (item.kind === "image") {
+    // 图片条目：显示真实缩略图
     const img = document.createElement("img");
     img.className = "card-image";
     img.alt = "图片";
     img.loading = "lazy";
+    img.onerror = () => {
+      img.remove();
+      appendPreview();
+    };
     try {
       img.src = await invoke("get_image", { id: item.id });
-      img.onerror = () => img.remove();
       body.appendChild(img);
     } catch {
-      /* 图片文件缺失/损坏 → 仅显示 [图片] 预览文本 */
+      /* 图片文件缺失/损坏 → 回退为 [图片] 文本 */
+      appendPreview();
     }
+  } else {
+    appendPreview();
   }
-
-  const preview = document.createElement("div");
-  preview.className = "card-preview";
-  preview.textContent = item.preview || "";
-  body.appendChild(preview);
   card.appendChild(body);
 
   // 左键 → 复制回剪贴板；右键 → 上下文菜单

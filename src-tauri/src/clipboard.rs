@@ -404,12 +404,19 @@ fn store_raw(raw: RawClip) -> HistoryItem {
     item
 }
 
-// DIB（BITMAPINFOHEADER + 调色板/掩码 + 像素）包装成 BMP 文件头
+// DIB（BITMAPINFOHEADER + 调色板/掩码 + 像素）包装成 BMP 文件头。
+//
+// BMP 文件 = 14 字节文件头 + **完整 DIB**（信息头 + 掩码/调色板 + 像素）。
+// 之前这里写成 `&dib[bi_size..]`，把 40 字节的 BITMAPINFOHEADER 整个丢掉了，
+// 生成的是无效 BMP，浏览器一律无法解码——这正是「图片永远不显示缩略图」的根因。
 fn dib_to_bmp(dib: &[u8]) -> Result<Vec<u8>, String> {
     if dib.len() < 40 {
         return Err("DIB 过短".into());
     }
     let bi_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
+    if bi_size < 40 || dib.len() < bi_size {
+        return Err("DIB 头不完整".into());
+    }
     let bi_bit_count = u16::from_le_bytes([dib[14], dib[15]]) as usize;
     let bi_compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
     // 压缩类型：0=BI_RGB；3=BI_BITFIELDS（header 后跟 3 个 RGB 掩码）；
@@ -425,18 +432,27 @@ fn dib_to_bmp(dib: &[u8]) -> Result<Vec<u8>, String> {
         }
         _ => return Err(format!("不支持的 DIB 压缩类型 {}", bi_compression)),
     };
+    // 像素数据在文件中的偏移（文件头 14 + 信息头 + 掩码/调色板）
     let pixel_offset = 14 + bi_size + mask_size;
-    if dib.len() < bi_size {
-        return Err("DIB 头不完整".into());
-    }
-    let file_size = pixel_offset + (dib.len() - bi_size);
+    let file_size = 14 + dib.len();
 
     let mut out = Vec::with_capacity(file_size);
     out.extend_from_slice(b"BM");
     out.extend_from_slice(&(file_size as u32).to_le_bytes());
     out.extend_from_slice(&[0, 0, 0, 0]); // reserved
     out.extend_from_slice(&(pixel_offset as u32).to_le_bytes());
-    out.extend_from_slice(&dib[bi_size..]); // info header + palette + pixels
+    out.extend_from_slice(dib); // 完整 DIB：信息头 + 掩码/调色板 + 像素
+
+    // 32bpp：Chromium 会把每像素第 4 字节当作 alpha，而剪贴板 DIB 该字节
+    // 常常是 0（未使用）→ 整图被判为全透明而不显示。强制置 255 保持不透明。
+    if bi_bit_count == 32 && pixel_offset < out.len() {
+        let px = &mut out[pixel_offset..];
+        let mut i = 3;
+        while i < px.len() {
+            px[i] = 255;
+            i += 4;
+        }
+    }
     Ok(out)
 }
 
