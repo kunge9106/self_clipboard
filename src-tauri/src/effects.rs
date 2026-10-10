@@ -34,10 +34,11 @@ const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
 /// Win10 acrylic 的 tint，格式为 **0xAABBGGRR**（注意不是 RGBA）。
-/// alpha 越低模糊越明显：90% 白会把模糊完全盖住（实测反馈），
-/// 65% 左右能同时保住「看得出模糊」与「文字可读」。
-const TINT_LIGHT: u32 = 0xA8_FF_FF_FF; // 白色 66%
-const TINT_DARK: u32 = 0x99_1C_1C_1E; // #1E1C1C 60%
+/// alpha 太低（≤66%）时壁纸颜色会大量透出，观感发脏；太高（≥90%）
+/// 则模糊被盖死。80% 左右是「模糊清晰可见 + 壁纸脏色被压住」的平衡点，
+/// 再配合前端一层玻璃光泽渐变（styles.css .app::after）提升质感。
+const TINT_LIGHT: u32 = 0xCC_FF_FF_FF; // 白色 80%
+const TINT_DARK: u32 = 0xCC_1C_1C_1E; // #1E1C1C 80%
 
 // ---------------------------------------------------------------------------
 // FFI 声明
@@ -235,7 +236,6 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     let tier = classify(build);
     let _ = BUILD.set(build);
     let _ = TIER.set(tier);
-    LAST_DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
 
     println!(
         "[effects] windows build={} → tier={} (radius≤{}px)",
@@ -453,31 +453,11 @@ pub fn refresh_theme(hwnd: isize, dark: bool) {
 }
 
 // ---------------------------------------------------------------------------
-// 拖动性能：真 acrylic（ACCENT_ENABLE_ACRYLICBLURBEHIND）在窗口拖动时
-// 每帧都要重算模糊，实测鼠标迟滞、窗口跟随缓慢。
-// 标准做法：拖动期间临时降级为廉价的 BLURBEHIND（无逐帧高斯重算），
-// WM_EXITSIZEMOVE 后恢复真 acrylic。
+// 拖动与材质：
+// 曾在 WM_ENTERSIZEMOVE 时把 acrylic 降级为 BLURBEHIND、拖完再恢复，
+// 实测「拖动瞬间背景突兀变色」，比轻微的渲染开销更伤体验——已废弃。
+// 现在全程保持 acrylic 不切换：拖拽不再变色，DWM 在 GPU 上连续合成。
 // ---------------------------------------------------------------------------
-
-const WM_ENTERSIZEMOVE: u32 = 0x0231;
-const WM_EXITSIZEMOVE: u32 = 0x0232;
-const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
-
-static LAST_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn set_dragging(hwnd: isize, dragging: bool) {
-    if current_tier() != Tier::Acrylic {
-        return;
-    }
-    let dark = LAST_DARK.load(std::sync::atomic::Ordering::Relaxed);
-    let state = if dragging {
-        ACCENT_ENABLE_BLURBEHIND
-    } else {
-        ACCENT_ENABLE_ACRYLICBLURBEHIND
-    };
-    let tint = if dark { TINT_DARK } else { TINT_LIGHT };
-    let _ = set_accent_state(hwnd, state, tint);
-}
 
 // ---------------------------------------------------------------------------
 // WndProc 子类：修焦点切换时的原生标题栏闪现
@@ -527,12 +507,6 @@ pub fn install_focus_hook(hwnd: isize) {
             // WM_CLIPBOARDUPDATE
             crate::clipboard::on_clipboard_update();
             return 0;
-        }
-        // 拖动开始/结束：临时降级/恢复 acrylic，消除拖动迟滞
-        if msg == WM_ENTERSIZEMOVE {
-            set_dragging(hwnd, true);
-        } else if msg == WM_EXITSIZEMOVE {
-            set_dragging(hwnd, false);
         }
         let orig = ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
         unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }

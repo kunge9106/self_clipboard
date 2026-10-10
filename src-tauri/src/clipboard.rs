@@ -404,22 +404,31 @@ fn store_raw(raw: RawClip) -> HistoryItem {
     item
 }
 
-// DIB（BITMAPINFOHEADER + 像素）包装成 BMP 文件头
+// DIB（BITMAPINFOHEADER + 调色板/掩码 + 像素）包装成 BMP 文件头
 fn dib_to_bmp(dib: &[u8]) -> Result<Vec<u8>, String> {
     if dib.len() < 40 {
         return Err("DIB 过短".into());
     }
     let bi_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
-    let bi_bit_count =
-        u16::from_le_bytes([dib[14], dib[15]]) as usize;
-    let palette_size = if bi_bit_count <= 8 {
-        let used = u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]]);
-        let used = if used == 0 { 1u32 << bi_bit_count } else { used };
-        used as usize * 4
-    } else {
-        0
+    let bi_bit_count = u16::from_le_bytes([dib[14], dib[15]]) as usize;
+    let bi_compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
+    // 压缩类型：0=BI_RGB；3=BI_BITFIELDS（header 后跟 3 个 RGB 掩码）；
+    // 6=BI_ALPHABITFIELDS（4 个掩码）。漏算掩码会让像素整体错位偏色。
+    let mask_size = match (bi_compression, bi_bit_count) {
+        (3, 16) | (3, 32) => 3 * 4,
+        (6, _) => 4 * 4,
+        (0, _) if bi_bit_count > 8 => 0,
+        (0, _) => {
+            let used = u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]]);
+            let used = if used == 0 { 1u32 << bi_bit_count } else { used };
+            used as usize * 4
+        }
+        _ => return Err(format!("不支持的 DIB 压缩类型 {}", bi_compression)),
     };
-    let pixel_offset = 14 + bi_size + palette_size;
+    let pixel_offset = 14 + bi_size + mask_size;
+    if dib.len() < bi_size {
+        return Err("DIB 头不完整".into());
+    }
     let file_size = pixel_offset + (dib.len() - bi_size);
 
     let mut out = Vec::with_capacity(file_size);

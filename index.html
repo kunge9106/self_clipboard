@@ -20,7 +20,8 @@
             <svg viewBox="0 0 10 10"><path d="M0 5h10" /></svg>
           </button>
           <button class="wc-btn" id="btn-maximize" title="最大化" aria-label="最大化">
-            <svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" /></svg>
+            <svg class="ic-max" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9"/></svg>
+            <svg class="ic-restore" viewBox="0 0 10 10"><rect x="0.5" y="2.5" width="7" height="7"/><path d="M2.8 2.5V0.5H9.5V7.2H7.5"/></svg>
           </button>
           <button class="wc-btn wc-close" id="btn-close" title="关闭" aria-label="关闭">
             <svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" /></svg>
@@ -52,7 +53,7 @@
 
           <div class="sidebar-footer">
             <button class="nav-item" data-view="settings">
-              <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.2v1.9M8 12.9v1.9M12.94 3.06l-1.35 1.35M4.41 11.59l-1.35 1.35M14.8 8h-1.9M3.1 8H1.2M12.94 12.94l-1.35-1.35M4.41 4.41L3.06 3.06"/></svg>
+              <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.6 1.8h2.8l.42 1.85c.5.17.96.42 1.37.74l1.8-.62 1.4 2.42-1.38 1.23a5.3 5.3 0 010 1.56l1.38 1.23-1.4 2.42-1.8-.62c-.41.32-.87.57-1.37.74L9.4 14.2H6.6l-.42-1.85a5.3 5.3 0 01-1.37-.74l-1.8.62-1.4-2.42 1.38-1.23a5.3 5.3 0 010-1.56L1.61 6.19l1.4-2.42 1.8.62c.41-.32.87-.57 1.37-.74z"/><circle cx="8" cy="8" r="2.1"/></svg>
               <span>设置</span>
             </button>
           </div>
@@ -65,9 +66,6 @@
               <svg class="search-icon" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
               <input id="search" type="text" placeholder="搜索剪贴板历史…" autocomplete="off" spellcheck="false" />
             </div>
-            <button class="btn-ghost toolbar-clear" id="btn-clear-view" title="清空（搜索时只清搜索结果；置顶/收藏除外）">
-              <svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>
-            </button>
           </div>
 
           <div class="view" id="view">
@@ -78,8 +76,11 @@
           </div>
 
           <footer class="statusbar">
-            <span id="status-count">共 0 条</span>
+            <span class="statusbar-left" id="status-count">共 0 条</span>
             <span class="statusbar-version" id="status-version"></span>
+            <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清搜索结果；置顶/收藏除外）">
+              <svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>
+            </button>
           </footer>
         </main>
       </div>

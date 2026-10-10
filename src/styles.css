@@ -81,12 +81,37 @@ body {
 /* ---------------------------------------------------------------- */
 
 .app {
+  position: relative;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  /* 窗口外框：accrylic 档下靠这条描边勾出圆角 */
+  /* 窗口外框：acrylic 档下靠这条描边勾出圆角 */
   border-radius: var(--radius);
   overflow: hidden;
+}
+
+/* 玻璃质感层：一层极淡的左上→右下光泽 + 顶部高光 + 发丝内描边，
+   让系统 acrylic 的「平模糊」有层次（不拦截任何交互） */
+.app::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 999;
+  pointer-events: none;
+  border-radius: inherit;
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0) 34%),
+    radial-gradient(130% 52% at 50% -8%, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0) 58%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+body.dark .app::after {
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 34%),
+    radial-gradient(130% 52% at 50% -8%, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0) 58%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09),
+    inset 0 1px 0 rgba(255, 255, 255, 0.10);
 }
 
 /* 顶部条 */
@@ -247,7 +272,7 @@ body {
 
 .search {
   flex: 1;
-  max-width: 420px;
+  max-width: none;
   height: 32px;
   display: flex;
   align-items: center;
@@ -256,6 +281,13 @@ body {
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
   border: 1px solid var(--stroke);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* 聚焦时描边高亮（同 V1） */
+.search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(47, 107, 255, 0.25);
 }
 
 .search-icon {
@@ -530,14 +562,14 @@ body.dark .ctx-menu {
   gap: 8px;
 }
 
-/* 底部状态栏：条目数 + 版本号 */
+/* 底部状态栏：左条目数 · 中版本号 · 右垃圾桶 */
 .statusbar {
   flex: 0 0 auto;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
-  height: 26px;
-  padding: 0 12px;
+  height: 28px;
+  padding: 0 8px 0 12px;
   border-top: 1px solid var(--stroke);
   font-size: 11px;
   color: var(--text-dim);
@@ -545,27 +577,37 @@ body.dark .ctx-menu {
 }
 
 .statusbar-version {
+  justify-self: center;
   opacity: 0.75;
 }
 
-/* 工具栏垃圾桶按钮 */
-.toolbar-clear {
-  flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
-  padding: 0;
+.statusbar-clear {
+  justify-self: end;
+  width: 24px;
+  height: 22px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
   display: grid;
   place-items: center;
+  cursor: default;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
-.toolbar-clear svg {
-  width: 15px;
-  height: 15px;
+.statusbar-clear svg {
+  width: 13px;
+  height: 13px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.4;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.statusbar-clear:hover {
+  background: var(--glass-hover);
+  color: var(--text);
 }
 
 /* 图片条目缩略图 */
@@ -646,23 +688,69 @@ body.dark .modal {
   color: #fff;
 }
 
-/* 复制反馈 toast */
+/* 复制反馈 toast：与整体玻璃风格一致 */
 .toast {
   position: absolute;
   left: 50%;
   bottom: 20px;
   transform: translateX(-50%) translateY(10px);
-  padding: 8px 16px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.78);
-  color: #fff;
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+  background: rgba(252, 252, 252, 0.94);
+  border: 1px solid var(--stroke);
+  box-shadow: var(--shadow);
+  color: var(--text);
   font-size: 13px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.18s ease, transform 0.18s ease;
 }
 
+body.dark .toast {
+  background: rgba(40, 40, 44, 0.95);
+}
+
 .toast.show {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+}
+
+/* 滚动条：细圆角半透明，融入玻璃风格 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+body.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+body.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+/* 最大化 ↔ 还原：图标随窗口状态切换 */
+.wc-btn .ic-restore {
+  display: none;
+}
+
+.wc-btn.is-max .ic-max {
+  display: none;
+}
+
+.wc-btn.is-max .ic-restore {
+  display: block;
 }

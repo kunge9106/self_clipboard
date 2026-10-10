@@ -63,6 +63,16 @@ function bindWindowControls() {
       guard("关闭", appWindow.close());
     }
   };
+
+  // 最大化 ↔ 还原：图标与提示词跟随窗口状态（需求 #6）
+  const maxBtn = document.getElementById("btn-maximize");
+  const syncMaxState = async () => {
+    const max = await appWindow.isMaximized().catch(() => false);
+    maxBtn.classList.toggle("is-max", max);
+    maxBtn.title = max ? "还原" : "最大化";
+  };
+  appWindow.onResized(() => syncMaxState());
+  syncMaxState();
 }
 
 // ---------------------------------------------------------------------------
