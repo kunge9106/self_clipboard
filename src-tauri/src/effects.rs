@@ -51,7 +51,16 @@ const TINT_RGB_DARK: u32 = 0x00_1C_1C_1E; // #1E1C1C
 /// 所以策略改为：acrylic 只负责**模糊**（几乎不带色调），窗口主体的明暗与
 /// 颜色交给 CSS 层（styles.css 的 --glass-alpha），这样四角的矩形残留就淡到
 /// 看不出来了。副作用是多了一层「高亮度半透明」的观感，反而更接近 macOS。
-const TINT_ALPHA: u32 = 0x14; // ≈8%
+/// 几乎为 0（0.4%）：让 acrylic **只保留模糊、不留任何色调**。
+///
+/// 这是消除四角直角的关键：那圈矩形残留之所以看得见，是因为 acrylic 的 tint
+/// 给它上了色（在壁纸上表现为一块偏白的直角）。tint 归零后，模糊在**纯色壁纸
+/// 上模糊的就是壁纸本身**——四角与壁纸同色，肉眼完全看不出来。
+/// 窗口的明暗全部交给 CSS 的 --glass-alpha（设置页「材质浓度」）。
+///
+/// 注：不直接写 0，是为了保证 DWM 仍然走 acrylic 的模糊路径（某些版本上
+/// alpha=0 会被当成「不需要模糊」而回退）。
+const TINT_ALPHA: u32 = 0x01; // ≈0.4%
 
 /// 计算 tint 值（格式 0xAABBGGRR）。alpha 固定为 TINT_ALPHA，参数保留仅为兼容调用方。
 pub fn tint_for(dark: bool, _alpha_pct: u32) -> u32 {
