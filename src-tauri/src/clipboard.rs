@@ -1,0 +1,618 @@
+//! 剪贴板监听 / 读取 / 存储 / 写回。
+//!
+//! 设计红线（DESIGN.md 6.1 / 6.3.1）：
+//!   - 事件驱动：仅响应 `WM_CLIPBOARDUPDATE`，绝不轮询
+//!   - 廉价去重：`GetClipboardSequenceNumber` 判重 + 上一条指纹
+//!   - 内容永不常驻内存：index 只存元数据，长文本/图片按 id 落盘分片
+
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager};
+
+// ---------------------------------------------------------------------------
+// 全局状态
+// ---------------------------------------------------------------------------
+
+/// 主窗口 hwnd：写回剪贴板时 OpenClipboard 需要 owner 窗口
+static MAIN_HWND: OnceLock<isize> = OnceLock::new();
+/// AppHandle：emit 事件用
+static APP: OnceLock<AppHandle> = OnceLock::new();
+/// 存储目录（app_data_dir/clipboard）
+static DIR: OnceLock<PathBuf> = OnceLock::new();
+/// 内存中的轻量索引（只存元数据，不存内容正文）
+static HISTORY: OnceLock<Mutex<Vec<HistoryItem>>> = OnceLock::new();
+
+/// 上一次处理过的剪贴板序列号（去重）
+static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
+/// 本程序写回剪贴板后产生的序列号（应被忽略，避免自读）
+static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
+/// 暂停录制开关
+static PAUSED: AtomicBool = AtomicBool::new(false);
+/// id 计数器，避免同毫秒碰撞
+static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// 数据结构
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryItem {
+    pub id: String,
+    pub kind: String, // "text" | "image" | "files"
+    pub ts: u64,
+    pub pinned: bool,
+    pub favorite: bool,
+    /// 文本前若干字符 / "[图片]" / "N 个文件"
+    pub preview: String,
+    pub size: u64,
+    /// 长文本落盘路径（相对 DIR/data/）
+    pub text_path: Option<String>,
+    /// 图片落盘路径（相对 DIR/images/）
+    pub img_path: Option<String>,
+    /// 文件路径列表（仅 files 类有）
+    pub files: Option<Vec<String>>,
+}
+
+// ---------------------------------------------------------------------------
+// 对外命令
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn get_history() -> Vec<HistoryItem> {
+    HISTORY
+        .get()
+        .map(|m| m.lock().unwrap().clone())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn set_paused(paused: bool) -> Result<(), String> {
+    PAUSED.store(paused, Ordering::Relaxed);
+    println!("[clipboard] 录制{}", if paused { "已暂停" } else { "已恢复" });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_item(id: String) -> Result<(), String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    if let Some(pos) = hist.iter().position(|i| i.id == id) {
+        let item = hist.remove(pos);
+        drop(hist);
+        remove_item_files(&dir, &item);
+        save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn toggle_pin(id: String) -> Result<(), String> {
+    patch_item(&id, |i| i.pinned = !i.pinned)
+}
+
+#[tauri::command]
+pub fn toggle_favorite(id: String) -> Result<(), String> {
+    patch_item(&id, |i| i.favorite = !i.favorite)
+}
+
+#[tauri::command]
+pub fn clear_all() -> Result<(), String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    for item in hist.iter() {
+        remove_item_files(&dir, item);
+    }
+    hist.clear();
+    save_index(&dir, &hist);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_image(id: String) -> Result<String, String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let hist = HISTORY.get().unwrap().lock().unwrap();
+    let item = hist.iter().find(|i| i.id == id).ok_or("条目不存在")?;
+    let rel = item.img_path.as_ref().ok_or("该条目不是图片")?;
+    let path = dir.join(rel);
+    drop(hist);
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    let b64 = base64_encode(&bytes);
+    Ok(format!("data:image/bmp;base64,{}", b64))
+}
+
+/// 把历史条目内容写回系统剪贴板（文本 + 文件列表；图片暂仅展示）
+#[tauri::command]
+pub fn copy_back(id: String) -> Result<(), String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let hist = HISTORY.get().unwrap().lock().unwrap();
+    let item = hist.iter().find(|i| i.id == id).cloned().ok_or("条目不存在")?;
+    drop(hist);
+
+    match item.kind.as_str() {
+        "text" => {
+            let text = match &item.text_path {
+                Some(rel) => fs::read_to_string(dir.join(rel)).map_err(|e| e.to_string())?,
+                None => item.preview.clone(),
+            };
+            unsafe { write_text_to_clipboard(&text) }
+        }
+        "files" => {
+            let files = item.files.ok_or("文件列表缺失")?;
+            unsafe { write_files_to_clipboard(&files) }
+        }
+        "image" => Err("图片写回暂未实现（当前版本仅展示）".into()),
+        _ => Err("未知类型".into()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 初始化
+// ---------------------------------------------------------------------------
+
+pub fn init(app: &AppHandle) {
+    let _ = APP.set(app.clone());
+    if let Some(w) = app.get_webview_window("main") {
+        if let Ok(h) = w.hwnd() {
+            let _ = MAIN_HWND.set(h.0 as isize);
+        }
+    }
+
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| eprintln!("[clipboard] 取 app_data_dir 失败：{e}"))
+        .unwrap_or_else(|_| PathBuf::from("./clipboard-data"));
+    let dir = dir.join("clipboard");
+
+    let _ = fs::create_dir_all(dir.join("data"));
+    let _ = fs::create_dir_all(dir.join("images"));
+    let _ = DIR.set(dir.clone());
+
+    let hist = load_index(&dir);
+    let _ = HISTORY.set(Mutex::new(hist));
+
+    // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
+    unsafe {
+        if AddClipboardFormatListener(MAIN_HWND.get().copied().unwrap_or(0)) == 0 {
+            eprintln!("[clipboard] AddClipboardFormatListener 失败");
+        } else {
+            println!("[clipboard] 已订阅 WM_CLIPBOARDUPDATE（事件驱动监听）");
+        }
+    }
+
+    println!(
+        "[clipboard] 初始化完成，历史条目 {} 条，目录 {}",
+        HISTORY.get().unwrap().lock().unwrap().len(),
+        dir.display()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 被钩子调用：剪贴板变化入口
+// ---------------------------------------------------------------------------
+
+/// 由 WndProc 子类在收到 WM_CLIPBOARDUPDATE 时调用。
+pub fn on_clipboard_update() {
+    if PAUSED.load(Ordering::Relaxed) {
+        return;
+    }
+    unsafe {
+        let seq = GetClipboardSequenceNumber();
+        if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
+            return;
+        }
+        if seq == SKIP_SEQ.load(Ordering::Relaxed) {
+            SKIP_SEQ.store(0, Ordering::Relaxed);
+            LAST_SEQ.store(seq, Ordering::Relaxed);
+            return;
+        }
+        LAST_SEQ.store(seq, Ordering::Relaxed);
+    }
+
+    let raw = unsafe { read_clipboard() };
+    if let Some(raw) = raw {
+        let item = store_raw(raw);
+        if let Some(app) = APP.get() {
+            let _ = app.emit("clipboard-update", item.clone());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 读取剪贴板
+// ---------------------------------------------------------------------------
+
+enum RawClip {
+    Text(String),
+    Image(Vec<u8>), // DIB 字节
+    Files(Vec<String>),
+}
+
+unsafe fn read_clipboard() -> Option<RawClip> {
+    const CF_UNICODETEXT: u32 = 13;
+    const CF_DIB: u32 = 8;
+    const CF_HDROP: u32 = 15;
+
+    if OpenClipboard(0) == 0 {
+        return None;
+    }
+
+    let result = (|| {
+        // 优先级：文本 > 文件 > 图片
+        if IsClipboardFormatAvailable(CF_UNICODETEXT) != 0 {
+            if let Some(h) = non_null(GetClipboardData(CF_UNICODETEXT)) {
+                let p = GlobalLock(h) as *const u16;
+                if p.is_null() {
+                    return None;
+                }
+                let mut v = Vec::new();
+                let mut i = 0;
+                loop {
+                    let c = *p.add(i);
+                    if c == 0 {
+                        break;
+                    }
+                    v.push(c);
+                    i += 1;
+                }
+                GlobalUnlock(h);
+                return Some(RawClip::Text(String::from_utf16_lossy(&v)));
+            }
+        }
+
+        if IsClipboardFormatAvailable(CF_HDROP) != 0 {
+            if let Some(h) = non_null(GetClipboardData(CF_HDROP)) {
+                const ALL: u32 = 0xFFFFFFFF;
+                let count = DragQueryFileW(h, ALL, std::ptr::null_mut(), 0);
+                let mut files = Vec::new();
+                for i in 0..count {
+                    let len = DragQueryFileW(h, i, std::ptr::null_mut(), 0) + 1;
+                    let mut buf = vec![0u16; len as usize];
+                    DragQueryFileW(h, i, buf.as_mut_ptr(), len);
+                    files.push(String::from_utf16_lossy(&buf[..buf.len() - 1]));
+                }
+                DragFinish(h);
+                return Some(RawClip::Files(files));
+            }
+        }
+
+        if IsClipboardFormatAvailable(CF_DIB) != 0 {
+            if let Some(h) = non_null(GetClipboardData(CF_DIB)) {
+                let size = GlobalSize(h);
+                let p = GlobalLock(h);
+                if !p.is_null() && size > 0 {
+                    let bytes = std::slice::from_raw_parts(p as *const u8, size as usize).to_vec();
+                    GlobalUnlock(h);
+                    return Some(RawClip::Image(bytes));
+                }
+            }
+        }
+        None
+    })();
+
+    CloseClipboard();
+    result
+}
+
+// ---------------------------------------------------------------------------
+// 落盘
+// ---------------------------------------------------------------------------
+
+fn store_raw(raw: RawClip) -> HistoryItem {
+    let dir = DIR.get().unwrap().clone();
+    let ts = now_ms();
+    let id = make_id(ts);
+    let mut item = HistoryItem {
+        id: id.clone(),
+        kind: String::new(),
+        ts,
+        pinned: false,
+        favorite: false,
+        preview: String::new(),
+        size: 0,
+        text_path: None,
+        img_path: None,
+        files: None,
+    };
+
+    match raw {
+        RawClip::Text(text) => {
+            item.kind = "text".into();
+            item.size = text.len() as u64;
+            let first_line = text.lines().next().unwrap_or("").trim().to_string();
+            item.preview = if text.trim().is_empty() {
+                "[空白文本]".into()
+            } else {
+                first_line.chars().take(120).collect()
+            };
+            // 无论长短都落盘全文：内存只保留截断后的 preview 摘要，
+            // 这样既遵守「内容不走内存」红线，复制回去时也不会被截断。
+            let rel = format!("data/{}.txt", id);
+            let _ = fs::write(dir.join(&rel), text.as_bytes());
+            item.text_path = Some(rel);
+        }
+        RawClip::Files(files) => {
+            item.kind = "files".into();
+            item.size = files.iter().map(|f| f.len()).sum::<usize>() as u64;
+            if files.is_empty() {
+                item.preview = "[空文件列表]".into();
+            } else {
+                let name = std::path::Path::new(&files[0])
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                item.preview = if files.len() == 1 {
+                    name
+                } else {
+                    format!("{} 等 {} 个文件", name, files.len())
+                };
+            }
+            item.files = Some(files);
+        }
+        RawClip::Image(bytes) => {
+            item.kind = "image".into();
+            item.size = bytes.len() as u64;
+            item.preview = "[图片]".into();
+            let rel = format!("images/{}.bmp", id);
+            if let Ok(bmp) = dib_to_bmp(&bytes) {
+                let _ = fs::write(dir.join(&rel), &bmp);
+                item.img_path = Some(rel);
+            } else {
+                // 兜底：直接存 DIB，前端无法显示但至少保留
+                let rel = format!("images/{}.dib", id);
+                let _ = fs::write(dir.join(&rel), &bytes);
+                item.img_path = Some(rel);
+            }
+        }
+    }
+
+    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    hist.insert(0, item.clone());
+    save_index(&dir, &hist);
+    println!(
+        "[clipboard] 新增 {} 条目 kind={} preview={:?} size={}",
+        id, item.kind, item.preview, item.size
+    );
+    item
+}
+
+// DIB（BITMAPINFOHEADER + 像素）包装成 BMP 文件头
+fn dib_to_bmp(dib: &[u8]) -> Result<Vec<u8>, String> {
+    if dib.len() < 40 {
+        return Err("DIB 过短".into());
+    }
+    let bi_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
+    let bi_bit_count =
+        u16::from_le_bytes([dib[14], dib[15]]) as usize;
+    let palette_size = if bi_bit_count <= 8 {
+        let used = u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]]);
+        let used = if used == 0 { 1u32 << bi_bit_count } else { used };
+        used as usize * 4
+    } else {
+        0
+    };
+    let pixel_offset = 14 + bi_size + palette_size;
+    let file_size = pixel_offset + (dib.len() - bi_size);
+
+    let mut out = Vec::with_capacity(file_size);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(file_size as u32).to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0]); // reserved
+    out.extend_from_slice(&(pixel_offset as u32).to_le_bytes());
+    out.extend_from_slice(&dib[bi_size..]); // info header + palette + pixels
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// 写回剪贴板
+// ---------------------------------------------------------------------------
+
+unsafe fn write_text_to_clipboard(text: &str) -> Result<(), String> {
+    let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+    if OpenClipboard(hwnd) == 0 {
+        return Err("OpenClipboard 失败".into());
+    }
+    EmptyClipboard();
+    let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = utf16.len() * 2;
+    let h = GlobalAlloc(0x0002, bytes); // GMEM_MOVEABLE
+    if h == 0 {
+        CloseClipboard();
+        return Err("GlobalAlloc 失败".into());
+    }
+    let p = GlobalLock(h) as *mut u16;
+    if p.is_null() {
+        CloseClipboard();
+        return Err("GlobalLock 失败".into());
+    }
+    std::ptr::copy_nonoverlapping(utf16.as_ptr(), p, utf16.len());
+    GlobalUnlock(h);
+    let ok = SetClipboardData(13, h); // CF_UNICODETEXT
+    CloseClipboard();
+    if ok == 0 {
+        return Err("SetClipboardData 失败".into());
+    }
+    mark_skip();
+    Ok(())
+}
+
+unsafe fn write_files_to_clipboard(files: &[String]) -> Result<(), String> {
+    let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+    if OpenClipboard(hwnd) == 0 {
+        return Err("OpenClipboard 失败".into());
+    }
+    EmptyClipboard();
+
+    // 计算所需字节：DROPFILES 头部(20) + 各路径 UTF-16(null 结尾) + 末尾双 null
+    let mut total = 20usize;
+    for f in files {
+        total += (f.encode_utf16().count() + 1) * 2;
+    }
+    total += 2; // 末尾额外 null
+
+    let h = GlobalAlloc(0x0002, total);
+    if h == 0 {
+        CloseClipboard();
+        return Err("GlobalAlloc 失败".into());
+    }
+    let base = GlobalLock(h) as *mut u8;
+    if base.is_null() {
+        CloseClipboard();
+        return Err("GlobalLock 失败".into());
+    }
+    // DROPFILES: pFiles(4) + pt(8) + fNC(4) + fWide(4)
+    let p_files: u32 = 20;
+    let f_wide: i32 = 1;
+    let p_files_b = p_files.to_le_bytes();
+    let f_wide_b = f_wide.to_le_bytes();
+    std::ptr::copy_nonoverlapping(p_files_b.as_ptr(), base, 4);
+    std::ptr::copy_nonoverlapping([0u8; 8].as_ptr(), base.add(4), 8);
+    std::ptr::copy_nonoverlapping([0u8; 4].as_ptr(), base.add(12), 4);
+    std::ptr::copy_nonoverlapping(f_wide_b.as_ptr(), base.add(16), 4);
+
+    let mut off = 20usize;
+    for f in files {
+        let w: Vec<u16> = f.encode_utf16().chain(std::iter::once(0)).collect();
+        std::ptr::copy_nonoverlapping(w.as_ptr() as *const u8, base.add(off), w.len() * 2);
+        off += w.len() * 2;
+    }
+    // 末尾双 null（已有一个，再补一个）
+    std::ptr::write(base.add(off) as *mut u16, 0);
+    GlobalUnlock(h);
+    let ok = SetClipboardData(15, h); // CF_HDROP
+    CloseClipboard();
+    if ok == 0 {
+        return Err("SetClipboardData(CF_HDROP) 失败".into());
+    }
+    mark_skip();
+    Ok(())
+}
+
+unsafe fn mark_skip() {
+    SKIP_SEQ.store(GetClipboardSequenceNumber(), Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// 存储辅助
+// ---------------------------------------------------------------------------
+
+fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
+    let path = dir.join("index.json");
+    match fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+            eprintln!("[clipboard] index.json 解析失败：{e}，返回空");
+            Vec::new()
+        }),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
+    let path = dir.join("index.json");
+    if let Ok(s) = serde_json::to_string_pretty(hist) {
+        let _ = fs::write(&path, s);
+    }
+}
+
+fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
+    if let Some(rel) = &item.text_path {
+        let _ = fs::remove_file(dir.join(rel));
+    }
+    if let Some(rel) = &item.img_path {
+        let _ = fs::remove_file(dir.join(rel));
+    }
+}
+
+fn patch_item<F: FnOnce(&mut HistoryItem)>(id: &str, f: F) -> Result<(), String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    if let Some(item) = hist.iter_mut().find(|i| i.id == id) {
+        f(item);
+        save_index(&dir, &hist);
+        Ok(())
+    } else {
+        Err("条目不存在".into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 杂项
+// ---------------------------------------------------------------------------
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn make_id(ts: u64) -> String {
+    let c = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{:x}-{}", ts, c)
+}
+
+fn non_null<T>(v: T) -> Option<T>
+where
+    T: PartialEq + Default,
+{
+    if v == T::default() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        s.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+        s.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            s.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            s.push('=');
+        }
+        if chunk.len() > 2 {
+            s.push(TABLE[(n & 0x3F) as usize] as char);
+        } else {
+            s.push('=');
+        }
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
+// FFI
+// ---------------------------------------------------------------------------
+
+const GMEM_MOVEABLE: u32 = 0x0002;
+
+extern "system" {
+    fn OpenClipboard(hwnd: isize) -> i32;
+    fn AddClipboardFormatListener(hwnd: isize) -> i32;
+    fn CloseClipboard() -> i32;
+    fn EmptyClipboard() -> i32;
+    fn GetClipboardData(format: u32) -> isize;
+    fn SetClipboardData(format: u32, handle: isize) -> isize;
+    fn IsClipboardFormatAvailable(format: u32) -> i32;
+    fn GetClipboardSequenceNumber() -> u32;
+    fn GetClipboardOwner() -> isize;
+
+    fn GlobalAlloc(flags: u32, bytes: usize) -> isize;
+    fn GlobalLock(handle: isize) -> *mut std::ffi::c_void;
+    fn GlobalUnlock(handle: isize) -> i32;
+    fn GlobalSize(handle: isize) -> usize;
+
+    fn DragQueryFileW(hdrop: isize, i: u32, buf: *mut u16, buflen: u32) -> u32;
+    fn DragFinish(hdrop: isize);
+}

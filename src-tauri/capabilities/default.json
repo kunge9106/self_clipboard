@@ -1,6 +1,11 @@
 {
   "identifier": "default",
-  "description": "轻贴默认权限：仅核心能力，不给文件系统与网络",
+  "description": "轻贴默认权限：核心能力（自定义命令默认允许，无需显式声明）",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:default", "core:webview:default"]
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:webview:default",
+    "core:event:default"
+  ]
 }

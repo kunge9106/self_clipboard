@@ -487,6 +487,12 @@ pub fn install_focus_hook(hwnd: isize) {
             // lparam = -1 → 禁止重绘非客户区，原生标题栏就永远画不出来
             return unsafe { DefWindowProcW(hwnd, msg, wparam, -1) };
         }
+        // 剪贴板变化：事件驱动监听（替代轮询），读取并落盘后推给前端
+        if msg == 0x031D {
+            // WM_CLIPBOARDUPDATE
+            crate::clipboard::on_clipboard_update();
+            return 0;
+        }
         let orig = ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
         unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }
     }

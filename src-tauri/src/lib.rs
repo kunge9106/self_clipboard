@@ -5,6 +5,8 @@ use tauri::Manager;
 
 #[cfg(windows)]
 mod effects;
+#[cfg(windows)]
+mod clipboard;
 
 /// 前端启动时调用，拿到实际生效的材质档位与圆角上限。
 /// 注意：返回的是「实际生效」而非「尝试应用」的档位——这是 v1 静默失败的直接教训。
@@ -99,10 +101,21 @@ fn setup_effects(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
-    let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![effect_info]);
+    let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
+        effect_info,
+        clipboard::get_history,
+        clipboard::set_paused,
+        clipboard::delete_item,
+        clipboard::toggle_pin,
+        clipboard::toggle_favorite,
+        clipboard::clear_all,
+        clipboard::get_image,
+        clipboard::copy_back,
+    ]);
 
     #[cfg(windows)]
     let builder = builder.setup(|app| {
+        clipboard::init(app.handle());
         setup_effects(app.handle());
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
