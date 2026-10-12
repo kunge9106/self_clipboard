@@ -415,6 +415,42 @@ html:not(.hovers-off) .nav-item:hover {
   color: var(--text-dim);
 }
 
+/* 清空搜索内容的 × 按钮：只在有输入时出现 */
+.search-clear {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.search-clear svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+/* hidden 属性依赖 UA 的 display:none，但被上面的 display:flex 覆盖，必须显式声明 */
+.search-clear[hidden] {
+  display: none;
+}
+
+html:not(.hovers-off) .search-clear:hover {
+  background: var(--glass-hover);
+  color: var(--text);
+}
+
 .toolbar-right {
   margin-left: auto;
   display: flex;

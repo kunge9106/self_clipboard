@@ -240,10 +240,25 @@ function bindNav() {
 
 function bindSearch() {
   const el = document.getElementById("search");
+  const clear = document.getElementById("search-clear");
+  // × 按钮只在确实有输入时出现（按 trim 判断：只敲空格视为无输入）
+  const sync = () => {
+    if (clear) clear.hidden = el.value.trim() === "";
+  };
   el.addEventListener("input", () => {
     query = el.value.trim().toLowerCase();
+    sync();
     render();
   });
+  if (clear)
+    clear.addEventListener("click", () => {
+      el.value = "";
+      query = "";
+      sync();
+      render(); // 换回完整列表，不回顶部保留位置
+      el.focus();
+    });
+  sync();
 }
 
 // ---------------------------------------------------------------------------
