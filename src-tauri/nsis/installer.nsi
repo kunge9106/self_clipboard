@@ -76,6 +76,9 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+; 已安装的旧版本号（欢迎页提示语与安装详情用）
+; WM_SETTEXT 由 MUI2 引入的 WinMessages.nsh 已定义，这里不要重复 !define，否则 makensis 报重复定义
+Var OverwriteVer
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -167,7 +170,13 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 
 ; Installer pages, must be ordered as they appear
 ; 1. Welcome Page
+;
+;    覆盖安装提示语：欢迎页默认文案是「欢迎使用 XX 安装向导」，用户看不出这次到底是
+;    全新安装还是覆盖升级。这里在页面显示时读一次卸载信息里记录的 DisplayVersion，
+;    有值就改写欢迎页正文，明确告知「将把已安装的 vX 升级到 vY」。
+;    全新安装时保持默认文案，不做任何改动。
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW WelcomeShow
 !insertmacro MUI_PAGE_WELCOME
 
 ; 2. License Page (if defined)
@@ -194,6 +203,33 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 ;    （exe + 图标 + WebView2 引导），版本间文件集一致，实际影响可忽略。
 Var ReinstallPageCheck
 ; Page custom PageReinstall PageLeaveReinstall
+; 欢迎页显示后：如果是覆盖安装，把正文改写成明确的升级提示。
+;
+; 为什么是改正文控件的文本，而不是按控件 ID 去找：
+;   MUI2 的欢迎页是 nsDialogs 动态建的（见 Contrib/Modern UI 2/Pages/Welcome.nsh），
+;   正文 Label 的句柄被存在 $mui.WelcomePage.Text 里，控件 ID 是运行时分配的，
+;   老教程里那套 GetDlgItem 1034 是 InstallOptions 时代的写法，在 MUI2 上取不到东西。
+;   直接用 MUI 暴露的变量最稳：不用自己算位置、不用管 DPI，也不会和原有布局打架。
+;   拿不到句柄就静默跳过——最多是没有这句提示，不影响安装本身。
+Function WelcomeShow
+  ; 卸载信息里留着版本号 → 这台机器装过轻贴
+  ReadRegStr $OverwriteVer SHCTX "${UNINSTKEY}" "DisplayVersion"
+  ${If} $OverwriteVer == ""
+    Return  ; 全新安装：保留默认欢迎文案，不打扰
+  ${EndIf}
+  ${If} $mui.WelcomePage.Text == ""
+    Return
+  ${EndIf}
+
+  ${If} $OverwriteVer == "${VERSION}"
+    StrCpy $R2 "检测到本机已安装轻贴 ${VERSION}（与本次安装的版本相同）。$\r$\n本次为覆盖安装，现有的设置与历史记录都会保留。"
+  ${Else}
+    StrCpy $R2 "检测到本机已安装轻贴 $OverwriteVer。$\r$\n本次将把它升级到 ${VERSION}，现有的设置与历史记录都会保留。"
+  ${EndIf}
+  StrCpy $R2 "$R2$\r$\n$\r$\n如果轻贴正在运行，建议先退出，再点击「下一步」继续。"
+  SendMessage $mui.WelcomePage.Text ${WM_SETTEXT} 0 "STR:$R2"
+FunctionEnd
+
 Function PageReinstall
   ; Uninstall previous WiX installation if exists.
   ;
@@ -650,6 +686,14 @@ Section Install
   !ifmacrodef NSIS_HOOK_PREINSTALL
     !insertmacro NSIS_HOOK_PREINSTALL
   !endif
+
+  ; 安装详情里点明这一次是覆盖还是全新安装（INSTFILES 页展开详情可见）
+  ReadRegStr $OverwriteVer SHCTX "${UNINSTKEY}" "DisplayVersion"
+  ${If} $OverwriteVer != ""
+    DetailPrint "正在覆盖安装轻贴 ${VERSION}，替换旧版本文件..."
+  ${Else}
+    DetailPrint "正在安装轻贴 ${VERSION}..."
+  ${EndIf}
 
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
