@@ -918,6 +918,9 @@ function settingsHtml() {
     <div class="row"><label>开机自启</label>
       <input type="checkbox" id="set-autostart" ${s.autoStart ? "checked" : ""} />
       <span class="hint">登录 Windows 后自动运行轻贴</span></div>
+    <div class="row"><label>失焦时保持材质</label>
+      <input type="checkbox" id="set-keep-material" ${s.keepMaterialOnBlur === false ? "" : "checked"} />
+      <span class="hint">开启：鼠标不在窗口内时材质观感不变（Win11 会因此改用自绘亚克力）；关闭：跟随 Windows 11 系统材质，失焦时变为中性色</span></div>
     <div class="row"><label>关闭时后台运行</label>
       <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
       <span class="hint">点关闭按钮时隐藏到托盘继续后台运行（托盘图标始终常驻，右键可开菜单、双击唤回窗口）</span></div>
@@ -988,6 +991,7 @@ function bindSettings(view) {
     };
   };
   bindCheck("set-autostart", "set_autostart");
+  bindCheck("set-keep-material", "set_keep_material_on_blur");
   bindCheck("set-tray", "set_tray_on_close");
   bindCheck("set-file-copy", "set_file_copy");
   bindCheck("set-clean", "set_clean_on_close");

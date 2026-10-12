@@ -188,6 +188,7 @@ pub fn run() {
             settings::exit_app,
             settings::set_retention_days,
             settings::set_autostart,
+            settings::set_keep_material_on_blur,
             settings::set_file_copy,
             tray::tray_show_main,
             tray::tray_quit,

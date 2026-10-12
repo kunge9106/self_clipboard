@@ -24,6 +24,7 @@ const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
 const DWMWA_MICA_EFFECT: u32 = 1029;
 
 // DWM_SYSTEMBACKDROP_TYPE
+const DWMSBT_NONE: u32 = 1;
 const DWMSBT_TRANSIENTWINDOW: u32 = 3;
 
 // DWM_WINDOW_CORNER_PREFERENCE
@@ -260,19 +261,38 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     let _ = BUILD.set(build);
     let _ = TIER.set(tier);
 
+    // 是否**绕过**系统 backdrop（仅 Win11 22H2+ 可能发生）。
+    //
+    // 系统 backdrop 有个设计行为：窗口失焦时材质会 fallback 到中性色
+    // （微软 Mica 文档原话），且**没有官方开关**。用户要求「失焦时材质不变」，
+    // 唯一的办法就是不用它，改走 tint 完全由我们控制的 SWCA acrylic。
+    let bypass_backdrop = tier == Tier::SystemBackdrop && crate::settings::get().keep_material_on_blur;
+    // 绕过之后，实际生效的材质就是 acrylic —— TIER 要如实反映，否则 max_radius
+    // 等下游判断会按 SystemBackdrop 算（12px 而不是 acrylic 的 20px）。
+    let effective = if bypass_backdrop { Tier::Acrylic } else { tier };
+    if bypass_backdrop {
+        let _ = TIER.set(effective);
+    }
+
     println!(
-        "[effects] windows build={} → tier={} (radius≤{}px)",
+        "[effects] windows build={} → tier={}{} (radius≤{}px)",
         build,
         tier.as_str(),
-        match tier.max_radius() {
+        if bypass_backdrop {
+            " → 绕过系统 backdrop，改用自绘 acrylic（失焦不变）"
+        } else {
+            ""
+        },
+        match effective.max_radius() {
             u32::MAX => 0,
             r => r,
         }
     );
 
     // 先清掉 WS_CAPTION | WS_THICKFRAME 等样式位——DWM 正是靠它们才
-    // 沿窗口矩形画 1px 边框（SystemBackdrop 档需要 DWM 提供 backdrop 与圆角，不能动）
-    if tier != Tier::SystemBackdrop {
+    // 沿窗口矩形画 1px 边框（SystemBackdrop 档需要 DWM 提供 backdrop 与圆角，不能动；
+    // 但绕过它走自绘 acrylic 时就必须清，否则那圈 1px 直角边框还在）
+    if tier != Tier::SystemBackdrop || bypass_backdrop {
         strip_window_frame(hwnd);
     }
 
@@ -280,21 +300,25 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     set_immersive_dark(hwnd, dark);
 
     // 再关掉 DWM 的非客户区渲染（双保险；部分系统上该属性已不再支持）
-    if tier != Tier::SystemBackdrop {
+    if tier != Tier::SystemBackdrop || bypass_backdrop {
         disable_nc_rendering(hwnd);
     }
 
-    let result = match tier {
-        Tier::SystemBackdrop => apply_system_backdrop(hwnd),
-        Tier::Mica => apply_mica(hwnd),
-        Tier::Acrylic => apply_acrylic(hwnd, dark),
-        Tier::Solid => Ok(()),
+    let result = if bypass_backdrop {
+        apply_acrylic(hwnd, dark)
+    } else {
+        match tier {
+            Tier::SystemBackdrop => apply_system_backdrop(hwnd),
+            Tier::Mica => apply_mica(hwnd),
+            Tier::Acrylic => apply_acrylic(hwnd, dark),
+            Tier::Solid => Ok(()),
+        }
     };
 
     match result {
         Ok(()) => {
-            println!("[effects] 材质应用完成：{}", tier.as_str());
-            tier
+            println!("[effects] 材质应用完成：{}", effective.as_str());
+            effective
         }
         Err(code) => {
             // 开发原则 3：降级必须显式，不能假装成功
@@ -633,6 +657,63 @@ fn apply_acrylic(hwnd: isize, dark: bool) -> Result<(), i32> {
 /// 切换「圆角模式」后立即生效（无需重启）
 pub fn apply_round_mode(hwnd: isize, dark: bool) {
     let _ = apply_acrylic(hwnd, dark);
+}
+
+// ---------------------------------------------------------------------------
+// 强制圆角的窗口（托盘菜单）
+// ---------------------------------------------------------------------------
+
+/// 关掉窗口上**所有**系统材质，让四角真透明。
+///
+/// 系统材质（system backdrop / mica / accent acrylic）恒为**矩形**铺满整个窗口矩形，
+/// CSS 的 border-radius 切不掉它。所以任何「必须用 CSS 圆角」的窗口都要先关干净，
+/// 否则圆角外会留一圈直角残留 —— 这正是主窗口早先反复踩的坑。
+fn clear_system_material(hwnd: isize, tier: Tier) {
+    unsafe {
+        match tier {
+            Tier::SystemBackdrop => {
+                let v: u32 = DWMSBT_NONE;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_SYSTEMBACKDROP_TYPE,
+                    &v as *const _ as *const c_void,
+                    std::mem::size_of::<u32>() as u32,
+                );
+            }
+            Tier::Mica => {
+                let v: u32 = 0;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_MICA_EFFECT,
+                    &v as *const _ as *const c_void,
+                    std::mem::size_of::<u32>() as u32,
+                );
+            }
+            Tier::Acrylic => {
+                let _ = set_accent_state(hwnd, ACCENT_DISABLED, 0);
+            }
+            Tier::Solid => {}
+        }
+    }
+    nudge(hwnd);
+}
+
+/// 对**必须用 CSS 圆角**的窗口施加材质（托盘菜单专用）。
+///
+/// 托盘菜单固定使用圆角外观，与主窗口的「圆角模式」开关无关。因此不能直接复用
+/// `apply()`——它在直角模式下会真的施加 acrylic（矩形），配上 CSS 圆角就是四角残留。
+/// 这里做的恰恰相反：**先关掉系统材质**，观感完全交给 CSS 层。
+///
+/// `TIER` 由主窗口的 `apply()` 设置；万一托盘菜单先跑（正常不会），这里自己探测一次。
+pub fn apply_rounded(hwnd: isize, dark: bool) {
+    let tier = current_tier();
+
+    if tier != Tier::SystemBackdrop {
+        strip_window_frame(hwnd);
+        disable_nc_rendering(hwnd);
+    }
+    set_immersive_dark(hwnd, dark);
+    clear_system_material(hwnd, tier);
 }
 
 /// 材质浓度变化后立即重刷 acrylic（设置页滑块用）
