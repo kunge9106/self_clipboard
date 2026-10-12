@@ -77,6 +77,15 @@ function applyRoundMode(on) {
   document.documentElement.style.setProperty("--radius", (on ? maxRadius : 0) + "px");
 }
 
+/** 最大化 ↔ 还原：图标与提示词跟随窗口状态（需求 #6） */
+async function syncMaxState() {
+  const maxBtn = document.getElementById("btn-maximize");
+  if (!maxBtn) return;
+  const max = await appWindow.isMaximized().catch(() => false);
+  maxBtn.classList.toggle("is-max", max);
+  maxBtn.title = max ? "还原" : "最大化";
+}
+
 function bindWindowControls() {
   const guard = (label, p) =>
     p.catch((err) => toast(label + "失败：" + err));
@@ -93,15 +102,44 @@ function bindWindowControls() {
     }
   };
 
-  // 最大化 ↔ 还原：图标与提示词跟随窗口状态（需求 #6）
-  const maxBtn = document.getElementById("btn-maximize");
-  const syncMaxState = async () => {
-    const max = await appWindow.isMaximized().catch(() => false);
-    maxBtn.classList.toggle("is-max", max);
-    maxBtn.title = max ? "还原" : "最大化";
-  };
+  // 窗口尺寸变化时同步图标
   appWindow.onResized(() => syncMaxState());
+  // 从最小化 / 托盘恢复时尺寸未必变化 → onResized 不触发，图标会停在旧状态，这里补一次。
+  // 刻意不在这里重放材质浓度/圆角模式：它们是「即时生效」的（改设置页当场就应用了），
+  // 在聚焦时重设样式变量纯属多余，还有概率引起一次重绘闪烁。
+  appWindow.onFocusChanged(({ payload: focused }) => {
+    if (focused) syncMaxState();
+  });
   syncMaxState();
+}
+
+/**
+ * 悬浮态防残留。
+ *
+ * Chromium 的 `:hover` 是引擎内部状态，只在收到**真实鼠标移动**时才重算。窗口最小化
+ * 或隐藏到托盘时，WebView 收不到 WM_MOUSELEAVE，于是「最小化前光标停着的那个元素」
+ * 会一直保持 `:hover` —— 从任务栏/托盘恢复后，右上角那几个窗口按钮就带着背景色，
+ * 直到鼠标真的动一下才消失。
+ *
+ * 做法：窗口失焦时给 `<html>` 挂上 `.hovers-off`，CSS 里所有 `:hover` 规则都写在
+ * `html:not(.hovers-off)` 之下，于是整体被屏蔽；等鼠标真的在本窗口里移动/按下之后
+ * 再摘掉 —— 那时 Chromium 会按新坐标重算 hover，得到的才是真实结果。
+ *
+ * 注意：只在**失焦**时挂载、不在聚焦时挂载。因为点击窗口的 `mousedown` 早于 `focus`，
+ * 若在 focus 时挂载，会出现「先摘掉又挂上」→ hover 再也不亮。
+ */
+function bindHoverGuard() {
+  const html = document.documentElement;
+  const off = () => html.classList.add("hovers-off");
+  const on = () => html.classList.remove("hovers-off");
+
+  appWindow.onFocusChanged(({ payload: focused }) => {
+    if (!focused) off();
+  });
+  window.addEventListener("mousemove", on, { passive: true });
+  window.addEventListener("mousedown", on, { passive: true });
+  document.addEventListener("mouseleave", off);
+  on();
 }
 
 // 自定义拖动（不用系统移动循环，避免 Win10 acrylic 的幽灵窗口 & 拖动变色）
@@ -178,7 +216,7 @@ function bindClearView() {
     try {
       await invoke("delete_items", { ids: targets.map((i) => i.id) });
       items = items.filter((i) => !targets.some((t) => t.id === i.id));
-      render();
+      render({ keepScroll: true });
       toast(query ? `已清理 ${targets.length} 条搜索结果` : `已清理 ${targets.length} 条`);
     } catch (e) {
       toast("清理失败：" + e);
@@ -202,10 +240,25 @@ function bindNav() {
 
 function bindSearch() {
   const el = document.getElementById("search");
+  const clear = document.getElementById("search-clear");
+  // × 按钮只在确实有输入时出现（按 trim 判断：只敲空格视为无输入）
+  const sync = () => {
+    if (clear) clear.hidden = el.value.trim() === "";
+  };
   el.addEventListener("input", () => {
     query = el.value.trim().toLowerCase();
+    sync();
     render();
   });
+  if (clear)
+    clear.addEventListener("click", () => {
+      el.value = "";
+      query = "";
+      sync();
+      render(); // 换回完整列表，不回顶部保留位置
+      el.focus();
+    });
+  sync();
 }
 
 // ---------------------------------------------------------------------------
@@ -291,8 +344,21 @@ function startTimeTicker() {
 
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
 
-function render() {
+/**
+ * 重绘列表。
+ *
+ * @param {{keepScroll?: boolean}} [opts]
+ *   keepScroll：保留当前滚动位置。适用于「列表就地变化」的场景——删除条目、
+ *   置顶/取消置顶、收藏、后台来了新内容。这些都不会改变用户正在看的位置，
+ *   跳回顶部属于纯粹的干扰。
+ *   切视图、改搜索词时**不要**开：那是换了一批数据，本来就该从头看。
+ *
+ * 为什么需要这个参数：本函数会 `view.innerHTML = ""` 并新建 `.history` 容器，
+ * 容器一换，scrollTop 必然归零。所以必须在重建**之前**把位置记下来。
+ */
+function render({ keepScroll = false } = {}) {
   hideImagePreview(); // 重绘后旧卡片已销毁，避免浮层残留
+  const prevTop = keepScroll && wrapEl ? wrapEl.scrollTop : 0;
   const view = document.getElementById("view");
   const toolbar = document.querySelector(".toolbar");
   const isSettings = currentView === "settings";
@@ -342,7 +408,28 @@ function render() {
   view.appendChild(wrapEl);
   setupMoreObserver(); // root 必须绑定到这个新的滚动容器
   appendBatch();
+  restoreScroll(prevTop);
   refreshMissing(list); // 文件条目的原路径可能已被移动/删除 → 打「已失效」标记
+}
+
+/**
+ * 还原滚动位置。
+ *
+ * 渐进渲染下第一批只有 PAGE_SIZE 条，撑不到原来的位置，所以边追加批次边还原，
+ * 直到内容够高（或全部渲染完）。追加的批数正好等于重建前 DOM 里的卡片数，
+ * 因此内存占用不会比渲染前更高。
+ */
+function restoreScroll(top) {
+  if (!wrapEl || top <= 0) return;
+  let guard = 0;
+  while (
+    wrapEl.scrollHeight - wrapEl.clientHeight < top &&
+    renderedUpTo < renderList.length &&
+    guard++ < 1000
+  ) {
+    appendBatch();
+  }
+  wrapEl.scrollTop = top;
 }
 
 // ---------------------------------------------------------------------------
@@ -773,7 +860,7 @@ function openContextMenu(x, y, item) {
         const idx = vs.indexOf(currentView);
         if (idx >= 0) vs.splice(idx, 1);
         else vs.push(currentView);
-        render();
+        render({ keepScroll: true });
       },
     },
     {
@@ -781,7 +868,7 @@ function openContextMenu(x, y, item) {
       act: async () => {
         await invoke("toggle_favorite", { id: item.id });
         item.favorite = !item.favorite;
-        render();
+        render({ keepScroll: true });
       },
     },
     {
@@ -790,7 +877,7 @@ function openContextMenu(x, y, item) {
       act: async () => {
         await invoke("delete_item", { id: item.id });
         items = items.filter((i) => i.id !== item.id);
-        render();
+        render({ keepScroll: true });
       },
     },
   ]);
@@ -846,6 +933,9 @@ function settingsHtml() {
     <div class="row"><label>开机自启</label>
       <input type="checkbox" id="set-autostart" ${s.autoStart ? "checked" : ""} />
       <span class="hint">登录 Windows 后自动运行轻贴</span></div>
+    <div class="row"><label>失焦时保持材质</label>
+      <input type="checkbox" id="set-keep-material" ${s.keepMaterialOnBlur === false ? "" : "checked"} />
+      <span class="hint">开启：鼠标不在窗口内时材质观感不变（Win11 会因此改用自绘亚克力）；关闭：跟随 Windows 11 系统材质，失焦时变为中性色</span></div>
     <div class="row"><label>关闭时后台运行</label>
       <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
       <span class="hint">点关闭按钮时隐藏到托盘继续后台运行（托盘图标始终常驻，右键可开菜单、双击唤回窗口）</span></div>
@@ -853,7 +943,7 @@ function settingsHtml() {
       <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
       <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
     <div class="row"><label>材质浓度</label>
-      <input type="range" id="set-material" min="25" max="90" value="${s.materialAlpha ?? 62}" />
+      <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 62}" />
       <span class="hint" id="material-val">${s.materialAlpha ?? 62}%（越高越厚实 · 越低越通透）</span></div>
     <div class="row"><label>圆角模式</label>
       <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
@@ -916,6 +1006,7 @@ function bindSettings(view) {
     };
   };
   bindCheck("set-autostart", "set_autostart");
+  bindCheck("set-keep-material", "set_keep_material_on_blur");
   bindCheck("set-tray", "set_tray_on_close");
   bindCheck("set-file-copy", "set_file_copy");
   bindCheck("set-clean", "set_clean_on_close");
@@ -942,11 +1033,26 @@ function bindSettings(view) {
   const material = view.querySelector("#set-material");
   if (material) {
     const label = view.querySelector("#material-val");
+    const show = (v) => {
+      if (label) label.textContent = `${v}%（越高越厚实 · 越低越通透）`;
+    };
+    // 拖动中：只改观感与本地状态，不落盘（高频写 config.json 没必要）。
+    // 关键是同步 settings.materialAlpha —— settingsHtml() 读的是模块级 settings，
+    // 不同步的话切到别的页面再回来，滑块会显示成旧值（看起来像「恢复默认」）。
     material.addEventListener("input", () => {
       const v = parseInt(material.value, 10);
-      if (label) label.textContent = `${v}%（越高越厚实 · 越低越通透）`;
-      applyGlassAlpha(v); // 实时生效（CSS 层，无需重启）
-      invoke("set_material_alpha", { value: v }).catch(() => {});
+      if (!Number.isFinite(v)) return;
+      show(v);
+      applyGlassAlpha(v);
+      if (settings) settings.materialAlpha = v;
+    });
+    // 松手才持久化
+    material.addEventListener("change", () => {
+      const v = parseInt(material.value, 10);
+      if (!Number.isFinite(v)) return;
+      invoke("set_material_alpha", { value: v }).catch((e) =>
+        toast("保存失败：" + e)
+      );
     });
   }
 
@@ -1009,6 +1115,7 @@ function bindSettings(view) {
 async function main() {
   // 控件绑定优先（即便后续异步步骤出错，也能保证可交互）
   bindWindowControls();
+  bindHoverGuard();
   bindDrag();
   bindResize();
   bindExitModal();
@@ -1058,7 +1165,8 @@ async function main() {
     const item = e.payload;
     if (!items.some((i) => i.id === item.id)) {
       items.unshift(item);
-      render();
+      // 新内容插到顶部，但用户可能正在看下面的内容 → 别把位置顶掉
+      render({ keepScroll: true });
     }
   });
 }

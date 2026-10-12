@@ -10,9 +10,10 @@
   gap: 2px;
   height: 100vh;
   padding: 6px;
-  /* --menu-radius 由 tray.js 按「圆角模式」下发：直角模式下必须是 0，
-     否则 CSS 圆角会把系统 acrylic 的直角矩形露出来（主窗口踩过的同一个坑）。 */
-  border-radius: var(--menu-radius, 0px);
+  /* --menu-radius 恒为 12px：托盘菜单固定圆角，是它的固有外观。
+     Rust 侧的 apply_rounded 已把系统 acrylic/backdrop 关干净，所以 CSS 圆角
+     不会把「系统材质的直角矩形」露出来（主窗口早先踩过的坑）。 */
+  border-radius: var(--menu-radius, 12px);
   border: 1px solid var(--stroke);
   background: rgb(var(--material-rgb) / var(--glass-alpha));
   overflow: hidden;
@@ -34,7 +35,7 @@
   cursor: default;
 }
 
-.tray-item:hover {
+html:not(.hovers-off) .tray-item:hover {
   background: var(--glass-hover);
 }
 
@@ -46,7 +47,7 @@
   color: #e81123;
 }
 
-.tray-item.danger:hover {
+html:not(.hovers-off) .tray-item.danger:hover {
   background: rgba(232, 17, 35, 0.12);
 }
 

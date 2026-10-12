@@ -108,7 +108,7 @@ fn setup_effects(app: &tauri::AppHandle) {
     effects::install_focus_hook(hwnd);
 
     let app_for_events = app.clone();
-    let window_for_close = window.clone();
+    let window_for_events = window.clone();
     window.on_window_event(move |event| {
         match event {
             tauri::WindowEvent::ThemeChanged(theme) => {
@@ -120,7 +120,11 @@ fn setup_effects(app: &tauri::AppHandle) {
             tauri::WindowEvent::Resized(_) => {
                 effects::begin_resize(hwnd);
             }
-            // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）
+            // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）。
+            //
+            // 这里刻意**不**重刷材质：聚焦是高频动作，重刷会让窗口肉眼可见地闪一下。
+            // 材质真正会被丢掉的路径是「隐藏 → 显示」，那一条已经在 tray::show_main
+            // 里于窗口可见之前补好了。
             tauri::WindowEvent::Focused(_) => {
                 effects::apply_rounded_corners(hwnd);
             }
@@ -132,7 +136,7 @@ fn setup_effects(app: &tauri::AppHandle) {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if settings::get().tray_on_close {
                     api.prevent_close();
-                    let _ = window_for_close.hide();
+                    let _ = window_for_events.hide();
                     tray::create_tray(&app_for_events);
                     println!("[tray] 窗口已隐藏到托盘");
                 }
@@ -184,6 +188,7 @@ pub fn run() {
             settings::exit_app,
             settings::set_retention_days,
             settings::set_autostart,
+            settings::set_keep_material_on_blur,
             settings::set_file_copy,
             tray::tray_show_main,
             tray::tray_quit,
@@ -194,6 +199,9 @@ pub fn run() {
     let builder = builder.setup(|app| {
         settings::init(app.handle());
         clipboard::init(app.handle());
+        // 自愈：旧版本把自启值按 UTF-8 写进宽字符 API，注册表里是乱码路径，
+        // 开机启动失败。这里每次启动比对一次，内容不符就重写。
+        autostart::repair_if_needed();
         setup_effects(app.handle());
         // 托盘图标常驻：程序一运行就显示（不再依赖「关闭时后台运行」开关）
         tray::create_tray(app.handle());

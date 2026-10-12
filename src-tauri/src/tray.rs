@@ -164,7 +164,9 @@ fn open_menu(app: &AppHandle, pos: PhysicalPosition<f64>) {
 pub struct MenuLook {
     /// 没有真材质（solid 兜底档）→ 菜单必须给不透明底色
     solid: bool,
-    /// 圆角模式 → 菜单用 CSS 圆角；否则直角（与系统 acrylic 的矩形吻合，四角零残留）
+    /// 菜单**恒为圆角**：圆角是托盘菜单的固有外观，不跟随主窗口的「圆角模式」。
+    /// Rust 侧的 `apply_material` 走 `effects::apply_rounded`，已把系统材质关干净，
+    /// 所以这里给 CSS 圆角不会有四角残留。
     round: bool,
     /// 材质浓度 → --glass-alpha（0–1）
     alpha: f64,
@@ -175,7 +177,7 @@ fn look(win: &WebviewWindow) -> MenuLook {
     let cfg = crate::settings::get();
     MenuLook {
         solid: crate::effects::current_tier().as_str() == "solid",
-        round: cfg.round_mode,
+        round: true,
         alpha: cfg.material_alpha.clamp(10, 95) as f64 / 100.0,
         dark: matches!(win.theme().unwrap_or(tauri::Theme::Light), tauri::Theme::Dark),
     }
@@ -193,7 +195,9 @@ fn apply_material(win: &WebviewWindow) {
     use tauri::Theme;
     if let Ok(h) = win.hwnd() {
         let dark = matches!(win.theme().unwrap_or(Theme::Light), Theme::Dark);
-        crate::effects::apply(h.0 as isize, dark);
+        // 菜单**固定圆角**（与主窗口的圆角模式无关），所以必须走「先关系统材质」的
+        // 路径：系统 acrylic/backdrop 是矩形，CSS 圆角配上它四角会留一圈直角残留。
+        crate::effects::apply_rounded(h.0 as isize, dark);
     }
 }
 
@@ -220,6 +224,22 @@ pub fn tray_quit(app: AppHandle) -> Result<(), String> {
 
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        // 所有「补齐」动作都必须在窗口可见**之前**做完。显示之后再改材质或尺寸，
+        // 用户会看到「先出现、再变样」的闪烁（上一版就是这么闪的）。
+        #[cfg(windows)]
+        {
+            use tauri::Theme;
+            if let Ok(h) = w.hwnd() {
+                let hwnd = h.0 as isize;
+                // 隐藏期间 DWM 会把 accent 材质丢掉 —— 先补回来
+                let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
+                crate::effects::apply(hwnd, dark);
+                // hide() 不产生 WM_SIZE，WebView2 的内容尺寸可能停在隐藏前的大小
+                // （表现为唤回来排版不对）。此刻窗口还不可见，尺寸微调看不见。
+                crate::effects::relayout(hwnd);
+            }
+        }
+
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
