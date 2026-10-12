@@ -925,7 +925,7 @@ function settingsHtml() {
       <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
       <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
     <div class="row"><label>材质浓度</label>
-      <input type="range" id="set-material" min="25" max="90" value="${s.materialAlpha ?? 62}" />
+      <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 62}" />
       <span class="hint" id="material-val">${s.materialAlpha ?? 62}%（越高越厚实 · 越低越通透）</span></div>
     <div class="row"><label>圆角模式</label>
       <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
@@ -1014,11 +1014,26 @@ function bindSettings(view) {
   const material = view.querySelector("#set-material");
   if (material) {
     const label = view.querySelector("#material-val");
+    const show = (v) => {
+      if (label) label.textContent = `${v}%（越高越厚实 · 越低越通透）`;
+    };
+    // 拖动中：只改观感与本地状态，不落盘（高频写 config.json 没必要）。
+    // 关键是同步 settings.materialAlpha —— settingsHtml() 读的是模块级 settings，
+    // 不同步的话切到别的页面再回来，滑块会显示成旧值（看起来像「恢复默认」）。
     material.addEventListener("input", () => {
       const v = parseInt(material.value, 10);
-      if (label) label.textContent = `${v}%（越高越厚实 · 越低越通透）`;
-      applyGlassAlpha(v); // 实时生效（CSS 层，无需重启）
-      invoke("set_material_alpha", { value: v }).catch(() => {});
+      if (!Number.isFinite(v)) return;
+      show(v);
+      applyGlassAlpha(v);
+      if (settings) settings.materialAlpha = v;
+    });
+    // 松手才持久化
+    material.addEventListener("change", () => {
+      const v = parseInt(material.value, 10);
+      if (!Number.isFinite(v)) return;
+      invoke("set_material_alpha", { value: v }).catch((e) =>
+        toast("保存失败：" + e)
+      );
     });
   }
 

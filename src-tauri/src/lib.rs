@@ -198,6 +198,9 @@ pub fn run() {
     let builder = builder.setup(|app| {
         settings::init(app.handle());
         clipboard::init(app.handle());
+        // 自愈：旧版本把自启值按 UTF-8 写进宽字符 API，注册表里是乱码路径，
+        // 开机启动失败。这里每次启动比对一次，内容不符就重写。
+        autostart::repair_if_needed();
         setup_effects(app.handle());
         // 托盘图标常驻：程序一运行就显示（不再依赖「关闭时后台运行」开关）
         tray::create_tray(app.handle());

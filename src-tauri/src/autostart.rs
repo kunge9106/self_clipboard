@@ -2,8 +2,10 @@
 //!
 //! 手写 advapi32 FFI，与项目「不为几个 API 拖入庞大依赖」的原则一致。
 //! 值数据为带引号的 exe 全路径，避免带空格路径被拆参。
-
-use std::fs;
+//!
+//! **坑**：`RegSetValueExW` 是宽字符版 API，`REG_SZ` 的数据必须是 **UTF-16LE 字节序列**
+//! （含结尾 null）。早期版本直接塞了 `String::as_bytes()`（UTF-8），注册表按 UTF-16
+//! 存下来就是乱码路径，开机时 Windows 运行失败 —— 表现为「开关显示已开启但不生效」。
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const VALUE_NAME: &str = "轻贴";
@@ -52,32 +54,102 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// 是否已存在自启项（不校验路径内容，存在即视为开启）
-pub fn is_enabled() -> bool {
+/// 期望写入的自启值：带引号的 exe 全路径
+fn expected_value() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .map(|p| format!("\"{}\"", p.to_string_lossy()))
+}
+
+/// 读取 Run 项里现存的值（REG_SZ，UTF-16LE → String）
+fn read_value() -> Option<String> {
     unsafe {
         let mut hkey: isize = 0;
-        if RegOpenKeyExW(HKEY_CURRENT_USER, wide(RUN_KEY).as_ptr(), 0, KEY_READ, &mut hkey)
-            != ERROR_SUCCESS
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            wide(RUN_KEY).as_ptr(),
+            0,
+            KEY_READ,
+            &mut hkey,
+        ) != ERROR_SUCCESS
         {
-            return false;
+            return None;
         }
         let mut typ: u32 = 0;
         let mut cb: u32 = 0;
-        let r = RegQueryValueExW(hkey, wide(VALUE_NAME).as_ptr(), std::ptr::null_mut(), &mut typ, std::ptr::null_mut(), &mut cb);
+        // 先按 null 缓冲调用一次拿字节长度
+        if RegQueryValueExW(
+            hkey,
+            wide(VALUE_NAME).as_ptr(),
+            std::ptr::null_mut(),
+            &mut typ,
+            std::ptr::null_mut(),
+            &mut cb,
+        ) != ERROR_SUCCESS
+        {
+            RegCloseKey(hkey);
+            return None;
+        }
+        let mut buf = vec![0u8; cb as usize];
+        let r = RegQueryValueExW(
+            hkey,
+            wide(VALUE_NAME).as_ptr(),
+            std::ptr::null_mut(),
+            &mut typ,
+            buf.as_mut_ptr(),
+            &mut cb,
+        );
         RegCloseKey(hkey);
-        r == ERROR_SUCCESS
+        if r != ERROR_SUCCESS {
+            return None;
+        }
+        let units: Vec<u16> = buf
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+        Some(String::from_utf16_lossy(&units[..end]))
+    }
+}
+
+/// 是否已开启自启：不只看「值存在」，还要求内容就是当前 exe 的路径。
+/// 这样 exe 被移动/重装后状态依然准确，也不会把写坏的值当成已开启。
+pub fn is_enabled() -> bool {
+    let Some(expected) = expected_value() else {
+        return false;
+    };
+    read_value().as_deref() == Some(expected.as_str())
+}
+
+/// 启动自愈：修复旧版本用 UTF-8 字节写坏的 REG_SZ 值。
+///
+/// 老用户的注册表里已经躺着一条乱码路径，即使换了新 exe 也不会自愈 ——
+/// 这里在每次启动时比对一次，值存在但内容不符就重写。
+pub fn repair_if_needed() {
+    let Some(expected) = expected_value() else {
+        return;
+    };
+    match read_value() {
+        Some(v) if v != expected => {
+            println!("[autostart] 自启项内容不是当前 exe 路径，重写修复");
+            let _ = set_enabled(true);
+        }
+        _ => {}
     }
 }
 
 pub fn set_enabled(enable: bool) -> Result<(), String> {
     if enable {
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("取 exe 路径失败：{e}"))?
-            .to_string_lossy()
-            .to_string();
-        let _ = fs::canonicalize(&exe); // 不强制成功：路径规范化失败就用原样
-        let data = format!("\"{}\"", exe);
-        let bytes = data.as_bytes();
+        let Some(data) = expected_value() else {
+            return Err("取 exe 路径失败".into());
+        };
+        // RegSetValueExW 是宽字符版 API：REG_SZ 的数据必须是 UTF-16LE 字节序列（含结尾 null）。
+        // 直接塞 UTF-8 字节会被注册表按 UTF-16 解释成乱码路径，开机时运行失败。
+        let mut wide_data: Vec<u16> = data.encode_utf16().collect();
+        wide_data.push(0);
+        let bytes = unsafe {
+            std::slice::from_raw_parts(wide_data.as_ptr() as *const u8, wide_data.len() * 2)
+        };
 
         unsafe {
             let mut hkey: isize = 0;
