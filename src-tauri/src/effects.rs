@@ -261,38 +261,19 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     let _ = BUILD.set(build);
     let _ = TIER.set(tier);
 
-    // 是否**绕过**系统 backdrop（仅 Win11 22H2+ 可能发生）。
-    //
-    // 系统 backdrop 有个设计行为：窗口失焦时材质会 fallback 到中性色
-    // （微软 Mica 文档原话），且**没有官方开关**。用户要求「失焦时材质不变」，
-    // 唯一的办法就是不用它，改走 tint 完全由我们控制的 SWCA acrylic。
-    let bypass_backdrop = tier == Tier::SystemBackdrop && crate::settings::get().keep_material_on_blur;
-    // 绕过之后，实际生效的材质就是 acrylic —— TIER 要如实反映，否则 max_radius
-    // 等下游判断会按 SystemBackdrop 算（12px 而不是 acrylic 的 20px）。
-    let effective = if bypass_backdrop { Tier::Acrylic } else { tier };
-    if bypass_backdrop {
-        let _ = TIER.set(effective);
-    }
-
     println!(
-        "[effects] windows build={} → tier={}{} (radius≤{}px)",
+        "[effects] windows build={} → tier={} (radius≤{}px)",
         build,
         tier.as_str(),
-        if bypass_backdrop {
-            " → 绕过系统 backdrop，改用自绘 acrylic（失焦不变）"
-        } else {
-            ""
-        },
-        match effective.max_radius() {
+        match tier.max_radius() {
             u32::MAX => 0,
             r => r,
         }
     );
 
     // 先清掉 WS_CAPTION | WS_THICKFRAME 等样式位——DWM 正是靠它们才
-    // 沿窗口矩形画 1px 边框（SystemBackdrop 档需要 DWM 提供 backdrop 与圆角，不能动；
-    // 但绕过它走自绘 acrylic 时就必须清，否则那圈 1px 直角边框还在）
-    if tier != Tier::SystemBackdrop || bypass_backdrop {
+    // 沿窗口矩形画 1px 边框（SystemBackdrop 档需要 DWM 提供 backdrop 与圆角，不能动）
+    if tier != Tier::SystemBackdrop {
         strip_window_frame(hwnd);
     }
 
@@ -300,25 +281,21 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     set_immersive_dark(hwnd, dark);
 
     // 再关掉 DWM 的非客户区渲染（双保险；部分系统上该属性已不再支持）
-    if tier != Tier::SystemBackdrop || bypass_backdrop {
+    if tier != Tier::SystemBackdrop {
         disable_nc_rendering(hwnd);
     }
 
-    let result = if bypass_backdrop {
-        apply_acrylic(hwnd, dark)
-    } else {
-        match tier {
-            Tier::SystemBackdrop => apply_system_backdrop(hwnd),
-            Tier::Mica => apply_mica(hwnd),
-            Tier::Acrylic => apply_acrylic(hwnd, dark),
-            Tier::Solid => Ok(()),
-        }
+    let result = match tier {
+        Tier::SystemBackdrop => apply_system_backdrop(hwnd),
+        Tier::Mica => apply_mica(hwnd),
+        Tier::Acrylic => apply_acrylic(hwnd, dark),
+        Tier::Solid => Ok(()),
     };
 
     match result {
         Ok(()) => {
-            println!("[effects] 材质应用完成：{}", effective.as_str());
-            effective
+            println!("[effects] 材质应用完成：{}", tier.as_str());
+            tier
         }
         Err(code) => {
             // 开发原则 3：降级必须显式，不能假装成功
@@ -708,10 +685,12 @@ fn clear_system_material(hwnd: isize, tier: Tier) {
 pub fn apply_rounded(hwnd: isize, dark: bool) {
     let tier = current_tier();
 
-    if tier != Tier::SystemBackdrop {
-        strip_window_frame(hwnd);
-        disable_nc_rendering(hwnd);
-    }
+    // 托盘菜单恒为 CSS 圆角外观，必须先关干净系统材质（见 clear_system_material），
+    // 所以**无论当前档位**都无条件 strip frame + 关 NC 渲染，观感完全交给 CSS 层。
+    // 这里不能按 tier 判断跳过：回退「失焦保持材质」后，Win11 的 tier 又变回
+    // SystemBackdrop，若是跳过 strip，菜单四角会再次残留直角、与 CSS 圆角打架。
+    strip_window_frame(hwnd);
+    disable_nc_rendering(hwnd);
     set_immersive_dark(hwnd, dark);
     clear_system_material(hwnd, tier);
 }

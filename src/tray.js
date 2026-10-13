@@ -19,19 +19,17 @@ const hide = () => win.hide().catch(() => {});
  * payload），页面这边不做任何读取 —— 一是少两次 IPC，二是保证「弹出即最新」：
  * 用户改完材质浓度 / 圆角模式，下次右键立刻就是新观感。
  *
- * 形状：{ solid, round, alpha, dark }
+ * 形状：{ solid, round, alpha, dark }（round 已不用：菜单恒为圆角外观）
  */
 function applyLook(look) {
   if (!look) return;
   document.body.classList.toggle("dark", !!look.dark);
   document.body.classList.toggle("tier-solid", !!look.solid);
 
-  // 直角模式（默认）→ 菜单也是直角：窗口矩形与系统 acrylic 完全吻合，四角零残留；
-  // 圆角模式 → 没有系统 blur，圆角由 CSS 负责，可以放心圆。
-  document.documentElement.style.setProperty(
-    "--menu-radius",
-    (look.round ? 12 : 0) + "px"
-  );
+  // 菜单**恒为圆角外观**（用户要求）：不管主窗口开没开圆角模式，托盘菜单
+  // 都用「圆角模式」那一套材质与样式 —— CSS 圆角 + 无系统 blur（Rust 侧
+  // apply_rounded 已把系统材质关干净，四角不会残留直角）。
+  document.documentElement.style.setProperty("--menu-radius", "12px");
 
   if (look.solid) {
     // 兜底档：没有 acrylic，用 CSS 里的不透明底色（body.tier-solid）

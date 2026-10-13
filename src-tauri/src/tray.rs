@@ -22,7 +22,10 @@ use tauri::{
 static TRAY: Mutex<Option<tauri::tray::TrayIcon>> = Mutex::new(None);
 
 const MENU_LABEL: &str = "tray-menu";
-const MENU_W: f64 = 190.0;
+/// 贴合内容宽度：6px 菜单内边距×2 + 10px 项内边距×2 + 14px 图标 + 8px 间距
+/// + 「显示轻贴」4 个汉字（13px 字号 ≈ 52px）+ 2px 描边 ≈ 108px，留 4px 余量。
+/// 以后菜单项变多/变长，把这里加回去即可。
+const MENU_W: f64 = 112.0;
 /// 两个 34px 菜单项 + 6px 上下内边距 + 2px 描边
 const MENU_H: f64 = 84.0;
 /// 菜单与鼠标（托盘图标）之间的间隙
