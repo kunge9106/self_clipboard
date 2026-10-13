@@ -1353,7 +1353,7 @@ async function main() {
     document.getElementById("status-version").textContent =
       `Version：${(await getVersion())}-ikun`;
   } catch (e) {
-    document.getElementById("status-version").textContent = "Version：2.0.0-ikun";
+    document.getElementById("status-version").textContent = "Version：2.1.5-ikun";
   }
 
   render();
