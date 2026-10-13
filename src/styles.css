@@ -674,6 +674,9 @@ html:not(.hovers-off) .ctx-item.danger:hover {
   flex-direction: column;
   gap: 18px;
   max-width: 520px;
+  /* 撑满 .view 的高度：内容是 .settings-body 在滚，标题与标签栏固定不随之滚走。
+     不撑满的话 flex:1 的内容区算不出可用高度，overflow 也就无从谈起。 */
+  height: 100%;
   /* 设置页隐藏了工具栏，标题需与搜索栏距离顶部一致（52-32)/2 = 10px */
   padding-top: 10px;
 }
@@ -681,6 +684,58 @@ html:not(.hovers-off) .ctx-item.danger:hover {
 .settings h2 {
   font-size: 16px;
   font-weight: 600;
+}
+
+/* 顶部分类标签：视觉语言完全沿用侧栏导航 —— 选中 = 底色 + 加粗，不改文字颜色。
+   标签分页替代了原来「10 项平铺一长条」的写法，每页只剩 2~4 项。 */
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.settings-tabs .tab {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  cursor: default;
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+
+/* hover 必须带 hovers-off 门控：窗口隐藏/最小化再回来时 Chromium 不会重算 :hover，
+   不加门控会让光标下的标签一直留着底色（与侧栏同一套规则）。 */
+html:not(.hovers-off) .settings-tabs .tab:hover {
+  background: var(--glass-hover);
+}
+
+.settings-tabs .tab.is-active {
+  background: var(--glass-strong);
+  /* 常态与选中态都是正文色，靠加粗（中文会落到 Bold）区分 */
+  font-weight: 700;
+}
+
+/* 圆角模式下没有背景模糊，有底色的元素才需要阴影撑出层次；
+   常态 .tab 是透明底，加阴影会变成「无底的浮影」，故只给有底色的状态。 */
+body.round .settings-tabs .tab.is-active,
+html:not(.hovers-off) body.round .settings-tabs .tab:hover {
+  box-shadow: var(--card-shadow);
+}
+
+/* 内容区独立滚动：.view 是 overflow:hidden，设置内容一旦超高就会被裁掉且滚不动。
+   分页后每页短了，但「数据与缓存」页（缓存块 + 3 项 + 危险按钮）在小窗口下仍可能超高，
+   所以让 .settings-body 自己滚，标题与标签栏保持固定。 */
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
 .settings .row {
