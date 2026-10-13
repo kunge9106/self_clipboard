@@ -956,6 +956,37 @@ body.dark .modal {
   gap: 8px;
 }
 
+/* 垃圾桶弹窗：「是否连置顶/收藏一起清」的勾选行。
+   没有对应条目时整行由 JS 置 hidden，不占位。 */
+.modal-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modal-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: default;
+}
+
+.modal-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: default;
+}
+
+/* 同理 .modal-mask[hidden]：这两个都是 display:flex，会盖掉 hidden 属性自带的
+   display:none，必须显式声明，否则 hidden 形同虚设、行还占着位置。 */
+.modal-check[hidden],
+.modal-checks[hidden] {
+  display: none;
+}
+
 .btn-danger {
   align-self: flex-start;
   height: 32px;
