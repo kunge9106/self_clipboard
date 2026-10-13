@@ -19,6 +19,10 @@ let currentView = "history";
 let query = "";
 let settings = null; // 后端配置（get_settings）
 
+// 设置页当前激活的分类。改这个变量只会影响「下次渲染时显示哪一组」，
+// 切换标签后重新 settingsHtml() + bindSettings() 即可（见 bindSettings 里的标签点击）。
+let settingsTab = "general";
+
 /** 窗口圆角上限（后端按材质档位下发，Win10 acrylic = 20px） */
 let maxRadius = 20;
 
@@ -922,29 +926,71 @@ function toast(msg) {
 // 设置页
 // ---------------------------------------------------------------------------
 
+// 设置页的四个分类。原先 10 个配置项 + 缓存块 + 危险按钮平铺成一长条，既杂又
+// 容易被 .view 的 overflow:hidden 裁掉（且无法滚动）。改成分页后每页只显示一组，
+// 组内仍保持平铺（不折叠）—— 视觉密度下来了，但不会多出「先点开才能改」这一步。
+const SETTINGS_TABS = [
+  { id: "general", label: "通用" },
+  { id: "record", label: "记录" },
+  { id: "appearance", label: "外观" },
+  { id: "data", label: "数据与缓存" },
+];
+
 function settingsHtml() {
   const s = settings || {};
-  const fmtMB = (b) => (b / 1024 / 1024).toFixed(1);
+  const tabBar = `<div class="settings-tabs">${SETTINGS_TABS.map(
+    (t) =>
+      `<button class="tab${t.id === settingsTab ? " is-active" : ""}" ` +
+      `data-tab="${t.id}">${t.label}</button>`
+  ).join("")}</div>`;
+
+  // 只渲染当前分类 —— 其余分类的控件这一刻**不在 DOM 里**，所以 bindSettings 里
+  // 每一个 querySelector 都必须做存在性保护，否则会 null.onclick / null.onchange 报错。
+  let body = "";
+  if (settingsTab === "record") body = settingsRecordHtml(s);
+  else if (settingsTab === "appearance") body = settingsAppearanceHtml(s);
+  else if (settingsTab === "data") body = settingsDataHtml(s);
+  else body = settingsGeneralHtml(s);
+
   return `<div class="settings">
     <h2>设置</h2>
-    <div class="row"><label>文件复制</label>
-      <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
-      <span class="hint">开启后记录在资源管理器里复制的文件（默认关闭，关闭时不采集也不显示文件条目）</span></div>
+    ${tabBar}
+    <div class="settings-body">${body}</div>
+  </div>`;
+}
+
+function settingsGeneralHtml(s) {
+  return `
     <div class="row"><label>开机自启</label>
       <input type="checkbox" id="set-autostart" ${s.autoStart ? "checked" : ""} />
       <span class="hint">登录 Windows 后自动运行轻贴</span></div>
     <div class="row"><label>关闭时后台运行</label>
       <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
-      <span class="hint">点关闭按钮时隐藏到托盘继续后台运行（托盘图标始终常驻，右键可开菜单、双击唤回窗口）</span></div>
+      <span class="hint">点关闭按钮时隐藏到托盘继续后台运行（托盘图标始终常驻，右键可开菜单、双击唤回窗口）</span></div>`;
+}
+
+function settingsRecordHtml(s) {
+  return `
+    <div class="row"><label>文件复制</label>
+      <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
+      <span class="hint">开启后记录在资源管理器里复制的文件（默认关闭，关闭时不采集也不显示文件条目）</span></div>
     <div class="row"><label>保留天数</label>
       <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
-      <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
+      <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>`;
+}
+
+function settingsAppearanceHtml(s) {
+  return `
     <div class="row"><label>材质浓度</label>
       <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 62}" />
       <span class="hint" id="material-val">${s.materialAlpha ?? 62}%（越高越厚实 · 越低越通透）</span></div>
     <div class="row"><label>圆角模式</label>
       <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
-      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感</span></div>
+      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感</span></div>`;
+}
+
+function settingsDataHtml(s) {
+  return `
     <div class="cache-box">
       <div class="cache-title">缓存目录 <span class="hint">仅保留近 ${s.retentionDays ?? 3} 天内容</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
@@ -963,8 +1009,7 @@ function settingsHtml() {
     <div class="row"><label>　└ 退出前弹窗提醒</label>
       <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
       <span class="hint">每次退出时先弹窗确认</span></div>
-    <button class="btn-danger" id="clear-all">清空全部历史</button>
-  </div>`;
+    <button class="btn-danger" id="clear-all">清空全部历史</button>`;
 }
 
 async function refreshCacheInfo() {
@@ -987,6 +1032,19 @@ function fmtSize(bytes) {
 }
 
 function bindSettings(view) {
+  // 分类标签：切换后整块重新渲染 + 重新绑定。
+  // 只改 settingsTab 再重绘就够 —— 每组控件互不依赖，重绑比「局部显示/隐藏」更不容易漏。
+  // 注意：这里不能复用 render()，render() 走的是列表分支（会重建 .history 滚动容器）。
+  view.querySelectorAll(".settings-tabs .tab").forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.dataset.tab;
+      if (!id || id === settingsTab) return;
+      settingsTab = id;
+      view.innerHTML = settingsHtml();
+      bindSettings(view);
+    };
+  });
+
   const bindCheck = (id, cmd) => {
     const el = view.querySelector("#" + id);
     if (!el) return;
@@ -1081,16 +1139,23 @@ function bindSettings(view) {
       }
     };
 
-  view.querySelector("#btn-pick-dir").onclick = async () => {
-    try {
-      const res = await invoke("pick_cache_dir");
-      if (res) toast("缓存目录已迁移，即将重启…");
-    } catch (e) {
-      toast("更改目录失败：" + e);
-    }
-  };
-  view.querySelector("#btn-open-dir").onclick = () =>
-    invoke("open_cache_dir").catch((e) => toast("打开失败：" + e));
+  // 缓存目录那两个按钮只存在于「数据与缓存」页，切到别的分类时它们不在 DOM 里
+  // → 必须做存在性判断，否则 null.onclick 会直接抛错、整页绑定中断。
+  const pickDir = view.querySelector("#btn-pick-dir");
+  if (pickDir)
+    pickDir.onclick = async () => {
+      try {
+        const res = await invoke("pick_cache_dir");
+        if (res) toast("缓存目录已迁移，即将重启…");
+      } catch (e) {
+        toast("更改目录失败：" + e);
+      }
+    };
+
+  const openDir = view.querySelector("#btn-open-dir");
+  if (openDir)
+    openDir.onclick = () =>
+      invoke("open_cache_dir").catch((e) => toast("打开失败：" + e));
 
   const clear = view.querySelector("#clear-all");
   if (clear)
@@ -1101,7 +1166,8 @@ function bindSettings(view) {
       toast("已清空");
     };
 
-  refreshCacheInfo();
+  // 同理：只有缓存块在页面上时才去查缓存信息，别在别的分类里白发一次 IPC
+  if (view.querySelector("#cache-path")) refreshCacheInfo();
 }
 
 // ---------------------------------------------------------------------------
