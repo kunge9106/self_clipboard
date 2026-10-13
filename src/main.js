@@ -245,24 +245,93 @@ function bindClearAllModal() {
 }
 
 // ---------------------------------------------------------------------------
-// 工具栏垃圾桶：搜索时只清搜索结果，否则清全部；置顶/收藏始终豁免（需求 #3）
+// 工具栏垃圾桶：搜索时只清搜索结果，否则清当前视图（需求 #3）
 // ---------------------------------------------------------------------------
 
+// 本次弹窗待清理的三组条目；确认时按勾选状态拼出最终 id 列表
+let clearViewTargets = null;
+
 function bindClearView() {
-  document.getElementById("btn-clear-view").onclick = async () => {
-    const targets = filtered().filter((i) => !isPinnedAnywhere(i) && !i.favorite);
-    if (targets.length === 0) {
-      toast("没有可清理的条目（置顶/收藏除外）");
+  document.getElementById("btn-clear-view").onclick = () => {
+    const scope = filtered();
+    if (scope.length === 0) {
+      toast("没有可清理的条目");
       return;
     }
-    try {
-      await invoke("delete_items", { ids: targets.map((i) => i.id) });
-      items = items.filter((i) => !targets.some((t) => t.id === i.id));
-      render({ keepScroll: true });
-      toast(query ? `已清理 ${targets.length} 条搜索结果` : `已清理 ${targets.length} 条`);
-    } catch (e) {
-      toast("清理失败：" + e);
+    // 一条可能既置顶又收藏，所以分组按「置顶优先」划分、三组互不重叠；
+    // 真正删除时再按 id 去重兜底。
+    const pinned = scope.filter((i) => isPinnedAnywhere(i));
+    const favs = scope.filter((i) => i.favorite && !isPinnedAnywhere(i));
+    const normal = scope.filter((i) => !isPinnedAnywhere(i) && !i.favorite);
+
+    // 范围内一件置顶/收藏都没有 → 直接清，不弹窗打扰（保持原来的顺手程度）
+    if (pinned.length === 0 && favs.length === 0) {
+      doClearView(normal.map((i) => i.id));
+      return;
     }
+    openClearViewModal({ normal, pinned, favs });
+  };
+}
+
+async function doClearView(ids) {
+  const uniq = [...new Set(ids)];
+  if (uniq.length === 0) {
+    toast("没有选中任何可清理的条目");
+    return;
+  }
+  try {
+    await invoke("delete_items", { ids: uniq });
+    const drop = new Set(uniq);
+    items = items.filter((i) => !drop.has(i.id));
+    render({ keepScroll: true });
+    toast(query ? `已清理 ${uniq.length} 条搜索结果` : `已清理 ${uniq.length} 条`);
+  } catch (e) {
+    toast("清理失败：" + e);
+  }
+}
+
+function openClearViewModal({ normal, pinned, favs }) {
+  clearViewTargets = { normal, pinned, favs };
+
+  document.getElementById("clear-view-modal-text").textContent =
+    normal.length > 0
+      ? `将清除 ${normal.length} 条${query ? "搜索结果" : "内容"}，置顶与收藏默认保留。`
+      : "当前范围内没有普通条目（全是置顶或收藏）。勾选下方选项可将其一并清除。";
+
+  const pinRow = document.getElementById("clear-view-pinned-row");
+  const favRow = document.getElementById("clear-view-fav-row");
+  pinRow.hidden = pinned.length === 0;
+  favRow.hidden = favs.length === 0;
+  document.getElementById("clear-view-pinned-label").textContent =
+    `同时清除置顶（${pinned.length} 条）`;
+  document.getElementById("clear-view-fav-label").textContent =
+    `同时清除收藏（${favs.length} 条）`;
+  document.getElementById("clear-view-pinned").checked = false;
+  document.getElementById("clear-view-fav").checked = false;
+  // 两组都不存在时，空容器仍会撑出两道 12px 的间隙，整块隐藏掉
+  document.getElementById("clear-view-checks").hidden =
+    pinned.length === 0 && favs.length === 0;
+
+  document.getElementById("clear-view-modal").hidden = false;
+}
+
+// 弹窗是 index.html 的常驻元素（不在 #view 内），启动时绑一次即可，
+// 与退出弹窗 / 清空全部历史弹窗同理。
+function bindClearViewModal() {
+  const modal = document.getElementById("clear-view-modal");
+  document.getElementById("clear-view-cancel").onclick = () => {
+    modal.hidden = true;
+  };
+  document.getElementById("clear-view-confirm").onclick = async () => {
+    modal.hidden = true;
+    const t = clearViewTargets;
+    if (!t) return;
+    const ids = t.normal.map((i) => i.id);
+    if (document.getElementById("clear-view-pinned").checked)
+      ids.push(...t.pinned.map((i) => i.id));
+    if (document.getElementById("clear-view-fav").checked)
+      ids.push(...t.favs.map((i) => i.id));
+    await doClearView(ids);
   };
 }
 
@@ -1216,6 +1285,7 @@ async function main() {
   bindExitModal();
   bindClearAllModal();
   bindClearView();
+  bindClearViewModal();
   bindNav();
   bindSearch();
   startTimeTicker();

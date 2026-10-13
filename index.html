@@ -132,6 +132,29 @@
       </div>
     </div>
 
+    <!-- 工具栏垃圾桶弹窗：只有范围内存在置顶或收藏时才弹，由勾选框决定是否连它们
+         一起清；一件都没有时不弹窗、直接清。两组勾选行按实际存在与否显示/隐藏。 -->
+    <div class="modal-mask" id="clear-view-modal" hidden>
+      <div class="modal">
+        <div class="modal-title">清理条目</div>
+        <div class="modal-text" id="clear-view-modal-text"></div>
+        <div class="modal-checks" id="clear-view-checks">
+          <label class="modal-check" id="clear-view-pinned-row" hidden>
+            <input type="checkbox" id="clear-view-pinned" />
+            <span id="clear-view-pinned-label">同时清除置顶</span>
+          </label>
+          <label class="modal-check" id="clear-view-fav-row" hidden>
+            <input type="checkbox" id="clear-view-fav" />
+            <span id="clear-view-fav-label">同时清除收藏</span>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="clear-view-cancel">取消</button>
+          <button class="btn-danger" id="clear-view-confirm">清除</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
