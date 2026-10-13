@@ -1113,6 +1113,13 @@ function settingsAppearanceHtml(s) {
       <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感</span></div>`;
 }
 
+// 「保留 N 天 / 永久保存」的展示文案。0 在语义上是「永久保留」，
+// 直接拼数字会得到「仅保留近 0 天内容」这种像 bug 的文案。
+function retentionLabel(days) {
+  const n = days ?? 3;
+  return n === 0 ? "永久保存" : `仅保留近 ${n} 天内容`;
+}
+
 // 「记录」与「数据与缓存」合并后的一页，按同一条链路排列：
 // 记什么 → 留多久 → 存在哪 → 怎么清。
 function settingsDataHtml(s) {
@@ -1124,7 +1131,7 @@ function settingsDataHtml(s) {
       <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
       <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
     <div class="cache-box">
-      <div class="cache-title">缓存目录 <span class="hint">仅保留近 ${s.retentionDays ?? 3} 天内容</span></div>
+      <div class="cache-title">缓存目录 <span class="hint">${retentionLabel(s.retentionDays)}</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
       <div class="cache-stats" id="cache-stats"></div>
       <div class="cache-actions">
