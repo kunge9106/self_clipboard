@@ -4,13 +4,13 @@
 > **窗口形态**：单窗口管理界面（无边框自绘）
 > **系统支持**：Windows 10 1809 及以上
 > **仓库**：https://github.com/kunge9106/self_clipboard
-> **当前版本**：v2.0.0
+> **当前版本**：v2.1.5
 
 ## 怎么读这份文档
 
 本文分两部分：
 
-- **第 1 – 11 章：已实现的实现说明**。全部以 `v2.0.0` 的**实际代码**为准，写的是「现在是怎样」，不是「打算怎样」。
+- **第 1 – 11 章：已实现的实现说明**。全部以 `v2.1.5` 的**实际代码**为准，写的是「现在是怎样」，不是「打算怎样」。
 - **第 12 章：路线图**。集中存放开发前规划、但当前**尚未实现**的部分（全局热键、快捷面板、虚拟滚动等）。这些规划继续保留，后续按序推进。
 
 每章尽量给出对应源码文件，便于对照。
@@ -49,7 +49,7 @@
 
 | 维度 | Electron（v1） | Tauri 2（v2） |
 |---|---|---|
-| 安装包 | 89 MB | **1.3 MB** |
+| 安装包 | 89 MB | **1.4 MB** |
 | 调 Win32 | 需 N-API addon，构建链路复杂 | Rust 直接 `extern "system"` 声明，零额外依赖 |
 | 版本探测 / 材质 | 受框架封装限制 | 直接 `RtlGetVersion` + DWM 调用 |
 | 进程模型 | 自带完整 Chromium + Node | 复用系统 WebView2 |
@@ -155,6 +155,7 @@ CF_BITMAP / DIB → RawClip::Image
 - **文本**：`GetClipboardData(CF_UNICODETEXT)`，取宽字符串。
 - **文件**：`DragQueryFileW` 枚举完整路径。**注意**：剪贴板 HDROP 句柄归系统所有，**绝不能调 `DragFinish`**（详见 9.3）。
 - **图片**：DIB → BMP 落盘。转换时要补 40 字节 `BITMAPINFOHEADER` 的前提处理与 14 字节文件头，并把 32bpp 的 alpha 强制置 255 —— 否则前端 canvas 会出现透明/黑块。
+- **图片文件的识别（v2.1.5 起）**：微信 / QQ 等应用「复制图片」时放进剪贴板的是 `CF_HDROP` 里的**临时图片文件路径**，而不是 `CF_BITMAP`。若 HDROP 只含**单个**扩展名为 `png / jpg / jpeg / bmp / gif / webp` 的文件，`read_clipboard` 会用 `image` crate 解码后转为 `RawClip::Image`（走与位图相同的落盘路径）；**多文件或混合类型**仍按 `RawClip::Files` 处理。这样用户在聊天工具里复制的图片会被正确归到「图片」分类，而不是「文件」。
 
 ### 3.5 开关：文件复制默认关闭
 
@@ -301,6 +302,13 @@ Win10 的 acrylic 在窗口刚创建时不一定立刻铺开。显示后按 200 
 [effects] 补涂流程结束，最终档位：acrylic
 ```
 
+**隐藏 / 最小化后恢复必须重刷（v2.1.5 修复）**：窗口从托盘唤回、或点窗口外再点回来时，DWM 会丢掉 accent 材质，窗口四周会浮出「Win7 式」的直角边框（Win10 与 Win11 都有）。修法是在两条路径上都补涂一次 `effects::apply`（+ 圆角/清边框 + nudge）：
+
+- `tray.rs::show_main`：`show()` 之后在后台线程延迟 150 / 500 ms 各补涂一次（`show()` 不产生 `WM_SIZE`，WebView2 内容尺寸会停在隐藏前，再叠加 DWM 掉材质，所以本地必须主动补）；
+- `lib.rs` 的 `WindowEvent::Focused(true)`：延迟 150 ms 后台补涂一次，覆盖「点击窗口外再点回来」的场景。
+
+补涂动作一律安排在**窗口可见之前**（或紧随 show 的后台延迟里），否则用户会看到「先出现、再变样」的闪烁。
+
 ---
 
 ## 六、窗口与自绘交互（`effects.rs` + 前端）
@@ -345,11 +353,11 @@ Win10 的 acrylic 在窗口刚创建时不一定立刻铺开。显示后按 200 
 系统原生托盘菜单（`TrackPopupMenu`）的字体、配色、圆角都不可控，与本体割裂。改为弹一个无边框透明小窗口 `tray-menu`：
 
 - 页面 `tray.html` + `src/tray.css`，后者 `@import "./styles.css"`，复用**同一套 CSS 变量**（材质色 / 描边 / 悬浮色 / 深色模式）；
-- Rust 侧对菜单窗口施加与主窗口**完全相同**的 acrylic，每次弹出重刷一次；
-- **圆角跟随「圆角模式」**：直角模式（默认）菜单也是直角（窗口矩形与 acrylic 吻合、四角零残留），圆角模式才用 CSS 圆角；
+- Rust 侧对菜单窗口施加材质，每次弹出重刷一次；
+- **统一使用「圆角模式」的材质与样式（v2.1.5 起）**：菜单一律走圆角模式那套观感（无系统模糊 + 清掉 DWM 边框 + CSS 圆角），不再跟随主窗口的直角/圆角开关。理由是系统 acrylic 会覆盖窗口矩形且带直角，与 CSS 圆角菜单对不齐、四角留残影；恒用圆角模式后菜单观感稳定一致。菜单宽度收到约 112px（只容「显示轻贴 / 退出」并留白），后续需要再加长；
 - 失焦自动收起；Esc 收起；点「显示轻贴」先收菜单再唤回主窗口；
 - **懒创建**：第一次右键才建窗口，不右键完全不占第二个 WebView2 的内存；
-- **外观参数每次弹出推送**：`MenuLook { solid, round, alpha, dark }` 由 Rust 算好随 `tray-menu-open` 事件下发（页面不做读取），保证「改完浓度/圆角再右键，菜单立刻跟着变」；页面首次加载用 `tray_menu_look` 拉一次。
+- **外观参数每次弹出推送**：`MenuLook { solid, round, alpha, dark }` 由 Rust 算好随 `tray-menu-open` 事件下发（页面不做读取），保证「改完浓度再右键，菜单立刻跟着变」；页面首次加载用 `tray_menu_look` 拉一次。
 
 菜单定位：默认弹在光标**上方**（托盘多在屏幕下缘），按显示器工作区夹取，放不下则翻到下方，多屏与负坐标显示器也算对。
 
@@ -384,7 +392,9 @@ favorites  favorite === true
 settings   设置页
 ```
 
-搜索：对 `preview` 与文件名做小写包含匹配。排序：**在当前分类里置顶的在前**，其余按时间倒序。
+搜索：对 `preview`（文本正文）、文件名、以及**类型名**做小写包含匹配。类型名的匹配同时接受**中文标签**与**英文 kind**——例如输入「图片」或 `image` 都能筛出图片条目，「文本」/ `text`、「文件」/ `files` 同理（v2.1.5 起）。排序：**在当前分类里置顶的在前**，其余按时间倒序。
+
+卡片右侧：类型 / 已置顶 / 已收藏 / 已失效都渲染为**统一风格的 `.tag` 徽章**，时间用 `.card-time` 在右侧对齐成一列；徽章通过 `insertBefore(.card-time)` 插入，避免破坏时间列的对齐。
 
 ### 8.3 条目操作
 
@@ -409,6 +419,14 @@ settings   设置页
 
 ## 九、设置项（`settings.rs`）
 
+设置页按 **三个标签分页**（v2.1.5 起）——**通用 / 外观 / 记录与缓存**，避免一长条列表翻找：
+
+- **通用**：开机自启、关闭时后台运行、退出清理相关；
+- **外观**：材质浓度、圆角模式（附注「Win11 原生即圆角，本开关只影响背景模糊与材质观感」）；
+- **记录与缓存**：文件复制开关、保留天数、缓存目录（路径 + 占用 + 迁移/打开）、清空全部历史。
+
+标签切换是纯前端行为（`SETTINGS_TABS` + `settingsGeneralHtml / settingsAppearanceHtml / settingsDataHtml`），点击只重渲染 `.settings-body`，不动其它区域。
+
 持久化到 `%APPDATA%\com.kunge.selfclipboard\config.json`：
 
 | 键 | 默认 | 说明 |
@@ -424,6 +442,11 @@ settings   设置页
 | `cache_dir` | null | 自定义缓存目录（null = app_data_dir/clipboard） |
 
 开机自启：不落在 config.json，而是直接读写注册表 `HKCU\...\Run`（`autostart.rs`，手写 FFI）。
+
+界面上的两处特殊呈现：
+
+- `retention_days = 0` 时，缓存目录旁显示「**永久保存**」而非「保留 0 天」（`retentionLabel()`）；
+- **危险操作二次确认**：「清空全部历史」弹窗写明条数并提示「含置顶与收藏、不可撤销」；工具栏垃圾桶在范围内**存在置顶/收藏时才弹窗**、让你勾选是否连同一起清，没有则直接清。
 
 失败兜底：`config.json` 解析失败时打印日志并退回默认配置，不阻断启动。
 
@@ -545,6 +568,7 @@ settings   设置页
 | 自己复制的内容又被记一遍（重复条目） | `copy_back` 在工作线程，`WM_CLIPBOARDUPDATE` 投递到主线程，存在主线程抢跑窗口 | 用 `GetClipboardOwner() == 本窗口` 判定，无窗口期 |
 | 图片不显示 / 全黑 | `dib_to_bmp` 漏了 40 字节 `BITMAPINFOHEADER` 前提，且 32bpp 的 alpha 未置 255 | 修正 DIB→BMP 拼接，强制 alpha=255 |
 | 文件条目在缓存目录里没有实体 | 只把路径内联写在 `index.json` | 落盘 `files/<id>.txt`，并对老数据 `backfill_files()` |
+| 微信 / QQ 复制的图片被记成「文件」 | 这些应用放进剪贴板的是 `CF_HDROP` 的临时图片文件路径，而非 `CF_BITMAP` | 单个图片扩展名文件用 `image` crate 解码转 `RawClip::Image`；多文件保持文件（详见 3.4） |
 
 ### 14.2 窗口与材质
 
@@ -559,6 +583,7 @@ settings   设置页
 | 圆角锯齿很重 | `SetWindowRgn` 区域是 1-bit、无抗锯齿 | 放弃区域裁剪，圆角交 CSS（`region_radius()` 恒 0） |
 | 圆角与系统模糊无法共存 | `SetWindowRgn` 对 acrylic 无效，四角必有矩形残留 | 提供「圆角模式」二选一（见 5.3） |
 | 纯色背景上材质「发平」 | Win10 accent API 只有单色 tint，无 luminosity 层 | tint 压到 8%，明暗改由 CSS 层负责 |
+| 托盘唤回 / 点窗口外，四周浮出「Win7 式」直角边框（Win10/11 均有） | 隐藏（`hide()` 不产生 `WM_SIZE`）或失焦后，DWM 丢掉 accent 材质且 WebView2 内容尺寸停在隐藏前 | `show_main` 在 `show()` 后延迟 150/500ms 后台补涂；`Focused(true)` 延迟 150ms 补涂（详见 5.7） |
 
 ### 14.3 构建与交付
 
@@ -570,6 +595,9 @@ settings   设置页
 | `schemars` 编译失败（`struct takes 3 generic arguments but 2 were supplied`） | `indexmap` 1.9.3 无 default feature，新版 rustc 上 build.rs 的 autocfg 探测失败 | `build-dependencies` 显式声明 `indexmap = { version = "1.9", features = ["std"] }` |
 | NSIS 工具链下不下来 | `github.com` 被代理拦，Tauri 自带下载器断连 | 用 `gh release download` 手动拉 `nsis-3.11.zip` 与 `nsis_tauri_utils.dll`（校验值一致），按 Tauri 期望布局铺到 `%LOCALAPPDATA%\tauri\NSIS\` |
 | gh 上传安装包后文件名中文丢失 | gh CLI 处理中文文件名有问题 | 改用 ASCII 文件名上传 |
+| 非管理员双击安装报「无法打开要写入的文件」 | 旧安装器未申请提权，却默认装到 `Program Files` | `tauri.conf.json` 的 `installMode` 改 `perMachine`（写入 `RequestExecutionLevel admin`），双击即弹 UAC |
+| `.modal-check{display:flex}` 让 `hidden` 失效（勾选框不隐藏） | 类选择器的 `display` 覆盖了 `[hidden]` 的默认样式 | 显式补 `[hidden]{display:none}` |
+| 已失效徽章把右侧时间挤乱 | `appendChild` 把徽章插到了 `.card-time` 之后 | 改 `insertBefore(badge, .card-time)`，保持时间列对齐 |
 | `tray.js` 构建失败 | 用了顶层 `await`，而 vite 目标含 `safari13` | 包进 async IIFE |
 
 ---
@@ -607,7 +635,7 @@ settings   设置页
 
 | 指标 | 目标 | 现状 |
 |---|---|---|
-| 安装包体积 | < 10 MB | **1.3 MB** |
+| 安装包体积 | < 10 MB | **1.4 MB** |
 | 空闲 CPU | ≈ 0 | 事件驱动，无轮询 |
 | 常驻内存 | 尽量低 | 启动约 120 MB（WebView2 基础开销）；大量带图历史下的峰值已通过「视野外释放位图」显著压低 |
 | 冷启动到窗口可见 | < 1.5 s | 材质在显示前就位，无闪白 |
@@ -630,14 +658,18 @@ settings   设置页
 
 ### 18.1 分支模型
 
+采用 **GitHub Flow（弹性版，无 CI）**：
+
 | 分支 | 用途 |
 |---|---|
-| `main` | 稳定可发布，只接受来自 `develop` 的合并 |
-| `develop` | 集成分支，日常开发汇总 |
-| `feature/*` / `fix/*` | 功能与修复分支 |
+| `main` | 稳定可发布，**只经 PR 合入**，任何情况下不直接提交/推送 |
+| `develop` | 集成分支，日常开发汇总；`main` 合入后快进到同一提交 |
+| `feature/*` / `fix/*` | 每个改动/功能单独开一支，绝不在 main/develop 直接堆改动 |
 | `legacy/electron-v1` | v1（Electron）归档，不再演进 |
 
-**严禁在 `main` 直接提交或推送。**
+**铁律**：改动必须经过用户在 Win10 / Win11 两台机器实测通过、并明确发出「合并」指令后，才可由 `feature/*` 开 PR 合入 `main`；**任何情况下不自行推/合 main**。本仓库为私有 + 免费账号，GitHub 的分支保护功能不可用（API 返回 403），「禁直推 main」靠流程纪律保证。
+
+合并方式：`feature/*` → PR → `main`，用 `gh pr merge --no-ff`（保留合并节点，便于未来 `git revert -m 1 <合并sha>` 整段回退）；合完把 `develop` 快进到 `main` 同一提交。**禁止 squash**（丢历史、不利恢复）。发版必打 `git tag -a vX.Y.Z`，可随时 `git checkout <tag>` 回到某版本。
 
 ### 18.2 提交规范
 
@@ -657,11 +689,13 @@ SemVer `MAJOR.MINOR.PATCH`。`v1.3.x` 为 Electron 时代，v2 从 `v2.0.0` 起�
 
 ### 18.4 发布流程
 
-1. `develop` → `main`（`--no-ff` 合并），打 tag；
-2. `npm run tauri build` 产出 NSIS 安装包；
-3. GitHub Release 附安装包（**用 ASCII 文件名**）；
-4. Release notes 写明新增 / 修复 / 已知问题；
-5. 安装包体积列为检查项。
+1. `feature/*` 开发完毕、用户在双机实测通过 → 开 PR `--no-ff` 合入 `main`，`develop` 快进；
+2. 统一改版本号（`package.json` / `package-lock.json` / `tauri.conf.json` / `Cargo.toml`）；
+3. `git tag -a vX.Y.Z -m ...` 并推送 tag；
+4. `npm run tauri build` 产出 NSIS 安装包；
+5. GitHub Release 附安装包（**用 ASCII 文件名**，如 `light_clip_v2.1.5_setup.exe` —— `gh` 在 Windows 下会吞掉中文资产名）；
+6. Release notes 写明新增 / 修复 / 已知问题；
+7. 安装包体积列为检查项。
 
 ### 18.5 安全红线
 
