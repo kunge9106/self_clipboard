@@ -406,7 +406,13 @@ function filtered() {
     list = list.filter(
       (i) =>
         (i.preview && i.preview.toLowerCase().includes(query)) ||
-        (i.files && i.files.some((f) => f.toLowerCase().includes(query)))
+        (i.files && i.files.some((f) => f.toLowerCase().includes(query))) ||
+        // 类型名也参与匹配。图片条目的 preview 固定是「[图片]」，所以搜「图片」一直
+        // 能命中；但搜英文「image」命中不了 —— kind 原本不在匹配范围内，img_path
+        // 也不在 i.files 里。把中文标签（图片/文本/文件）与英文 kind（image/text/files）
+        // 都纳入后，「图片」和「image」就都能搜出图片条目。
+        (KIND_LABEL[i.kind] || "").toLowerCase().includes(query) ||
+        (i.kind || "").toLowerCase().includes(query)
     );
   }
   // 置顶优先，其余按时间倒序。置顶是**按分类独立**的：只在当前这个分类里置顶过的
