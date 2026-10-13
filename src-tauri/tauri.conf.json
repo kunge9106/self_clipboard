@@ -45,6 +45,7 @@
     ],
     "windows": {
       "nsis": {
+        "installMode": "perMachine",
         "languages": ["SimpChinese"],
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
