@@ -19,6 +19,10 @@ let currentView = "history";
 let query = "";
 let settings = null; // 后端配置（get_settings）
 
+// 设置页当前激活的分类。改这个变量只会影响「下次渲染时显示哪一组」，
+// 切换标签后重新 settingsHtml() + bindSettings() 即可（见 bindSettings 里的标签点击）。
+let settingsTab = "general";
+
 /** 窗口圆角上限（后端按材质档位下发，Win10 acrylic = 20px） */
 let maxRadius = 20;
 
@@ -203,24 +207,131 @@ function bindExitModal() {
 }
 
 // ---------------------------------------------------------------------------
-// 工具栏垃圾桶：搜索时只清搜索结果，否则清全部；置顶/收藏始终豁免（需求 #3）
+// 清空全部历史确认弹窗
 // ---------------------------------------------------------------------------
 
+// 后端的 clear_all() 是 hist.clear()，没有任何豁免 —— 置顶与收藏也会一并删掉，
+// 且磁盘上的内容文件同时被删除，无法恢复。原先这个按钮点了就直接清空、连提示都没有，
+// 一次误触就是整库没了，所以这里补上二次确认，并把条数与影响范围如实写明。
+function openClearAllModal() {
+  const n = items.length;
+  if (n === 0) {
+    toast("没有可清空的内容");
+    return;
+  }
+  document.getElementById("clear-all-modal-text").textContent =
+    `将清空全部历史，共 ${n} 条。置顶与收藏也会被一并删除，此操作不可撤销。`;
+  document.getElementById("clear-all-modal").hidden = false;
+}
+
+// 弹窗是 index.html 里的常驻元素（不在 #view 内），所以只在这里绑一次；
+// 设置页那个按钮只负责把弹窗打开 —— 这样切分类标签重绘时不会丢绑定。
+function bindClearAllModal() {
+  const modal = document.getElementById("clear-all-modal");
+  document.getElementById("clear-all-cancel").onclick = () => {
+    modal.hidden = true;
+  };
+  document.getElementById("clear-all-confirm").onclick = async () => {
+    modal.hidden = true;
+    try {
+      await invoke("clear_all");
+      items = [];
+      render();
+      toast("已清空");
+    } catch (e) {
+      toast("清空失败：" + e);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 工具栏垃圾桶：搜索时只清搜索结果，否则清当前视图（需求 #3）
+// ---------------------------------------------------------------------------
+
+// 本次弹窗待清理的三组条目；确认时按勾选状态拼出最终 id 列表
+let clearViewTargets = null;
+
 function bindClearView() {
-  document.getElementById("btn-clear-view").onclick = async () => {
-    const targets = filtered().filter((i) => !isPinnedAnywhere(i) && !i.favorite);
-    if (targets.length === 0) {
-      toast("没有可清理的条目（置顶/收藏除外）");
+  document.getElementById("btn-clear-view").onclick = () => {
+    const scope = filtered();
+    if (scope.length === 0) {
+      toast("没有可清理的条目");
       return;
     }
-    try {
-      await invoke("delete_items", { ids: targets.map((i) => i.id) });
-      items = items.filter((i) => !targets.some((t) => t.id === i.id));
-      render({ keepScroll: true });
-      toast(query ? `已清理 ${targets.length} 条搜索结果` : `已清理 ${targets.length} 条`);
-    } catch (e) {
-      toast("清理失败：" + e);
+    // 一条可能既置顶又收藏，所以分组按「置顶优先」划分、三组互不重叠；
+    // 真正删除时再按 id 去重兜底。
+    const pinned = scope.filter((i) => isPinnedAnywhere(i));
+    const favs = scope.filter((i) => i.favorite && !isPinnedAnywhere(i));
+    const normal = scope.filter((i) => !isPinnedAnywhere(i) && !i.favorite);
+
+    // 范围内一件置顶/收藏都没有 → 直接清，不弹窗打扰（保持原来的顺手程度）
+    if (pinned.length === 0 && favs.length === 0) {
+      doClearView(normal.map((i) => i.id));
+      return;
     }
+    openClearViewModal({ normal, pinned, favs });
+  };
+}
+
+async function doClearView(ids) {
+  const uniq = [...new Set(ids)];
+  if (uniq.length === 0) {
+    toast("没有选中任何可清理的条目");
+    return;
+  }
+  try {
+    await invoke("delete_items", { ids: uniq });
+    const drop = new Set(uniq);
+    items = items.filter((i) => !drop.has(i.id));
+    render({ keepScroll: true });
+    toast(query ? `已清理 ${uniq.length} 条搜索结果` : `已清理 ${uniq.length} 条`);
+  } catch (e) {
+    toast("清理失败：" + e);
+  }
+}
+
+function openClearViewModal({ normal, pinned, favs }) {
+  clearViewTargets = { normal, pinned, favs };
+
+  document.getElementById("clear-view-modal-text").textContent =
+    normal.length > 0
+      ? `将清除 ${normal.length} 条${query ? "搜索结果" : "内容"}，置顶与收藏默认保留。`
+      : "当前范围内没有普通条目（全是置顶或收藏）。勾选下方选项可将其一并清除。";
+
+  const pinRow = document.getElementById("clear-view-pinned-row");
+  const favRow = document.getElementById("clear-view-fav-row");
+  pinRow.hidden = pinned.length === 0;
+  favRow.hidden = favs.length === 0;
+  document.getElementById("clear-view-pinned-label").textContent =
+    `同时清除置顶（${pinned.length} 条）`;
+  document.getElementById("clear-view-fav-label").textContent =
+    `同时清除收藏（${favs.length} 条）`;
+  document.getElementById("clear-view-pinned").checked = false;
+  document.getElementById("clear-view-fav").checked = false;
+  // 两组都不存在时，空容器仍会撑出两道 12px 的间隙，整块隐藏掉
+  document.getElementById("clear-view-checks").hidden =
+    pinned.length === 0 && favs.length === 0;
+
+  document.getElementById("clear-view-modal").hidden = false;
+}
+
+// 弹窗是 index.html 的常驻元素（不在 #view 内），启动时绑一次即可，
+// 与退出弹窗 / 清空全部历史弹窗同理。
+function bindClearViewModal() {
+  const modal = document.getElementById("clear-view-modal");
+  document.getElementById("clear-view-cancel").onclick = () => {
+    modal.hidden = true;
+  };
+  document.getElementById("clear-view-confirm").onclick = async () => {
+    modal.hidden = true;
+    const t = clearViewTargets;
+    if (!t) return;
+    const ids = t.normal.map((i) => i.id);
+    if (document.getElementById("clear-view-pinned").checked)
+      ids.push(...t.pinned.map((i) => i.id));
+    if (document.getElementById("clear-view-fav").checked)
+      ids.push(...t.favs.map((i) => i.id));
+    await doClearView(ids);
   };
 }
 
@@ -295,7 +406,13 @@ function filtered() {
     list = list.filter(
       (i) =>
         (i.preview && i.preview.toLowerCase().includes(query)) ||
-        (i.files && i.files.some((f) => f.toLowerCase().includes(query)))
+        (i.files && i.files.some((f) => f.toLowerCase().includes(query))) ||
+        // 类型名也参与匹配。图片条目的 preview 固定是「[图片]」，所以搜「图片」一直
+        // 能命中；但搜英文「image」命中不了 —— kind 原本不在匹配范围内，img_path
+        // 也不在 i.files 里。把中文标签（图片/文本/文件）与英文 kind（image/text/files）
+        // 都纳入后，「图片」和「image」就都能搜出图片条目。
+        (KIND_LABEL[i.kind] || "").toLowerCase().includes(query) ||
+        (i.kind || "").toLowerCase().includes(query)
     );
   }
   // 置顶优先，其余按时间倒序。置顶是**按分类独立**的：只在当前这个分类里置顶过的
@@ -520,8 +637,21 @@ function cardEl(item) {
   body.className = "card-body";
   const meta = document.createElement("div");
   meta.className = "card-meta";
-  meta.innerHTML = `<span class="card-kind">${KIND_LABEL[item.kind] || item.kind}</span>
-    <span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>${pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
+  // 徽章统一用 .tag（几何一致、颜色区分语义）。
+  // 「视图本身已经隐含」的标签不再显示，否则整列重复同一个词反而更吵：
+  //   文本/图片/文件 视图 → 不显示类型徽章；收藏视图 → 不显示「已收藏」。
+  //   历史视图是混合的，全部显示；置顶是按分类独立的，任何视图都显示。
+  const hideKind =
+    currentView === "text" || currentView === "images" || currentView === "files";
+  const hideFav = currentView === "favorites";
+  meta.innerHTML =
+    (hideKind
+      ? ""
+      : `<span class="tag tag-kind">${KIND_LABEL[item.kind] || item.kind}</span>`) +
+    (pinned ? '<span class="tag tag-pinned">已置顶</span>' : "") +
+    (item.favorite && !hideFav ? '<span class="tag tag-fav">已收藏</span>' : "") +
+    // 时间放最后，靠 CSS 的 margin-left:auto 推到最右
+    `<span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>`;
   body.appendChild(meta);
 
   if (item.kind === "image") {
@@ -792,9 +922,13 @@ function applyMissingMarks() {
     const tag = meta.querySelector(".tag-missing");
     if (missing && !tag) {
       const s = document.createElement("span");
-      s.className = "tag-missing";
+      s.className = "tag tag-missing";
       s.textContent = "已失效";
-      meta.appendChild(s);
+      // 必须插到时间**之前**：时间是 margin-left:auto 推到最右的，
+      // 若用 appendChild 它会落到时间右边，破坏「徽章在左、时间靠右」的布局。
+      const time = meta.querySelector(".card-time");
+      if (time) meta.insertBefore(s, time);
+      else meta.appendChild(s);
     } else if (!missing && tag) {
       tag.remove();
     }
@@ -922,31 +1056,82 @@ function toast(msg) {
 // 设置页
 // ---------------------------------------------------------------------------
 
+// 设置页的分类。原先 10 个配置项 + 缓存块 + 危险按钮平铺成一长条，既杂又
+// 容易被 .view 的 overflow:hidden 裁掉（且无法滚动）。改成分页后每页只显示一组，
+// 组内仍保持平铺（不折叠）—— 视觉密度下来了，但不会多出「先点开才能改」这一步。
+//
+// 「记录」已并入「记录与缓存」：记什么（文件复制）→ 留多久（保留天数）→ 存在哪
+// （缓存目录）→ 怎么清（清理缓存 / 清空全部），本就是同一条链路，拆成两页反而跳。
+const SETTINGS_TABS = [
+  { id: "general", label: "通用" },
+  { id: "appearance", label: "外观" },
+  { id: "data", label: "记录与缓存" },
+];
+
 function settingsHtml() {
   const s = settings || {};
-  const fmtMB = (b) => (b / 1024 / 1024).toFixed(1);
+  const tabBar = `<div class="settings-tabs">${SETTINGS_TABS.map(
+    (t) =>
+      `<button class="tab${t.id === settingsTab ? " is-active" : ""}" ` +
+      `data-tab="${t.id}">${t.label}</button>`
+  ).join("")}</div>`;
+
+  // 只渲染当前分类 —— 其余分类的控件这一刻**不在 DOM 里**，所以 bindSettings 里
+  // 每一个 querySelector 都必须做存在性保护，否则会 null.onclick / null.onchange 报错。
+  let body = "";
+  if (settingsTab === "appearance") body = settingsAppearanceHtml(s);
+  // "record" 已并入 "data"；带上这个旧值兜底，万一 settingsTab 还是它，
+  // 也不会停在已经不存在的分类上。
+  else if (settingsTab === "data" || settingsTab === "record")
+    body = settingsDataHtml(s);
+  else body = settingsGeneralHtml(s);
+
   return `<div class="settings">
     <h2>设置</h2>
-    <div class="row"><label>文件复制</label>
-      <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
-      <span class="hint">开启后记录在资源管理器里复制的文件（默认关闭，关闭时不采集也不显示文件条目）</span></div>
+    ${tabBar}
+    <div class="settings-body">${body}</div>
+  </div>`;
+}
+
+function settingsGeneralHtml(s) {
+  return `
     <div class="row"><label>开机自启</label>
       <input type="checkbox" id="set-autostart" ${s.autoStart ? "checked" : ""} />
       <span class="hint">登录 Windows 后自动运行轻贴</span></div>
     <div class="row"><label>关闭时后台运行</label>
       <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
-      <span class="hint">点关闭按钮时隐藏到托盘继续后台运行（托盘图标始终常驻，右键可开菜单、双击唤回窗口）</span></div>
-    <div class="row"><label>保留天数</label>
-      <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
-      <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
+      <span class="hint">点关闭按钮时隐藏到托盘继续后台运行（托盘图标始终常驻，右键可开菜单、双击唤回窗口）</span></div>`;
+}
+
+function settingsAppearanceHtml(s) {
+  return `
     <div class="row"><label>材质浓度</label>
       <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 62}" />
       <span class="hint" id="material-val">${s.materialAlpha ?? 62}%（越高越厚实 · 越低越通透）</span></div>
     <div class="row"><label>圆角模式</label>
       <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
-      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感</span></div>
+      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感</span></div>`;
+}
+
+// 「保留 N 天 / 永久保存」的展示文案。0 在语义上是「永久保留」，
+// 直接拼数字会得到「仅保留近 0 天内容」这种像 bug 的文案。
+function retentionLabel(days) {
+  const n = days ?? 3;
+  return n === 0 ? "永久保存" : `仅保留近 ${n} 天内容`;
+}
+
+// 「记录」与「数据与缓存」合并后的一页，按同一条链路排列：
+// 记什么 → 留多久 → 存在哪 → 怎么清。
+function settingsDataHtml(s) {
+  return `
+    <div class="row"><label>文件复制</label>
+      <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
+      <span class="hint">开启后记录在资源管理器里复制的文件（默认关闭，关闭时不采集也不显示文件条目）</span></div>
+    <div class="row"><label>保留天数</label>
+      <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
+      <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
     <div class="cache-box">
-      <div class="cache-title">缓存目录 <span class="hint">仅保留近 ${s.retentionDays ?? 3} 天内容</span></div>
+      <div class="cache-title">缓存目录 <span class="hint">${retentionLabel(s.retentionDays)}</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
       <div class="cache-stats" id="cache-stats"></div>
       <div class="cache-actions">
@@ -963,8 +1148,7 @@ function settingsHtml() {
     <div class="row"><label>　└ 退出前弹窗提醒</label>
       <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
       <span class="hint">每次退出时先弹窗确认</span></div>
-    <button class="btn-danger" id="clear-all">清空全部历史</button>
-  </div>`;
+    <button class="btn-danger" id="clear-all">清空全部历史</button>`;
 }
 
 async function refreshCacheInfo() {
@@ -987,6 +1171,19 @@ function fmtSize(bytes) {
 }
 
 function bindSettings(view) {
+  // 分类标签：切换后整块重新渲染 + 重新绑定。
+  // 只改 settingsTab 再重绘就够 —— 每组控件互不依赖，重绑比「局部显示/隐藏」更不容易漏。
+  // 注意：这里不能复用 render()，render() 走的是列表分支（会重建 .history 滚动容器）。
+  view.querySelectorAll(".settings-tabs .tab").forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.dataset.tab;
+      if (!id || id === settingsTab) return;
+      settingsTab = id;
+      view.innerHTML = settingsHtml();
+      bindSettings(view);
+    };
+  });
+
   const bindCheck = (id, cmd) => {
     const el = view.querySelector("#" + id);
     if (!el) return;
@@ -1081,27 +1278,30 @@ function bindSettings(view) {
       }
     };
 
-  view.querySelector("#btn-pick-dir").onclick = async () => {
-    try {
-      const res = await invoke("pick_cache_dir");
-      if (res) toast("缓存目录已迁移，即将重启…");
-    } catch (e) {
-      toast("更改目录失败：" + e);
-    }
-  };
-  view.querySelector("#btn-open-dir").onclick = () =>
-    invoke("open_cache_dir").catch((e) => toast("打开失败：" + e));
-
-  const clear = view.querySelector("#clear-all");
-  if (clear)
-    clear.onclick = async () => {
-      await invoke("clear_all");
-      items = [];
-      render();
-      toast("已清空");
+  // 缓存目录那两个按钮只存在于「数据与缓存」页，切到别的分类时它们不在 DOM 里
+  // → 必须做存在性判断，否则 null.onclick 会直接抛错、整页绑定中断。
+  const pickDir = view.querySelector("#btn-pick-dir");
+  if (pickDir)
+    pickDir.onclick = async () => {
+      try {
+        const res = await invoke("pick_cache_dir");
+        if (res) toast("缓存目录已迁移，即将重启…");
+      } catch (e) {
+        toast("更改目录失败：" + e);
+      }
     };
 
-  refreshCacheInfo();
+  const openDir = view.querySelector("#btn-open-dir");
+  if (openDir)
+    openDir.onclick = () =>
+      invoke("open_cache_dir").catch((e) => toast("打开失败：" + e));
+
+  // 危险操作：这里只负责把确认弹窗打开，真正的清空要用户在弹窗里再确认一次才执行
+  const clear = view.querySelector("#clear-all");
+  if (clear) clear.onclick = () => openClearAllModal();
+
+  // 同理：只有缓存块在页面上时才去查缓存信息，别在别的分类里白发一次 IPC
+  if (view.querySelector("#cache-path")) refreshCacheInfo();
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,7 +1315,9 @@ async function main() {
   bindDrag();
   bindResize();
   bindExitModal();
+  bindClearAllModal();
   bindClearView();
+  bindClearViewModal();
   bindNav();
   bindSearch();
   startTimeTicker();
@@ -1151,7 +1353,7 @@ async function main() {
     document.getElementById("status-version").textContent =
       `Version：${(await getVersion())}-ikun`;
   } catch (e) {
-    document.getElementById("status-version").textContent = "Version：2.0.0-ikun";
+    document.getElementById("status-version").textContent = "Version：2.1.5-ikun";
   }
 
   render();

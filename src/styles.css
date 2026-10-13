@@ -30,6 +30,12 @@
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
+  /* 卡片徽章底色。文字色：置顶直接用 --accent，收藏用固定琥珀 400（#ba7517），
+     两者在浅色/深色的徽章底上都能读；底色则按主题各调一档浓度。
+     类型徽章用「文字反色」的中性 tint：玻璃变量叠在同色系卡片底上会隐形。 */
+  --tag-kind-bg: rgba(0, 0, 0, 0.06);
+  --tag-pinned-bg: rgba(47, 107, 255, 0.12);
+  --tag-fav-bg: rgba(186, 117, 23, 0.15);
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
   /* 卡片阴影：材质浓度拉高时（窗口接近不透明）卡片底色与窗口几乎同色，
      1px 描边会糊在里面看不见，靠这层阴影把卡片「托起来」以便识别。 */
@@ -47,6 +53,9 @@ body.dark {
   --text: #f2f2f5;
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
+  --tag-kind-bg: rgba(255, 255, 255, 0.12);
+  --tag-pinned-bg: rgba(91, 140, 255, 0.2);
+  --tag-fav-bg: rgba(239, 159, 39, 0.2);
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3),
     0 2px 8px -2px rgba(0, 0, 0, 0.36);
@@ -553,11 +562,22 @@ html:not(.hovers-off) .card:hover {
   color: var(--text-dim);
 }
 
-.tag-missing {
+/* 卡片 meta 行的徽章：几何统一（沿用原先「已失效」徽章的尺寸），颜色按语义区分
+   —— 类型=中性、置顶=accent 蓝、收藏=琥珀、失效=红。 */
+.tag {
   padding: 1px 6px;
   border-radius: 4px;
+}
+
+.tag-missing {
   color: #e81123;
   background: rgba(232, 17, 35, 0.12);
+}
+
+/* 深色下 #e81123 压在深底上偏暗，换浅一档的红保证可读（浅色观感不变） */
+body.dark .tag-missing {
+  color: #f09595;
+  background: rgba(226, 75, 74, 0.2);
 }
 
 .card-body {
@@ -571,15 +591,50 @@ html:not(.hovers-off) .card:hover {
 .card-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  /* 徽章组更紧凑；时间靠 margin-left:auto 推到最右，不吃这个间距 */
+  gap: 6px;
   font-size: 11px;
   color: var(--text-dim);
 }
 
-.card-kind {
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--glass-strong);
+/* 类型徽章：中性，不抢状态徽章（置顶/收藏/失效）的注意力。
+   不能用 --glass-strong —— 那是半透明白（深色为半透明深灰），叠在本就同色系的
+   卡片底上几乎隐形，看起来就像纯文字。改用文字反色的中性 tint：
+   浅色加深 6%、深色提亮 12%，能看出是个徽章、又不喧宾夺主。 */
+.tag-kind {
+  background: var(--tag-kind-bg);
+}
+
+.tag-pinned {
+  color: var(--accent);
+  background: var(--tag-pinned-bg);
+}
+
+.tag-fav {
+  color: #ba7517;
+  background: var(--tag-fav-bg);
+}
+
+/* 圆角模式：材质不走系统模糊、卡片底接近实色，半透明的中性徽章底会糊进卡片里，
+   看起来就跟纯文字一样 → 底色加实、文字改用正文色并提高字重，一眼能看出是徽章。 */
+body.round .tag {
+  font-weight: 500;
+}
+
+body.round .tag-kind {
+  background: rgba(0, 0, 0, 0.1);
+  color: var(--text);
+}
+
+body.dark.round .tag-kind {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--text);
+}
+
+/* 时间推到最右：左边是状态徽章组，右边自成一列，
+   多行看下来时间对齐成一条线，比夹在徽章中间好读。 */
+.card-time {
+  margin-left: auto;
 }
 
 .card-preview {
@@ -674,6 +729,9 @@ html:not(.hovers-off) .ctx-item.danger:hover {
   flex-direction: column;
   gap: 18px;
   max-width: 520px;
+  /* 撑满 .view 的高度：内容是 .settings-body 在滚，标题与标签栏固定不随之滚走。
+     不撑满的话 flex:1 的内容区算不出可用高度，overflow 也就无从谈起。 */
+  height: 100%;
   /* 设置页隐藏了工具栏，标题需与搜索栏距离顶部一致（52-32)/2 = 10px */
   padding-top: 10px;
 }
@@ -681,6 +739,58 @@ html:not(.hovers-off) .ctx-item.danger:hover {
 .settings h2 {
   font-size: 16px;
   font-weight: 600;
+}
+
+/* 顶部分类标签：视觉语言完全沿用侧栏导航 —— 选中 = 底色 + 加粗，不改文字颜色。
+   标签分页替代了原来「10 项平铺一长条」的写法，每页只剩 2~4 项。 */
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.settings-tabs .tab {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  cursor: default;
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+
+/* hover 必须带 hovers-off 门控：窗口隐藏/最小化再回来时 Chromium 不会重算 :hover，
+   不加门控会让光标下的标签一直留着底色（与侧栏同一套规则）。 */
+html:not(.hovers-off) .settings-tabs .tab:hover {
+  background: var(--glass-hover);
+}
+
+.settings-tabs .tab.is-active {
+  background: var(--glass-strong);
+  /* 常态与选中态都是正文色，靠加粗（中文会落到 Bold）区分 */
+  font-weight: 700;
+}
+
+/* 圆角模式下没有背景模糊，有底色的元素才需要阴影撑出层次；
+   常态 .tab 是透明底，加阴影会变成「无底的浮影」，故只给有底色的状态。 */
+body.round .settings-tabs .tab.is-active,
+html:not(.hovers-off) body.round .settings-tabs .tab:hover {
+  box-shadow: var(--card-shadow);
+}
+
+/* 内容区独立滚动：.view 是 overflow:hidden，设置内容一旦超高就会被裁掉且滚不动。
+   分页后每页短了，但「数据与缓存」页（缓存块 + 3 项 + 危险按钮）在小窗口下仍可能超高，
+   所以让 .settings-body 自己滚，标题与标签栏保持固定。 */
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
 .settings .row {
@@ -899,6 +1009,37 @@ body.dark .modal {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* 垃圾桶弹窗：「是否连置顶/收藏一起清」的勾选行。
+   没有对应条目时整行由 JS 置 hidden，不占位。 */
+.modal-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modal-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: default;
+}
+
+.modal-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: default;
+}
+
+/* 同理 .modal-mask[hidden]：这两个都是 display:flex，会盖掉 hidden 属性自带的
+   display:none，必须显式声明，否则 hidden 形同虚设、行还占着位置。 */
+.modal-check[hidden],
+.modal-checks[hidden] {
+  display: none;
 }
 
 .btn-danger {

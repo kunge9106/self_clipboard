@@ -246,5 +246,28 @@ fn show_main(app: &AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+
+        // 隐藏期间设置的 DWM 属性不一定粘得住：窗口重新可见时 DWM 会重算
+        // NC 渲染 / accent，刚设置的值可能被丢掉（实测 Win10/Win11 都会出现
+        // 托盘唤回后四周围上一圈 Win7 式边框）。这与启动时「创建后补涂」是
+        // 同一批问题 —— 显示之后再延迟补涂两次。
+        // 延迟放后台线程：立即补会跟 show 抢帧（先出现、再变样）；
+        // 这里刻意不做 relayout，窗口已可见，动尺寸会闪。
+        #[cfg(windows)]
+        {
+            let w2 = w.clone();
+            std::thread::spawn(move || {
+                use tauri::Theme;
+                for delay in [150u64, 500] {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    if let Ok(h) = w2.hwnd() {
+                        let dark = matches!(w2.theme().unwrap_or(Theme::Light), Theme::Dark);
+                        crate::effects::apply(h.0 as isize, dark);
+                        crate::effects::apply_rounded_corners(h.0 as isize);
+                        crate::effects::nudge(h.0 as isize);
+                    }
+                }
+            });
+        }
     }
 }

@@ -439,6 +439,15 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                 // 对应到轻贴的现象：复制文件（读一次）→ 之后点击文件条目（写回 → OpenClipboard）
                 // → 崩溃。这正是本次上报的 bug。
                 // 内存无需手动释放：CloseClipboard 后由剪贴板自身管理。
+                // 微信等应用复制图片时给的是 CF_HDROP（一个临时 PNG/JPG 文件路径），
+                // 不是位图数据 —— 若按文件记，用户看到的就是「文件」条目，图片的
+                // 缩略图、点击回贴成位图这些形态全丢了。只有一张且扩展名是图片时，
+                // 就地解码转成图片条目；多张或混合文件维持「文件」条目不变。
+                if files.len() == 1 {
+                    if let Some(dib) = image_file_to_dib(std::path::Path::new(&files[0])) {
+                        return Some(RawClip::Image(dib));
+                    }
+                }
                 return Some(RawClip::Files(files));
             }
         }
@@ -464,6 +473,58 @@ unsafe fn read_clipboard() -> Option<RawClip> {
 // ---------------------------------------------------------------------------
 // 落盘
 // ---------------------------------------------------------------------------
+
+/// 把一个图片文件解码成 DIB 字节（= BMP 掐掉 14 字节文件头），供转成图片条目。
+///
+/// 微信/QQ 等「复制图片」放进剪贴板的是 CF_HDROP（临时 PNG/JPG 文件）而非 CF_DIB；
+/// 条目存储管线吃的是 DIB（`store_raw` 的 Image 分支用 `dib_to_bmp` 落盘）。
+/// 这里统一：image 库解码 → 手工拼 32bpp BI_RGB 的 DIB —— 与 CF_DIB 读到的
+/// 字节形态完全一致，下游（落盘/缩略图/回贴）零改动。解码失败返回 None，
+/// 调用方退回按「文件」记录，不影响原行为。
+fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
+    const EXTS: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
+    let is_image = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false);
+    if !is_image {
+        return None;
+    }
+    let img = image::open(path).ok()?;
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    // 手工拼 DIB：BITMAPINFOHEADER(40) + 像素（自下而上、BGRA、32bpp、BI_RGB）。
+    // 不借 image 的 BMP 编码器再掐头，是因手拼 20 行就能保证与 CF_DIB 的字节
+    // 形态一字不差，也避开一层编码器实现差异。
+    let pixel_bytes = (w as usize) * (h as usize) * 4;
+    let mut dib = Vec::with_capacity(40 + pixel_bytes);
+    dib.extend_from_slice(&40u32.to_le_bytes()); // biSize
+    dib.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth
+    dib.extend_from_slice(&(h as i32).to_le_bytes()); // biHeight，正值 = 自下而上
+    dib.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+    dib.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biCompression = BI_RGB
+    dib.extend_from_slice(&(pixel_bytes as u32).to_le_bytes()); // biSizeImage
+    dib.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerMeter
+    dib.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerMeter
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
+    for y in (0..h).rev() {
+        for x in 0..w {
+            let p = rgba.get_pixel(x, y);
+            dib.push(p[2]);
+            dib.push(p[1]);
+            dib.push(p[0]);
+            dib.push(p[3]);
+        }
+    }
+    Some(dib)
+}
 
 fn store_raw(raw: RawClip) -> HistoryItem {
     let dir = DIR.get().unwrap().clone();
