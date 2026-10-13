@@ -121,12 +121,29 @@ fn setup_effects(app: &tauri::AppHandle) {
                 effects::begin_resize(hwnd);
             }
             // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）。
-            //
-            // 这里刻意**不**重刷材质：聚焦是高频动作，重刷会让窗口肉眼可见地闪一下。
-            // 材质真正会被丢掉的路径是「隐藏 → 显示」，那一条已经在 tray::show_main
-            // 里于窗口可见之前补好了。
-            tauri::WindowEvent::Focused(_) => {
+            tauri::WindowEvent::Focused(_active) => {
                 effects::apply_rounded_corners(hwnd);
+                // 实测（Win10/Win11 都有）：失焦/聚焦偶发把材质与 NC 渲染一起丢掉，
+                // 四周围上一圈 Win7 式边框，而托盘唤回路径的补涂管不到这里。
+                // 同步重刷会肉眼可见地闪（聚焦是高频动作），所以延迟 150ms 在后台
+                // 补一次；apply 幂等，连续触发也只是多跑几遍。
+                let w2 = window_for_events.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    #[cfg(windows)]
+                    {
+                        use tauri::Theme;
+                        if let Ok(h) = w2.hwnd() {
+                            let dark =
+                                matches!(w2.theme().unwrap_or(Theme::Light), Theme::Dark);
+                            effects::apply(h.0 as isize, dark);
+                            effects::apply_rounded_corners(h.0 as isize);
+                            effects::nudge(h.0 as isize);
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    drop(w2);
+                });
             }
             // 跨屏拖动 DPI 变化后，半径要按新 DPI 重新换算
             tauri::WindowEvent::ScaleFactorChanged { .. } => {
