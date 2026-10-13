@@ -631,8 +631,21 @@ function cardEl(item) {
   body.className = "card-body";
   const meta = document.createElement("div");
   meta.className = "card-meta";
-  meta.innerHTML = `<span class="card-kind">${KIND_LABEL[item.kind] || item.kind}</span>
-    <span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>${pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
+  // 徽章统一用 .tag（几何一致、颜色区分语义）。
+  // 「视图本身已经隐含」的标签不再显示，否则整列重复同一个词反而更吵：
+  //   文本/图片/文件 视图 → 不显示类型徽章；收藏视图 → 不显示「已收藏」。
+  //   历史视图是混合的，全部显示；置顶是按分类独立的，任何视图都显示。
+  const hideKind =
+    currentView === "text" || currentView === "images" || currentView === "files";
+  const hideFav = currentView === "favorites";
+  meta.innerHTML =
+    (hideKind
+      ? ""
+      : `<span class="tag tag-kind">${KIND_LABEL[item.kind] || item.kind}</span>`) +
+    (pinned ? '<span class="tag tag-pinned">已置顶</span>' : "") +
+    (item.favorite && !hideFav ? '<span class="tag tag-fav">已收藏</span>' : "") +
+    // 时间放最后，靠 CSS 的 margin-left:auto 推到最右
+    `<span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>`;
   body.appendChild(meta);
 
   if (item.kind === "image") {
@@ -903,9 +916,13 @@ function applyMissingMarks() {
     const tag = meta.querySelector(".tag-missing");
     if (missing && !tag) {
       const s = document.createElement("span");
-      s.className = "tag-missing";
+      s.className = "tag tag-missing";
       s.textContent = "已失效";
-      meta.appendChild(s);
+      // 必须插到时间**之前**：时间是 margin-left:auto 推到最右的，
+      // 若用 appendChild 它会落到时间右边，破坏「徽章在左、时间靠右」的布局。
+      const time = meta.querySelector(".card-time");
+      if (time) meta.insertBefore(s, time);
+      else meta.appendChild(s);
     } else if (!missing && tag) {
       tag.remove();
     }
