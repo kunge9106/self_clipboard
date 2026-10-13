@@ -207,6 +207,44 @@ function bindExitModal() {
 }
 
 // ---------------------------------------------------------------------------
+// 清空全部历史确认弹窗
+// ---------------------------------------------------------------------------
+
+// 后端的 clear_all() 是 hist.clear()，没有任何豁免 —— 置顶与收藏也会一并删掉，
+// 且磁盘上的内容文件同时被删除，无法恢复。原先这个按钮点了就直接清空、连提示都没有，
+// 一次误触就是整库没了，所以这里补上二次确认，并把条数与影响范围如实写明。
+function openClearAllModal() {
+  const n = items.length;
+  if (n === 0) {
+    toast("没有可清空的内容");
+    return;
+  }
+  document.getElementById("clear-all-modal-text").textContent =
+    `将清空全部历史，共 ${n} 条。置顶与收藏也会被一并删除，此操作不可撤销。`;
+  document.getElementById("clear-all-modal").hidden = false;
+}
+
+// 弹窗是 index.html 里的常驻元素（不在 #view 内），所以只在这里绑一次；
+// 设置页那个按钮只负责把弹窗打开 —— 这样切分类标签重绘时不会丢绑定。
+function bindClearAllModal() {
+  const modal = document.getElementById("clear-all-modal");
+  document.getElementById("clear-all-cancel").onclick = () => {
+    modal.hidden = true;
+  };
+  document.getElementById("clear-all-confirm").onclick = async () => {
+    modal.hidden = true;
+    try {
+      await invoke("clear_all");
+      items = [];
+      render();
+      toast("已清空");
+    } catch (e) {
+      toast("清空失败：" + e);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 工具栏垃圾桶：搜索时只清搜索结果，否则清全部；置顶/收藏始终豁免（需求 #3）
 // ---------------------------------------------------------------------------
 
@@ -1157,14 +1195,9 @@ function bindSettings(view) {
     openDir.onclick = () =>
       invoke("open_cache_dir").catch((e) => toast("打开失败：" + e));
 
+  // 危险操作：这里只负责把确认弹窗打开，真正的清空要用户在弹窗里再确认一次才执行
   const clear = view.querySelector("#clear-all");
-  if (clear)
-    clear.onclick = async () => {
-      await invoke("clear_all");
-      items = [];
-      render();
-      toast("已清空");
-    };
+  if (clear) clear.onclick = () => openClearAllModal();
 
   // 同理：只有缓存块在页面上时才去查缓存信息，别在别的分类里白发一次 IPC
   if (view.querySelector("#cache-path")) refreshCacheInfo();
@@ -1181,6 +1214,7 @@ async function main() {
   bindDrag();
   bindResize();
   bindExitModal();
+  bindClearAllModal();
   bindClearView();
   bindNav();
   bindSearch();
