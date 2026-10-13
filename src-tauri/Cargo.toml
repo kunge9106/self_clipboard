@@ -32,6 +32,16 @@ serde_json = "1"
 # 缓存目录「更改目录」的文件夹选择框（仅 Rust 侧调用，无需前端 JS 包与权限）
 tauri-plugin-dialog = "2"
 
+# 微信等应用「复制图片」放进剪贴板的是 CF_HDROP（临时 PNG/JPG 文件）而非位图，
+# 要转成图片条目必须解码文件。只开用得到的格式特性，不拖入无关解码器。
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "bmp",
+  "gif",
+  "webp",
+] }
+
 # Windows 材质与剪贴板一律走手写 FFI，不引入 windows crate：
 # 避免元数据版本漂移，也避免为几个 API 拖入庞大依赖（开发原则 10）。
 
