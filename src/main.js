@@ -406,7 +406,13 @@ function filtered() {
     list = list.filter(
       (i) =>
         (i.preview && i.preview.toLowerCase().includes(query)) ||
-        (i.files && i.files.some((f) => f.toLowerCase().includes(query)))
+        (i.files && i.files.some((f) => f.toLowerCase().includes(query))) ||
+        // 类型名也参与匹配。图片条目的 preview 固定是「[图片]」，所以搜「图片」一直
+        // 能命中；但搜英文「image」命中不了 —— kind 原本不在匹配范围内，img_path
+        // 也不在 i.files 里。把中文标签（图片/文本/文件）与英文 kind（image/text/files）
+        // 都纳入后，「图片」和「image」就都能搜出图片条目。
+        (KIND_LABEL[i.kind] || "").toLowerCase().includes(query) ||
+        (i.kind || "").toLowerCase().includes(query)
     );
   }
   // 置顶优先，其余按时间倒序。置顶是**按分类独立**的：只在当前这个分类里置顶过的
@@ -631,8 +637,21 @@ function cardEl(item) {
   body.className = "card-body";
   const meta = document.createElement("div");
   meta.className = "card-meta";
-  meta.innerHTML = `<span class="card-kind">${KIND_LABEL[item.kind] || item.kind}</span>
-    <span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>${pinned ? '<span style="color:var(--accent)">已置顶</span>' : ""}`;
+  // 徽章统一用 .tag（几何一致、颜色区分语义）。
+  // 「视图本身已经隐含」的标签不再显示，否则整列重复同一个词反而更吵：
+  //   文本/图片/文件 视图 → 不显示类型徽章；收藏视图 → 不显示「已收藏」。
+  //   历史视图是混合的，全部显示；置顶是按分类独立的，任何视图都显示。
+  const hideKind =
+    currentView === "text" || currentView === "images" || currentView === "files";
+  const hideFav = currentView === "favorites";
+  meta.innerHTML =
+    (hideKind
+      ? ""
+      : `<span class="tag tag-kind">${KIND_LABEL[item.kind] || item.kind}</span>`) +
+    (pinned ? '<span class="tag tag-pinned">已置顶</span>' : "") +
+    (item.favorite && !hideFav ? '<span class="tag tag-fav">已收藏</span>' : "") +
+    // 时间放最后，靠 CSS 的 margin-left:auto 推到最右
+    `<span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>`;
   body.appendChild(meta);
 
   if (item.kind === "image") {
@@ -903,9 +922,13 @@ function applyMissingMarks() {
     const tag = meta.querySelector(".tag-missing");
     if (missing && !tag) {
       const s = document.createElement("span");
-      s.className = "tag-missing";
+      s.className = "tag tag-missing";
       s.textContent = "已失效";
-      meta.appendChild(s);
+      // 必须插到时间**之前**：时间是 margin-left:auto 推到最右的，
+      // 若用 appendChild 它会落到时间右边，破坏「徽章在左、时间靠右」的布局。
+      const time = meta.querySelector(".card-time");
+      if (time) meta.insertBefore(s, time);
+      else meta.appendChild(s);
     } else if (!missing && tag) {
       tag.remove();
     }
@@ -1033,14 +1056,16 @@ function toast(msg) {
 // 设置页
 // ---------------------------------------------------------------------------
 
-// 设置页的四个分类。原先 10 个配置项 + 缓存块 + 危险按钮平铺成一长条，既杂又
+// 设置页的分类。原先 10 个配置项 + 缓存块 + 危险按钮平铺成一长条，既杂又
 // 容易被 .view 的 overflow:hidden 裁掉（且无法滚动）。改成分页后每页只显示一组，
 // 组内仍保持平铺（不折叠）—— 视觉密度下来了，但不会多出「先点开才能改」这一步。
+//
+// 「记录」已并入「记录与缓存」：记什么（文件复制）→ 留多久（保留天数）→ 存在哪
+// （缓存目录）→ 怎么清（清理缓存 / 清空全部），本就是同一条链路，拆成两页反而跳。
 const SETTINGS_TABS = [
   { id: "general", label: "通用" },
-  { id: "record", label: "记录" },
   { id: "appearance", label: "外观" },
-  { id: "data", label: "数据与缓存" },
+  { id: "data", label: "记录与缓存" },
 ];
 
 function settingsHtml() {
@@ -1054,9 +1079,11 @@ function settingsHtml() {
   // 只渲染当前分类 —— 其余分类的控件这一刻**不在 DOM 里**，所以 bindSettings 里
   // 每一个 querySelector 都必须做存在性保护，否则会 null.onclick / null.onchange 报错。
   let body = "";
-  if (settingsTab === "record") body = settingsRecordHtml(s);
-  else if (settingsTab === "appearance") body = settingsAppearanceHtml(s);
-  else if (settingsTab === "data") body = settingsDataHtml(s);
+  if (settingsTab === "appearance") body = settingsAppearanceHtml(s);
+  // "record" 已并入 "data"；带上这个旧值兜底，万一 settingsTab 还是它，
+  // 也不会停在已经不存在的分类上。
+  else if (settingsTab === "data" || settingsTab === "record")
+    body = settingsDataHtml(s);
   else body = settingsGeneralHtml(s);
 
   return `<div class="settings">
@@ -1076,16 +1103,6 @@ function settingsGeneralHtml(s) {
       <span class="hint">点关闭按钮时隐藏到托盘继续后台运行（托盘图标始终常驻，右键可开菜单、双击唤回窗口）</span></div>`;
 }
 
-function settingsRecordHtml(s) {
-  return `
-    <div class="row"><label>文件复制</label>
-      <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
-      <span class="hint">开启后记录在资源管理器里复制的文件（默认关闭，关闭时不采集也不显示文件条目）</span></div>
-    <div class="row"><label>保留天数</label>
-      <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
-      <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>`;
-}
-
 function settingsAppearanceHtml(s) {
   return `
     <div class="row"><label>材质浓度</label>
@@ -1096,8 +1113,16 @@ function settingsAppearanceHtml(s) {
       <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感</span></div>`;
 }
 
+// 「记录」与「数据与缓存」合并后的一页，按同一条链路排列：
+// 记什么 → 留多久 → 存在哪 → 怎么清。
 function settingsDataHtml(s) {
   return `
+    <div class="row"><label>文件复制</label>
+      <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
+      <span class="hint">开启后记录在资源管理器里复制的文件（默认关闭，关闭时不采集也不显示文件条目）</span></div>
+    <div class="row"><label>保留天数</label>
+      <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
+      <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
     <div class="cache-box">
       <div class="cache-title">缓存目录 <span class="hint">仅保留近 ${s.retentionDays ?? 3} 天内容</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
