@@ -31,7 +31,9 @@
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
   /* 卡片徽章底色。文字色：置顶直接用 --accent，收藏用固定琥珀 400（#ba7517），
-     两者在浅色/深色的徽章底上都能读；底色则按主题各调一档浓度。 */
+     两者在浅色/深色的徽章底上都能读；底色则按主题各调一档浓度。
+     类型徽章用「文字反色」的中性 tint：玻璃变量叠在同色系卡片底上会隐形。 */
+  --tag-kind-bg: rgba(0, 0, 0, 0.06);
   --tag-pinned-bg: rgba(47, 107, 255, 0.12);
   --tag-fav-bg: rgba(186, 117, 23, 0.15);
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
@@ -51,6 +53,7 @@ body.dark {
   --text: #f2f2f5;
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
+  --tag-kind-bg: rgba(255, 255, 255, 0.12);
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
@@ -594,9 +597,12 @@ body.dark .tag-missing {
   color: var(--text-dim);
 }
 
-/* 类型徽章：中性，不抢状态徽章（置顶/收藏/失效）的注意力 */
+/* 类型徽章：中性，不抢状态徽章（置顶/收藏/失效）的注意力。
+   不能用 --glass-strong —— 那是半透明白（深色为半透明深灰），叠在本就同色系的
+   卡片底上几乎隐形，看起来就像纯文字。改用文字反色的中性 tint：
+   浅色加深 6%、深色提亮 12%，能看出是个徽章、又不喧宾夺主。 */
 .tag-kind {
-  background: var(--glass-strong);
+  background: var(--tag-kind-bg);
 }
 
 .tag-pinned {
@@ -607,6 +613,22 @@ body.dark .tag-missing {
 .tag-fav {
   color: #ba7517;
   background: var(--tag-fav-bg);
+}
+
+/* 圆角模式：材质不走系统模糊、卡片底接近实色，半透明的中性徽章底会糊进卡片里，
+   看起来就跟纯文字一样 → 底色加实、文字改用正文色并提高字重，一眼能看出是徽章。 */
+body.round .tag {
+  font-weight: 500;
+}
+
+body.round .tag-kind {
+  background: rgba(0, 0, 0, 0.1);
+  color: var(--text);
+}
+
+body.dark.round .tag-kind {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--text);
 }
 
 /* 时间推到最右：左边是状态徽章组，右边自成一列，
