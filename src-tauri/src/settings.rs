@@ -50,15 +50,6 @@ pub struct Config {
     /// 关闭时：read_clipboard 完全不看 CF_HDROP；前端「文件」入口保留但显示已关闭提示。
     #[serde(default)]
     pub file_copy: bool,
-    /// 失焦时保持材质不变（主要影响 Win11）
-    ///
-    /// Win11 的系统 backdrop 是**设计如此**：窗口失焦时材质会 fallback 到中性色
-    /// （微软 Mica 文档原话："falling back to a neutral color when the app is
-    /// inactive"），没有官方开关可以关掉。开启这一项后，Win11 也改用
-    /// `SetWindowCompositionAttribute` 的 acrylic —— tint 由我们自己控制，
-    /// 聚不聚焦都是同一个样子。
-    #[serde(default = "default_keep_material_on_blur")]
-    pub keep_material_on_blur: bool,
     /// 自定义缓存目录（None = 使用 app_data_dir/clipboard）
     #[serde(default)]
     pub cache_dir: Option<String>,
@@ -74,11 +65,6 @@ fn default_material_alpha() -> u32 {
     62
 }
 
-fn default_keep_material_on_blur() -> bool {
-    // 默认开启：失焦时材质变中性色会让窗口「忽明忽暗」，绝大多数人觉得是 bug
-    true
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -90,7 +76,6 @@ impl Default for Config {
             material_alpha: default_material_alpha(),
             round_mode: false,
             file_copy: false, // 默认关闭：不记录文件复制
-            keep_material_on_blur: default_keep_material_on_blur(),
             cache_dir: None,
         }
     }
@@ -166,7 +151,6 @@ pub fn get_settings() -> serde_json::Value {
         "materialAlpha": cfg.material_alpha,
         "roundMode": cfg.round_mode,
         "fileCopy": cfg.file_copy,
-        "keepMaterialOnBlur": cfg.keep_material_on_blur,
         "cacheDir": cfg.cache_dir,
         "autoStart": autostart::is_enabled(),
     })
@@ -225,23 +209,4 @@ pub fn set_retention_days(days: u32) -> Result<(), String> {
 #[tauri::command]
 pub fn set_autostart(value: bool) -> Result<(), String> {
     autostart::set_enabled(value)
-}
-
-/// 「失焦时保持材质」开关（默认开启）：切过去要重刷一次材质才会生效
-#[tauri::command]
-pub fn set_keep_material_on_blur(app: tauri::AppHandle, value: bool) -> Result<(), String> {
-    update(|c| c.keep_material_on_blur = value);
-    #[cfg(windows)]
-    {
-        use tauri::Manager;
-        if let Some(w) = app.get_webview_window("main") {
-            if let Ok(h) = w.hwnd() {
-                let dark = matches!(w.theme().unwrap_or(tauri::Theme::Light), tauri::Theme::Dark);
-                crate::effects::apply(h.0 as isize, dark);
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = app;
-    Ok(())
 }
