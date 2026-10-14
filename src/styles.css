@@ -32,6 +32,9 @@
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
+  /* 批量选中描边：淡金色。刻意不用 --accent —— 置顶（.card.is-pinned）的描边
+     就是 accent，两者叠在一起会分不清。 */
+  --select: #d9b95c;
   /* 卡片徽章底色。文字色：置顶直接用 --accent，收藏用固定琥珀 400（#ba7517），
      两者在浅色/深色的徽章底上都能读；底色则按主题各调一档浓度。
      类型徽章用「文字反色」的中性 tint：玻璃变量叠在同色系卡片底上会隐形。 */
@@ -56,6 +59,7 @@ body.dark {
   --text: #f2f2f5;
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
+  --select: #e9d189;
   --tag-kind-bg: rgba(255, 255, 255, 0.12);
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
@@ -741,12 +745,14 @@ html:not(.hovers-off) .card:hover {
   border-color: var(--accent);
 }
 
-/* 批量删除：选中态用红色描边 + 一圈同色 ring。
-   不能沿用置顶的 accent 蓝 —— 置顶本来就把描边设成 accent，两者会分不清；
-   而且这里选中的条目即将被删除，红色语义也对得上。 */
+/* 批量删除：选中态用淡金色描边。
+   不能沿用置顶的 accent 蓝 —— 置顶本来就把描边设成 accent，两者会分不清。
+   第二层必须用 **inset**，不能外扩 ring：.history 是滚动容器且只留了右侧
+   padding，左缘落在滚动容器之外的外扩 1px 会被裁掉（表现为「左侧边框像被
+   遮住一半」，右边因为有 12px 留白反而看不出来）。 */
 .card.is-selected {
-  border-color: #e81123;
-  box-shadow: 0 0 0 1px #e81123, var(--card-shadow);
+  border-color: var(--select);
+  box-shadow: inset 0 0 0 1px var(--select), var(--card-shadow);
 }
 
 /* 文件条目的原路径已失效（被移动 / 改名 / 删除）——整条压暗 + 标「已失效」 */
