@@ -275,6 +275,9 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     // 沿窗口矩形画 1px 边框（SystemBackdrop 档需要 DWM 提供 backdrop 与圆角，不能动）
     if tier != Tier::SystemBackdrop {
         strip_window_frame(hwnd);
+        // Tauri 的 4px 缩放边框子窗口会挡在 WebView 之上、抢走边缘鼠标事件，
+        // 每次 apply 都确认一遍（窗口重建后子窗口句柄会变）
+        disable_resize_border(hwnd);
     }
 
     // 标题栏/系统区域跟随深色
@@ -402,10 +405,18 @@ pub fn apply_rounded_corners(hwnd: isize) {
     unsafe {
         extern "system" {
             fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+            fn IsIconic(hwnd: isize) -> i32;
             fn GetDpiForWindow(hwnd: isize) -> u32;
             fn CreateRoundRectRgn(x1: i32, y1: i32, x2: i32, y2: i32, w: i32, h: i32) -> isize;
             fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
             fn DeleteObject(obj: isize) -> i32;
+        }
+
+        // 最小化时 GetWindowRect 返回的是**任务栏上那个小图标矩形**（约 160×28）。
+        // 拿它去 SetWindowRgn，窗口就会被裁成一小块 —— 还原后只剩左上角一点可见，
+        // 表现为「窗口变得很小」。relayout() 早已防了这一手，这里必须同样防。
+        if IsIconic(hwnd) != 0 {
+            return;
         }
 
         let mut r: Rect = std::mem::zeroed();
@@ -415,6 +426,11 @@ pub fn apply_rounded_corners(hwnd: isize) {
         let w = r.right - r.left;
         let h = r.bottom - r.top;
         if w <= 0 || h <= 0 {
+            return;
+        }
+        // 兜底：正常窗口不可能小于最小尺寸的一半（逻辑 720×480）。真拿到更小的值
+        // 只可能是窗口处于异常状态（被 DWM 收起、正在销毁），此时宁可不裁剪。
+        if w < 320 || h < 200 {
             return;
         }
 
@@ -763,7 +779,19 @@ pub fn refresh_theme(hwnd: isize, dark: bool) {
 // ---------------------------------------------------------------------------
 
 const WM_MOUSEMOVE: u32 = 0x0200;
-const WM_LBUTTONUP: u32 = 0x0201;
+/// ⚠️ 0x0201 是 **WM_LBUTTONDOWN**，0x0202 才是 **WM_LBUTTONUP**。
+///
+/// 这里曾经写成 0x0201，等于把「鼠标按下」当成「抬起」：
+/// 拖动/缩放在按下的瞬间就被收尾（清状态 + ReleaseCapture），而真正的抬起
+/// 反而没人处理 —— 状态与鼠标捕获会一直残留到**下一次按下**。下一次按下
+/// 又会用上次的起点执行一次拖动/缩放，于是：
+///   - 拉伸过一次之后，再点窗口任何地方（尤其外部）窗口会突然缩得很小；
+///   - 鼠标捕获一直攥在手里，后续的 WM_LBUTTONDOWN 被我们吞掉、传不到 WebView，
+///     前端边缘热区再也收不到 mousedown —— 表现为「边缘/四角拉不动」。
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+/// 系统要收回鼠标捕获时发送（按 Esc、弹出模态框、切换窗口等）
+const WM_CANCELMODE: u32 = 0x001F;
 
 static DRAG_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// (起始光标 X, 起始光标 Y, 起始窗口 X, 起始窗口 Y)
@@ -811,6 +839,21 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 鼠标捕获是否仍在本窗口。
+///
+/// 自定义拖动 / 缩放靠 `SetCapture` 把鼠标消息引到本窗口。一旦 capture 丢掉
+/// （失焦、被别的窗口抢走、用户点了窗口外部），我们**收不到 WM_LBUTTONUP**，
+/// 复位逻辑就永远不会执行 —— 残留的起点会在下一次 `WM_MOUSEMOVE` 时用过期
+/// 原点算位移，把窗口一次「拉」到与光标匹配的尺寸。
+/// 实测症状：拉伸完点一下窗口外部，窗口会突然缩得很小。
+/// 所以每次处理前都先校验一次，capture 不在就复位。
+fn capture_is(hwnd: isize) -> bool {
+    unsafe extern "system" {
+        fn GetCapture() -> isize;
+    }
+    unsafe { GetCapture() == hwnd }
+}
+
 /// 把窗口移动到「光标起点 → 当前位置」的位移处
 fn drag_move_to_cursor(hwnd: isize) {
     unsafe {
@@ -851,9 +894,20 @@ fn handle_drag_msg(hwnd: isize, msg: u32) -> bool {
     if !DRAG_ARMED.load(std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
+    // capture 丢了（点了外部 / 失焦）→ 复位，别再用过期起点改窗口位置
+    if !capture_is(hwnd) {
+        DRAG_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
+        return false;
+    }
     unsafe {
         extern "system" {
             fn ReleaseCapture() -> i32;
+        }
+        // 状态还活着却又来了一次「按下」→ 上一次的抬起丢了，丢弃旧起点
+        if msg == WM_LBUTTONDOWN {
+            DRAG_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
+            ReleaseCapture();
+            return false;
         }
         if msg == WM_MOUSEMOVE {
             // 节流：过密的移动直接丢弃，避免 DWM 事件积压（落点精度不受影响）
@@ -1017,9 +1071,22 @@ fn handle_resize_msg(hwnd: isize, msg: u32) -> bool {
     if RESIZE_EDGE.load(std::sync::atomic::Ordering::Relaxed) == 0 {
         return false;
     }
+    // capture 丢了（点了外部 / 失焦 / 被别的窗口抢走）→ 复位。
+    // 不这么做的话，残留的起点会在鼠标回到窗口时把窗口「拉」成极小尺寸。
+    if !capture_is(hwnd) {
+        RESIZE_EDGE.store(0, std::sync::atomic::Ordering::Relaxed);
+        return false;
+    }
     unsafe {
         extern "system" {
             fn ReleaseCapture() -> i32;
+        }
+        // 状态还活着却又来了一次「按下」→ 说明上一次的抬起丢了。
+        // 丢掉旧起点、不执行本次缩放，否则会拿过期原点把窗口拉变形。
+        if msg == WM_LBUTTONDOWN {
+            RESIZE_EDGE.store(0, std::sync::atomic::Ordering::Relaxed);
+            ReleaseCapture();
+            return false;
         }
         if msg == WM_MOUSEMOVE {
             let now = now_ms();
@@ -1060,6 +1127,8 @@ pub fn resize_start(app: tauri::AppHandle, edge: u32) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 const WM_NCACTIVATE: u32 = 0x0086;
+/// 鼠标捕获转移：lparam 为接手 capture 的窗口（0 = 没人持有）
+const WM_CAPTURECHANGED: u32 = 0x0215;
 
 static ORIG_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
@@ -1073,6 +1142,138 @@ static ORIG_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicI
 /// 子类过程里要用到 AppHandle（收到单实例唤醒消息时要唤回窗口并通知前端），
 /// 而 `hook_proc` 是裸函数指针、拿不到闭包，所以把句柄存进全局。
 static HOOK_APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+// ---------------------------------------------------------------------------
+// 让 Tauri 自带的「拖拽 / 缩放边框」子窗口不再抢鼠标
+// ---------------------------------------------------------------------------
+
+/// tao 给无边框窗口创建的边框子窗口类名
+const RESIZE_BORDER_CLASS: &str = "TAURI_DRAG_RESIZE_BORDERS";
+const GWLP_WNDPROC_BORDER: i32 = -4;
+/// 边缘判定容差（物理 px）。这个子窗口本身只有 4px 宽，留一点余量。
+const RESIZE_EDGE_TOLERANCE: i32 = 6;
+
+static BORDER_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static BORDER_ORIG: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// 按光标相对窗口的位置算出缩放方向位掩码（1上 2下 4左 8右，可组合，如左上 = 5）
+fn edge_from_cursor(main: isize) -> u32 {
+    unsafe {
+        extern "system" {
+            fn GetCursorPos(pt: *mut Rect) -> i32;
+            fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+        }
+        let mut cur: Rect = std::mem::zeroed();
+        let mut wr: Rect = std::mem::zeroed();
+        if GetCursorPos(&mut cur) == 0 || GetWindowRect(main, &mut wr) == 0 {
+            return 0;
+        }
+        let t = RESIZE_EDGE_TOLERANCE;
+        let mut e = 0u32;
+        if cur.top <= wr.top + t {
+            e |= 1;
+        }
+        if cur.top >= wr.bottom - t {
+            e |= 2;
+        }
+        if cur.left <= wr.left + t {
+            e |= 4;
+        }
+        if cur.left >= wr.right - t {
+            e |= 8;
+        }
+        e
+    }
+}
+
+/// Tauri v2（tao）给无边框窗口额外建了一个 4px 宽的边框子窗口，类名固定为
+/// `TAURI_DRAG_RESIZE_BORDERS`，用来提供**系统级**的边缘拖拽/缩放。
+///
+/// 它盖在窗口最外圈、位于 WebView **之上**，会先拿到鼠标：前端那些贴着边框的
+/// 缩放热区于是永远收不到 mousedown —— 实测边缘 0–3px 全被它吃掉，四角再叠加
+/// 圆角，可点面积只剩几个像素，表现就是「边缘很难拉、四个角根本拉不动」。
+/// 而它走的正是我们想绕开的那套系统缩放循环（Win10 acrylic 下严重滞后）。
+///
+/// 做法：给它挂子类，自己接管 ——
+///   - `WM_NCHITTEST` 返回 HTCLIENT，让它自己收下边缘的鼠标消息
+///     （**不能**返回 HTTRANSPARENT 指望穿透：该子窗口不在主线程上，
+///      HTTRANSPARENT 只在同一线程的窗口之间生效，实测穿透后消息直接消失）；
+///   - `WM_LBUTTONDOWN` 时按光标位置判定方向，交给主窗口的自定义缩放
+///     （SetCapture 到主窗口，后续移动/抬起由主窗口的 hook 接管）。
+pub fn disable_resize_border(hwnd: isize) {
+    unsafe {
+        extern "system" {
+            fn EnumChildWindows(
+                parent: isize,
+                cb: unsafe extern "system" fn(isize, isize) -> i32,
+                param: isize,
+            ) -> i32;
+            fn GetClassNameW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
+            fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+        }
+
+        unsafe extern "system" fn enum_cb(child: isize, param: isize) -> i32 {
+            let mut buf = [0u16; 128];
+            let n = unsafe { GetClassNameW(child, buf.as_mut_ptr(), 128) };
+            if n <= 0 {
+                return 1;
+            }
+            if String::from_utf16_lossy(&buf[..n as usize]) == RESIZE_BORDER_CLASS {
+                unsafe { *(param as *mut isize) = child };
+                return 0; // 找到了，停止枚举
+            }
+            1
+        }
+
+        let mut found: isize = 0;
+        EnumChildWindows(hwnd, enum_cb, &mut found as *mut isize as isize);
+        if found == 0 {
+            return;
+        }
+        // 窗口重建后子窗口句柄会变，所以每次都比一遍；没变就直接返回（幂等）
+        if BORDER_HWND.load(std::sync::atomic::Ordering::Relaxed) == found {
+            return;
+        }
+        let prev = SetWindowLongPtrW(found, GWLP_WNDPROC_BORDER, border_proc as isize);
+        if prev == 0 {
+            eprintln!("[effects] 缩放边框子窗口子类化失败");
+            return;
+        }
+        BORDER_ORIG.store(prev, std::sync::atomic::Ordering::Relaxed);
+        BORDER_HWND.store(found, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("[effects] 缩放边框子窗口已接管（hwnd={found}）");
+    }
+}
+
+unsafe extern "system" fn border_proc(
+    hwnd: isize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    unsafe extern "system" {
+        fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize)
+            -> isize;
+        fn GetAncestor(hwnd: isize, flags: u32) -> isize;
+    }
+    // 这个子窗口覆盖在窗口最外圈、位于 WebView 之上，边缘的鼠标事件只有它能收到。
+    // 所以边缘缩放必须在这里起手：按下时按光标位置判定方向，交给主窗口的
+    // 自定义缩放（SetCapture 到主窗口，后续 mousemove/up 由主窗口的 hook 接管）。
+    if msg == WM_NCHITTEST {
+        return HTCLIENT;
+    }
+    if msg == WM_LBUTTONDOWN {
+        let main = unsafe { GetAncestor(hwnd, 2) }; // GA_ROOT
+        let target = if main != 0 { main } else { hwnd };
+        let edge = edge_from_cursor(target);
+        if edge != 0 {
+            begin_custom_resize(target, edge);
+            return 0;
+        }
+    }
+    let prev = BORDER_ORIG.load(std::sync::atomic::Ordering::Relaxed);
+    unsafe { CallWindowProcW(prev, hwnd, msg, wparam, lparam) }
+}
 
 pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
     let _ = HOOK_APP.set(app.clone());
@@ -1117,6 +1318,20 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
         if msg == WM_NCACTIVATE {
             // lparam = -1 → 禁止重绘非客户区，原生标题栏就永远画不出来
             return unsafe { DefWindowProcW(hwnd, msg, wparam, -1) };
+        }
+        // 鼠标捕获被抢走 / 释放（点了窗口外部、失焦、别的窗口 SetCapture）：
+        // 此时收不到 WM_LBUTTONUP，必须在这里复位，否则拖动/缩放的「起点」
+        // 会一直留着，下一次 mousemove 用过期原点把窗口拉到错误尺寸。
+        if msg == WM_CAPTURECHANGED {
+            if lparam != hwnd {
+                RESIZE_EDGE.store(0, std::sync::atomic::Ordering::Relaxed);
+                DRAG_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        // 系统收回鼠标捕获（Esc、模态框、切换窗口）：同样必须复位
+        if msg == WM_CANCELMODE {
+            RESIZE_EDGE.store(0, std::sync::atomic::Ordering::Relaxed);
+            DRAG_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
         }
         // 剪贴板变化：事件驱动监听（替代轮询），读取并落盘后推给前端
         if msg == 0x031D {
