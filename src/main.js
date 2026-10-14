@@ -647,7 +647,7 @@ function emptyHtml() {
     )} 相关内容</div></div>`;
   }
   const titles = {
-    history: ["暂无内容", "复制点东西试试"],
+    history: ["暂无内容", "复制点东西试试，会自动记录到这里"],
     text: ["暂无文本", "复制的文本会出现在这里"],
     favorites: ["暂无收藏", "右键条目选「收藏」即可"],
     images: ["暂无图片", "复制的图片会出现在这里"],
@@ -1159,7 +1159,7 @@ function settingsAppearanceHtml(s) {
 // 直接拼数字会得到「仅保留近 0 天内容」这种像 bug 的文案。
 function retentionLabel(days) {
   const n = days ?? 3;
-  return n === 0 ? "永久保存" : `近 ${n} 天`;
+  return n === 0 ? "永久保存" : `仅保留近 ${n} 天内容`;
 }
 
 // 「记录」与「数据与缓存」合并后的一页，按同一条链路排列：
@@ -1950,7 +1950,7 @@ async function main() {
     document.getElementById("status-version").textContent =
       `Version：${(await getVersion())}-ikun`;
   } catch (e) {
-    document.getElementById("status-version").textContent = "Version：2.1.9-beta-ikun";
+    document.getElementById("status-version").textContent = "Version：2.1.9-ikun";
   }
 
   render();
