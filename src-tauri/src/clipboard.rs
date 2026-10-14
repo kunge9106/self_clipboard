@@ -963,7 +963,7 @@ fn dir_stats(dir: &PathBuf) -> (u64, u64) {
 /// 关键：`blocking_pick_folder` 不能在主线程调用（会死锁，表现为「点了没反应」），
 /// 因此放到阻塞线程池上执行，本命令声明为 async。
 #[tauri::command]
-pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let app_for_dialog = app.clone();
@@ -1004,7 +1004,7 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
 
     if old_c == new_c {
         // 选的就是当前目录：什么都不用做，更不能迁移
-        return Ok(Some(strip_ext_prefix(&new_dir.to_string_lossy())));
+        return Ok(Some((strip_ext_prefix(&new_dir.to_string_lossy()), false)));
     }
 
     // ── 防线②：拒绝危险的包含关系 ────────────────────────
@@ -1048,7 +1048,7 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
         std::thread::sleep(std::time::Duration::from_millis(600));
         handle.restart();
     });
-    Ok(Some(new_dir_str))
+    Ok(Some((new_dir_str, true)))
 }
 
 /// 目录是否为空（不含任何条目；隐藏文件也算有内容）

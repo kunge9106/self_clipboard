@@ -1285,7 +1285,14 @@ function bindSettings(view) {
     pickDir.onclick = async () => {
       try {
         const res = await invoke("pick_cache_dir");
-        if (res) toast(`已迁移到「${res}」，即将重启…`);
+        if (res) {
+          const [path, moved] = res;
+          toast(
+            moved
+              ? `已迁移到「${path}」，即将重启…`
+              : "已经是当前缓存目录，无需更改"
+          );
+        }
       } catch (e) {
         toast("更改目录失败：" + e);
       }
