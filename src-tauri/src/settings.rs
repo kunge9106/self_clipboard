@@ -29,9 +29,26 @@ pub struct Config {
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
-    /// 材质浓度：窗口主体层的不透明度百分比（25–90，默认 62）
+    /// 材质浓度：窗口主体层的不透明度百分比（40–90）
+    ///
+    /// 默认取「直角模式」的推荐档（见 `default_material_alpha`）。
+    /// 圆角模式没有背景模糊，面板要更实，所以 `set_round_mode` 会按模式自动切档 ——
+    /// **但仅限用户没有手动调过**，见 `alpha_is_custom`。
     #[serde(default = "default_material_alpha")]
     pub material_alpha: u32,
+    /// 用户是否手动调过材质浓度。
+    ///
+    /// `None` = 老配置里没有这个字段，用数值反推（见 `alpha_is_custom`）。
+    /// 一旦用户在设置页拖过滑块，就永远以用户的值优先，
+    /// 开关圆角模式不再动它 —— 之前无条件覆盖，用户调好的浓度会被悄悄改掉。
+    #[serde(default)]
+    pub material_alpha_custom: Option<bool>,
+    /// 首次运行引导：开机自启那一次问过了吗
+    #[serde(default)]
+    pub asked_autostart: bool,
+    /// 首次运行引导：第一次点关闭按钮时「后台运行还是退出」问过了吗
+    #[serde(default)]
+    pub asked_tray_on_close: bool,
     /// 圆角模式：**圆角 + 不用系统 blur**
     ///
     /// 为什么要有这个开关：Win10 的 acrylic 恒为**矩形**、`SetWindowRgn` 对它
@@ -93,10 +110,26 @@ fn default_retention() -> u32 {
     3
 }
 
+/// 直角 / 圆角模式各自的推荐浓度。这两个值只在**用户没手动调过**时自动生效。
+pub const STRAIGHT_ALPHA: u32 = 50;
+pub const ROUND_ALPHA: u32 = 90;
+
 fn default_material_alpha() -> u32 {
-    // 现在这个值控制的是 CSS 主体层的不透明度（acrylic 的 tint 已固定压到 8%），
-    // 62% 相当于「看得出模糊、文字也清楚」的中间值
-    62
+    // 新装默认 50（直角模式的推荐档）。以前是 62，但 62 既不是直角档也不是圆角档，
+    // 会让「没手动调过」这个判断失效（见 alpha_is_custom）。
+    STRAIGHT_ALPHA
+}
+
+impl Config {
+    /// 用户是否手动调过材质浓度。
+    ///
+    /// 老配置没有 `material_alpha_custom` 字段（None），这时用数值反推：
+    /// 50 / 90 正是两种模式的自动档，除此之外的值必然是人手动拖出来的。
+    /// 新配置由 `Config::default()` 明确写成 `Some(false)`，不再依赖反推。
+    pub fn alpha_is_custom(&self) -> bool {
+        self.material_alpha_custom
+            .unwrap_or(self.material_alpha != STRAIGHT_ALPHA && self.material_alpha != ROUND_ALPHA)
+    }
 }
 
 impl Default for Config {
@@ -108,6 +141,10 @@ impl Default for Config {
             clean_confirm_exit: false,
             retention_days: default_retention(),
             material_alpha: default_material_alpha(),
+            // 新装即「没手动调过」——不需要靠数值反推
+            material_alpha_custom: Some(false),
+            asked_autostart: false,
+            asked_tray_on_close: false,
             round_mode: false,
             file_copy: false, // 默认关闭：不记录文件复制
             cache_dir: None,
@@ -188,7 +225,28 @@ pub fn get_settings() -> serde_json::Value {
         "fileCopy": cfg.file_copy,
         "cacheDir": cfg.cache_dir,
         "autoStart": autostart::is_enabled(),
+        "askedAutostart": cfg.asked_autostart,
+        "askedTrayOnClose": cfg.asked_tray_on_close,
     })
+}
+
+/// 记下「首次运行引导」的某一项已经问过，之后不再打扰。
+///
+/// kind：`autostart`（首次运行问开机自启）/ `tray`（首次点关闭问后台运行）。
+/// 用户选什么都算问过——选了关掉也不该每次启动都再问一遍；
+/// 真正的开关随时可以在「设置」里改。
+#[tauri::command]
+pub fn dismiss_onboarding(kind: String) -> Result<(), String> {
+    match kind.as_str() {
+        "autostart" => {
+            update(|c| c.asked_autostart = true);
+        }
+        "tray" => {
+            update(|c| c.asked_tray_on_close = true);
+        }
+        other => return Err(format!("未知的引导项：{other}")),
+    }
+    Ok(())
 }
 
 #[tauri::command]

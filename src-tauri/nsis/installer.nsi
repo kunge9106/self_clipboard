@@ -495,7 +495,9 @@ Function un.ConfirmShow ; Add add a `Delete app data` check box
   IntOp $5 $5 / 96
   IntOp $6 $6 / 96
   IntOp $7 $7 / 96
-  System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w "$(deleteAppData)", i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
+  ; 勾选框文案改成如实描述：现在它只删 WebView2 的缓存目录，
+  ; 设置与历史（config.json / 缓存目录）一律保留 —— 见下面 un.onUninstall 里的说明。
+  System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w "同时删除浏览器缓存（不影响设置与历史记录）", i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
   Pop $DeleteAppDataCheckbox
   SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $1
   SendMessage $DeleteAppDataCheckbox ${WM_SETFONT} $1 1
@@ -918,8 +920,12 @@ Section Uninstall
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
   ${EndIf}
 
-  ; Delete app data if the checkbox is selected
-  ; and if not updating
+  ; 用户勾了「删除浏览器缓存」且不是升级时，清掉 WebView2 的数据目录。
+  ;
+  ; **绝不删 $APPDATA\${BUNDLEID}**：那是 config.json 所在（材质浓度、保留天数、
+  ; 自定义缓存目录指向等用户设置）。以前这里会连同它一起 RmDir /r，后果是
+  ; 「重装之后设置全回默认」，更糟的是缓存目录指向丢了 —— 历史看着像消失，
+  ; 其实只是程序不知道去哪儿找。用户数据不该由安装/卸载流程处置。
   ${If} $DeleteAppDataCheckboxState = 1
   ${AndIf} $UpdateMode <> 1
     ; Clear the install location $INSTDIR from registry
@@ -932,7 +938,6 @@ Section Uninstall
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
 
     SetShellVarContext current
-    RmDir /r "$APPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
   ${EndIf}
 

@@ -36,10 +36,24 @@ fn effect_info() -> serde_json::Value {
     }
 }
 
-/// 圆角模式开关：圆角 + 不用系统 blur（四角真透明、100% 干净），立即生效
+/// 圆角模式开关：圆角 + 不用系统 blur（四角真透明、100% 干净），立即生效。
+///
+/// 顺带把「材质浓度」切到该模式的推荐档（直角 50 / 圆角 90）——
+/// 圆角模式没有背景模糊，同样浓度会显得更透，需要更实的面板。
+/// **但只在用户没手动调过浓度时才这么做**：以前无条件覆盖，
+/// 用户每开关一次圆角模式，自己调好的浓度就被悄悄改掉一次。
 #[tauri::command]
 fn set_round_mode(app: tauri::AppHandle, value: bool) -> Result<(), String> {
-    settings::update(|c| c.round_mode = value);
+    settings::update(|c| {
+        c.round_mode = value;
+        if !c.alpha_is_custom() {
+            c.material_alpha = if value {
+                settings::ROUND_ALPHA
+            } else {
+                settings::STRAIGHT_ALPHA
+            };
+        }
+    });
     #[cfg(windows)]
     {
         use tauri::Manager;
@@ -55,10 +69,15 @@ fn set_round_mode(app: tauri::AppHandle, value: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// 材质浓度（设置页滑块）：更新 tint alpha 并立即重刷亚克力
+/// 材质浓度（设置页滑块）：更新 tint alpha 并立即重刷亚克力。
+///
+/// 走到这里就意味着**用户手动调过** → 记下来，从此圆角模式不再自动改浓度。
 #[tauri::command]
 fn set_material_alpha(app: tauri::AppHandle, value: u32) -> Result<(), String> {
-    settings::update(|c| c.material_alpha = value.clamp(40, 90));
+    settings::update(|c| {
+        c.material_alpha = value.clamp(40, 90);
+        c.material_alpha_custom = Some(true);
+    });
     #[cfg(windows)]
     {
         use tauri::Manager;
@@ -234,6 +253,7 @@ pub fn run() {
             clipboard::open_cache_dir,
             clipboard::open_log_dir,
             settings::get_settings,
+            settings::dismiss_onboarding,
             settings::set_tray_on_close,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,

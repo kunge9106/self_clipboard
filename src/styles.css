@@ -147,18 +147,13 @@ body {
 
 /* 深色下主体色由 --material-rgb / --glass-alpha 一并切换，无需额外覆盖 */
 
-/* 圆角模式（圆角 + 无系统模糊）：窗口退化为纯透明 layered 窗口，四角是
-   **真透明**、100% 干净——代价是背后的壁纸不再被模糊，所以「透」会变成
-   「直接看到清晰的桌面」，很干扰观感。因此这一档把主体**明显加厚**
-   （默认 62% → 94%），接近一块实心面板，只留一点通透感；
-   想再实一点，把「材质浓度」拉到 90 就是完全不透明。 */
-body.round .app {
-  background: linear-gradient(
-    160deg,
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32))),
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.20))) 62%
-  );
-}
+/* 圆角模式**不再**给浓度加补偿。
+   以前这里有一条 `body.round .app { --glass-alpha + 0.32 }`：圆角模式没有系统
+   背景模糊，透过去就是清晰的桌面，所以把面板统一加厚。
+   问题是它让「材质浓度」这个设置在两种模式下含义不同——用户开关一次圆角模式，
+   面板厚度就跳一大截，看起来就像「浓度被重置了」（实测 Win10 上尤其明显）。
+   现在浓度就是用户设的那个值，两种模式完全一致；圆角模式嫌太透就把浓度调高，
+   设置页对应项上已经写明这条建议。 */
 
 /* 圆角模式（窗口接近实心）下，不止历史卡片，侧栏选中项与设置页的
    缓存卡片同样会与窗口底面糊在一起——用同一套阴影把边界立起来。
@@ -579,6 +574,24 @@ html:not(.hovers-off) .search-clear:hover {
 
 html:not(.hovers-off) .btn-ghost:hover {
   background: var(--glass-hover);
+}
+
+/* 主操作按钮（首次运行引导的「开启自启」「后台运行」这类推荐项）：
+   跟 btn-ghost 同一尺寸，但用强调色实底，让「推荐的那个」一眼可辨。 */
+.btn-primary {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: default;
+}
+
+html:not(.hovers-off) .btn-primary:hover {
+  filter: brightness(1.08);
 }
 
 /* 内容区 */

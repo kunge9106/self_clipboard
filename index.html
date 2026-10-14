@@ -171,6 +171,39 @@
       </div>
     </div>
 
+    <!-- 首次运行引导 1/2：开机自启。全新安装后的第一次启动才出现
+         （config 里 asked_autostart 一旦落盘就不再问，选「暂不」也算问过）。 -->
+    <div class="modal-mask" id="firstrun-autostart" hidden>
+      <div class="modal">
+        <div class="modal-title">要开机自动启动吗？</div>
+        <div class="modal-text">
+          开启后，登录 Windows 时轻贴会自动在托盘里待命，复制过的内容随时可查。<br />
+          现在不开启也没关系，以后随时可以在「设置 → 通用」里打开。
+        </div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="fra-later">暂不开启</button>
+          <button class="btn-primary" id="fra-enable">开启自启</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 首次运行引导 2/2：第一次点关闭按钮时问「后台运行还是直接退出」。
+         用户明确要求把「关闭时后台运行」这个默认行为在第一次就讲清楚。 -->
+    <div class="modal-mask" id="firstrun-close" hidden>
+      <div class="modal">
+        <div class="modal-title">关闭后要怎样？</div>
+        <div class="modal-text">
+          选「后台运行」：点关闭按钮只是把窗口收进托盘，轻贴继续在后台记录剪贴板，
+          双击托盘图标即可唤回。<br />
+          这个选择以后可以在「设置 → 通用」里改。
+        </div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="frc-quit">直接退出</button>
+          <button class="btn-primary" id="frc-tray">后台运行</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

@@ -96,6 +96,15 @@ async function syncMaxState() {
   maxBtn.title = max ? "还原" : "最大化";
 }
 
+/** 真正执行关闭：按「关闭时清理缓存 + 退出前提醒」决定要不要先确认。 */
+function doCloseWindow() {
+  if (settings && settings.cleanOnClose && settings.cleanConfirmExit) {
+    openExitModal();
+  } else {
+    appWindow.close().catch((err) => toast("关闭失败：" + err));
+  }
+}
+
 function bindWindowControls() {
   const guard = (label, p) =>
     p.catch((err) => toast(label + "失败：" + err));
@@ -104,12 +113,16 @@ function bindWindowControls() {
   document.getElementById("btn-maximize").onclick = () =>
     guard("最大化", appWindow.toggleMaximize());
   document.getElementById("btn-close").onclick = () => {
-    // 「关闭时清理缓存」+「退出前弹窗提醒」都开启时，先确认再退出（需求 #2）
-    if (settings && settings.cleanOnClose && settings.cleanConfirmExit) {
-      openExitModal();
-    } else {
-      guard("关闭", appWindow.close());
+    // 首次关闭先问一次「后台运行 / 直接退出」（问过就不再问，见 firstrun-close 弹窗）
+    if (settings && !settings.askedTrayOnClose) {
+      const ask = document.getElementById("firstrun-close");
+      if (ask) {
+        ask.hidden = false;
+        return;
+      }
     }
+    // 「关闭时清理缓存」+「退出前弹窗提醒」都开启时，先确认再退出（需求 #2）
+    doCloseWindow();
   };
 
   // 窗口尺寸变化时同步图标
@@ -1122,11 +1135,11 @@ function settingsGeneralHtml(s) {
 function settingsAppearanceHtml(s) {
   return `
     <div class="row"><label>材质浓度</label>
-      <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 62}" />
-      <span class="hint" id="material-val">${s.materialAlpha ?? 62}%（越高越厚实 · 越低越通透）</span></div>
+      <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 50}" />
+      <span class="hint" id="material-val">${s.materialAlpha ?? 50}%（越高越厚实 · 越低越通透）</span></div>
     <div class="row"><label>圆角模式</label>
       <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
-      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感</span></div>`;
+      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感。圆角模式下没有背景模糊、面板会显得更透，<b>建议把上面的「材质浓度」调到 80% 以上</b>（此开关不会自动改你的浓度）</span></div>`;
 }
 
 // 「保留 N 天 / 永久保存」的展示文案。0 在语义上是「永久保留」，
@@ -1583,6 +1596,76 @@ function bindSingletonModal() {
   if (modal && ok) ok.onclick = () => (modal.hidden = true);
 }
 
+/** 首次运行引导：开机自启（只在全新安装后的第一次启动出现）。 */
+function openAutostartAsk() {
+  const modal = document.getElementById("firstrun-autostart");
+  if (modal) modal.hidden = false;
+}
+
+/**
+ * 首次运行引导的两个弹窗（常驻元素，绑一次）。
+ *
+ * 两个引导都遵循同一原则：**不管用户选什么都算「问过了」**，
+ * 之后不再弹 —— 真正的开关随时能在设置里改，每次启动都追问才是骚扰。
+ */
+function bindFirstRunModals() {
+  // 记下「已经问过」，失败也不阻塞流程（顶多是下次再问一遍）
+  const dismiss = (kind) => invoke("dismiss_onboarding", { kind }).catch(() => {});
+  const refresh = async () => {
+    try {
+      settings = await invoke("get_settings");
+    } catch (e) {
+      /* 拿不到就保持旧值，不影响关闭流程 */
+    }
+  };
+
+  const auto = document.getElementById("firstrun-autostart");
+  const autoEnable = document.getElementById("fra-enable");
+  if (autoEnable)
+    autoEnable.onclick = async () => {
+      if (auto) auto.hidden = true;
+      try {
+        await invoke("set_autostart", { value: true });
+        toast("已开启开机自启");
+      } catch (e) {
+        toast("开启失败：" + e);
+      }
+      await dismiss("autostart");
+      await refresh();
+    };
+  const autoLater = document.getElementById("fra-later");
+  if (autoLater)
+    autoLater.onclick = async () => {
+      if (auto) auto.hidden = true;
+      await dismiss("autostart");
+      toast("好的，之后可在「设置 → 通用」里打开开机自启");
+    };
+
+  const close = document.getElementById("firstrun-close");
+  const closeTray = document.getElementById("frc-tray");
+  if (closeTray)
+    closeTray.onclick = async () => {
+      if (close) close.hidden = true;
+      await invoke("set_tray_on_close", { value: true }).catch(() => {});
+      await dismiss("tray");
+      await refresh();
+      // 直接走关闭：Rust 侧 CloseRequested 会按 tray_on_close 把窗口收进托盘。
+      // 刻意**不**经过 doCloseWindow()——用户刚选了后台运行，
+      // 这时再弹「退出并清理」确认是自相矛盾的。
+      appWindow.close().catch((err) => toast("关闭失败：" + err));
+    };
+  const closeQuit = document.getElementById("frc-quit");
+  if (closeQuit)
+    closeQuit.onclick = async () => {
+      if (close) close.hidden = true;
+      await invoke("set_tray_on_close", { value: false }).catch(() => {});
+      await dismiss("tray");
+      await refresh();
+      // 选了直接退出 → 走正常关闭路径（该弹的清理确认照旧）
+      doCloseWindow();
+    };
+}
+
 async function aboutFeedback() {
   try {
     const a = await invoke("about_info");
@@ -1705,23 +1788,26 @@ function bindSettings(view) {
   }
 
   // 圆角模式：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启。
-  // 两种模式对「厚度」的要求不同，所以顺带把材质浓度也切到对应的档：
-  //   圆角模式没有背景模糊 → 半透就等于直接看到桌面，要更实（90）
-  //   直角模式有真模糊      → 50% 更通透好看
+  //
+  // 浓度由**后端**按规则处理（见 lib.rs::set_round_mode）：
+  //   用户没手动调过 → 按模式的推荐档切（直角 50 / 圆角 90）；
+  //   用户手动调过   → 一个字节都不动，永远以用户的为准。
+  // 这里只负责把结果同步到界面（滑块 / 标签 / 观感）。
   const round = view.querySelector("#set-round");
   if (round)
     round.onchange = async () => {
       try {
         await invoke("set_round_mode", { value: round.checked });
-        const alpha = round.checked ? 90 : 50;
-        await invoke("set_material_alpha", { value: alpha });
+        applyRoundMode(round.checked);
+        // 浓度可能被后端按模式切了推荐档（用户没手动调过时才会），
+        // 所以要把滑块与观感按最新配置同步一次，否则界面显示的值跟实际不一致。
+        settings = await invoke("get_settings");
+        const alpha = settings.materialAlpha ?? 50;
         applyGlassAlpha(alpha);
         const slider = view.querySelector("#set-material");
         if (slider) slider.value = alpha;
         const label = view.querySelector("#material-val");
         if (label) label.textContent = `${alpha}%（越高越厚实 · 越低越通透）`;
-        applyRoundMode(round.checked);
-        settings = await invoke("get_settings");
         toast(
           round.checked
             ? "已切换为圆角模式（无背景模糊）"
@@ -1816,6 +1902,7 @@ async function main() {
   bindClearView();
   bindClearViewModal();
   bindSingletonModal();
+  bindFirstRunModals();
   bindNav();
   bindSearch();
   startTimeTicker();
@@ -1841,7 +1928,7 @@ async function main() {
   try {
     settings = await invoke("get_settings");
     // 应用材质浓度（CSS 层，窗口主体的不透明度）
-    applyGlassAlpha(settings.materialAlpha ?? 62);
+    applyGlassAlpha(settings.materialAlpha ?? 50);
     // 圆角模式（圆角 + 无系统模糊）
     applyRoundMode(settings.roundMode);
   } catch (e) {
@@ -1855,6 +1942,10 @@ async function main() {
   }
 
   render();
+
+  // 首次运行引导（只在全新安装后的第一次启动出现）：先问开机自启。
+  // 「首次关闭时问后台运行」在 bindWindowControls 的关闭按钮里触发。
+  if (settings && !settings.askedAutostart) openAutostartAsk();
 
   // ── 更新状态 ──────────────────────────────────────────────────────────
   // Rust 启动时已在后台自检过一次（失败或没有新版都静默）。这里先读缓存把红点
