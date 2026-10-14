@@ -7,6 +7,8 @@ use tauri::Manager;
 mod effects;
 #[cfg(windows)]
 mod clipboard;
+#[cfg(windows)]
+mod singleton;
 mod settings;
 mod autostart;
 mod tray;
@@ -177,6 +179,15 @@ fn setup_effects(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    // 单实例：同一版本只允许一个实例；测试版(debug)与正式版(release)锁名不同，可共存。
+    // 检测到同版本已在运行 → 把它的窗口唤到前台，本次启动直接结束（等价于"双击没反应"的反面：
+    // 用户至少能看到已存在的窗口被带到前面）。
+    #[cfg(windows)]
+    if !singleton::ensure_single_instance() {
+        singleton::activate_existing_instance();
+        std::process::exit(0);
+    }
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
