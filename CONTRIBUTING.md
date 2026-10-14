@@ -100,16 +100,16 @@ git fetch --all --prune && git checkout feature/xxx && git pull
 
    `CHANGELOG.md` 在编译期内嵌进 exe。关于页在没有新版本时显示这一节，漏写会使 beta 或未发布版本的用户看到上一个正式版的说明。改写后执行 `touch src-tauri/src/about.rs` 再编译，确保内嵌内容被重新读取。
 
-3. 统一改版本号，少改一处即不一致。清单共 6 项，其中 `package-lock.json` 有两处：
+3. 改版本号：`npm run version:set X.Y.Z`。
 
-   | 文件 | 字段 |
+   版本源是 `package.json` 的 `version`。该命令一次写入 `package-lock.json`（两处）、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`，不必手工逐处修改。以下两处不参与：
+
+   | 位置 | 为什么不用改 |
    |---|---|
-   | `package.json` | `version` |
-   | `package-lock.json` | 顶层 `version` 与 `packages[""].version` |
-   | `src-tauri/tauri.conf.json` | `version` |
-   | `src-tauri/Cargo.toml` | `version` |
-   | `src-tauri/Cargo.lock` | `[[package]] name = "self-clipboard"` 的 `version` |
-   | `src/main.js` | 版本号兜底字符串，用 `grep "Version："` 定位 |
+   | `src-tauri/tauri.conf.json` | `version` 为 `"../package.json"`，Tauri 支持的引用写法，构建与运行时都从 `package.json` 取值 |
+   | `src/main.js` | 状态栏版本号取自 `getVersion()`，无硬编码 |
+
+   `package.json` 与 `src-tauri/Cargo.toml` 无法合并为一处：npm 与 cargo 两个工具链各自必须能独立读到版本，相互不可引用。脚本会逐项校验是否匹配到自身版本号，未匹配即报错，不静默跳过。
 
 4. 打 tag 并推送：`git tag -a vX.Y.Z -m "轻贴 vX.Y.Z"`，`git push origin vX.Y.Z`。
 

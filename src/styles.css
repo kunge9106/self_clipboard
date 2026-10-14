@@ -6,7 +6,7 @@
    ========================================================================== */
 
 :root {
-  --sidebar-w: 208px;
+  --sidebar-w: 168px;
   --titlebar-h: 40px;
 
   /* 窗口圆角；JS 会按后端返回的档位上限覆盖它（Win10 acrylic = 20px）。
@@ -32,6 +32,9 @@
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
+  /* 批量选中描边：淡金色。刻意不用 --accent —— 置顶（.card.is-pinned）的描边
+     就是 accent，两者叠在一起会分不清。 */
+  --select: #d9b95c;
   /* 卡片徽章底色。文字色：置顶直接用 --accent，收藏用固定琥珀 400（#ba7517），
      两者在浅色/深色的徽章底上都能读；底色则按主题各调一档浓度。
      类型徽章用「文字反色」的中性 tint：玻璃变量叠在同色系卡片底上会隐形。 */
@@ -56,6 +59,7 @@ body.dark {
   --text: #f2f2f5;
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
+  --select: #e9d189;
   --tag-kind-bg: rgba(255, 255, 255, 0.12);
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
@@ -523,6 +527,47 @@ html:not(.hovers-off) #update-banner .ub-close:hover {
   box-shadow: 0 0 0 1px rgba(47, 107, 255, 0.25);
 }
 
+/* 批量删除模式的操作条：与搜索栏同一个位置、同样占满宽度。
+   用 .toolbar.is-selecting 切换显隐，而不是给元素加 hidden —— 这两者都是
+   display:flex，靠 hidden 属性压不住（UA 的 [hidden] 规则优先级更低）。 */
+.selectbar {
+  display: none;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.toolbar.is-selecting .search {
+  display: none;
+}
+
+.toolbar.is-selecting .selectbar {
+  display: flex;
+}
+
+.selectbar-count {
+  color: var(--text-dim);
+}
+
+.selectbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 操作条里的按钮收一档高度，与 32px 的搜索栏对齐 */
+.selectbar-actions .btn-ghost,
+.selectbar-actions .btn-danger {
+  height: 30px;
+  align-self: center;
+}
+
+.selectbar-actions .btn-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .search-icon {
   width: 14px;
   height: 14px;
@@ -666,6 +711,9 @@ html:not(.hovers-off) .btn-primary:hover {
   scrollbar-gutter: stable;
   /* 与 .view 的右内边距相等（12px）→ 滚动条在两侧留白中视觉居中 */
   padding-right: 12px;
+  /* 左缘 2px：卡片与窗口左边界之间留一点缝。滚动容器没有左内边距时，
+     卡片描边紧贴容器边界，观感上像「贴死」了。 */
+  padding-left: 2px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -698,6 +746,16 @@ html:not(.hovers-off) .card:hover {
 
 .card.is-pinned {
   border-color: var(--accent);
+}
+
+/* 批量删除：选中态用淡金色描边。
+   不能沿用置顶的 accent 蓝 —— 置顶本来就把描边设成 accent，两者会分不清。
+   第二层必须用 **inset**，不能外扩 ring：.history 是滚动容器且只留了右侧
+   padding，左缘落在滚动容器之外的外扩 1px 会被裁掉（表现为「左侧边框像被
+   遮住一半」，右边因为有 12px 留白反而看不出来）。 */
+.card.is-selected {
+  border-color: var(--select);
+  box-shadow: inset 0 0 0 1px var(--select), var(--card-shadow);
 }
 
 /* 文件条目的原路径已失效（被移动 / 改名 / 删除）——整条压暗 + 标「已失效」 */

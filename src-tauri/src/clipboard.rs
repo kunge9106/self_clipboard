@@ -42,9 +42,20 @@ pub struct HistoryItem {
     pub id: String,
     pub kind: String, // "text" | "image" | "files"
     pub ts: u64,
-    /// 置顶：**按分类（视图）独立** —— 记录这条内容在哪些分类里被置顶。
-    /// 取值与前端 `data-view` 一致："history" | "text" | "images" | "files" | "favorites"。
-    /// 在「文本」里置顶不会影响它在「历史」里的位置。
+    /// 置顶：记录这条内容在**哪些分类**里被置顶。
+    /// 取值与前端 `data-view` 一致："history" | "text" | "images" | "files" | "favorites"；
+    /// 另有通配值 `"*"`（`PIN_ALL`），表示**所有分类**都置顶。
+    ///
+    /// 两种语义由设置项 `pin_global` 决定（默认关闭）：
+    ///   - 关闭（默认）：**按分类独立** —— 在「文本」里置顶不影响它在「历史」里的位置。
+    ///   - 开启：**互通** —— 整条内容只有一个置顶状态，任一分类置顶/取消其它分类同步。
+    ///
+    /// 互通模式下的置顶形如 `["*", "history"]`：通配项 `"*"` 是**同步置顶的永久标记**，
+    /// 后面那个具体分类名是**来源**，记下用户当初是在哪个分类里置顶的。
+    ///
+    /// `"*"` 不会因为关掉互通而消失（除非子选项 `pin_cancel_on_disable` 要求取消），
+    /// 所以「同步产生的置顶」一直认得出来：下次再开互通时它仍是同一条同步置顶，
+    /// 不会退化成每个分类各一条独立置顶。见 `normalize_pins`。
     ///
     /// 注意 `rename = "pinnedViews"`：这个结构体同时用于 IPC 与 index.json 持久化，
     /// 整体加 camelCase 会让旧 index.json（text_path/img_path…）解析失败、丢掉数据，
@@ -102,15 +113,82 @@ pub fn delete_item(id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// `pinned_views` 里的通配项：**同步置顶的永久标记**，表示在所有分类里置顶。
+/// 「置顶互通」开启时由 `toggle_pin` 写入；关掉互通后默认保留（见 `normalize_pins`）。
+pub const PIN_ALL: &str = "*";
+
+/// 切换置顶状态。返回改动后该条目的 `pinned_views`，前端直接用，不再自己推一遍。
+///
+/// 行为随设置项 `pin_global` 分两种：
+///   - 互通：整条内容一个状态。未置顶 → `["*", 当前分类]`；已置顶 → 清空。
+///   - 按分类独立（默认）：只有当前分类参与。
+///       * 该条已带同步标记 `"*"` 时说明它是互通产生的**同步置顶**，而同步置顶只有
+///         「有 / 没有」两个状态 —— 取消即整条取消，不是只摘掉当前分类；
+///       * 否则按普通置顶处理，只增删 `view` 这一项。
 #[tauri::command]
-pub fn toggle_pin(id: String, view: String) -> Result<(), String> {
+pub fn toggle_pin(id: String, view: String) -> Result<Vec<String>, String> {
+    let global = crate::settings::get().pin_global;
+    let mut out: Vec<String> = Vec::new();
     patch_item(&id, |i| {
-        if let Some(pos) = i.pinned_views.iter().position(|v| v == &view) {
+        if global {
+            if i.pinned_views.is_empty() {
+                i.pinned_views = vec![PIN_ALL.to_string(), view.clone()];
+            } else {
+                i.pinned_views.clear();
+            }
+        } else if i.pinned_views.iter().any(|v| v == PIN_ALL) {
+            // 这是一条**同步置顶**（互通产生的）。同步置顶只有「有」和「没有」两个状态，
+            // 取消就是整条取消：不能只摘掉当前分类 —— 那样按一次「取消」它在别的分类
+            // 仍然置顶，用户只能一个分类一个分类地取消。
+            i.pinned_views.clear();
+        } else if let Some(pos) = i.pinned_views.iter().position(|v| v == &view) {
             i.pinned_views.remove(pos);
         } else {
             i.pinned_views.push(view.clone());
         }
-    })
+        out = i.pinned_views.clone();
+    })?;
+    Ok(out)
+}
+
+/// 切换「置顶互通」开关后，把已有记录归一到新模式的表示。
+///
+///   - 开启互通：给所有已置顶的条目补上通配项 `"*"`；**原有的具体分类名保留**，
+///     它们记着来源，关掉互通时能原样回落。
+///   - 关闭互通：
+///       * `cancel_propagated = true`（「关闭时取消同步置顶」，默认开）→ 删掉 `"*"`，
+///         同步置顶随开关一起取消，置顶回到当初那个分类；来源没记下的旧数据回落到「历史」。
+///       * `cancel_propagated = false` → **原样保留 `"*"`**。同步置顶是永久标记：关掉
+///         互通后它继续在各分类置顶，下次再开互通时仍是同一条同步置顶，不会退化成
+///         每个分类各一条独立置顶（那样只能逐条手动取消）。
+pub fn normalize_pins(global: bool, cancel_propagated: bool) {
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return;
+    };
+    let mut hist = hist.lock().unwrap();
+    for i in hist.iter_mut() {
+        if global {
+            let has_all = i.pinned_views.iter().any(|v| v == PIN_ALL);
+            if !i.pinned_views.is_empty() && !has_all {
+                i.pinned_views.insert(0, PIN_ALL.to_string());
+            }
+            continue;
+        }
+        if !i.pinned_views.iter().any(|v| v == PIN_ALL) {
+            continue;
+        }
+        if !cancel_propagated {
+            // 保留同步置顶：`"*"` 就是这个永久标记，不动它。
+            continue;
+        }
+        i.pinned_views.retain(|v| v.as_str() != PIN_ALL);
+        if i.pinned_views.is_empty() {
+            // 来源分类没记下来（互通时代置顶的旧数据）→ 回落到「历史」：
+            // 历史是默认分类，也是「全局置顶」时代迁移的目标，丢掉这条置顶不合理。
+            i.pinned_views.push("history".to_string());
+        }
+    }
+    save_index(&dir, &hist);
 }
 
 #[tauri::command]

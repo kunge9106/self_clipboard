@@ -16,6 +16,11 @@ const TIER_CLASS = {
 // 全局状态
 let items = []; // 历史条目（内存中仅元数据，内容在磁盘）
 let currentView = "history";
+
+// 批量删除：由右键菜单进入。进入后点击条目即切换选中（不再复制回剪贴板），
+// 顶部搜索栏让位给选中操作条（见 index.html 的 .selectbar）。
+let selectMode = false;
+const selectedIds = new Set();
 let query = "";
 let settings = null; // 后端配置（get_settings）
 
@@ -283,6 +288,71 @@ function bindClearAllModal() {
 // 本次弹窗待清理的三组条目；确认时按勾选状态拼出最终 id 列表
 let clearViewTargets = null;
 
+// ---------------------------------------------------------------------------
+// 批量删除
+// ---------------------------------------------------------------------------
+
+function enterSelectMode() {
+  selectMode = true;
+  selectedIds.clear();
+  render({ keepScroll: true });
+}
+
+function exitSelectMode() {
+  if (!selectMode) return;
+  selectMode = false;
+  selectedIds.clear();
+  render({ keepScroll: true });
+}
+
+/**
+ * 切换一条的选中状态。
+ *
+ * 只改这张卡片的 class 并同步操作条，**不整表重绘** —— 重绘会把滚动位置和
+ * 已渲染的批次全部丢掉，选几条第 200 行开外的内容就得重新滚回去。
+ */
+function toggleSelect(id, card) {
+  if (selectedIds.has(id)) selectedIds.delete(id);
+  else selectedIds.add(id);
+  card.classList.toggle("is-selected", selectedIds.has(id));
+  syncSelectBar();
+}
+
+function syncSelectBar() {
+  const n = selectedIds.size;
+  const count = document.getElementById("select-count");
+  if (count) count.textContent = `已选 ${n} 项`;
+  const del = document.getElementById("select-delete");
+  if (del) del.disabled = n === 0;
+}
+
+async function deleteSelected() {
+  const ids = [...selectedIds];
+  if (ids.length === 0) return;
+  try {
+    await invoke("delete_items", { ids });
+  } catch (e) {
+    toast("删除失败：" + e);
+    return;
+  }
+  const gone = new Set(ids);
+  items = items.filter((i) => !gone.has(i.id));
+  selectMode = false;
+  selectedIds.clear();
+  // 保留滚动位置：删几条不该把人踹回列表顶部（与单条删除同一口径）
+  render({ keepScroll: true });
+  toast(`已删除 ${ids.length} 项`);
+}
+
+function bindSelectBar() {
+  const cancel = document.getElementById("select-cancel");
+  if (cancel) cancel.onclick = () => exitSelectMode();
+  const del = document.getElementById("select-delete");
+  if (del) del.onclick = () => deleteSelected();
+}
+
+// 「清空当前视图」：按钮 → 分组 → 弹窗或直接清
+
 function bindClearView() {
   document.getElementById("btn-clear-view").onclick = () => {
     const scope = filtered();
@@ -377,6 +447,9 @@ function bindNav() {
       .forEach((n) => n.classList.remove("is-active"));
     item.classList.add("is-active");
     currentView = item.dataset.view;
+    // 换分类 = 换了一批条目，选中集合不再对应，直接退出批量模式
+    selectMode = false;
+    selectedIds.clear();
     render();
   });
 }
@@ -413,9 +486,13 @@ function fileCopyOn() {
   return !!(settings && settings.fileCopy);
 }
 
-/** 置顶按分类独立：这条内容是否在 view 这个分类里被置顶 */
+/** `pinnedViews` 里的通配项：表示所有分类都置顶（设置里开了「置顶互通」时写入） */
+const PIN_ALL = "*";
+
+/** 这条内容是否在 view 这个分类里置顶。通配项对所有分类都成立。 */
 function isPinnedIn(item, view) {
-  return Array.isArray(item.pinnedViews) && item.pinnedViews.includes(view);
+  const vs = item.pinnedViews;
+  return Array.isArray(vs) && (vs.includes(PIN_ALL) || vs.includes(view));
 }
 
 /** 是否在任何分类里置顶过（用于清理豁免，避免误删别处置顶的内容） */
@@ -513,6 +590,9 @@ function render({ keepScroll = false } = {}) {
   const isSettings = currentView === "settings";
   // 设置页不需要搜索栏（需求 #1）
   toolbar.style.display = isSettings ? "none" : "";
+  // 批量选中模式下搜索栏让位给选中操作条
+  toolbar.classList.toggle("is-selecting", selectMode && !isSettings);
+  syncSelectBar();
   // 设置页底部状态栏只留版本号：左侧条数与右侧垃圾桶按钮隐藏。
   // 用 visibility 而不是 display —— 网格是 1fr/auto/1fr 三列，display:none 会让版本号
   // 掉进第一列（1fr）而不再居中；隐藏但占位才能保持居中。
@@ -661,7 +741,10 @@ function emptyHtml() {
 function cardEl(item) {
   const card = document.createElement("div");
   const pinned = isPinnedIn(item, currentView); // 置顶按分类独立，只看当前分类
-  card.className = "card" + (pinned ? " is-pinned" : "");
+  card.className =
+    "card" +
+    (pinned ? " is-pinned" : "") +
+    (selectMode && selectedIds.has(item.id) ? " is-selected" : "");
   card.dataset.id = item.id;
 
   // 内容区
@@ -705,8 +788,14 @@ function cardEl(item) {
   }
   card.appendChild(body);
 
-  // 左键 → 复制回剪贴板；右键 → 上下文菜单
-  card.addEventListener("click", () => copyBack(item));
+  // 左键 → 复制回剪贴板；批量选中模式下改为切换选中
+  card.addEventListener("click", () => {
+    if (selectMode) {
+      toggleSelect(item.id, card);
+      return;
+    }
+    copyBack(item);
+  });
   card.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1015,17 +1104,21 @@ function showMenu(x, y, entries) {
 function openContextMenu(x, y, item) {
   const pinnedHere = isPinnedIn(item, currentView);
   const viewName = { history: "历史", text: "文本", images: "图片", files: "文件", favorites: "收藏" }[currentView] || currentView;
+  // 带同步标记的条目是互通产生的「同步置顶」，它只有有/没有两个状态：取消即整条取消。
+  // 文案不能带分类名，否则看起来像只动了当前分类。
+  const synced = Array.isArray(item.pinnedViews) && item.pinnedViews.includes(PIN_ALL);
+  const pinLabel = synced
+    ? settings?.pinGlobal
+      ? "取消置顶"
+      : "取消同步置顶"
+    : (pinnedHere ? "取消置顶" : "置顶") + (settings?.pinGlobal ? "" : `（${viewName}）`);
   showMenu(x, y, [
     { label: "复制", act: () => copyBack(item) },
     {
-      // 置顶按分类独立：这里动的是「当前分类」下的置顶状态
-      label: pinnedHere ? `取消置顶（${viewName}）` : `置顶（${viewName}）`,
+      label: pinLabel,
       act: async () => {
-        await invoke("toggle_pin", { id: item.id, view: currentView });
-        const vs = Array.isArray(item.pinnedViews) ? item.pinnedViews : (item.pinnedViews = []);
-        const idx = vs.indexOf(currentView);
-        if (idx >= 0) vs.splice(idx, 1);
-        else vs.push(currentView);
+        // 新集合由后端按当前模式算好回传，前端不再重复实现一遍置顶规则
+        item.pinnedViews = await invoke("toggle_pin", { id: item.id, view: currentView });
         render({ keepScroll: true });
       },
     },
@@ -1036,6 +1129,11 @@ function openContextMenu(x, y, item) {
         item.favorite = !item.favorite;
         render({ keepScroll: true });
       },
+    },
+    {
+      // 批量删除是个模式：进入后左键改为选中，再点一次同一项即取消选中
+      label: selectMode ? "退出批量选中" : "批量删除",
+      act: () => (selectMode ? exitSelectMode() : enterSelectMode()),
     },
     {
       label: "删除",
@@ -1063,6 +1161,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeContextMenu();
     hideImagePreview();
+    exitSelectMode();
   }
 });
 document.addEventListener("contextmenu", (e) => {
@@ -1142,7 +1241,13 @@ function settingsGeneralHtml(s) {
       <span class="hint">开机后自动运行</span></div>
     <div class="row"><label>关闭时后台运行</label>
       <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
-      <span class="hint">关闭时收进托盘，继续在后台记录（右键托盘可开菜单）</span></div>`;
+      <span class="hint">关闭时收进托盘，继续在后台记录（右键托盘可开菜单）</span></div>
+    <div class="row"><label>置顶互通</label>
+      <input type="checkbox" id="set-pin-global" ${s.pinGlobal ? "checked" : ""} />
+      <span class="hint">任一分类置顶或取消，其它分类同步；关闭后各分类独立记录</span></div>
+    <div class="row"><label>　└ 关闭时取消同步置顶</label>
+      <input type="checkbox" id="set-pin-cancel" ${s.pinCancelOnDisable ? "checked" : ""} />
+      <span class="hint">勾选则关掉互通时连同它产生的同步置顶一起取消（置顶回到当初的分类）；不勾选则同步置顶永久保留</span></div>`;
 }
 
 function settingsAppearanceHtml(s) {
@@ -1425,7 +1530,8 @@ function renderUpdatePanels() {
     tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，当前 v${esc(cur)}`;
   } else if (info?.latest) {
     tip.className = "about-state is-ok";
-    tip.textContent = "已是最新版本（v" + cur + "）";
+    // 不带版本号：上方大字已经显示了当前版本，这里再写一遍是重复。
+    tip.textContent = "已是最新版本";
   } else {
     tip.className = "about-state";
     tip.textContent = "尚未检查更新";
@@ -1554,7 +1660,7 @@ async function aboutCheckUpdate() {
     toast(
       updateInfo.hasUpdate
         ? `发现新版本 v${updateInfo.latest}，当前 v${updateInfo.displayCurrent}`
-        : `已是最新版本（v${updateInfo.displayCurrent}）`
+        : "已是最新版本"
     );
   } catch (e) {
     if (tip) {
@@ -1794,6 +1900,24 @@ function bindSettings(view) {
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
   bindCheck("set-clean-confirm", "set_clean_confirm_exit");
 
+  bindCheck("set-pin-cancel", "set_pin_cancel_on_disable");
+
+  // 置顶互通不能走 bindCheck：这个开关会把已有置顶记录归一到新表示，
+  // 必须顺带把本地缓存的 items 拉新的，否则列表里的置顶徽章/排序还是旧的。
+  const pinGlobal = view.querySelector("#set-pin-global");
+  if (pinGlobal)
+    pinGlobal.onchange = async () => {
+      try {
+        await invoke("set_pin_global", { value: pinGlobal.checked });
+        settings = await invoke("get_settings");
+        items = await invoke("get_history");
+        toast(pinGlobal.checked ? "置顶已改为全分类互通" : "置顶已改为按分类独立");
+      } catch (e) {
+        toast("保存失败：" + e);
+        pinGlobal.checked = !pinGlobal.checked;
+      }
+    };
+
   const retention = view.querySelector("#set-retention");
   if (retention)
     retention.onchange = async () => {
@@ -1949,6 +2073,7 @@ async function main() {
   bindExitModal();
   bindClearAllModal();
   bindClearView();
+  bindSelectBar();
   bindClearViewModal();
   bindSingletonModal();
   bindFirstRunModals();
@@ -1987,7 +2112,10 @@ async function main() {
     document.getElementById("status-version").textContent =
       `Version：${(await getVersion())}-ikun`;
   } catch (e) {
-    document.getElementById("status-version").textContent = "Version：2.1.9-ikun";
+    // 版本号不在前端写死：它由 tauri.conf.json 引用 package.json 得到，
+    // 写死会在下次发版后与真实版本不一致。取不到时留一个占位符。
+    console.error("get version failed", e);
+    document.getElementById("status-version").textContent = "Version：—";
   }
 
   render();

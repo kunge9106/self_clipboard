@@ -250,6 +250,8 @@ pub fn run() {
             settings::set_retention_days,
             settings::set_autostart,
             settings::set_file_copy,
+            settings::set_pin_global,
+            settings::set_pin_cancel_on_disable,
             tray::tray_show_main,
             tray::tray_quit,
             tray::tray_menu_look,
