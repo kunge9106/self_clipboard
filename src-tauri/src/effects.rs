@@ -632,8 +632,19 @@ fn apply_acrylic(hwnd: isize, dark: bool) -> Result<(), i32> {
 }
 
 /// 切换「圆角模式」后立即生效（无需重启）
+///
+/// ⚠️ 不能无脑 `apply_acrylic`：Win11 走 **SystemBackdrop(Mica)** 档，正常材质是 Mica 而非 acrylic。
+/// - **开启圆角**：必须关掉**所有**系统材质（Mica/SystemBackdrop 的 backdrop + accent 都要清），
+///   否则系统材质的矩形 blur 仍在，圆角外会留直角残留；
+/// - **关闭圆角**：必须按当前档位**完整恢复**（SystemBackdrop→Mica、Acrylic→acrylic），
+///   只施加 acrylic 恢复不了 Mica，表现为「关了圆角材质还是圆角模式的样子」。
 pub fn apply_round_mode(hwnd: isize, dark: bool) {
-    let _ = apply_acrylic(hwnd, dark);
+    if is_round() {
+        clear_system_material(hwnd, current_tier());
+        clear_accent(hwnd);
+    } else {
+        let _ = apply(hwnd, dark);
+    }
 }
 
 // ---------------------------------------------------------------------------
