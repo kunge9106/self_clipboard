@@ -1406,7 +1406,17 @@ function renderUpdatePanels() {
   }
 
   // 更新日志：标题带版本号，所以「这条说明属于哪一版」一眼可辨。
-  renderNotes(info?.latest || "", info?.notes || "");
+  //   有新版 → 显示新版本的说明（这才是你要不要升级的依据）；
+  //   没有新版 → 显示**本机这版**的说明。它随包内置，所以 beta 这种
+  //              GitHub 上还没有 Release 的版本也能看到自己的更新日志；
+  //   两者都没有 → 回退到远端最近一个版本的说明。
+  if (has) {
+    renderNotes(info.latest, info.notes);
+  } else if (info?.localNotes) {
+    renderNotes(info.localTag || cur, info.localNotes);
+  } else {
+    renderNotes(info?.latest || "", info?.notes || "");
+  }
 }
 
 /** 下载进度画进按钮：背景由左向右填充（像手机装应用那样），文字盖在填充层上。 */

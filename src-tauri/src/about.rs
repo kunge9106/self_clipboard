@@ -561,6 +561,37 @@ fn fetch_release() -> Result<Release, String> {
     best.ok_or_else(|| "没有找到任何发布版本".into())
 }
 
+/// 随包内置的更新日志（仓库根 `CHANGELOG.md`，**编译期内嵌**进 exe）。
+///
+/// 为什么需要：GitHub 上未必存在「当前这一版」的 Release —— beta 版尤其如此。
+/// 那时远端返回的是上一个正式版的说明，用户看到的就不是自己这版改了什么。
+/// 内置一份就没这个问题：本机跑的是哪一版，就显示哪一版的说明。
+const CHANGELOG: &str = include_str!("../../CHANGELOG.md");
+
+/// 从 CHANGELOG 里取出版本 `v` 那一节（`## v` 到下一个 `## ` 之间）。
+///
+/// 忽略大小写与前后空白，兼容 `## 2.1.9-beta` / `## v2.1.9-beta` 两种写法。
+/// 找不到就返回空串，由调用方回退去显示远端版本说明。
+fn changelog_section(v: &str) -> String {
+    let want = v.trim().trim_start_matches('v').to_lowercase();
+    let mut out: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for line in CHANGELOG.lines() {
+        if let Some(rest) = line.strip_prefix("## ") {
+            if inside {
+                break; // 遇到下一个版本标题，本节结束
+            }
+            let tag = rest.trim().trim_start_matches('v').to_lowercase();
+            inside = tag == want;
+            continue;
+        }
+        if inside {
+            out.push(line);
+        }
+    }
+    out.join("\n").trim().to_string()
+}
+
 /// 统一的结果 payload（`check_update` 与 `update_state` 返回同一个形状）。
 fn payload(rel: &Release) -> serde_json::Value {
     let cur = env!("CARGO_PKG_VERSION");
@@ -575,6 +606,10 @@ fn payload(rel: &Release) -> serde_json::Value {
         "assetUrl": rel.asset_url,
         "assetName": rel.asset_name,
         "assetSize": rel.asset_size,
+        // 本机这版的说明（随包内置）。没有新版本时前端显示它，
+        // 这样 beta / 未发布版本也能看到自己的更新日志。
+        "localTag": cur,
+        "localNotes": changelog_section(cur),
     })
 }
 
