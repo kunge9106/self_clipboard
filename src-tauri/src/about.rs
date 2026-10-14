@@ -314,9 +314,24 @@ fn log_append(line: &str) {
     crate::logger::write_line("INFO", "update", line);
 }
 
+/// `CreateProcess` 标志：在新进程里不创建控制台窗口。
+///
+/// 轻贴是 GUI 程序（`windows_subsystem = "windows"`，自身没有控制台），而 `curl.exe`
+/// 是**控制台程序**——不加这个标志，Windows 会为它新建一个黑窗口：用户每进一次关于页、
+/// 每点一次检查更新都会看到 cmd 闪现；探测多个代理时更是连着闪好几次。
+/// 加上之后子进程无窗口运行，功能与输出（stdout/stderr 管道）完全不受影响。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// 用某个代理（或直连，proxy 为空）请求一次，返回 (是否拿到数据, 响应体)。
 fn curl_fetch(url: &str, proxy: &str) -> (bool, String) {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+
     let mut cmd = std::process::Command::new("curl");
+    // 抑制黑窗口（见 CREATE_NO_WINDOW 注释）
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.args([
         "-sSL",
         "--max-time",
