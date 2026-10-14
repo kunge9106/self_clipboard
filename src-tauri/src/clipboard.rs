@@ -6,7 +6,7 @@
 //!   - 内容永不常驻内存：index 只存元数据，长文本/图片按 id 落盘分片
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -989,16 +989,56 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
     if !new_dir.is_dir() {
         return Err("所选路径不是目录".into());
     }
-    // 不做 canonicalize（会引入 \\?\ 前缀），仅清理可能存在的扩展前缀
-    let new_dir_str = strip_ext_prefix(&new_dir.to_string_lossy());
 
-    if let Some(old) = DIR.get() {
-        if old.to_string_lossy() == new_dir_str {
-            return Ok(Some(new_dir_str));
-        }
-        move_dir_contents(old, &new_dir).map_err(|e| format!("迁移缓存文件失败：{e}"))?;
+    let old = match DIR.get() {
+        Some(d) => d.clone(),
+        None => return Err("存储目录未初始化".into()),
+    };
+
+    // ── 防线①：归一化之后判同 ──────────────────────────────
+    // 字符串比较不可靠：`\\?\` 前缀、末尾反斜杠、短路径…都能让「同一个目录」
+    // 长得不一样，于是同一目录也被当成"换了目录"而进入迁移 → 自我搬迁 → 无限嵌套/卡死。
+    // canonicalize 会把这些形式差异全部归一。
+    let old_c = fs::canonicalize(&old).map_err(|e| format!("当前缓存目录不可访问：{e}"))?;
+    let new_c = fs::canonicalize(&new_dir).map_err(|e| format!("所选目录不可访问：{e}"))?;
+
+    if old_c == new_c {
+        // 选的就是当前目录：什么都不用做，更不能迁移
+        return Ok(Some(strip_ext_prefix(&new_dir.to_string_lossy())));
     }
 
+    // ── 防线②：拒绝危险的包含关系 ────────────────────────
+    if new_c.starts_with(&old_c) {
+        return Err("新目录不能是当前缓存目录本身或其子目录，请选一个外部位置".into());
+    }
+    if old_c.starts_with(&new_c) {
+        return Err("新目录不能是当前缓存目录的上级目录，请选一个外部位置".into());
+    }
+
+    // ── 目录识别：空目录 vs 非空目录 ─────────────────────
+    // - 选中的是空目录 → 直接当作新的缓存根，data/images/files/index.json 搬进去；
+    // - 选中的非空     → 不污染它，在其下建一个缓存子文件夹（沿用当前缓存目录名）再搬。
+    let target_root = if dir_is_empty(&new_dir) {
+        new_dir.clone()
+    } else {
+        let sub_name = old
+            .file_name()
+            .map(|s| s.to_os_string())
+            .ok_or_else(|| "无法确定缓存目录名".to_string())?;
+        let sub = new_dir.join(&sub_name);
+        if sub.exists() {
+            return Err(format!(
+                "目标位置已存在同名文件夹「{}」，请先清空它或换一个目录",
+                sub_name.to_string_lossy()
+            ));
+        }
+        sub
+    };
+
+    // ── 防线③在 move_dir_contents 内部（结构性杜绝无限递归）──
+    move_dir_contents(&old, &target_root).map_err(|e| format!("迁移缓存文件失败：{e}"))?;
+
+    let new_dir_str = strip_ext_prefix(&target_root.to_string_lossy());
     crate::settings::update(|c| c.cache_dir = Some(new_dir_str.clone()));
     println!("[clipboard] 缓存目录已迁移至 {new_dir_str}，即将重启");
 
@@ -1011,14 +1051,57 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<String>, String> {
     Ok(Some(new_dir_str))
 }
 
+/// 目录是否为空（不含任何条目；隐藏文件也算有内容）
+fn dir_is_empty(dir: &Path) -> bool {
+    match fs::read_dir(dir) {
+        Ok(mut rd) => rd.next().is_none(),
+        Err(_) => false,
+    }
+}
+
 /// 递归把 old 内所有内容移动到 new（跨卷也适用：rename 失败退回 copy+delete）
+///
+/// **安全约束：结构性地杜绝"自己搬进自己"导致的无限嵌套目录 / 卡死闪退**
+/// - **先快照、后搬运**：先把 old 的子项收集成列表，再逐个移动。若不这样做，
+///   `create_dir_all(new)` 刚建出的新目录会被随后的 `read_dir(old)` 当成 old 的一个
+///   条目读回来——一旦 new 位于 old 内部，就必然自我嵌套、一层套一层。
+/// - **每层断言**：`old != new` 且 `new` 不在 `old` 内部，违反立即返回错误、绝不继续。
+/// - **深度上限**兜底，任何异常递归都会在此终止。
 fn move_dir_contents(old: &PathBuf, new: &PathBuf) -> std::io::Result<()> {
+    move_dir_contents_depth(old, new, 0)
+}
+
+fn move_dir_contents_depth(old: &Path, new: &Path, depth: u32) -> std::io::Result<()> {
+    const MAX_DEPTH: u32 = 64;
+    if depth > MAX_DEPTH {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "目录层级异常过深，已中止迁移",
+        ));
+    }
+    if old == new || new.starts_with(old) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "目标目录落在源目录内部，已中止迁移",
+        ));
+    }
+
     fs::create_dir_all(new)?;
-    for entry in fs::read_dir(old)?.flatten() {
-        let from = entry.path();
-        let to = new.join(entry.file_name());
+
+    // 先快照 old 当前的子项，不边建边读
+    let children: Vec<PathBuf> = fs::read_dir(old)?.flatten().map(|e| e.path()).collect();
+
+    for from in children {
+        // 兜底：万一快照里混进了 new 自身（或 new 落在某个 from 内部），跳过，防自噬
+        if from == new || new.starts_with(&from) {
+            continue;
+        }
+        let Some(name) = from.file_name() else {
+            continue;
+        };
+        let to = new.join(name);
         if from.is_dir() {
-            move_dir_contents(&from, &to)?;
+            move_dir_contents_depth(&from, &to, depth + 1)?;
             fs::remove_dir_all(&from).ok();
         } else if fs::rename(&from, &to).is_err() {
             fs::copy(&from, &to)?;

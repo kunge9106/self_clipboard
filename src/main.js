@@ -1285,7 +1285,7 @@ function bindSettings(view) {
     pickDir.onclick = async () => {
       try {
         const res = await invoke("pick_cache_dir");
-        if (res) toast("缓存目录已迁移，即将重启…");
+        if (res) toast(`已迁移到「${res}」，即将重启…`);
       } catch (e) {
         toast("更改目录失败：" + e);
       }
