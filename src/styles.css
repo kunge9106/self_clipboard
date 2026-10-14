@@ -6,7 +6,7 @@
    ========================================================================== */
 
 :root {
-  --sidebar-w: 208px;
+  --sidebar-w: 168px;
   --titlebar-h: 40px;
 
   /* 窗口圆角；JS 会按后端返回的档位上限覆盖它（Win10 acrylic = 20px）。
@@ -711,6 +711,9 @@ html:not(.hovers-off) .btn-primary:hover {
   scrollbar-gutter: stable;
   /* 与 .view 的右内边距相等（12px）→ 滚动条在两侧留白中视觉居中 */
   padding-right: 12px;
+  /* 左缘 2px：卡片与窗口左边界之间留一点缝。滚动容器没有左内边距时，
+     卡片描边紧贴容器边界，观感上像「贴死」了。 */
+  padding-left: 2px;
   display: flex;
   flex-direction: column;
   gap: 8px;
