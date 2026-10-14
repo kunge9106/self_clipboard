@@ -1147,7 +1147,10 @@ function settingsGeneralHtml(s) {
       <span class="hint">关闭时收进托盘，继续在后台记录（右键托盘可开菜单）</span></div>
     <div class="row"><label>置顶互通</label>
       <input type="checkbox" id="set-pin-global" ${s.pinGlobal ? "checked" : ""} />
-      <span class="hint">任一分类置顶或取消，其它分类同步；关闭后各分类独立记录</span></div>`;
+      <span class="hint">任一分类置顶或取消，其它分类同步；关闭后各分类独立记录</span></div>
+    <div class="row"><label>　└ 关闭时取消互通产生的置顶</label>
+      <input type="checkbox" id="set-pin-cancel" ${s.pinCancelOnDisable ? "checked" : ""} />
+      <span class="hint">勾选后只在当初置顶的分类保留；不勾选则关掉互通后原先铺到各分类的置顶继续保留</span></div>`;
 }
 
 function settingsAppearanceHtml(s) {
@@ -1798,6 +1801,8 @@ function bindSettings(view) {
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
   bindCheck("set-clean-confirm", "set_clean_confirm_exit");
+
+  bindCheck("set-pin-cancel", "set_pin_cancel_on_disable");
 
   // 置顶互通不能走 bindCheck：这个开关会把已有置顶记录归一到新表示，
   // 必须顺带把本地缓存的 items 拉新的，否则列表里的置顶徽章/排序还是旧的。

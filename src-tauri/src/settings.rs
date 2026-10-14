@@ -82,6 +82,15 @@ pub struct Config {
     /// 默认关闭的原因：这是交互语义的改变，不该在升版本时静默替换用户已经形成的用法。
     #[serde(default)]
     pub pin_global: bool,
+    /// 关闭「置顶互通」时，是否把互通铺到其它分类的置顶一并取消。
+    ///
+    /// **默认开启**：互通期间铺开的置顶随开关一起撤销，只留下当初置顶的那个分类
+    /// （来源分类记录在 `pinned_views` 的具体分类名里）。
+    /// 关闭时：那些置顶落成全部具体分类，即关掉互通后内容仍在各分类置顶。
+    ///
+    /// 只影响「关闭互通」这一刻的归一动作，见 `clipboard::normalize_pins`。
+    #[serde(default = "default_true")]
+    pub pin_cancel_on_disable: bool,
     /// 自定义缓存目录（None = 使用 app_data_dir/clipboard）
     #[serde(default)]
     pub cache_dir: Option<String>,
@@ -123,6 +132,10 @@ pub struct UpdateCache {
 
 fn default_retention() -> u32 {
     3
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 直角 / 圆角模式各自的**默认**浓度。
@@ -194,6 +207,7 @@ impl Default for Config {
             round_mode: false,
             file_copy: false, // 默认关闭：不记录文件复制
             pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
+            pin_cancel_on_disable: true, // 默认开启：关掉互通即撤销它铺开的置顶
             cache_dir: None,
             update_cache: None,
         }
@@ -285,6 +299,7 @@ pub fn get_settings() -> serde_json::Value {
         "roundMode": cfg.round_mode,
         "fileCopy": cfg.file_copy,
         "pinGlobal": cfg.pin_global,
+        "pinCancelOnDisable": cfg.pin_cancel_on_disable,
         "cacheDir": cfg.cache_dir,
         "autoStart": autostart::is_enabled(),
         "askedAutostart": cfg.asked_autostart,
@@ -330,8 +345,18 @@ pub fn set_file_copy(value: bool) -> Result<(), String> {
 /// 「互通」与「按分类独立」两种写法，界面表现与前面对不上。
 #[tauri::command]
 pub fn set_pin_global(value: bool) -> Result<(), String> {
-    update(|c| c.pin_global = value);
-    crate::clipboard::normalize_pins(value);
+    // update 返回改动后的快照：归一动作要用到子选项当前的值
+    let cfg = update(|c| c.pin_global = value);
+    crate::clipboard::normalize_pins(value, cfg.pin_cancel_on_disable);
+    Ok(())
+}
+
+/// 「关闭互通时取消其产生的置顶」子选项（设置页，默认开启）
+///
+/// 只存值，不立刻动数据 —— 它决定的是**下次关闭互通时**的归一动作。
+#[tauri::command]
+pub fn set_pin_cancel_on_disable(value: bool) -> Result<(), String> {
+    update(|c| c.pin_cancel_on_disable = value);
     Ok(())
 }
 

@@ -48,8 +48,12 @@ pub struct HistoryItem {
     ///
     /// 两种语义由设置项 `pin_global` 决定（默认关闭）：
     ///   - 关闭（默认）：**按分类独立** —— 在「文本」里置顶不影响它在「历史」里的位置。
-    ///   - 开启：**互通** —— 整条内容只有一个置顶状态，任一分类置顶/取消其它分类同步，
-    ///     存储上收敛成 `["*"]`。切换开关时由 `normalize_pins` 在两种表示之间归一。
+    ///   - 开启：**互通** —— 整条内容只有一个置顶状态，任一分类置顶/取消其它分类同步。
+    ///
+    /// 互通模式下的置顶形如 `["*", "history"]`：通配项负责「各分类都算置顶」，
+    /// 后面那个具体分类名是**来源**，记下用户当初是在哪个分类里置顶的。
+    /// 关闭互通时删 `"*"`，铺到其它分类的那部分是否一并撤销由
+    /// `settings.pin_cancel_on_disable` 决定（见 `normalize_pins`）。
     ///
     /// 注意 `rename = "pinnedViews"`：这个结构体同时用于 IPC 与 index.json 持久化，
     /// 整体加 camelCase 会让旧 index.json（text_path/img_path…）解析失败、丢掉数据，
@@ -107,7 +111,7 @@ pub fn delete_item(id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 已知分类，取值与前端 `data-view` 一致。`pinned_views` 里只允许出现这些值与 `PIN_ALL`。
+/// 已知分类，取值与前端 `data-view` 一致。
 const VIEWS: [&str; 5] = ["history", "text", "images", "files", "favorites"];
 /// `pinned_views` 里的通配项：表示在**所有分类**里置顶。
 /// 「置顶互通」（`settings.pin_global`）开启时写入的就是它。
@@ -116,8 +120,10 @@ pub const PIN_ALL: &str = "*";
 /// 切换置顶状态。返回改动后该条目的 `pinned_views`，前端直接用，不再自己推一遍。
 ///
 /// 行为随设置项 `pin_global` 分两种：
-///   - 互通：整条内容一个状态。未置顶 → `["*"]`，已置顶 → 清空。
-///   - 按分类独立（默认）：只增删 `view` 这一项。
+///   - 互通：整条内容一个状态。已置顶 → 清空；未置顶 → `["*", 当前分类]`
+///     （通配项 + 来源分类，供关闭互通时回落）。
+///   - 按分类独立（默认）：只增删 `view` 这一项；若存在互通留下的通配项，一并去掉 ——
+///     只要 `"*"` 还在，任何单独分类的取消都不会生效。
 #[tauri::command]
 pub fn toggle_pin(id: String, view: String) -> Result<Vec<String>, String> {
     let global = crate::settings::get().pin_global;
@@ -125,23 +131,19 @@ pub fn toggle_pin(id: String, view: String) -> Result<Vec<String>, String> {
     patch_item(&id, |i| {
         if global {
             if i.pinned_views.is_empty() {
-                i.pinned_views = vec![PIN_ALL.to_string()];
+                i.pinned_views = vec![PIN_ALL.to_string(), view.clone()];
             } else {
                 i.pinned_views.clear();
             }
-        } else if i.pinned_views.iter().any(|v| v == PIN_ALL) {
-            // 这条是互通模式下置顶的（通配项）。现在按分类独立地取消它：
-            // 把通配展开成「除当前分类外」的具体分类 —— 除当前这一处外，别处仍然置顶，
-            // 与用户在界面上看到的状态连续。
-            i.pinned_views = VIEWS
-                .iter()
-                .filter(|v| **v != view.as_str())
-                .map(|v| v.to_string())
-                .collect();
-        } else if let Some(pos) = i.pinned_views.iter().position(|v| v == &view) {
-            i.pinned_views.remove(pos);
         } else {
-            i.pinned_views.push(view.clone());
+            // 先摘掉互通遗留的通配项。来源分类此时也一并留在列表里，
+            // 于是「关掉互通后原来的来源仍在置顶」这件事无需再单独处理。
+            i.pinned_views.retain(|v| v.as_str() != PIN_ALL);
+            if let Some(pos) = i.pinned_views.iter().position(|v| v == &view) {
+                i.pinned_views.remove(pos);
+            } else {
+                i.pinned_views.push(view.clone());
+            }
         }
         out = i.pinned_views.clone();
     })?;
@@ -150,24 +152,36 @@ pub fn toggle_pin(id: String, view: String) -> Result<Vec<String>, String> {
 
 /// 切换「置顶互通」开关后，把已有记录归一到新模式的表示。
 ///
-///   - 开启互通：任何非空的 `pinned_views` 收敛成 `["*"]`。互通模式下置顶是全分类一致的
-///     单一状态，分开记录没有意义；不收敛就会出现「开着互通却只有部分分类显示置顶」。
-///   - 关闭互通：把 `["*"]` 展开成全部具体分类，之后各分类各自记录。
+///   - 开启互通：给所有已置顶的条目补上通配项 `"*"`；**原有的具体分类名保留**，
+///     它们记着来源，关掉互通时能原样回落。
+///   - 关闭互通：删掉通配项 `"*"`，通配项铺到其它分类的那部分怎么处理由
+///     `cancel_propagated`（设置页「关闭时取消互通产生的置顶」，默认开）决定：
+///       * `true`  → 只留来源分类，互通铺过去的置顶随开关一起撤销；
+///       * `false` → 落成全部具体分类，即关掉互通后这些内容仍在各分类置顶。
 ///
-/// 归一方向有损（互通看不到原来分在哪些分类），这是开关本身的语义；两种表示各自唯一，
-/// 便于排查，也避免同一份数据出现两种等价写法。
-pub fn normalize_pins(global: bool) {
+/// 来源分类缺失时（在互通模式下置顶、没记下来源的旧数据）回落到「历史」：
+/// 历史是默认分类，也是「全局置顶」时代迁移的目标，丢掉这条置顶不合理。
+pub fn normalize_pins(global: bool, cancel_propagated: bool) {
     let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
         return;
     };
     let mut hist = hist.lock().unwrap();
     for i in hist.iter_mut() {
         if global {
-            if !i.pinned_views.is_empty() {
-                i.pinned_views = vec![PIN_ALL.to_string()];
+            let has_all = i.pinned_views.iter().any(|v| v == PIN_ALL);
+            if !i.pinned_views.is_empty() && !has_all {
+                i.pinned_views.insert(0, PIN_ALL.to_string());
             }
-        } else if i.pinned_views.iter().any(|v| v == PIN_ALL) {
+            continue;
+        }
+        if !i.pinned_views.iter().any(|v| v == PIN_ALL) {
+            continue;
+        }
+        i.pinned_views.retain(|v| v.as_str() != PIN_ALL);
+        if !cancel_propagated {
             i.pinned_views = VIEWS.iter().map(|v| v.to_string()).collect();
+        } else if i.pinned_views.is_empty() {
+            i.pinned_views.push("history".to_string());
         }
     }
     save_index(&dir, &hist);
