@@ -1290,11 +1290,14 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   pointer-events: auto;
 }
 
+/* 热区贴着窗口最外圈那条边框线，厚度与系统原生的可调整边框相当
+   （100% DPI 下约 4–6px）。角上给到 10×10：斜向拖动要同时命中的是两个方向，
+   面积太小会「怎么点都不动」。 */
 .rz-n,
 .rz-s {
-  left: 10px;
-  right: 10px;
-  height: 5px;
+  left: 12px;
+  right: 12px;
+  height: 6px;
   cursor: ns-resize;
 }
 .rz-n {
@@ -1306,9 +1309,9 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 
 .rz-w,
 .rz-e {
-  top: 10px;
-  bottom: 10px;
-  width: 5px;
+  top: 12px;
+  bottom: 12px;
+  width: 6px;
   cursor: ew-resize;
 }
 .rz-w {
