@@ -1555,15 +1555,13 @@ function showUpdateBanner() {
 
   el.querySelector("#ub-go").onclick = () => {
     el.remove();
-    // 走真实点击：导航是事件委托在 .sidebar 上的，这样最不容易漏掉状态同步
-    const nav = document.querySelector('.sidebar-footer .nav-item[data-view="settings"]');
-    if (nav) nav.click();
+    // 先定好要显示的分类，再走真实点击 —— 导航是事件委托在 .sidebar 上的，
+    // 这样最不容易漏掉状态同步（render() 会按 settingsTab 渲染设置页）。
     settingsTab = "about";
-    const view = document.getElementById("view");
-    if (view) {
-      view.innerHTML = settingsHtml();
-      bindSettings(view);
-    }
+    const nav = document.querySelector(
+      '.sidebar-footer .nav-item[data-view="settings"]'
+    );
+    if (nav) nav.click();
   };
   el.querySelector("#ub-close").onclick = () => el.remove();
 }
