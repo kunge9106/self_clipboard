@@ -16,6 +16,11 @@ const TIER_CLASS = {
 // 全局状态
 let items = []; // 历史条目（内存中仅元数据，内容在磁盘）
 let currentView = "history";
+
+// 批量删除：由右键菜单进入。进入后点击条目即切换选中（不再复制回剪贴板），
+// 顶部搜索栏让位给选中操作条（见 index.html 的 .selectbar）。
+let selectMode = false;
+const selectedIds = new Set();
 let query = "";
 let settings = null; // 后端配置（get_settings）
 
@@ -283,6 +288,71 @@ function bindClearAllModal() {
 // 本次弹窗待清理的三组条目；确认时按勾选状态拼出最终 id 列表
 let clearViewTargets = null;
 
+// ---------------------------------------------------------------------------
+// 批量删除
+// ---------------------------------------------------------------------------
+
+function enterSelectMode() {
+  selectMode = true;
+  selectedIds.clear();
+  render({ keepScroll: true });
+}
+
+function exitSelectMode() {
+  if (!selectMode) return;
+  selectMode = false;
+  selectedIds.clear();
+  render({ keepScroll: true });
+}
+
+/**
+ * 切换一条的选中状态。
+ *
+ * 只改这张卡片的 class 并同步操作条，**不整表重绘** —— 重绘会把滚动位置和
+ * 已渲染的批次全部丢掉，选几条第 200 行开外的内容就得重新滚回去。
+ */
+function toggleSelect(id, card) {
+  if (selectedIds.has(id)) selectedIds.delete(id);
+  else selectedIds.add(id);
+  card.classList.toggle("is-selected", selectedIds.has(id));
+  syncSelectBar();
+}
+
+function syncSelectBar() {
+  const n = selectedIds.size;
+  const count = document.getElementById("select-count");
+  if (count) count.textContent = `已选 ${n} 项`;
+  const del = document.getElementById("select-delete");
+  if (del) del.disabled = n === 0;
+}
+
+async function deleteSelected() {
+  const ids = [...selectedIds];
+  if (ids.length === 0) return;
+  try {
+    await invoke("delete_items", { ids });
+  } catch (e) {
+    toast("删除失败：" + e);
+    return;
+  }
+  const gone = new Set(ids);
+  items = items.filter((i) => !gone.has(i.id));
+  selectMode = false;
+  selectedIds.clear();
+  // 保留滚动位置：删几条不该把人踹回列表顶部（与单条删除同一口径）
+  render({ keepScroll: true });
+  toast(`已删除 ${ids.length} 项`);
+}
+
+function bindSelectBar() {
+  const cancel = document.getElementById("select-cancel");
+  if (cancel) cancel.onclick = () => exitSelectMode();
+  const del = document.getElementById("select-delete");
+  if (del) del.onclick = () => deleteSelected();
+}
+
+// 「清空当前视图」：按钮 → 分组 → 弹窗或直接清
+
 function bindClearView() {
   document.getElementById("btn-clear-view").onclick = () => {
     const scope = filtered();
@@ -377,6 +447,9 @@ function bindNav() {
       .forEach((n) => n.classList.remove("is-active"));
     item.classList.add("is-active");
     currentView = item.dataset.view;
+    // 换分类 = 换了一批条目，选中集合不再对应，直接退出批量模式
+    selectMode = false;
+    selectedIds.clear();
     render();
   });
 }
@@ -517,6 +590,9 @@ function render({ keepScroll = false } = {}) {
   const isSettings = currentView === "settings";
   // 设置页不需要搜索栏（需求 #1）
   toolbar.style.display = isSettings ? "none" : "";
+  // 批量选中模式下搜索栏让位给选中操作条
+  toolbar.classList.toggle("is-selecting", selectMode && !isSettings);
+  syncSelectBar();
   // 设置页底部状态栏只留版本号：左侧条数与右侧垃圾桶按钮隐藏。
   // 用 visibility 而不是 display —— 网格是 1fr/auto/1fr 三列，display:none 会让版本号
   // 掉进第一列（1fr）而不再居中；隐藏但占位才能保持居中。
@@ -665,7 +741,10 @@ function emptyHtml() {
 function cardEl(item) {
   const card = document.createElement("div");
   const pinned = isPinnedIn(item, currentView); // 置顶按分类独立，只看当前分类
-  card.className = "card" + (pinned ? " is-pinned" : "");
+  card.className =
+    "card" +
+    (pinned ? " is-pinned" : "") +
+    (selectMode && selectedIds.has(item.id) ? " is-selected" : "");
   card.dataset.id = item.id;
 
   // 内容区
@@ -709,8 +788,14 @@ function cardEl(item) {
   }
   card.appendChild(body);
 
-  // 左键 → 复制回剪贴板；右键 → 上下文菜单
-  card.addEventListener("click", () => copyBack(item));
+  // 左键 → 复制回剪贴板；批量选中模式下改为切换选中
+  card.addEventListener("click", () => {
+    if (selectMode) {
+      toggleSelect(item.id, card);
+      return;
+    }
+    copyBack(item);
+  });
   card.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1046,6 +1131,11 @@ function openContextMenu(x, y, item) {
       },
     },
     {
+      // 批量删除是个模式：进入后左键改为选中，再点一次同一项即取消选中
+      label: selectMode ? "退出批量选中" : "批量删除",
+      act: () => (selectMode ? exitSelectMode() : enterSelectMode()),
+    },
+    {
       label: "删除",
       danger: true,
       act: async () => {
@@ -1071,6 +1161,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeContextMenu();
     hideImagePreview();
+    exitSelectMode();
   }
 });
 document.addEventListener("contextmenu", (e) => {
@@ -1981,6 +2072,7 @@ async function main() {
   bindExitModal();
   bindClearAllModal();
   bindClearView();
+  bindSelectBar();
   bindClearViewModal();
   bindSingletonModal();
   bindFirstRunModals();

@@ -523,6 +523,47 @@ html:not(.hovers-off) #update-banner .ub-close:hover {
   box-shadow: 0 0 0 1px rgba(47, 107, 255, 0.25);
 }
 
+/* 批量删除模式的操作条：与搜索栏同一个位置、同样占满宽度。
+   用 .toolbar.is-selecting 切换显隐，而不是给元素加 hidden —— 这两者都是
+   display:flex，靠 hidden 属性压不住（UA 的 [hidden] 规则优先级更低）。 */
+.selectbar {
+  display: none;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.toolbar.is-selecting .search {
+  display: none;
+}
+
+.toolbar.is-selecting .selectbar {
+  display: flex;
+}
+
+.selectbar-count {
+  color: var(--text-dim);
+}
+
+.selectbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 操作条里的按钮收一档高度，与 32px 的搜索栏对齐 */
+.selectbar-actions .btn-ghost,
+.selectbar-actions .btn-danger {
+  height: 30px;
+  align-self: center;
+}
+
+.selectbar-actions .btn-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .search-icon {
   width: 14px;
   height: 14px;
@@ -698,6 +739,14 @@ html:not(.hovers-off) .card:hover {
 
 .card.is-pinned {
   border-color: var(--accent);
+}
+
+/* 批量删除：选中态用红色描边 + 一圈同色 ring。
+   不能沿用置顶的 accent 蓝 —— 置顶本来就把描边设成 accent，两者会分不清；
+   而且这里选中的条目即将被删除，红色语义也对得上。 */
+.card.is-selected {
+  border-color: #e81123;
+  box-shadow: 0 0 0 1px #e81123, var(--card-shadow);
 }
 
 /* 文件条目的原路径已失效（被移动 / 改名 / 删除）——整条压暗 + 标「已失效」 */
