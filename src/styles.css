@@ -411,6 +411,14 @@ html:not(.hovers-off) .nav-item:hover {
   font-family: var(--font);
   font-size: 13px;
   color: var(--text);
+  /* 自动收起（10s）与手动关闭都走 .is-out，淡出而不是瞬间消失 */
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+/* 收起中：往上飘一点并淡出；transform 里要带上原本的水平居中 */
+#update-banner.is-out {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-6px);
 }
 
 #update-banner .ub-btn {

@@ -696,16 +696,39 @@ pub fn update_state() -> serde_json::Value {
 }
 
 /// 打开外部链接（项目主页 / 新建反馈 / 下载页）。
-/// 只允许 http(s)，避免被塞进 `file://` 之类的本地路径。
+///
+/// 走系统 shell 的 `open` 动词，只允许 http(s)，避免被塞进 `file://` 之类的本地路径。
+///
+/// **不能用 `explorer <url>` 来打开**：explorer.exe 解析命令行时会把 URL 里的 `?`
+/// 当成路径，带查询串的链接根本送不到浏览器 —— 实测会退化成打开「文档」文件夹。
+/// 轻贴的「问题反馈」按钮拼的是 `issues/new?title=…&body=…`，正好中这一枪。
 #[tauri::command]
-pub fn open_external(url: String) -> Result<(), String> {
+pub async fn open_external(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("仅允许打开 http/https 链接".into());
     }
-    std::process::Command::new("explorer")
-        .arg(url)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    // ShellExecuteW 会等 shell 解析关联程序，放阻塞线程池里跑，别占住 IPC 线程
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let w = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        let op = w("open");
+        let file = w(&url);
+        unsafe {
+            ShellExecuteW(
+                0,
+                op.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, // SW_SHOWNORMAL
+            )
+        }
+    })
+    .await;
+    // ShellExecuteW 的约定：返回值小于等于 32 表示失败
+    let rc = joined.map_err(|e| e.to_string())?;
+    if rc <= 32 {
+        return Err(format!("系统里没有能打开链接的程序（错误码 {rc}）"));
+    }
     Ok(())
 }
 

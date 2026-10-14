@@ -1576,7 +1576,26 @@ function applyUpdateState() {
   renderUpdatePanels();
 }
 
-/** 启动自检发现新版本时的一次性提示：窗口顶部横幅，点「查看」直接跳到关于页。 */
+// 横幅自动收起的计时器（0 = 没在计时）
+let bannerTimer = 0;
+
+/** 收起横幅：手动关闭、点「查看」、到点自动收起，三条路都走这里（顺带清掉计时器）。 */
+function closeUpdateBanner() {
+  if (bannerTimer) {
+    clearTimeout(bannerTimer);
+    bannerTimer = 0;
+  }
+  const el = document.getElementById("update-banner");
+  if (!el) return;
+  el.classList.add("is-out");
+  // 等淡出走完再摘掉节点，别「啪」一下消失
+  setTimeout(() => el.remove(), 200);
+}
+
+/**
+ * 启动自检发现新版本时的一次性提示：窗口顶部横幅，点「查看」直接跳到关于页。
+ * 出现 **10 秒后自动收起** —— 通知到就够了，不该一直占住标题栏下方。
+ */
 function showUpdateBanner() {
   if (!updateInfo?.hasUpdate) return;
   if (document.getElementById("update-banner")) return;
@@ -1590,7 +1609,7 @@ function showUpdateBanner() {
   document.body.appendChild(el);
 
   el.querySelector("#ub-go").onclick = () => {
-    el.remove();
+    closeUpdateBanner();
     // 先定好要显示的分类，再走真实点击 —— 导航是事件委托在 .sidebar 上的，
     // 这样最不容易漏掉状态同步（render() 会按 settingsTab 渲染设置页）。
     settingsTab = "about";
@@ -1599,7 +1618,9 @@ function showUpdateBanner() {
     );
     if (nav) nav.click();
   };
-  el.querySelector("#ub-close").onclick = () => el.remove();
+  el.querySelector("#ub-close").onclick = closeUpdateBanner;
+  // 10 秒后自动收起
+  bannerTimer = setTimeout(closeUpdateBanner, 10000);
 }
 
 /** 重复启动提示弹窗（常驻元素，绑一次）。 */
