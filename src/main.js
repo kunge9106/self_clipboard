@@ -1019,12 +1019,18 @@ function showMenu(x, y, entries) {
 function openContextMenu(x, y, item) {
   const pinnedHere = isPinnedIn(item, currentView);
   const viewName = { history: "历史", text: "文本", images: "图片", files: "文件", favorites: "收藏" }[currentView] || currentView;
+  // 带同步标记的条目是互通产生的「同步置顶」，它只有有/没有两个状态：取消即整条取消。
+  // 文案不能带分类名，否则看起来像只动了当前分类。
+  const synced = Array.isArray(item.pinnedViews) && item.pinnedViews.includes(PIN_ALL);
+  const pinLabel = synced
+    ? settings?.pinGlobal
+      ? "取消置顶"
+      : "取消同步置顶"
+    : (pinnedHere ? "取消置顶" : "置顶") + (settings?.pinGlobal ? "" : `（${viewName}）`);
   showMenu(x, y, [
     { label: "复制", act: () => copyBack(item) },
     {
-      // 默认「按分类独立」，菜单里标明动的是哪个分类；开了「置顶互通」后置顶是全分类一致
-      // 的单一状态，再带分类名只会误导
-      label: (pinnedHere ? "取消置顶" : "置顶") + (settings?.pinGlobal ? "" : `（${viewName}）`),
+      label: pinLabel,
       act: async () => {
         // 新集合由后端按当前模式算好回传，前端不再重复实现一遍置顶规则
         item.pinnedViews = await invoke("toggle_pin", { id: item.id, view: currentView });
@@ -1148,9 +1154,9 @@ function settingsGeneralHtml(s) {
     <div class="row"><label>置顶互通</label>
       <input type="checkbox" id="set-pin-global" ${s.pinGlobal ? "checked" : ""} />
       <span class="hint">任一分类置顶或取消，其它分类同步；关闭后各分类独立记录</span></div>
-    <div class="row"><label>　└ 关闭时取消互通产生的置顶</label>
+    <div class="row"><label>　└ 关闭时取消同步置顶</label>
       <input type="checkbox" id="set-pin-cancel" ${s.pinCancelOnDisable ? "checked" : ""} />
-      <span class="hint">勾选后只在当初置顶的分类保留；不勾选则关掉互通后原先铺到各分类的置顶继续保留</span></div>`;
+      <span class="hint">勾选则关掉互通时连同它产生的同步置顶一起取消（置顶回到当初的分类）；不勾选则同步置顶永久保留</span></div>`;
 }
 
 function settingsAppearanceHtml(s) {
