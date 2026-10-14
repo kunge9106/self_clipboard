@@ -53,6 +53,40 @@ pub struct Config {
     /// 自定义缓存目录（None = 使用 app_data_dir/clipboard）
     #[serde(default)]
     pub cache_dir: Option<String>,
+    /// 最近一次成功的更新检查结果（跨重启保留，用于设置红点与「最新版更新日志」）。
+    /// 检查失败时保持原值不动 —— 离线重启不该把已知的新版本信息抹掉。
+    #[serde(default)]
+    pub update_cache: Option<UpdateCache>,
+}
+
+/// 一次成功的 `releases/latest` 查询结果。
+///
+/// 只存「GitHub 上最新的那个正式版」的元信息，**不存 hasUpdate**——那是个
+/// 会随时间变的派生值（等用户升级之后同一个缓存就该判为「已是最新」），
+/// 所以一律拿 `latest` 与当前 `CARGO_PKG_VERSION` 现算。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateCache {
+    /// 最新版版本号（已去掉前缀 v）
+    #[serde(default)]
+    pub latest: String,
+    /// Release 正文（Markdown）
+    #[serde(default)]
+    pub notes: String,
+    /// Release 页面地址
+    #[serde(default)]
+    pub url: String,
+    /// 安装包直链（`assets[].browser_download_url`），没有则为空
+    #[serde(default)]
+    pub asset_url: String,
+    /// 安装包文件名（ASCII）
+    #[serde(default)]
+    pub asset_name: String,
+    /// 安装包字节数（0 = 未知）
+    #[serde(default)]
+    pub asset_size: u64,
+    /// 检查时间（epoch 秒）
+    #[serde(default)]
+    pub checked_at: u64,
 }
 
 fn default_retention() -> u32 {
@@ -77,6 +111,7 @@ impl Default for Config {
             round_mode: false,
             file_copy: false, // 默认关闭：不记录文件复制
             cache_dir: None,
+            update_cache: None,
         }
     }
 }

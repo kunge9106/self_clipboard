@@ -935,6 +935,14 @@ fn strip_ext_prefix(s: &str) -> String {
     }
 }
 
+/// 缓存目录本身（未初始化时为空路径）。
+///
+/// 给「下载更新包到缓存目录」这类调用方用——它们只要路径，
+/// 不想付 `cache_info()` 那趟全目录统计（会递归遍历所有文件）。
+pub fn cache_dir() -> PathBuf {
+    DIR.get().cloned().unwrap_or_default()
+}
+
 #[tauri::command]
 pub fn cache_info() -> CacheInfo {
     let dir = DIR.get().cloned().unwrap_or_default();

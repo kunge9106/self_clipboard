@@ -155,6 +155,22 @@
       </div>
     </div>
 
+    <!-- 重复启动提示。第二个实例只给主进程发一条消息（不跨进程改窗口，
+         否则会把窗口尺寸/排版搞坏），窗口由主进程自己按正常路径唤回，
+         然后弹这个说明——用户至少知道「刚才那次双击去哪儿了」。 -->
+    <div class="modal-mask" id="singleton-modal" hidden>
+      <div class="modal">
+        <div class="modal-title">轻贴已经在运行</div>
+        <div class="modal-text">
+          已经有一个轻贴在后台运行，已为你把它的窗口唤到前面。<br />
+          同一时间只需运行一个实例：它会一直守在托盘里，双击托盘图标就能唤回。
+        </div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="singleton-ok">知道了</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

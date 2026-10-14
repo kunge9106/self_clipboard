@@ -8,13 +8,23 @@ use serde_json::json;
 const REPO_URL: &str = "https://github.com/kunge9106/self_clipboard";
 const RELEASES_API: &str =
     "https://api.github.com/repos/kunge9106/self_clipboard/releases/latest";
+/// 测试版用：列表接口会把 pre-release 一并返回（`latest` 接口按定义会跳过它们）。
+const RELEASES_LIST_API: &str =
+    "https://api.github.com/repos/kunge9106/self_clipboard/releases?per_page=30";
 
-/// 显示用版本号：**测试版(debug)带 `-beta` 后缀**，正式版是干净的版本号。
-/// 这样一眼就能区分手上跑的是哪一版，避免"装了一个又跑了一个 debug"的混淆。
+/// 显示用版本号。正式版是干净的版本号，本地测试版额外标出来。
+///
+/// 版本号自身已经带预发布后缀（如 `2.1.9-beta`）时不再重复追加，改加 `-dev`：
+/// 这样「装了一个又跑了一个 debug」仍然一眼可辨，同时不会出现
+/// `2.1.9-beta-beta` 这种没法看的字符串。
 pub fn version_display() -> String {
     let v = env!("CARGO_PKG_VERSION");
     if cfg!(debug_assertions) {
-        format!("{v}-beta")
+        if v.contains('-') {
+            format!("{v}-dev")
+        } else {
+            format!("{v}-beta")
+        }
     } else {
         v.to_string()
     }
@@ -83,6 +93,11 @@ fn parse_version(v: &str) -> Vec<u64> {
         .collect()
 }
 
+/// 数字段逐位比较；数字段完全相同、只有一方带预发布后缀（`-beta`）时，
+/// **不带后缀的那个更新**（`2.1.9` > `2.1.9-beta`）。
+///
+/// 没有这一步，「beta 测完转正式」用户永远收不到提示——
+/// 两个版本号的数字段一样，逐位比较会判为「无更新」。
 fn is_newer(latest: &str, current: &str) -> bool {
     let l = parse_version(latest);
     let c = parse_version(current);
@@ -93,7 +108,9 @@ fn is_newer(latest: &str, current: &str) -> bool {
             return a > b;
         }
     }
-    false
+    let l_pre = latest.trim_start_matches('v').contains('-');
+    let c_pre = current.trim_start_matches('v').contains('-');
+    c_pre && !l_pre
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +317,16 @@ fn proxy_candidates() -> Vec<String> {
     out
 }
 
+/// 候选代理 + 末尾的「直连」空串。
+///
+/// 直连必须放在最后：有人压根不开代理、境外网络直连更快，所以不能省；
+/// 但放在前面会让每次检查都先白等一个 12 秒超时。
+fn proxy_candidates_with_direct() -> Vec<String> {
+    let mut c = proxy_candidates();
+    c.push(String::new());
+    c
+}
+
 /// 记住本次成功的代理（空串表示「直连可用」，同样要记住，
 /// 否则下次又会把代理挨个试一遍）。
 fn remember_proxy(p: &str) {
@@ -349,8 +376,10 @@ fn curl_fetch(url: &str, proxy: &str) -> (bool, String) {
     match cmd.output() {
         Ok(o) => {
             let body = String::from_utf8_lossy(&o.stdout).to_string();
-            // 只有拿到 release JSON 才算成功；错误 JSON（限流/404）不算
-            let ok = o.status.success() && body.contains("\"tag_name\"");
+            // 只有拿到 release JSON 才算成功；错误 JSON（限流/404）不算。
+            // 列表接口在一个 release 都没有时会返回 `[]`——那也算「请求成功」。
+            let ok = o.status.success()
+                && (body.contains("\"tag_name\"") || body.trim() == "[]");
             log_append(&format!(
                 "[{}] proxy={} code={:?} ok={ok} len={}\n    body={}",
                 now_stamp(),
@@ -382,22 +411,41 @@ fn now_stamp() -> String {
     d.to_string()
 }
 
-/// 检查 GitHub 上是否有新版本。
-#[tauri::command]
-pub fn check_update() -> Result<serde_json::Value, String> {
-    // 候选代理逐个实测；最后再试一次直连（有人压根不开代理、境外网络直连更快）。
-    let mut candidates = proxy_candidates();
-    candidates.push(String::new()); // 空串 = 直连
-    log_append(&format!(
-        "────── 检查更新 v{} | 候选 {} 条 ──────",
-        version_display(),
-        candidates.len()
-    ));
+// ---------------------------------------------------------------------------
+// 更新检查
+// ---------------------------------------------------------------------------
 
+/// 一次更新查询的结果。
+///
+/// 两种模式共用这个结构，差别只在「查哪个接口」：
+///   - **正式版**（版本号不带后缀）只查 `/releases/latest`。该接口按定义
+///     **跳过 pre-release 与 draft**，所以正式版天然看不到 beta ——
+///     这正是「beta 不打扰正式用户」的官方机制（Release 没有 private 开关，
+///     可见性只到仓库级；而 draft 要 token 才读得到，程序里不可能存 token）。
+///   - **测试版**（版本号带 `-beta` 这类后缀）查 `/releases` 列表，在全部
+///     release 里挑版本号最高的（含 pre-release），所以 beta 既能看到新 beta，
+///     也能看到新正式版。
+#[derive(Default)]
+struct Release {
+    latest: String,
+    url: String,
+    notes: String,
+    asset_url: String,
+    asset_name: String,
+    asset_size: u64,
+}
+
+/// 当前构建是不是预发布版（`2.1.9-beta`）——决定查 `latest` 还是列表接口。
+fn is_prerelease_build() -> bool {
+    env!("CARGO_PKG_VERSION").contains('-')
+}
+
+/// 用 curl 逐候选（代理 + 末尾直连）请求一个 URL，返回解析好的 JSON。
+fn fetch_json(url: &str, candidates: &[String]) -> Result<serde_json::Value, String> {
     let mut text = String::new();
     let mut rate_limited = false;
-    for proxy in &candidates {
-        let (ok, body) = curl_fetch(RELEASES_API, proxy);
+    for proxy in candidates {
+        let (ok, body) = curl_fetch(url, proxy);
         if ok {
             text = body;
             remember_proxy(proxy);
@@ -427,31 +475,189 @@ pub fn check_update() -> Result<serde_json::Value, String> {
         } else {
             format!(
                 "无法连接 GitHub（已尝试 {} 个代理和直连），请检查网络",
-                candidates.len() - 1
+                candidates.len().saturating_sub(1)
             )
         });
     }
 
-    let v: serde_json::Value =
-        serde_json::from_str(text.trim()).map_err(|e| format!("解析更新信息失败：{e}"))?;
+    serde_json::from_str(text.trim()).map_err(|e| format!("解析更新信息失败：{e}"))
+}
 
-    let latest = v
-        .get("tag_name")
-        .and_then(|t| t.as_str())
-        .unwrap_or("")
-        .trim_start_matches('v')
-        .to_string();
+/// 从一条 release JSON 里抽出要用的字段。安装包优先取名字带 `setup` 的 exe。
+fn release_from_json(v: &serde_json::Value) -> Release {
+    let tag = v.get("tag_name").and_then(|t| t.as_str()).unwrap_or("");
+    let assets = v.get("assets").and_then(|a| a.as_array());
+    let is_exe = |a: &&serde_json::Value| {
+        a.get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .ends_with(".exe")
+    };
+    let pick = assets.and_then(|list| {
+        list.iter()
+            .find(|a| {
+                let n = a.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                n.ends_with(".exe") && n.contains("setup")
+            })
+            .or_else(|| list.iter().find(is_exe))
+    });
 
-    Ok(json!({
-        "hasUpdate": is_newer(&latest, env!("CARGO_PKG_VERSION")),
-        "latest": latest,
-        // 纯版本号（不带 -beta），供前端显示与比较；带后缀的展示号单独给 displayCurrent
-        "current": env!("CARGO_PKG_VERSION"),
+    Release {
+        latest: tag.trim_start_matches('v').to_string(),
+        url: v
+            .get("html_url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        notes: v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        asset_url: pick
+            .and_then(|a| a.get("browser_download_url").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .to_string(),
+        asset_name: pick
+            .and_then(|a| a.get("name").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .to_string(),
+        asset_size: pick
+            .and_then(|a| a.get("size").and_then(|x| x.as_u64()))
+            .unwrap_or(0),
+    }
+}
+
+/// 查询「当前该推荐哪个版本」。正式版查 latest，测试版查列表。
+fn fetch_release() -> Result<Release, String> {
+    let candidates = proxy_candidates_with_direct();
+
+    if !is_prerelease_build() {
+        log_append(&format!(
+            "────── 检查更新 v{}（正式版：只查 latest，自动跳过 pre-release）| 候选 {} 条 ──────",
+            version_display(),
+            candidates.len()
+        ));
+        let v = fetch_json(RELEASES_API, &candidates)?;
+        return Ok(release_from_json(&v));
+    }
+
+    log_append(&format!(
+        "────── 检查更新 v{}（测试版：查列表，含 pre-release）| 候选 {} 条 ──────",
+        version_display(),
+        candidates.len()
+    ));
+    let v = fetch_json(RELEASES_LIST_API, &candidates)?;
+    let list = v.as_array().ok_or("更新信息格式异常")?;
+    let mut best: Option<Release> = None;
+    for r in list
+        .iter()
+        .filter(|r| !r.get("draft").and_then(|d| d.as_bool()).unwrap_or(false))
+        .map(release_from_json)
+        .filter(|r| !r.latest.is_empty())
+    {
+        // 字符串比较不可靠（要处理 -beta 后缀），统一用 is_newer 定序
+        best = Some(match best {
+            Some(b) if !is_newer(&r.latest, &b.latest) => b,
+            _ => r,
+        });
+    }
+    best.ok_or_else(|| "没有找到任何发布版本".into())
+}
+
+/// 统一的结果 payload（`check_update` 与 `update_state` 返回同一个形状）。
+fn payload(rel: &Release) -> serde_json::Value {
+    let cur = env!("CARGO_PKG_VERSION");
+    json!({
+        "hasUpdate": is_newer(&rel.latest, cur),
+        "latest": rel.latest,
+        "current": cur,
+        // 纯版本号（不带后缀）供比较，带后缀的展示号单独给 displayCurrent
         "displayCurrent": version_display(),
-        "url": v.get("html_url").and_then(|x| x.as_str()).unwrap_or(""),
-        "notes": v.get("body").and_then(|x| x.as_str()).unwrap_or(""),
-        "publishedAt": v.get("published_at").and_then(|x| x.as_str()).unwrap_or(""),
-    }))
+        "url": rel.url,
+        "notes": rel.notes,
+        "assetUrl": rel.asset_url,
+        "assetName": rel.asset_name,
+        "assetSize": rel.asset_size,
+    })
+}
+
+/// 把一次成功的结果记进 config.json：跨重启保留，设置红点与「最新版更新日志」都读它。
+/// 内容没变就不写盘，免得每次启动都白写一遍配置文件。
+fn save_cache(rel: &Release) {
+    let next = crate::settings::UpdateCache {
+        latest: rel.latest.clone(),
+        notes: rel.notes.clone(),
+        url: rel.url.clone(),
+        asset_url: rel.asset_url.clone(),
+        asset_name: rel.asset_name.clone(),
+        asset_size: rel.asset_size,
+        checked_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+    let same = crate::settings::get()
+        .update_cache
+        .as_ref()
+        .map_or(false, |c| {
+            c.latest == next.latest
+                && c.notes == next.notes
+                && c.asset_url == next.asset_url
+                && c.asset_size == next.asset_size
+        });
+    if same {
+        return;
+    }
+    crate::settings::update(|cfg| cfg.update_cache = Some(next));
+}
+
+/// 启动时自动检查一次（背景线程，静默）。
+///
+/// 只有「确实有新版本」才通知前端；**检查失败或没有新版一律什么都不做**
+/// （用户明确要求：这两种情况不要打扰）。
+pub fn auto_check(app: tauri::AppHandle) {
+    use tauri::Emitter;
+    std::thread::spawn(move || {
+        let rel = match fetch_release() {
+            Ok(r) => r,
+            Err(e) => {
+                println!("[update] 启动自检未完成（静默）：{e}");
+                return;
+            }
+        };
+        save_cache(&rel);
+        if !is_newer(&rel.latest, env!("CARGO_PKG_VERSION")) {
+            println!("[update] 启动自检：已是最新（远端 {}）", rel.latest);
+            return;
+        }
+        println!("[update] 启动自检：发现新版本 {}", rel.latest);
+        let _ = app.emit("update-available", payload(&rel));
+    });
+}
+
+/// 手动检查更新。
+#[tauri::command]
+pub async fn check_update() -> Result<serde_json::Value, String> {
+    // 同步命令会跑在主线程上，而这里最坏要等「若干个代理 × 12 秒」——
+    // 放阻塞线程池，界面全程不卡。
+    let rel = tauri::async_runtime::spawn_blocking(fetch_release)
+        .await
+        .map_err(|e| e.to_string())??;
+    save_cache(&rel);
+    Ok(payload(&rel))
+}
+
+/// 读缓存的检查结果：前端启动时用它恢复红点与更新日志，不必再联网。
+#[tauri::command]
+pub fn update_state() -> serde_json::Value {
+    match crate::settings::get().update_cache {
+        Some(c) => payload(&Release {
+            latest: c.latest,
+            url: c.url,
+            notes: c.notes,
+            asset_url: c.asset_url,
+            asset_name: c.asset_name,
+            asset_size: c.asset_size,
+        }),
+        None => payload(&Release::default()),
+    }
 }
 
 /// 打开外部链接（项目主页 / 新建反馈 / 下载页）。
@@ -465,5 +671,213 @@ pub fn open_external(url: String) -> Result<(), String> {
         .arg(url)
         .spawn()
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 下载安装包并运行
+// ---------------------------------------------------------------------------
+
+/// 同一时间只允许一个下载任务（重复点按钮不该开出两条 curl）。
+static DL_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 下载最新安装包到缓存目录的 `update/`，全程用 `update-progress` 事件报进度。
+///
+/// 进度怎么来的：**轮询 `.part` 文件大小**，分母取 release JSON 里的
+/// `assets[].size`。不去解析 curl 的进度条——那是本地化文本、格式随版本变，
+/// 而文件大小是稳定可信的事实，跨语言跨版本都不受影响。
+#[tauri::command]
+pub async fn download_update(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::sync::atomic::Ordering;
+        if DL_RUNNING.swap(true, Ordering::SeqCst) {
+            return Err("已有下载任务在进行中".into());
+        }
+        let r = download_inner(&app);
+        DL_RUNNING.store(false, Ordering::SeqCst);
+        r
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn download_inner(app: &tauri::AppHandle) -> Result<String, String> {
+    use tauri::Emitter;
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+
+    let cache = crate::settings::get()
+        .update_cache
+        .ok_or("还没有可下载的版本信息，请先点「检查更新」")?;
+    if cache.asset_url.is_empty() {
+        return Err("这个版本没有提供安装包，请到 Release 页面手动下载".into());
+    }
+
+    let dir = crate::clipboard::cache_dir().join("update");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建下载目录失败：{e}"))?;
+
+    let name = if cache.asset_name.is_empty() {
+        "light_clip_setup.exe".to_string()
+    } else {
+        cache.asset_name.clone()
+    };
+    let final_path = dir.join(&name);
+    let part = dir.join(format!("{name}.part"));
+
+    // 清掉上次留下的半截文件与旧版本安装包（只保留本次的目标文件）
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p != final_path && p.is_file() {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+
+    let total = cache.asset_size;
+    let mut last_err = String::new();
+
+    for proxy in proxy_candidates_with_direct() {
+        let _ = std::fs::remove_file(&part);
+
+        let mut cmd = std::process::Command::new("curl");
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.args(["-sSL", "--fail", "--max-time", "1800", "--retry", "2", "-o"]);
+        cmd.arg(&part);
+        if !proxy.is_empty() {
+            cmd.args(["-x", &proxy]);
+        }
+        cmd.arg(&cache.asset_url);
+
+        log_append(&format!(
+            "[{}] 开始下载 proxy={} -> {}",
+            now_stamp(),
+            if proxy.is_empty() { "直连" } else { &proxy },
+            final_path.display()
+        ));
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = format!("启动 curl 失败：{e}");
+                continue;
+            }
+        };
+
+        let mut exit_ok = false;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let got = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+            let percent = if total > 0 {
+                (got.min(total) as f64 * 100.0 / total as f64).round() as u32
+            } else {
+                0
+            };
+            let _ = app.emit(
+                "update-progress",
+                json!({ "got": got, "total": total, "percent": percent }),
+            );
+            match child.try_wait() {
+                Ok(Some(st)) => {
+                    exit_ok = st.success();
+                    if !exit_ok {
+                        last_err = format!("下载中断（curl 退出码 {:?}）", st.code());
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    last_err = format!("等待下载进程失败：{e}");
+                    break;
+                }
+            }
+        }
+
+        let got = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        // 知道总大小时必须一分不差；不知道时只要求非空
+        let size_ok = if total > 0 { got == total } else { got > 0 };
+        if exit_ok && size_ok {
+            if std::fs::rename(&part, &final_path).is_err() {
+                last_err = "下载完成但重命名失败".into();
+                continue;
+            }
+            remember_proxy(&proxy);
+            let _ = app.emit(
+                "update-progress",
+                json!({ "got": got, "total": total, "percent": 100 }),
+            );
+            println!("[update] 安装包已就绪：{}", final_path.display());
+            return Ok(final_path.to_string_lossy().to_string());
+        }
+        if last_err.is_empty() {
+            last_err = format!("文件大小不符（期望 {total}，实际 {got}）");
+        }
+    }
+
+    Err(if last_err.is_empty() {
+        "下载失败，请检查网络".into()
+    } else {
+        last_err
+    })
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    /// `runas` 动词会触发 UAC 提权。`std::process::Command` 直接 spawn 一个
+    /// 需要管理员权限的程序只会拿到 ERROR_ELEVATION_REQUIRED，所以这里必须走
+    /// shell 的 runas。
+    fn ShellExecuteW(
+        hwnd: isize,
+        op: *const u16,
+        file: *const u16,
+        params: *const u16,
+        cwd: *const u16,
+        show: i32,
+    ) -> isize;
+}
+
+/// 运行已下载的安装包，然后退出自身。
+///
+/// 顺序要紧：**先拉起安装器，再退出自己**。安装器是 perMachine（需要管理员），
+/// 而且要覆盖 `self-clipboard.exe` —— 自己正锁着它，nsis 模板里的
+/// `CheckIfAppIsRunning` 也会因此拦下来。安装器是独立进程，
+/// 父进程退出不影响它继续跑。
+#[tauri::command]
+pub fn install_downloaded(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    // 只允许运行我们自己下载目录里的文件：这个路径来自前端，
+    // 不校验就等于开了一条「执行任意程序」的通道。
+    let dir = crate::clipboard::cache_dir().join("update");
+    let p = std::path::PathBuf::from(&path);
+    if !p.starts_with(&dir) {
+        return Err("安装包路径不合法".into());
+    }
+    if !p.is_file() {
+        return Err("安装包不存在，可能已被删除".into());
+    }
+
+    let w = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let op = w("runas");
+    let file = w(&path);
+    let rc = unsafe {
+        ShellExecuteW(
+            0,
+            op.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    // 返回值 > 32 才算成功（<= 32 全是错误码，含用户在 UAC 上点了「否」）
+    if rc <= 32 {
+        return Err(format!("无法启动安装程序（错误码 {rc}）"));
+    }
+
+    std::thread::spawn(move || {
+        // 给安装器一点时间完成初始化再退出，免得它刚起来就判定「轻贴正在运行」
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        app.exit(0);
+    });
     Ok(())
 }

@@ -23,6 +23,12 @@ let settings = null; // 后端配置（get_settings）
 // 切换标签后重新 settingsHtml() + bindSettings() 即可（见 bindSettings 里的标签点击）。
 let settingsTab = "general";
 
+// 更新检查结果。Rust 在启动时会自检一次并（有新版本时）推 update-available；
+// 前端其余时候只读缓存（update_state），**只有用户点按钮才重新联网**。
+let updateInfo = null;
+// 下载进度。存成模块状态是为了「切走再切回来」时还能把进度条画回去。
+let dlState = { running: false, percent: 0, error: "" };
+
 /** 窗口圆角上限（后端按材质档位下发，Win10 acrylic = 20px） */
 let maxRadius = 20;
 
@@ -1071,10 +1077,18 @@ const SETTINGS_TABS = [
 
 function settingsHtml() {
   const s = settings || {};
+  // 有新版时「关于」标签本身带一个小红点（侧栏的「设置」红点在 applyUpdateState 里处理）
+  const hasUpd = !!updateInfo?.hasUpdate;
+  const dotTip = hasUpd ? `有新版本 v${updateInfo.latest}，点击查看` : "";
   const tabBar = `<div class="settings-tabs">${SETTINGS_TABS.map(
-    (t) =>
-      `<button class="tab${t.id === settingsTab ? " is-active" : ""}" ` +
-      `data-tab="${t.id}">${t.label}</button>`
+    (t) => {
+      const dot = t.id === "about" && hasUpd;
+      return (
+        `<button class="tab${t.id === settingsTab ? " is-active" : ""}` +
+        `${dot ? " has-dot" : ""}" data-tab="${t.id}"` +
+        `${dot ? ` title="${esc(dotTip)}"` : ""}>${t.label}</button>`
+      );
+    }
   ).join("")}</div>`;
 
   // 只渲染当前分类 —— 其余分类的控件这一刻**不在 DOM 里**，所以 bindSettings 里
@@ -1139,7 +1153,9 @@ function settingsDataHtml(s) {
       <div class="cache-actions">
         <button class="btn-ghost" id="btn-pick-dir">更改目录</button>
         <button class="btn-ghost" id="btn-open-dir">打开目录</button>
+        <button class="btn-ghost" id="btn-open-log">日志目录</button>
       </div>
+      <div class="cache-log-hint">上方的保留天数、清空历史、退出清理都<b>不会动 log/ 里的日志</b>——日志只在你自己手动删除文件时才会消失。</div>
     </div>
     <div class="row"><label>关闭时清理缓存</label>
       <input type="checkbox" id="set-clean" ${s.cleanOnClose ? "checked" : ""} />
@@ -1279,9 +1295,11 @@ function settingsAboutHtml() {
           <div class="about-badge-l">当前版本</div>
           <div class="about-badge-v" id="about-ver">读取中…</div>
         </div>
-        <div class="about-state" id="about-update">正在获取版本信息…</div>
+        <div class="about-state" id="about-update">尚未检查更新</div>
         <div class="about-actions">
-          <button class="btn-ghost" id="btn-check-update">检查更新</button>
+          <button class="btn-ghost" id="btn-check-update">${
+            updateInfo?.hasUpdate ? "下载最新版" : "检查更新"
+          }</button>
           <button class="btn-ghost" id="btn-repo">项目主页</button>
           <button class="btn-ghost" id="btn-feedback">问题反馈</button>
         </div>
@@ -1349,47 +1367,93 @@ function renderNotes(tag, notes) {
   box.innerHTML = md(notes);
 }
 
-// 静默拉一次更新信息：只用来填充日志与状态，不弹任何提示。
-// 进入关于页就跑一次，所以日志是「常驻」的，不用先点检查更新。
-// manual=true（用户点了按钮）时才 toast 结果。
-async function loadReleaseNotes(manual) {
+// 关于页的更新区域只做「渲染」，不发请求 —— 数据来自 updateInfo（启动自检的缓存
+// 或用户手动检查的结果）。这样进关于页不会联网、不会卡，也不会再闪黑窗口。
+function renderUpdatePanels() {
+  const info = updateInfo;
+  const cur = info?.displayCurrent || info?.current || "";
+  const has = !!info?.hasUpdate;
+
+  const btn = document.getElementById("btn-check-update");
+  if (btn) {
+    if (dlState.running) {
+      setDownloadUi(dlState.percent);
+    } else {
+      btn.classList.remove("is-downloading");
+      btn.disabled = false;
+      btn.textContent = has ? "下载最新版" : "检查更新";
+    }
+  }
+
   const tip = document.getElementById("about-update");
+  if (!tip) return;
+
+  if (dlState.running) {
+    tip.className = "about-state is-new";
+    tip.textContent = `正在下载 v${info?.latest || ""}…`;
+  } else if (dlState.error) {
+    tip.className = "about-state is-err";
+    tip.textContent = "下载失败：" + dlState.error;
+  } else if (has) {
+    tip.className = "about-state is-new";
+    tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，当前 v${esc(cur)}`;
+  } else if (info?.latest) {
+    tip.className = "about-state is-ok";
+    tip.textContent = "已是最新版本（v" + cur + "）";
+  } else {
+    tip.className = "about-state";
+    tip.textContent = "尚未检查更新";
+  }
+
+  // 更新日志：标题带版本号，所以「这条说明属于哪一版」一眼可辨。
+  renderNotes(info?.latest || "", info?.notes || "");
+}
+
+/** 下载进度画进按钮：背景由左向右填充（像手机装应用那样），文字盖在填充层上。 */
+function setDownloadUi(percent) {
+  const btn = document.getElementById("btn-check-update");
+  if (!btn) return;
+  if (!btn.classList.contains("is-downloading")) {
+    btn.classList.add("is-downloading");
+    btn.disabled = true;
+    btn.innerHTML = `<span class="dl-fill"></span><span class="dl-label"></span>`;
+  }
+  const fill = btn.querySelector(".dl-fill");
+  const label = btn.querySelector(".dl-label");
+  if (fill) fill.style.width = `${percent}%`;
+  if (label) label.textContent = `正在下载 ${percent}%`;
+}
+
+/** 下载完成后的那一步：按钮改文案，进度条填满。 */
+function setDownloadDone(text) {
+  const btn = document.getElementById("btn-check-update");
+  if (!btn) return;
+  setDownloadUi(100);
+  const label = btn.querySelector(".dl-label");
+  if (label) label.textContent = text;
+}
+
+/** 点「下载最新版」：Rust 下到缓存目录 update/，完成后自动拉起安装器并退出本进程。 */
+async function startDownload() {
+  if (dlState.running) return;
+  dlState = { running: true, percent: 0, error: "" };
+  renderUpdatePanels();
+  let downloaded = "";
   try {
-    const r = await invoke("check_update");
-    const cur = r.displayCurrent || r.current; // 带 -beta 的展示号
-    // 有新版本就显示新版本的日志，否则显示当前版本的 —— 这正是你要的常驻逻辑
-    const showTag = r.hasUpdate ? r.latest : String(cur).replace(/^v/, "");
-    renderNotes(showTag, r.notes);
-    if (tip) {
-      if (r.hasUpdate) {
-        tip.className = "about-state is-new";
-        tip.innerHTML =
-          `发现新版本 <b>v${esc(r.latest)}</b>，当前 v${esc(cur)}　` +
-          `<button class="btn-ghost" id="btn-go-dl">前往下载</button>`;
-        const go = document.getElementById("btn-go-dl");
-        if (go) go.onclick = () => invoke("open_external", { url: r.url });
-      } else {
-        tip.className = "about-state is-ok";
-        tip.textContent = "已是最新版本";
-      }
-    }
-    if (manual) {
-      toast(
-        r.hasUpdate
-          ? `发现新版本 v${r.latest}，当前 v${cur}`
-          : `已是最新版本（v${cur}）`
-      );
-    }
-    return r;
+    downloaded = await invoke("download_update");
+    setDownloadDone("下载完成，正在启动安装程序…");
+    // Rust 会先用 runas 拉起安装器（触发 UAC），再退出自己 ——
+    // 安装器要覆盖 exe，本进程正锁着它。
+    await invoke("install_downloaded", { path: downloaded });
   } catch (e) {
-    if (tip) {
-      tip.className = "about-state is-err";
-      tip.textContent = "检查更新失败";
-    }
-    renderNotes("", "");
-    // 静默进入时不打扰，只有点了按钮才提示失败
-    if (manual) toast("检查更新失败，请检查网络");
-    return null;
+    // 分开报：下载失败和「下载好了但安装器起不来」是两回事
+    dlState = {
+      running: false,
+      percent: 0,
+      error: downloaded ? `启动安装程序失败（${e}）` : String(e),
+    };
+    renderUpdatePanels();
+    toast(downloaded ? "无法启动安装程序：" + e : "下载失败：" + e);
   }
 }
 
@@ -1412,8 +1476,15 @@ async function loadAbout() {
   } catch (e) {
     setTxt("about-ver", "读取失败");
   }
-  // 日志与更新状态并行拉，不阻塞信息展示
-  loadReleaseNotes(true);
+  // 更新状态只读缓存；万一启动时的自检还没落地，这里补问一次（同样不联网）
+  if (!updateInfo) {
+    try {
+      updateInfo = await invoke("update_state");
+    } catch (e) {
+      updateInfo = null;
+    }
+  }
+  renderUpdatePanels();
 }
 
 async function aboutCheckUpdate() {
@@ -1424,9 +1495,84 @@ async function aboutCheckUpdate() {
     tip.className = "about-state";
     tip.textContent = "正在检查更新…";
   }
-  // 手动点击复用静默拉取：状态、日志都会刷新，并弹 toast 告知结果
-  await loadReleaseNotes(true);
-  if (btn) btn.disabled = false;
+  try {
+    updateInfo = await invoke("check_update");
+    dlState = { running: false, percent: 0, error: "" };
+    applyUpdateState();
+    toast(
+      updateInfo.hasUpdate
+        ? `发现新版本 v${updateInfo.latest}，当前 v${updateInfo.displayCurrent}`
+        : `已是最新版本（v${updateInfo.displayCurrent}）`
+    );
+  } catch (e) {
+    if (tip) {
+      tip.className = "about-state is-err";
+      tip.textContent = "检查更新失败";
+    }
+    toast("检查更新失败，请检查网络");
+  }
+  renderUpdatePanels();
+}
+
+/** 更新状态 → 侧栏「设置」红点 + 「关于」标签红点 + 关于页内容。 */
+function applyUpdateState() {
+  const has = !!updateInfo?.hasUpdate;
+  const tip = has ? `有新版本 v${updateInfo.latest}，点击查看` : "";
+
+  // 侧栏底部「设置」是常驻 DOM，直接改类名即可
+  const navSet = document.querySelector(
+    '.sidebar-footer .nav-item[data-view="settings"]'
+  );
+  if (navSet) {
+    navSet.classList.toggle("has-dot", has);
+    if (has) navSet.title = tip;
+    else navSet.removeAttribute("title");
+  }
+
+  // 「关于」标签在设置页里，随 settingsHtml() 渲染；这里兼顾「设置页已经开着」的情况
+  const tabAbout = document.querySelector('.settings-tabs .tab[data-tab="about"]');
+  if (tabAbout) {
+    tabAbout.classList.toggle("has-dot", has);
+    if (has) tabAbout.title = tip;
+    else tabAbout.removeAttribute("title");
+  }
+
+  renderUpdatePanels();
+}
+
+/** 启动自检发现新版本时的一次性提示：窗口顶部横幅，点「查看」直接跳到关于页。 */
+function showUpdateBanner() {
+  if (!updateInfo?.hasUpdate) return;
+  if (document.getElementById("update-banner")) return;
+
+  const el = document.createElement("div");
+  el.id = "update-banner";
+  el.innerHTML =
+    `<span class="ub-text">发现新版本 <b>v${esc(updateInfo.latest)}</b></span>` +
+    `<button class="ub-btn" id="ub-go">查看</button>` +
+    `<button class="ub-close" id="ub-close" title="关闭">×</button>`;
+  document.body.appendChild(el);
+
+  el.querySelector("#ub-go").onclick = () => {
+    el.remove();
+    // 走真实点击：导航是事件委托在 .sidebar 上的，这样最不容易漏掉状态同步
+    const nav = document.querySelector('.sidebar-footer .nav-item[data-view="settings"]');
+    if (nav) nav.click();
+    settingsTab = "about";
+    const view = document.getElementById("view");
+    if (view) {
+      view.innerHTML = settingsHtml();
+      bindSettings(view);
+    }
+  };
+  el.querySelector("#ub-close").onclick = () => el.remove();
+}
+
+/** 重复启动提示弹窗（常驻元素，绑一次）。 */
+function bindSingletonModal() {
+  const modal = document.getElementById("singleton-modal");
+  const ok = document.getElementById("singleton-ok");
+  if (modal && ok) ok.onclick = () => (modal.hidden = true);
 }
 
 async function aboutFeedback() {
@@ -1453,8 +1599,13 @@ async function refreshCacheInfo() {
     const pathEl = document.getElementById("cache-path");
     const statsEl = document.getElementById("cache-stats");
     if (pathEl) pathEl.textContent = info.dir;
-    if (statsEl)
-      statsEl.textContent = `${info.count} 个文件 · ${fmtSize(info.size)}`;
+    if (statsEl) {
+      // 日志单独标出来：既不隐瞒它占的空间，也说清它是「清不掉的那部分」。
+      const logPart = info.logSize
+        ? `，含日志 ${fmtSize(info.logSize)}（不受清理影响）`
+        : "";
+      statsEl.textContent = `${info.count} 个文件 · ${fmtSize(info.size)}${logPart}`;
+    }
   } catch (e) {
     console.error("cache_info failed", e);
   }
@@ -1599,11 +1750,18 @@ function bindSettings(view) {
     openDir.onclick = () =>
       invoke("open_cache_dir").catch((e) => toast("打开失败：" + e));
 
+  const openLog = view.querySelector("#btn-open-log");
+  if (openLog)
+    openLog.onclick = () =>
+      invoke("open_log_dir").catch((e) => toast("打开失败：" + e));
+
   // 「关于」页的按钮同理，只在切到该分类时存在 → 同样做存在性保护；
   // 顺便在进入该页时就把版本号与运行环境拉出来。
   const btnCheck = view.querySelector("#btn-check-update");
   if (btnCheck) {
-    btnCheck.onclick = aboutCheckUpdate;
+    // 有新版时这颗按钮就是「下载最新版」，其余时候才是「检查更新」
+    btnCheck.onclick = () =>
+      updateInfo?.hasUpdate ? startDownload() : aboutCheckUpdate();
     loadAbout();
   }
   const btnRepo = view.querySelector("#btn-repo");
@@ -1649,6 +1807,7 @@ async function main() {
   bindClearAllModal();
   bindClearView();
   bindClearViewModal();
+  bindSingletonModal();
   bindNav();
   bindSearch();
   startTimeTicker();
@@ -1684,10 +1843,39 @@ async function main() {
     document.getElementById("status-version").textContent =
       `Version：${(await getVersion())}-ikun`;
   } catch (e) {
-    document.getElementById("status-version").textContent = "Version：2.1.5-ikun";
+    document.getElementById("status-version").textContent = "Version：2.1.9-beta-ikun";
   }
 
   render();
+
+  // ── 更新状态 ──────────────────────────────────────────────────────────
+  // Rust 启动时已在后台自检过一次（失败或没有新版都静默）。这里先读缓存把红点
+  // 补上，再监听自检结果事件 —— 自检通常比前端就绪慢，所以两条路都要走。
+  try {
+    updateInfo = await invoke("update_state");
+  } catch (e) {
+    updateInfo = null;
+  }
+  applyUpdateState();
+
+  await listen("update-available", (e) => {
+    updateInfo = e.payload;
+    applyUpdateState();
+    // 只在启动自检发现新版本时提示一次；失败/无新版不会有这条事件
+    showUpdateBanner();
+  });
+
+  await listen("update-progress", (e) => {
+    const p = e.payload?.percent ?? 0;
+    dlState.percent = p;
+    if (dlState.running) setDownloadUi(p);
+  });
+
+  // 重复启动 → 主进程已把窗口唤回，这里补一个说明
+  await listen("singleton-wake", () => {
+    const modal = document.getElementById("singleton-modal");
+    if (modal) modal.hidden = false;
+  });
 
   // 增量：复制新内容时 Rust 推事件，直接插到顶部
   await listen("clipboard-update", (e) => {

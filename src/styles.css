@@ -348,6 +348,105 @@ html:not(.hovers-off) .nav-item:hover {
   font-weight: 700;
 }
 
+/* 「有新版本」的小红点：挂在侧栏「设置」与设置页「关于」标签上。
+   悬浮说明用元素自带的 title，不另做浮层 —— 侧栏是定宽容器，浮层会被裁掉。 */
+.nav-item,
+.settings-tabs .tab {
+  position: relative;
+}
+
+.nav-item.has-dot::after,
+.settings-tabs .tab.has-dot::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e5484d;
+  pointer-events: none;
+}
+
+/* 「下载最新版」：按钮底色变成从左向右灌满的进度条（像手机装应用那样）。
+   填充层在下、文字在上，所以文字要 relative 抬一层。 */
+.btn-ghost.is-downloading {
+  position: relative;
+  overflow: hidden;
+  min-width: 136px;
+  cursor: default;
+}
+
+.btn-ghost.is-downloading .dl-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  background: linear-gradient(90deg, rgba(47, 107, 255, 0.5), var(--accent));
+  /* 水头：右缘圆润一点，避免一根生硬的直线往前推 */
+  border-radius: 0 8px 8px 0;
+  transition: width 0.25s ease-out;
+}
+
+.btn-ghost.is-downloading .dl-label {
+  position: relative;
+  color: #fff;
+}
+
+/* 启动自检发现新版本时的一次性横幅（压在标题栏下方，不挡拖动区） */
+#update-banner {
+  position: fixed;
+  top: calc(var(--titlebar-h) + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 24px);
+  padding: 7px 8px 7px 14px;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  background: var(--glass-strong);
+  box-shadow: var(--card-shadow);
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--text);
+}
+
+#update-banner .ub-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: default;
+}
+
+#update-banner .ub-close {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: default;
+}
+
+html:not(.hovers-off) #update-banner .ub-btn:hover {
+  filter: brightness(1.08);
+}
+
+html:not(.hovers-off) #update-banner .ub-close:hover {
+  background: var(--glass-hover);
+}
+
 .nav-icon {
   width: 15px;
   height: 15px;
@@ -892,6 +991,19 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 .cache-actions {
   display: flex;
   gap: 8px;
+}
+
+/* 日志隔离说明：直接挂在 .cache-box（flex column）里，
+   所以不能复用 .settings .hint（那个 flex:1 1 150px 在列方向上会变成高度）。 */
+.cache-log-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.cache-log-hint b {
+  color: var(--text);
+  font-weight: 600;
 }
 
 /* 底部状态栏：左条目数 · 中版本号 · 右垃圾桶 */

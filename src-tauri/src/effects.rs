@@ -1068,7 +1068,13 @@ static ORIG_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicI
 /// 修法是给窗口过程挂子类（subclass），拦截这条消息后用 `lparam = -1`
 /// 调 DefWindowProc——微软文档认可的做法，含义是「激活状态变更，但
 /// 不要重绘非客户区」。只拦这一条消息，其余全部原样转交 tao。
-pub fn install_focus_hook(hwnd: isize) {
+/// 子类过程里要用到 AppHandle（收到单实例唤醒消息时要唤回窗口并通知前端），
+/// 而 `hook_proc` 是裸函数指针、拿不到闭包，所以把句柄存进全局。
+static HOOK_APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
+    let _ = HOOK_APP.set(app.clone());
+
     unsafe extern "system" {
         fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
     }
@@ -1092,6 +1098,20 @@ pub fn install_focus_hook(hwnd: isize) {
             ) -> isize;
         }
 
+        // 第二个实例请求唤回：**在本进程里**走与托盘唤回完全相同的路径，
+        // 而不是让对面跨进程直接操作窗口（那会把窗口尺寸/排版搞坏）。
+        // 放后台线程做：show/emit 会跟事件循环打交道，不该在 WndProc 里同步执行。
+        if msg == crate::singleton::WM_QINGTIE_WAKE {
+            if let Some(app) = HOOK_APP.get() {
+                use tauri::Emitter;
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    crate::tray::show_main(&app);
+                    let _ = app.emit("singleton-wake", ());
+                });
+            }
+            return 0;
+        }
         if msg == WM_NCACTIVATE {
             // lparam = -1 → 禁止重绘非客户区，原生标题栏就永远画不出来
             return unsafe { DefWindowProcW(hwnd, msg, wparam, -1) };
