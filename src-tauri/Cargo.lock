@@ -2689,7 +2689,7 @@ dependencies = [
 
 [[package]]
 name = "self-clipboard"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "image",
  "indexmap 1.9.3",
