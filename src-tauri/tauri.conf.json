@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "轻贴",
-  "version": "2.1.9-beta",
+  "version": "2.1.9",
   "identifier": "com.kunge.selfclipboard",
   "build": {
     "beforeDevCommand": "npm run dev",
