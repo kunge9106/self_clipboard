@@ -4,13 +4,13 @@
 > **窗口形态**：单窗口管理界面（无边框自绘）
 > **系统支持**：Windows 10 1809 及以上
 > **仓库**：https://github.com/kunge9106/self_clipboard
-> **当前版本**：v2.1.5
+> **当前版本**：v2.1.8
 
 ## 怎么读这份文档
 
 本文分两部分：
 
-- **第 1 – 11 章：已实现的实现说明**。全部以 `v2.1.5` 的**实际代码**为准，写的是「现在是怎样」，不是「打算怎样」。
+- **第 1 – 11 章：已实现的实现说明**。全部以 `v2.1.8` 的**实际代码**为准，写的是「现在是怎样」，不是「打算怎样」。
 - **第 12 章：路线图**。集中存放开发前规划、但当前**尚未实现**的部分（全局热键、快捷面板、虚拟滚动等）。这些规划继续保留，后续按序推进。
 
 每章尽量给出对应源码文件，便于对照。
@@ -24,7 +24,7 @@
 轻贴是一个**单机剪贴板历史管理器**：
 
 - 常驻托盘，事件驱动监听剪贴板，空闲时几乎不占 CPU；
-- 内容全部落盘到本地目录，无账号、无云端、无网络请求；
+- 内容全部落盘到本地目录，无账号、无云端；剪贴板内容不出本机（唯一外联是「关于」页的检查更新，见第十一章）；
 - 只在需要时打开窗口查找与取用。
 
 核心指标：**安装包 < 2 MB、常驻内存尽量低、窗口观感与系统原生质感一致**。
@@ -64,6 +64,9 @@ src-tauri/src/
 ├─ lib.rs          应用装配：初始化顺序、IPC 命令注册、窗口事件
 ├─ clipboard.rs    剪贴板监听、多格式解析、存储、清理、失效检测
 ├─ effects.rs      Windows 材质分档、圆角、去边框、自定义拖动与缩放
+├─ singleton.rs    单实例约束（按 debug/release 区分锁名）
+├─ logger.rs       全局日志：println/eprintln 落盘、panic 快照
+├─ about.rs        关于页：环境自检、检查更新
 ├─ settings.rs     config.json 持久化
 ├─ tray.rs         托盘图标与自绘菜单窗口
 └─ autostart.rs    开机自启（手写注册表 FFI）
@@ -85,6 +88,12 @@ tray.html          托盘菜单窗口入口
 ### 2.4 启动流程（`lib.rs`）
 
 ```
+fn run():
+  logger::install_hook()                 // 最先：连单实例阶段的崩溃也能落盘
+  if !singleton::ensure_single_instance():
+      singleton::activate_existing_instance(); exit(0)   // 同版本已在跑 → 唤前台后退出
+  logger::write_line("INFO","boot", ...)
+
 Builder::default()
   .setup(|app| {
       settings::init(app)      // 读 config.json → 全局 CONFIG
@@ -99,6 +108,16 @@ Builder::default()
 ```
 
 **顺序有讲究**：材质必须在窗口 `show` 之前/同时就位，否则会看到「先白后糊」的闪。因此配置文件里把主窗口设为 `visible: false`，由 Rust 在 setup 末尾显式 `show()`。
+
+### 2.5 单实例约束（`singleton.rs`）
+
+**同一版本只允许一个实例**；重复启动时把已存在的窗口带到前台，而不是开第二个。
+
+- **手写 `CreateMutexW`**（不引 windows crate，与既有风格一致）：`GetLastError() == ERROR_ALREADY_EXISTS` 即判定已有一份在跑。句柄存进 `OnceLock`，进程存活期间锁名一直被占用。
+- **锁名按构建区分**：`Local\com.kunge.selfclipboard.instance`（release）/ `...instance.debug`（debug）。**这正是不能用 `tauri-plugin-single-instance` 的原因**——它按 app identifier 判重，而 debug 与 release 共用同一份 `tauri.conf.json`（identifier 相同），要「测试版与正式版共存」就必须手动区分锁名。
+- **唤前台**：`EnumWindows` 遍历，按窗口标题「轻贴」匹配，并**用宽度下限 `MIN_MAIN_WIDTH = 300` 过滤**掉托盘菜单那个很窄的自绘窗口；命中后 `ShowWindow(SW_RESTORE)` + `SetForegroundWindow`。枚举回调里先比长度再比内容，避免短标题切长下标越界。
+- **执行时机**：在 `logger::install_hook()` 之后、其余初始化之前（`run()` 最开头）。既保证「单实例检测阶段的崩溃」也落进日志，又避免第二个实例为了写日志去抢剪贴板监听等资源；判定重复则 `std::process::exit(0)`。
+- 建不出锁（极端情况）时返回 `true` 放行——**不因为单实例机制挡住用户使用**。
 
 ---
 
@@ -178,7 +197,8 @@ clipboard/
 ├─ index.json          索引（元数据）
 ├─ data/<id>.txt       文本正文
 ├─ images/<id>.bmp     图片
-└─ files/<id>.txt      文件清单（每行一个完整路径）
+├─ files/<id>.txt      文件清单（每行一个完整路径）
+└─ log/                日志（轻贴.log；崩溃时另存 轻贴-崩溃_<时间戳>.log）
 ```
 
 **内容一律落盘**，任何一条记录在缓存目录里都能找到对应的实体文件 —— 这是从 v1 继承并强化的硬约束。
@@ -231,6 +251,27 @@ clipboard/
 - **渲染后**：前端异步调 `check_files_alive(ids)`（只做 `Path::exists()`，纯元数据查询），失效卡片压暗并标「已失效」；
 - **点击时**：`copy_back` 逐个校验 —— 全部失效直接报错说明；**部分失效**只写回还在的那几个，并返回提示信息（如「已跳过 1 个」），由前端 toast。
 - 因此 `copy_back` 的签名是 `Result<Option<String>, String>`，`Some(msg)` 表示「成功了但有情况要告诉你」。
+
+### 4.6 缓存目录迁移（自我嵌套防护）
+
+`pick_cache_dir` 返回 `Option<(String, bool)>`——`bool` 表示「是否真的迁移了」（选的就是当前目录时为 `false`，前端据此显示「已经是当前缓存目录，无需更改」）。迁移要跨过三道防线：
+
+1. **归一化后判同**。字符串比较不可靠：`\\?\` 前缀、末尾反斜杠、短路径（8.3 名）都能让**同一个目录**长得不一样，于是被当成「换了目录」而进入迁移 → 自我搬迁 → 无限嵌套 / 卡死。用 `fs::canonicalize` 把两种写法归一到同一形式再比。
+2. **拒绝包含关系**。新目录在旧目录内、或旧目录在新目录内，一律报错——这是「自己搬进自己」的另一条入口。
+3. **先快照，后搬运**。`move_dir_contents_depth` 先把 `old` 的子项收集成 `Vec<PathBuf>` 再逐个移动；否则 `create_dir_all(new)` 刚建出的目录会被随后的 `read_dir(old)` 当成 `old` 的一个条目读回来。此外每层断言 `old != new` 且 `new` 不在 `old` 内，并设 `MAX_DEPTH = 64` 深度上限兜底（任何异常递归都会在这里终止）。
+
+**空 / 非空目录的识别**：选中的是空目录 → 直接当缓存根；选中的是非空目录 → **不污染它**，在其下建一个与当前缓存目录同名的子文件夹再搬进去（已存在同名则报错让用户换一个）。
+
+### 4.7 日志（`logger.rs`）
+
+GUI 程序从双击启动，`stderr` 没人接收——出问题时用户只看到「弹了一下」，看不到任何细节。所以把 `println!` / `eprintln!` 的内容同时写一份到缓存目录 `log/轻贴.log`。
+
+- **实现取向**：不引第三方日志库（依赖极少是既定原则）。`install_hook()` 挂 `std::panic::set_hook`，其余打印语句不用逐个改写就都能留痕。
+- **环形截断**：文件超过 `MAX_BYTES = 64MB` 时保留尾部 `KEEP_BYTES = 32MB`，不整份清空——异常前后的上下文往往在同一文件里。
+- **崩溃快照**：panic 时除写主日志外，另存 `轻贴-崩溃_<时间戳>.log`，用户直接发这个文件即可。
+- **时间戳手算**：用 Howard Hinnant 的 `civil_from_days` 换算年月日，不引 `chrono`。
+- 对外提供 `log_err!` / `log_info!` 宏、`note_error()`（每第 5 次异常写一份计数文件）、`snapshot_on_error()`。
+- 缓存目录尚未初始化时（panic 可能早于初始化），退回 `%LOCALAPPDATA%\轻贴\log`，不写到奇怪的工作目录。
 
 `files_path` 缺失的老数据在启动时由 `backfill_files()` 补写清单并回存索引。
 
@@ -308,6 +349,15 @@ Win10 的 acrylic 在窗口刚创建时不一定立刻铺开。显示后按 200 
 - `lib.rs` 的 `WindowEvent::Focused(true)`：延迟 150 ms 后台补涂一次，覆盖「点击窗口外再点回来」的场景。
 
 补涂动作一律安排在**窗口可见之前**（或紧随 show 的后台延迟里），否则用户会看到「先出现、再变样」的闪烁。
+
+### 5.8 圆角模式开关的立即生效（`apply_round_mode`）
+
+切换「圆角模式」后要立即生效、无需重启，这里**不能无脑 `apply_acrylic`**——Win11 走 `SystemBackdrop(Mica)` 档，正常材质是 Mica 而非 acrylic：
+
+- **开启圆角**：必须关掉**所有**系统材质（`clear_system_material(current_tier())` 清 Mica / SystemBackdrop 的 backdrop，再 `clear_accent`），否则系统材质的矩形 blur 仍在，圆角外会留直角残留；
+- **关闭圆角**：必须按当前档位**完整恢复**——`apply(hwnd, dark)` 会按 build 分档重新施加（SystemBackdrop→Mica、Acrylic→acrylic）。只施加 acrylic 恢复不了 Mica，表现就是「关了圆角，材质还是圆角模式那副样子」。
+
+`detect_build()` 作为公开函数暴露出来，供「关于」页展示真实 build 号。
 
 ---
 
@@ -415,17 +465,30 @@ settings   设置页
 
 跟随系统：`getCurrentWindow().theme()` + `onThemeChanged`，切换 `body.dark` 类。Rust 侧在 `ThemeChanged` 事件里重刷材质。CSS 变量在 `body.dark` 作用域整体替换。
 
+### 8.6 关于页（`about.rs` + 前端）
+
+设置的第 4 个标签「关于」，把「出问题时才去翻终端日志」变成「页面上直接看」。进入该页会**静默**拉一次更新信息（不弹任何提示），所以更新日志是常驻的，不用先点「检查更新」。
+
+- `about_info()` 一次性返回全部自检项，避免前端发一堆零碎 invoke：版本（debug 带 `-beta` 后缀）、系统名（`ProductName` 在部分版本仍是「Windows 10」，用 build ≥ 22000 纠正为「Windows 11」）、`DisplayVersion`（26H2 这类）、build、材质档位、圆角模式、开机自启、**内存占用**（`psapi::GetProcessMemoryInfo` 手写 FFI，读工作集）、缓存目录、仓库地址。
+- **`check_update()` 走系统自带 `curl.exe`**（Win10+ 均自带），不引 HTTP 客户端依赖，与「依赖极少」的取向一致。
+  - **代理候选逐个实测**：GUI 进程拿不到 shell 里设的 `HTTP_PROXY`，所以按「上次成功的 → 环境变量 → 注册表 `Internet Settings\ProxyServer` 的每个分号段 → 最后直连」组成候选列表依次试，成功者记进 `Mutex<Option<String>>` 供下次优先使用；**不硬编码端口**（各家代理端口不同，靠实测决定）。
+  - 只有响应体含 `"tag_name"` 才算成功（限流 / 404 的错误 JSON 不算）；全部失败才计数 + 留痕，并对「含限流」与「均无法连接」给出不同提示。
+  - 版本比较 `is_newer` 只比数字段、忽略 `-beta` 后缀。
+- `open_external` 只放行 `http(s)`，避免被塞 `file://` 之类的本地路径。
+- 前端内置**极简 Markdown 渲染**（`md` / `mdInline` / `esc`）来渲染 Release notes；因为渲染的是**外部文本**（缓存目录路径、Release 说明），一律**先转义再插 innerHTML**。
+
 ---
 
 ## 九、设置项（`settings.rs`）
 
-设置页按 **三个标签分页**（v2.1.5 起）——**通用 / 外观 / 记录与缓存**，避免一长条列表翻找：
+设置页按 **四个标签分页**（v2.1.8 起）——**通用 / 外观 / 记录与缓存 / 关于**，避免一长条列表翻找：
 
 - **通用**：开机自启、关闭时后台运行、退出清理相关；
 - **外观**：材质浓度、圆角模式（附注「Win11 原生即圆角，本开关只影响背景模糊与材质观感」）；
-- **记录与缓存**：文件复制开关、保留天数、缓存目录（路径 + 占用 + 迁移/打开）、清空全部历史。
+- **记录与缓存**：文件复制开关、保留天数、缓存目录（路径 + 占用 + 迁移/打开）、清空全部历史；
+- **关于**：版本、运行环境自检、检查更新与更新日志、项目主页 / 问题反馈入口（详见 8.6）。
 
-标签切换是纯前端行为（`SETTINGS_TABS` + `settingsGeneralHtml / settingsAppearanceHtml / settingsDataHtml`），点击只重渲染 `.settings-body`，不动其它区域。
+标签切换是纯前端行为（`SETTINGS_TABS` + `settingsGeneralHtml / settingsAppearanceHtml / settingsDataHtml / settingsAboutHtml`），点击只重渲染 `.settings-body`，不动其它区域。
 
 持久化到 `%APPDATA%\com.kunge.selfclipboard\config.json`：
 
@@ -470,6 +533,11 @@ settings   设置页
 | `get_settings` / `set_*` | 读取与修改各项设置 |
 | `exit_app` | 前端确认后执行退出清理并退出 |
 | `tray_show_main` / `tray_quit` / `tray_menu_look` | 托盘菜单用 |
+| `about_info` | 关于页自检数据（版本 / 系统 / 档位 / 内存 / 缓存目录…） |
+| `check_update` | 经系统 `curl` 查 GitHub 最新 Release（多代理候选实测） |
+| `open_external` | 打开外部链接（仅 http/https） |
+
+> `pick_cache_dir` 的返回是 `Result<Option<(String, bool)>, String>`：`(路径, 是否真的迁移了)`。
 
 权限（`capabilities/default.json`）覆盖 `main` 与 `tray-menu` 两个窗口：`core:default`、`core:window:*`（close / hide / show / set-focus / minimize / maximize / toggle-maximize / start-dragging / theme）、`core:webview:default`、`core:event:default`。
 
@@ -481,12 +549,14 @@ settings   设置页
 
 | 原则 | 落实 |
 |---|---|
-| 数据全本地 | 无网络请求；不引入任何上报 SDK |
+| 数据全本地 | 用户的剪贴板内容**永不出本机**；不引入任何上报 / 统计 SDK |
+| 唯一的外联 | 仅「关于」页的**检查更新** —— 用系统 `curl` 只读 `api.github.com/.../releases/latest`（公开信息，不带任何用户标识、不上传任何数据）；进入「关于」页会静默请求一次 |
 | 内容落盘 | 每条记录都有对应实体文件，用户可直接查看/备份 |
 | 目录可迁移 | 自定义缓存目录，改完立即生效 |
 | 可一键清空 | 工具栏清空按钮 + 退出清理 + 保留天数 |
 | 置顶/收藏保护 | 清理逻辑一律豁免，除非显式勾选「连置顶一起清」 |
-| 敏感默认保守 | 文件复制默认关闭；不记录剪贴板原文到日志 |
+| 敏感默认保守 | 文件复制默认关闭；日志只记事件与路径，不记剪贴板原文 |
+| 外链白名单 | `open_external` 只放行 `http(s)`，拒绝 `file://` 等本地协议 |
 
 ---
 
@@ -584,6 +654,7 @@ settings   设置页
 | 圆角与系统模糊无法共存 | `SetWindowRgn` 对 acrylic 无效，四角必有矩形残留 | 提供「圆角模式」二选一（见 5.3） |
 | 纯色背景上材质「发平」 | Win10 accent API 只有单色 tint，无 luminosity 层 | tint 压到 8%，明暗改由 CSS 层负责 |
 | 托盘唤回 / 点窗口外，四周浮出「Win7 式」直角边框（Win10/11 均有） | 隐藏（`hide()` 不产生 `WM_SIZE`）或失焦后，DWM 丢掉 accent 材质且 WebView2 内容尺寸停在隐藏前 | `show_main` 在 `show()` 后延迟 150/500ms 后台补涂；`Focused(true)` 延迟 150ms 补涂（详见 5.7） |
+| 关掉「圆角模式」后材质仍像圆角模式（Win11） | `apply_round_mode` 无脑 `apply_acrylic`：开圆角没清 Mica/SystemBackdrop、关圆角也没按档位恢复 | 开圆角清所有系统材质 + 清 accent；关圆角改走 `apply()` 按档位恢复（详见 5.8） |
 
 ### 14.3 构建与交付
 
@@ -598,6 +669,17 @@ settings   设置页
 | 非管理员双击安装报「无法打开要写入的文件」 | 旧安装器未申请提权，却默认装到 `Program Files` | `tauri.conf.json` 的 `installMode` 改 `perMachine`（写入 `RequestExecutionLevel admin`），双击即弹 UAC |
 | `.modal-check{display:flex}` 让 `hidden` 失效（勾选框不隐藏） | 类选择器的 `display` 覆盖了 `[hidden]` 的默认样式 | 显式补 `[hidden]{display:none}` |
 | 已失效徽章把右侧时间挤乱 | `appendChild` 把徽章插到了 `.card-time` 之后 | 改 `insertBefore(badge, .card-time)`，保持时间列对齐 |
+
+### 14.4 存储 / 进程 / 日志
+
+| 现象 | 根因 | 解法 |
+|---|---|---|
+| 迁移缓存目录后目录**无限嵌套**、卡死甚至闪退 | ①同一目录的不同写法（`\\?\` 前缀、尾斜杠、短路径）字符串不等 → 被当成换目录；②`create_dir_all(new)` 建出的目录又被随后 `read_dir(old)` 当成 `old` 的子项读回，new 在 old 内时必然自我嵌套 | `canonicalize` 归一化判同 + 拒绝父子包含 + **先快照子项再搬运** + 每层断言 + `MAX_DEPTH=64`（详见 4.6） |
+| 迁移到**非空目录**会污染用户既有内容 | 直接把 `data/`、`images/` 等平铺进去 | 非空目录下自动建一个同名子文件夹再搬（已存在同名则报错） |
+| 双击图标开出第二个实例 | 无单实例约束 | `CreateMutexW` + `ERROR_ALREADY_EXISTS` 判定，重复则唤前台后 `exit(0)`（详见 2.5） |
+| 测试版与正式版想同时开却互相顶掉 | 单实例插件按 app identifier 判重，而 debug/release 共用同一 identifier | 手写锁名，按 `cfg!(debug_assertions)` 加 `.debug` 后缀，天然共存（详见 2.5） |
+| GUI 崩溃后**没有任何线索** | 程序由双击启动，`stderr` 无人接收 | `logger` 挂 panic hook，日志落盘 + 崩溃另存快照（详见 4.7） |
+| 「关于」页检查更新常提示连不上 | GUI 进程拿不到 shell 的 `HTTP_PROXY`，且各家代理端口不同 | 组候选列表逐个实测（上次成功 → 环境变量 → 注册表 ProxyServer 各段 → 直连），不硬编码端口（详见 8.6） |
 | `tray.js` 构建失败 | 用了顶层 `await`，而 vite 目标含 `safari13` | 包进 async IIFE |
 
 ---
@@ -693,7 +775,7 @@ SemVer `MAJOR.MINOR.PATCH`。`v1.3.x` 为 Electron 时代，v2 从 `v2.0.0` 起�
 2. 统一改版本号（`package.json` / `package-lock.json` / `tauri.conf.json` / `Cargo.toml`）；
 3. `git tag -a vX.Y.Z -m ...` 并推送 tag；
 4. `npm run tauri build` 产出 NSIS 安装包；
-5. GitHub Release 附安装包（**用 ASCII 文件名**，如 `light_clip_v2.1.5_setup.exe` —— `gh` 在 Windows 下会吞掉中文资产名）；
+5. GitHub Release 附安装包（**用 ASCII 文件名**，如 `light_clip_v2.1.8_setup.exe` —— `gh` 在 Windows 下会吞掉中文资产名）；
 6. Release notes 写明新增 / 修复 / 已知问题；
 7. 安装包体积列为检查项。
 
