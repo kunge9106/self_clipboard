@@ -686,6 +686,21 @@ settings   设置页
 - 首次引导介绍基本用法；
 - 单条超过 1MB 的超大条目专门处理，索引只记字符数与路径。
 
+### 12.6 浅色主题的元素可见性
+
+**现象**：浅色主题下，以「白色 + 低不透明度」表达的前景元素在浅色背景上对比度不足，视觉上接近隐形。
+
+已确认的实例：
+
+- 更新中心的下载按钮空轨（`--track-bg`）：填充前整条不可见，看不出进度从哪开始；
+- 玻璃材质卡片描边、列表分隔线与状态栏分隔线。
+
+**根因**：这类元素用 `rgba(255,255,255,α)` 表达「浅色元素」。在深色主题下白色叠加天然可见，一旦背景变亮（浅色主题，或浅色桌面透过玻璃材质），白色叠加失去参照，等价于不存在。因此问题只在浅色主题暴露，且不限于某一处 —— 凡是依赖低不透明度白色叠加的元素都有同一缺陷。
+
+**处理时机**：功能收尾阶段统一处理，不逐个临时打补丁。现在只记录，不改。
+
+**方向（待定）**：建立按主题分档的语义色阶（分隔线、轨道、描边各一个变量），浅色主题取低不透明度黑、深色主题取低不透明度白；随后把各处硬编码的白色叠加逐个替换为对应变量。
+
 ---
 
 ## 十三、开发原则
@@ -789,6 +804,7 @@ settings   设置页
 - 文件条目恒为复制语义。只写 `CF_HDROP`，未写 `Preferred DropEffect`，从历史粘出来永远是复制，原 `Ctrl+X` 剪切不会删除原文件。
 - 仅支持 Windows。材质、托盘、自启均基于 Win32，代码以 `#[cfg(windows)]` 隔离，未做跨平台适配。
 - Win10 材质观感受系统版本影响。纯色背景上，尤其低浓度时，仍比 Win11 平淡。
+- 浅色主题下低不透明度白色叠加的前景元素对比度不足，见 12.6。
 
 ---
 
@@ -850,10 +866,17 @@ perf(memory): 视野外释放图片解码位图
 
 SemVer `MAJOR.MINOR.PATCH`。`v1.3.x` 为 Electron 时代，v2 从 `v2.0.0` 起。
 
+版本源是 `package.json` 的 `version`：
+
+- `src-tauri/tauri.conf.json` 的 `version` 为 `"../package.json"`，是 Tauri 支持的引用写法，构建与运行时都从 `package.json` 取值；
+- `src/main.js` 的状态栏版本号取自 `getVersion()`，不硬编码；
+- `package-lock.json` 与 `src-tauri/Cargo.lock` 由 npm / cargo 生成，二者随版本号变化；
+- 由于 npm 与 cargo 各自必须能独立读到版本，`package.json` 与 `src-tauri/Cargo.toml` 是两个不可合并的清单，由 `npm run version:set X.Y.Z`（`scripts/set-version.mjs`）一次写入全部位置。
+
 ### 18.4 发布流程
 
 1. `feature/*` 开发完毕且用户在双机实测通过后，开 PR 以 `--no-ff` 合入 `main`，`develop` 快进；
-2. 统一修改版本号，涉及 `package.json`、`package-lock.json`、`tauri.conf.json`、`Cargo.toml`；
+2. 改版本号：`npm run version:set X.Y.Z`；
 3. `git tag -a vX.Y.Z -m ...` 并推送 tag；
 4. 执行 `npm run tauri build` 产出 NSIS 安装包；
 5. 在 GitHub Release 附安装包，使用 ASCII 文件名，例如 `light_clip_v2.1.9_setup.exe`，因为 `gh` 在 Windows 下会吞掉中文资产名；
