@@ -122,6 +122,8 @@ pub fn toggle_favorite(id: String) -> Result<(), String> {
 pub fn clear_all() -> Result<(), String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    // 只删条目自己的实体（文本 / 图片 / 文件清单），不碰目录里其它内容——
+    // 尤其不碰 `log/`（见 CONTENT_DIRS 注释）。
     for item in hist.iter() {
         remove_item_files(&dir, item);
     }
@@ -871,6 +873,7 @@ fn patch_item<F: FnOnce(&mut HistoryItem)>(id: &str, f: F) -> Result<(), String>
 
 /// 按天数清理过期条目（0 = 不清理），返回清理后的历史。
 /// v1 语义：严格按时间戳过滤，不豁免置顶/收藏。
+/// 只删过期条目自己的实体文件，**不碰 `log/`**（见 CONTENT_DIRS 注释）。
 pub fn prune_retention(days: u32) {
     if let Some(dir) = DIR.get() {
         let mut hist = HISTORY.get().unwrap().lock().unwrap();
@@ -913,6 +916,11 @@ pub struct CacheInfo {
     pub dir: String,
     pub count: u64,
     pub size: u64,
+    /// 其中属于 `log/` 的那部分（文件数 / 字节）。
+    /// 单独给出是为了把「缓存占用包含日志」这件事说清楚——清理动作从不碰 `log/`，
+    /// 但日志确实占着空间，用户有权知道占了多少（见 `CONTENT_DIRS` 注释）。
+    pub log_count: u64,
+    pub log_size: u64,
 }
 
 /// 去掉 Windows `canonicalize` 产生的扩展长度前缀，让路径显示为普通形式：
@@ -931,10 +939,13 @@ fn strip_ext_prefix(s: &str) -> String {
 pub fn cache_info() -> CacheInfo {
     let dir = DIR.get().cloned().unwrap_or_default();
     let (count, size) = dir_stats(&dir);
+    let (log_count, log_size) = dir_stats(&dir.join("log"));
     CacheInfo {
         dir: strip_ext_prefix(&dir.to_string_lossy()),
         count,
         size,
+        log_count,
+        log_size,
     }
 }
 
@@ -1121,9 +1132,32 @@ pub fn open_cache_dir() -> Result<(), String> {
     Ok(())
 }
 
+/// 直接打开 `log/` 子目录。日志不会被任何清理动作删除，
+/// 用户想删只能自己来——那就得让他们找得到。
+#[tauri::command]
+pub fn open_log_dir() -> Result<(), String> {
+    let dir = DIR.get().ok_or("存储目录未初始化")?;
+    let log = dir.join("log");
+    let _ = fs::create_dir_all(&log);
+    std::process::Command::new("explorer")
+        .arg(log)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // 退出清理（迁移自 v1 cleanImagesOnClose：清空内容缓存 + 历史）
 // ---------------------------------------------------------------------------
+
+/// 允许被清理动作触碰的内容目录——**只有这三个**。
+///
+/// `log/` 刻意不在其中：日志是排查问题的唯一凭据，尤其是崩溃现场。
+/// 因此以下所有清除路径都**从未**删除日志，也绝不允许删除：
+/// 保留天数清理（`prune_history`）、清空全部历史（`clear_all`）、
+/// 退出清理（`on_app_exit`）、缓存目录迁移（`move_dir_contents` 只搬不移除）。
+/// 日志只会在用户于文件管理器里手动删除时才消失。
+const CONTENT_DIRS: [&str; 3] = ["data", "images", "files"];
 
 /// 在 RunEvent::Exit 时调用。clean_on_close 开启则清空全部内容文件与历史索引。
 pub fn on_app_exit() {
@@ -1138,8 +1172,8 @@ pub fn on_app_exit() {
     );
     if let Some(dir) = DIR.get() {
         if include_pinned {
-            // 全清：直接清空三个内容目录 + 历史
-            for sub in ["data", "images", "files"] {
+            // 全清：只清内容目录（CONTENT_DIRS，**不含 log/**）+ 历史索引
+            for sub in CONTENT_DIRS {
                 let _ = fs::remove_dir_all(dir.join(sub));
                 let _ = fs::create_dir_all(dir.join(sub));
             }

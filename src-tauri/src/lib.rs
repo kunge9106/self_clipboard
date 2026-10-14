@@ -229,6 +229,7 @@ pub fn run() {
             clipboard::cache_info,
             clipboard::pick_cache_dir,
             clipboard::open_cache_dir,
+            clipboard::open_log_dir,
             settings::get_settings,
             settings::set_tray_on_close,
             settings::set_clean_on_close,
