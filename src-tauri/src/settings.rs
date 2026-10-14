@@ -73,6 +73,15 @@ pub struct Config {
     /// 关闭时：read_clipboard 完全不看 CF_HDROP；前端「文件」入口保留但显示已关闭提示。
     #[serde(default)]
     pub file_copy: bool,
+    /// 置顶是否在**所有分类间互通**。
+    ///
+    /// **默认关闭** —— 保持「置顶按分类独立」的既有行为：在「文本」里置顶不影响它在
+    /// 「历史」里的位置。开启后整条内容只有一个置顶状态，任一分类置顶/取消其它分类同步
+    /// （存储上收敛成 `pinned_views = ["*"]`，见 `clipboard::PIN_ALL` / `normalize_pins`）。
+    ///
+    /// 默认关闭的原因：这是交互语义的改变，不该在升版本时静默替换用户已经形成的用法。
+    #[serde(default)]
+    pub pin_global: bool,
     /// 自定义缓存目录（None = 使用 app_data_dir/clipboard）
     #[serde(default)]
     pub cache_dir: Option<String>,
@@ -184,6 +193,7 @@ impl Default for Config {
             asked_tray_on_close: false,
             round_mode: false,
             file_copy: false, // 默认关闭：不记录文件复制
+            pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
             cache_dir: None,
             update_cache: None,
         }
@@ -274,6 +284,7 @@ pub fn get_settings() -> serde_json::Value {
         "alphaRound": cfg.alpha_round,
         "roundMode": cfg.round_mode,
         "fileCopy": cfg.file_copy,
+        "pinGlobal": cfg.pin_global,
         "cacheDir": cfg.cache_dir,
         "autoStart": autostart::is_enabled(),
         "askedAutostart": cfg.asked_autostart,
@@ -310,6 +321,17 @@ pub fn set_clean_on_close(value: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn set_file_copy(value: bool) -> Result<(), String> {
     update(|c| c.file_copy = value);
+    Ok(())
+}
+
+/// 「置顶互通」开关（设置页，默认关闭）
+///
+/// 改完设置必须把已有置顶记录归一到对应模式的表示，否则同一份数据里会同时存在
+/// 「互通」与「按分类独立」两种写法，界面表现与前面对不上。
+#[tauri::command]
+pub fn set_pin_global(value: bool) -> Result<(), String> {
+    update(|c| c.pin_global = value);
+    crate::clipboard::normalize_pins(value);
     Ok(())
 }
 

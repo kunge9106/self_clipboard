@@ -413,9 +413,13 @@ function fileCopyOn() {
   return !!(settings && settings.fileCopy);
 }
 
-/** 置顶按分类独立：这条内容是否在 view 这个分类里被置顶 */
+/** `pinnedViews` 里的通配项：表示所有分类都置顶（设置里开了「置顶互通」时写入） */
+const PIN_ALL = "*";
+
+/** 这条内容是否在 view 这个分类里置顶。通配项对所有分类都成立。 */
 function isPinnedIn(item, view) {
-  return Array.isArray(item.pinnedViews) && item.pinnedViews.includes(view);
+  const vs = item.pinnedViews;
+  return Array.isArray(vs) && (vs.includes(PIN_ALL) || vs.includes(view));
 }
 
 /** 是否在任何分类里置顶过（用于清理豁免，避免误删别处置顶的内容） */
@@ -1018,14 +1022,12 @@ function openContextMenu(x, y, item) {
   showMenu(x, y, [
     { label: "复制", act: () => copyBack(item) },
     {
-      // 置顶按分类独立：这里动的是「当前分类」下的置顶状态
-      label: pinnedHere ? `取消置顶（${viewName}）` : `置顶（${viewName}）`,
+      // 默认「按分类独立」，菜单里标明动的是哪个分类；开了「置顶互通」后置顶是全分类一致
+      // 的单一状态，再带分类名只会误导
+      label: (pinnedHere ? "取消置顶" : "置顶") + (settings?.pinGlobal ? "" : `（${viewName}）`),
       act: async () => {
-        await invoke("toggle_pin", { id: item.id, view: currentView });
-        const vs = Array.isArray(item.pinnedViews) ? item.pinnedViews : (item.pinnedViews = []);
-        const idx = vs.indexOf(currentView);
-        if (idx >= 0) vs.splice(idx, 1);
-        else vs.push(currentView);
+        // 新集合由后端按当前模式算好回传，前端不再重复实现一遍置顶规则
+        item.pinnedViews = await invoke("toggle_pin", { id: item.id, view: currentView });
         render({ keepScroll: true });
       },
     },
@@ -1142,7 +1144,10 @@ function settingsGeneralHtml(s) {
       <span class="hint">开机后自动运行</span></div>
     <div class="row"><label>关闭时后台运行</label>
       <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
-      <span class="hint">关闭时收进托盘，继续在后台记录（右键托盘可开菜单）</span></div>`;
+      <span class="hint">关闭时收进托盘，继续在后台记录（右键托盘可开菜单）</span></div>
+    <div class="row"><label>置顶互通</label>
+      <input type="checkbox" id="set-pin-global" ${s.pinGlobal ? "checked" : ""} />
+      <span class="hint">任一分类置顶或取消，其它分类同步；关闭后各分类独立记录</span></div>`;
 }
 
 function settingsAppearanceHtml(s) {
@@ -1793,6 +1798,22 @@ function bindSettings(view) {
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
   bindCheck("set-clean-confirm", "set_clean_confirm_exit");
+
+  // 置顶互通不能走 bindCheck：这个开关会把已有置顶记录归一到新表示，
+  // 必须顺带把本地缓存的 items 拉新的，否则列表里的置顶徽章/排序还是旧的。
+  const pinGlobal = view.querySelector("#set-pin-global");
+  if (pinGlobal)
+    pinGlobal.onchange = async () => {
+      try {
+        await invoke("set_pin_global", { value: pinGlobal.checked });
+        settings = await invoke("get_settings");
+        items = await invoke("get_history");
+        toast(pinGlobal.checked ? "置顶已改为全分类互通" : "置顶已改为按分类独立");
+      } catch (e) {
+        toast("保存失败：" + e);
+        pinGlobal.checked = !pinGlobal.checked;
+      }
+    };
 
   const retention = view.querySelector("#set-retention");
   if (retention)
