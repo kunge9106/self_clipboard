@@ -22,6 +22,8 @@
   --glass-strong: rgba(255, 255, 255, 0.28);
   --glass-hover: rgba(255, 255, 255, 0.24);
   --stroke: rgba(255, 255, 255, 0.35);
+  /* 进度条空轨：玻璃白在浅色底上等于隐形，必须用「比底深一点」的中性色 */
+  --track-bg: rgba(0, 0, 0, 0.08);
   /* 材质主体：系统 acrylic 只负责「模糊」（tint 已压到 8%，因为 SetWindowRgn
      管不住 acrylic，四角切不掉），窗口的明暗与浓淡由这一层负责。
      好处：四角的矩形残留淡到看不见，材质浓度也能在设置页实时调。 */
@@ -48,6 +50,7 @@ body.dark {
   --glass-strong: rgba(40, 40, 44, 0.38);
   --glass-hover: rgba(255, 255, 255, 0.1);
   --stroke: rgba(255, 255, 255, 0.12);
+  --track-bg: rgba(255, 255, 255, 0.14);
   --material-rgb: 22 22 24;
   --glass-alpha: 0.62;
   --text: #f2f2f5;
@@ -366,30 +369,47 @@ html:not(.hovers-off) .nav-item:hover {
   pointer-events: none;
 }
 
-/* 「下载最新版」：按钮底色变成从左向右灌满的进度条（像手机装应用那样）。
-   填充层在下、文字在上，所以文字要 relative 抬一层。 */
+/* 「下载最新版」：按钮底色变成从左向右推进的进度条。
+   两条硬要求：
+   ① 看得出填充从哪儿开始 —— 先给按钮铺一层**可见的空轨**，填充用实色；
+      原实现是「半透明渐变 + 玻璃底」，在玻璃上根本分不出边界。
+   ② 文字在「已填充」「未填充」两段上都要清楚 —— 文字分两层，用**同一条裁剪线**
+      （--p）裁开：底层是常规文字色，上层是白色。两层几何完全一致，
+      所以文字与进度永远对齐，不会出现「白字压在浅底上看不见」。 */
 .btn-ghost.is-downloading {
   position: relative;
   overflow: hidden;
-  min-width: 136px;
+  min-width: 142px;
   cursor: default;
+  background: var(--track-bg); /* 空轨：必须看得见，否则不知道填充从哪儿开始 */
+  color: var(--text);
 }
 
 .btn-ghost.is-downloading .dl-fill {
   position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 0;
-  background: linear-gradient(90deg, rgba(47, 107, 255, 0.5), var(--accent));
-  /* 水头：右缘圆润一点，避免一根生硬的直线往前推 */
-  border-radius: 0 8px 8px 0;
-  transition: width 0.25s ease-out;
+  inset: 0;
+  background: var(--accent);
+  clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0);
+  transition: clip-path 0.2s ease-out;
 }
 
 .btn-ghost.is-downloading .dl-label {
-  position: relative;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.btn-ghost.is-downloading .dl-label-off {
+  color: var(--text);
+}
+
+.btn-ghost.is-downloading .dl-label-on {
   color: #fff;
+  clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0);
+  transition: clip-path 0.2s ease-out;
 }
 
 /* 启动自检发现新版本时的一次性横幅（压在标题栏下方，不挡拖动区） */

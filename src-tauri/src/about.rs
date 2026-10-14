@@ -764,9 +764,31 @@ fn download_inner(app: &tauri::AppHandle) -> Result<String, String> {
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
 
-    let cache = crate::settings::get()
+    let cached = crate::settings::get()
         .update_cache
         .ok_or("请先点「检查更新」")?;
+
+    // 校验用的「期望大小」必须**现取**，不能直接用缓存：发布方重新上传同名资产
+    // （覆盖发布）之后，缓存里的 `asset_size` 就过期了 —— 于是文件其实下载成功、
+    // 校验却必然报「文件大小不符」（实测遇到过一次）。
+    // 取不到时（离线等）再退回缓存，反正那种情况下下载本身也大概率失败。
+    let cache = match fetch_release() {
+        Ok(rel) => {
+            save_cache(&rel);
+            rel
+        }
+        Err(e) => {
+            println!("[update] 下载前重新获取发布信息失败，改用缓存：{e}");
+            Release {
+                latest: cached.latest,
+                notes: cached.notes,
+                url: cached.url,
+                asset_url: cached.asset_url,
+                asset_name: cached.asset_name,
+                asset_size: cached.asset_size,
+            }
+        }
+    };
     if cache.asset_url.is_empty() {
         return Err("该版本没有安装包，请到 Release 页手动下载".into());
     }
@@ -869,7 +891,7 @@ fn download_inner(app: &tauri::AppHandle) -> Result<String, String> {
             return Ok(final_path.to_string_lossy().to_string());
         }
         if last_err.is_empty() {
-            last_err = format!("文件大小不符（期望 {total}，实际 {got}）");
+            last_err = format!("下载不完整：期望 {total} 字节，实际 {got} 字节");
         }
     }
 
