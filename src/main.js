@@ -1530,7 +1530,8 @@ function renderUpdatePanels() {
     tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，当前 v${esc(cur)}`;
   } else if (info?.latest) {
     tip.className = "about-state is-ok";
-    tip.textContent = "已是最新版本（v" + cur + "）";
+    // 不带版本号：上方大字已经显示了当前版本，这里再写一遍是重复。
+    tip.textContent = "已是最新版本";
   } else {
     tip.className = "about-state";
     tip.textContent = "尚未检查更新";
@@ -1659,7 +1660,7 @@ async function aboutCheckUpdate() {
     toast(
       updateInfo.hasUpdate
         ? `发现新版本 v${updateInfo.latest}，当前 v${updateInfo.displayCurrent}`
-        : `已是最新版本（v${updateInfo.displayCurrent}）`
+        : "已是最新版本"
     );
   } catch (e) {
     if (tip) {
@@ -2111,7 +2112,10 @@ async function main() {
     document.getElementById("status-version").textContent =
       `Version：${(await getVersion())}-ikun`;
   } catch (e) {
-    document.getElementById("status-version").textContent = "Version：2.1.9-ikun";
+    // 版本号不在前端写死：它由 tauri.conf.json 引用 package.json 得到，
+    // 写死会在下次发版后与真实版本不一致。取不到时留一个占位符。
+    console.error("get version failed", e);
+    document.getElementById("status-version").textContent = "Version：—";
   }
 
   render();
