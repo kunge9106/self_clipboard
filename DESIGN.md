@@ -740,7 +740,7 @@ settings   设置页
 
 ### 18.1 分支模型
 
-采用 **GitHub Flow（弹性版，无 CI）**：
+采用 **GitHub Flow（弹性版，无 CI）**。完整流程见仓库根目录 [`CONTRIBUTING.md`](./CONTRIBUTING.md)（把纪律写进仓库，避免换机后丢失）：
 
 | 分支 | 用途 |
 |---|---|

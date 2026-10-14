@@ -242,6 +242,8 @@ Win11 的 DWM 本身就给顶层窗口圆角，所以开不开圆角模式边角
 
 欢迎提 Issue 与 PR。仓库采用 **GitHub Flow**：`main` 只经 PR 合入，功能/修复开 `feature/*`、`fix/*` 分支；提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/)；合并用 `--no-ff` 保留合并节点，便于整段回退。
 
+完整的分支 / 提交 / 双机开发 / 发版流程见 **[CONTRIBUTING.md](./CONTRIBUTING.md)**。
+
 ## 开源协议
 
 [MIT](./LICENSE) © 2026 kunge9106
