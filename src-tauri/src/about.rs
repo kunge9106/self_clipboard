@@ -474,7 +474,7 @@ fn fetch_json(url: &str, candidates: &[String]) -> Result<serde_json::Value, Str
             "GitHub 请求过于频繁（匿名接口限流），请稍后再试".into()
         } else {
             format!(
-                "无法连接 GitHub（已尝试 {} 个代理和直连），请检查网络",
+                "连不上 GitHub（试了 {} 个代理和直连），请检查网络",
                 candidates.len().saturating_sub(1)
             )
         });
@@ -743,9 +743,9 @@ fn download_inner(app: &tauri::AppHandle) -> Result<String, String> {
 
     let cache = crate::settings::get()
         .update_cache
-        .ok_or("还没有可下载的版本信息，请先点「检查更新」")?;
+        .ok_or("请先点「检查更新」")?;
     if cache.asset_url.is_empty() {
-        return Err("这个版本没有提供安装包，请到 Release 页面手动下载".into());
+        return Err("该版本没有安装包，请到 Release 页手动下载".into());
     }
 
     let dir = crate::clipboard::cache_dir().join("update");

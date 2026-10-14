@@ -218,8 +218,8 @@ function openExitModal() {
   const modal = document.getElementById("exit-modal");
   const includePinned = settings && settings.cleanIncludePinned;
   document.getElementById("exit-modal-text").textContent = includePinned
-    ? "退出时将清理全部缓存内容（含置顶/收藏），确定退出吗？"
-    : "退出时将清理缓存内容（置顶/收藏会保留），确定退出吗？";
+    ? "将清理全部缓存（含置顶/收藏），确定退出？"
+    : "将清理缓存（保留置顶/收藏），确定退出？";
   modal.hidden = false;
 }
 
@@ -252,7 +252,7 @@ function openClearAllModal() {
     return;
   }
   document.getElementById("clear-all-modal-text").textContent =
-    `将清空全部历史，共 ${n} 条。置顶与收藏也会被一并删除，此操作不可撤销。`;
+    `共 ${n} 条，含置顶与收藏，此操作不可撤销。`;
   document.getElementById("clear-all-modal").hidden = false;
 }
 
@@ -308,7 +308,7 @@ function bindClearView() {
 async function doClearView(ids) {
   const uniq = [...new Set(ids)];
   if (uniq.length === 0) {
-    toast("没有选中任何可清理的条目");
+    toast("没有选中可清理的条目");
     return;
   }
   try {
@@ -327,8 +327,8 @@ function openClearViewModal({ normal, pinned, favs }) {
 
   document.getElementById("clear-view-modal-text").textContent =
     normal.length > 0
-      ? `将清除 ${normal.length} 条${query ? "搜索结果" : "内容"}，置顶与收藏默认保留。`
-      : "当前范围内没有普通条目（全是置顶或收藏）。勾选下方选项可将其一并清除。";
+      ? `将清除 ${normal.length} 条${query ? "搜索结果" : "内容"}，默认保留置顶与收藏。`
+      : "范围内没有普通条目（全是置顶或收藏），勾选下方选项可一并清除。";
 
   const pinRow = document.getElementById("clear-view-pinned-row");
   const favRow = document.getElementById("clear-view-fav-row");
@@ -527,8 +527,8 @@ function render({ keepScroll = false } = {}) {
   if (currentView === "files" && !fileCopyOn()) {
     document.getElementById("status-count").textContent = "共 0 条";
     view.innerHTML = `<div class="empty">
-      <div class="empty-title">文件复制功能已关闭</div>
-      <div class="empty-sub">需要记录资源管理器里复制的文件时，可在「设置 → 文件复制」中打开</div>
+      <div class="empty-title">文件复制已关闭</div>
+      <div class="empty-sub">可在「设置 → 记录与缓存」里打开</div>
     </div>`;
     return;
   }
@@ -647,11 +647,11 @@ function emptyHtml() {
     )} 相关内容</div></div>`;
   }
   const titles = {
-    history: ["暂无内容", "复制点东西试试，会自动记录到这里"],
-    text: ["暂无文本", "复制的文本会自动记录到这里"],
-    favorites: ["暂无收藏内容", "在条目上右键选择「收藏」，会出现在这里"],
-    images: ["暂无图片", "复制的图片会自动记录到这里"],
-    files: ["暂无文件", "复制的文件会自动记录到这里"],
+    history: ["暂无内容", "复制点东西试试"],
+    text: ["暂无文本", "复制的文本会出现在这里"],
+    favorites: ["暂无收藏", "右键条目选「收藏」即可"],
+    images: ["暂无图片", "复制的图片会出现在这里"],
+    files: ["暂无文件", "复制的文件会出现在这里"],
   };
   const [title, sub] = titles[currentView] || titles.history;
   return `<div class="empty"><div class="empty-title">${title}</div>
@@ -1139,10 +1139,10 @@ function settingsGeneralHtml(s) {
   return `
     <div class="row"><label>开机自启</label>
       <input type="checkbox" id="set-autostart" ${s.autoStart ? "checked" : ""} />
-      <span class="hint">登录 Windows 后自动运行轻贴</span></div>
+      <span class="hint">开机后自动运行</span></div>
     <div class="row"><label>关闭时后台运行</label>
       <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
-      <span class="hint">点关闭按钮时隐藏到托盘继续后台运行（托盘图标始终常驻，右键可开菜单、双击唤回窗口）</span></div>`;
+      <span class="hint">关闭时收进托盘，继续在后台记录（右键托盘可开菜单）</span></div>`;
 }
 
 function settingsAppearanceHtml(s) {
@@ -1152,14 +1152,14 @@ function settingsAppearanceHtml(s) {
       <span class="hint" id="material-val">${s.materialAlpha ?? 50}%（越高越厚实 · 越低越通透）</span></div>
     <div class="row"><label>圆角模式</label>
       <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
-      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。Win11 的系统材质本身就带窗口圆角，此开关主要改变的是背景模糊与材质观感</span></div>`;
+      <span class="hint">圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感</span></div>`;
 }
 
 // 「保留 N 天 / 永久保存」的展示文案。0 在语义上是「永久保留」，
 // 直接拼数字会得到「仅保留近 0 天内容」这种像 bug 的文案。
 function retentionLabel(days) {
   const n = days ?? 3;
-  return n === 0 ? "永久保存" : `仅保留近 ${n} 天内容`;
+  return n === 0 ? "永久保存" : `近 ${n} 天`;
 }
 
 // 「记录」与「数据与缓存」合并后的一页，按同一条链路排列：
@@ -1168,10 +1168,10 @@ function settingsDataHtml(s) {
   return `
     <div class="row"><label>文件复制</label>
       <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
-      <span class="hint">开启后记录在资源管理器里复制的文件（默认关闭，关闭时不采集也不显示文件条目）</span></div>
+      <span class="hint">记录资源管理器里复制的文件（默认关闭，关闭时不采集）</span></div>
     <div class="row"><label>保留天数</label>
       <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
-      <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
+      <span class="hint">0 表示永久保留</span></div>
     <div class="cache-box">
       <div class="cache-title">缓存目录 <span class="hint">${retentionLabel(s.retentionDays)}</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
@@ -1181,17 +1181,17 @@ function settingsDataHtml(s) {
         <button class="btn-ghost" id="btn-open-dir">打开目录</button>
         <button class="btn-ghost" id="btn-open-log">日志目录</button>
       </div>
-      <div class="cache-log-hint">上方的保留天数、清空历史、退出清理都<b>不会动 log/ 里的日志</b>——日志只在你自己手动删除文件时才会消失。</div>
+      <div class="cache-log-hint"><b>缓存与日志相互独立</b>：清空、保留天数、退出清理都不会影响日志，日志仅能手动删除。</div>
     </div>
     <div class="row"><label>关闭时清理缓存</label>
       <input type="checkbox" id="set-clean" ${s.cleanOnClose ? "checked" : ""} />
-      <span class="hint">退出时清理内容缓存与历史（置顶/收藏默认保留）</span></div>
+      <span class="hint">退出时清理缓存与历史（默认保留置顶/收藏）</span></div>
     <div class="row"><label>　└ 同时清理置顶/收藏</label>
       <input type="checkbox" id="set-clean-pinned" ${s.cleanIncludePinned ? "checked" : ""} />
-      <span class="hint">不勾选则置顶/收藏单独存放，不受清理影响</span></div>
+      <span class="hint">不勾选则置顶/收藏不受清理影响</span></div>
     <div class="row"><label>　└ 退出前弹窗提醒</label>
       <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
-      <span class="hint">每次退出时先弹窗确认</span></div>
+      <span class="hint">退出前弹窗确认</span></div>
     <button class="btn-danger" id="clear-all">清空全部历史</button>`;
 }
 
@@ -1314,7 +1314,7 @@ function settingsAboutHtml() {
     <div class="about-hero">
       <div class="about-hero-l">
         <div class="about-name">轻贴</div>
-        <p class="about-slogan">安静常驻托盘的剪贴板历史 · 全部存于本机，无账号、不联网、不上传</p>
+        <p class="about-slogan">安静常驻托盘的剪贴板历史 · 只存本机，无账号、不上传</p>
       </div>
       <div class="about-hero-r">
         <div class="about-badge">
@@ -1651,7 +1651,7 @@ function bindFirstRunModals() {
     autoLater.onclick = async () => {
       if (auto) auto.hidden = true;
       await dismiss("autostart");
-      toast("好的，之后可在「设置 → 通用」里打开开机自启");
+      toast("以后可在「设置 → 通用」里打开");
     };
 
   const close = document.getElementById("firstrun-close");
@@ -1706,7 +1706,7 @@ async function refreshCacheInfo() {
     if (statsEl) {
       // 日志单独标出来：既不隐瞒它占的空间，也说清它是「清不掉的那部分」。
       const logPart = info.logSize
-        ? `，含日志 ${fmtSize(info.logSize)}（不受清理影响）`
+        ? `，含日志 ${fmtSize(info.logSize)}`
         : "";
       statsEl.textContent = `${info.count} 个文件 · ${fmtSize(info.size)}${logPart}`;
     }
@@ -1768,7 +1768,7 @@ function bindSettings(view) {
         items = await invoke("get_history");
         settings = await invoke("get_settings");
         render();
-        toast(days === 0 ? "已改为永久保留" : `仅保留近 ${days} 天内容`);
+        toast(days === 0 ? "已改为永久保留" : `仅保留近 ${days} 天`);
       } catch (e) {
         toast("保存失败：" + e);
       }

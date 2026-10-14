@@ -189,14 +189,14 @@ pub fn copy_back(id: String) -> Result<Option<String>, String> {
                 .collect();
             if alive.is_empty() {
                 return Err(format!(
-                    "原文件已不存在（{total} 个都找不到了），可能已被移动、改名或删除"
+                    "原文件都已不存在（{total} 个），可能被移动或删除"
                 ));
             }
             unsafe { write_files_to_clipboard(&alive)? }
             let missing = total - alive.len();
             Ok(if missing > 0 {
                 Some(format!(
-                    "已复制 {} 个文件（{missing} 个原文件已不存在，已跳过）",
+                    "已复制 {} 个文件（跳过 {missing} 个失效文件）",
                     alive.len()
                 ))
             } else {

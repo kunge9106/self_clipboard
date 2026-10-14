@@ -68,7 +68,7 @@
           <div class="toolbar">
             <div class="search">
               <svg class="search-icon" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
-              <input id="search" type="text" placeholder="搜索剪贴板历史…" autocomplete="off" spellcheck="false" />
+              <input id="search" type="text" placeholder="搜索…" autocomplete="off" spellcheck="false" />
               <button class="search-clear" id="search-clear" type="button" title="清空搜索" hidden>
                 <svg viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
               </button>
@@ -77,15 +77,15 @@
 
           <div class="view" id="view">
             <div class="empty">
-              <div class="empty-title">轻贴 v2 骨架已就绪</div>
-              <div class="empty-sub" id="effect-debug">正在读取材质档位…</div>
+              <div class="empty-title">正在加载…</div>
+              <div class="empty-sub" id="effect-debug">正在读取环境信息…</div>
             </div>
           </div>
 
           <footer class="statusbar">
             <span class="statusbar-left" id="status-count">共 0 条</span>
             <span class="statusbar-version" id="status-version"></span>
-            <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清搜索结果；置顶/收藏除外）">
+            <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清结果；置顶/收藏除外）">
               <svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>
             </button>
           </footer>
@@ -162,8 +162,8 @@
       <div class="modal">
         <div class="modal-title">轻贴已经在运行</div>
         <div class="modal-text">
-          已经有一个轻贴在后台运行，已为你把它的窗口唤到前面。<br />
-          同一时间只需运行一个实例：它会一直守在托盘里，双击托盘图标就能唤回。
+          轻贴已经在后台运行，窗口已唤到前面。<br />
+          双击托盘图标即可随时唤回。
         </div>
         <div class="modal-actions">
           <button class="btn-ghost" id="singleton-ok">知道了</button>
@@ -177,8 +177,8 @@
       <div class="modal">
         <div class="modal-title">要开机自动启动吗？</div>
         <div class="modal-text">
-          开启后，登录 Windows 时轻贴会自动在托盘里待命，复制过的内容随时可查。<br />
-          现在不开启也没关系，以后随时可以在「设置 → 通用」里打开。
+          登录 Windows 后自动运行，安静待在托盘里。<br />
+          以后可在「设置 → 通用」里打开。
         </div>
         <div class="modal-actions">
           <button class="btn-ghost" id="fra-later">暂不开启</button>
@@ -193,9 +193,8 @@
       <div class="modal">
         <div class="modal-title">关闭后要怎样？</div>
         <div class="modal-text">
-          选「后台运行」：点关闭按钮只是把窗口收进托盘，轻贴继续在后台记录剪贴板，
-          双击托盘图标即可唤回。<br />
-          这个选择以后可以在「设置 → 通用」里改。
+          选「后台运行」＝收起窗口、继续记录，双击托盘图标可唤回。<br />
+          以后可在「设置 → 通用」里改。
         </div>
         <div class="modal-actions">
           <button class="btn-ghost" id="frc-quit">直接退出</button>
