@@ -12,20 +12,16 @@ use std::os::windows::ffi::OsStrExt;
 use std::sync::OnceLock;
 
 const ERROR_ALREADY_EXISTS: u32 = 183;
-const SW_RESTORE: i32 = 9;
 
-/// 主窗口标题（与 tauri.conf.json 一致）。托盘菜单窗口标题不同且很窄，
-/// 用宽度下限过滤，避免误把托盘小窗带到前台。
+/// 主窗口标题（与 tauri.conf.json 一致）。托盘菜单窗口标题是「轻贴菜单」，
+/// 长度都不等，所以**按标题精确匹配**就足以区分，不需要再比宽度。
 const WINDOW_TITLE: &str = "轻贴";
-const MIN_MAIN_WIDTH: i32 = 300;
 
-#[repr(C)]
-struct Rect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
+/// 自定义窗口消息：第二个实例用它告诉已在运行的实例「又有人启动了」。
+///
+/// 取值落在 `WM_APP` 段（0x8000–0xBFFF，专供应用自定义），
+/// 与系统消息、tao 自己的消息都不会撞。
+pub const WM_QINGTIE_WAKE: u32 = 0x8000 + 0x51;
 
 extern "system" {
     fn CreateMutexW(attrs: *mut c_void, initial_owner: i32, name: *const u16) -> isize;
@@ -33,8 +29,7 @@ extern "system" {
     fn GetLastError() -> u32;
     fn EnumWindows(cb: extern "system" fn(isize, isize) -> i32, param: isize) -> i32;
     fn GetWindowTextW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
-    fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
-    fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+    fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
     fn SetForegroundWindow(hwnd: isize) -> i32;
 }
 
@@ -100,22 +95,12 @@ extern "system" fn enum_cb(hwnd: isize, param: isize) -> i32 {
         if buf[..len] != ctx.target[..len] {
             return 1;
         }
-        let mut rect = Rect {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        if GetWindowRect(hwnd, &mut rect) != 0 && (rect.right - rect.left) >= MIN_MAIN_WIDTH {
-            ctx.found = hwnd;
-            return 0;
-        }
-        1
+        ctx.found = hwnd;
+        0
     }
 }
 
-/// 把已运行实例的主窗口恢复到前台（第二次双击/启动时的反馈）。
-pub fn activate_existing_instance() {
+fn find_main_window() -> isize {
     let mut ctx = SearchCtx {
         target: wide(WINDOW_TITLE),
         found: 0,
@@ -123,10 +108,32 @@ pub fn activate_existing_instance() {
     unsafe {
         EnumWindows(enum_cb, &mut ctx as *mut SearchCtx as isize);
     }
-    if ctx.found != 0 {
-        unsafe {
-            ShowWindow(ctx.found, SW_RESTORE);
-            SetForegroundWindow(ctx.found);
-        }
+    ctx.found
+}
+
+/// 通知已运行的实例：请它把主窗口唤回前台，并弹一个应用内提示。
+///
+/// **只发一条消息，完全不碰窗口状态。** 上一版直接用
+/// `ShowWindow(hwnd, SW_RESTORE)` 跨进程改窗口，有两个后果：
+///   1. SW_RESTORE 的语义是「按窗口的还原矩形恢复」——窗口处于最大化/最小化，
+///      或系统里记着的还原矩形比当前小时，就会被改回那个更小的尺寸
+///      （用户实测：「重复打开时原有的窗口会缩小」）；
+///   2. 它绕过了应用自己的唤回路径（材质补涂、WebView2 重新布局），
+///      唤回后还会排版错位，而整个过程主进程毫不知情、无法自愈。
+///
+/// 现在由**主进程自己**在收到这条消息后处理（见 `effects::hook_proc`），
+/// 走的是与托盘唤回完全相同的代码路径。
+pub fn notify_existing_instance() -> bool {
+    let hwnd = find_main_window();
+    if hwnd == 0 {
+        return false;
     }
+    let posted = unsafe { PostMessageW(hwnd, WM_QINGTIE_WAKE, 0, 0) != 0 };
+    if !posted {
+        // 极少数情况下消息会被系统拦下（典型场景：对面以管理员身份运行，
+        // UIPI 不允许低完整性进程往高完整性窗口投递消息）。
+        // 这时退一步、至少把窗口带到前台——只改 Z 序、**不动尺寸**，安全。
+        unsafe { SetForegroundWindow(hwnd) };
+    }
+    posted
 }

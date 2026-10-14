@@ -77,15 +77,15 @@
 
           <div class="view" id="view">
             <div class="empty">
-              <div class="empty-title">轻贴 v2 骨架已就绪</div>
-              <div class="empty-sub" id="effect-debug">正在读取材质档位…</div>
+              <div class="empty-title">正在加载…</div>
+              <div class="empty-sub" id="effect-debug">正在读取环境信息…</div>
             </div>
           </div>
 
           <footer class="statusbar">
             <span class="statusbar-left" id="status-count">共 0 条</span>
             <span class="statusbar-version" id="status-version"></span>
-            <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清搜索结果；置顶/收藏除外）">
+            <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清结果；置顶/收藏除外）">
               <svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>
             </button>
           </footer>
@@ -151,6 +151,53 @@
         <div class="modal-actions">
           <button class="btn-ghost" id="clear-view-cancel">取消</button>
           <button class="btn-danger" id="clear-view-confirm">清除</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 重复启动提示。第二个实例只给主进程发一条消息（不跨进程改窗口，
+         否则会把窗口尺寸/排版搞坏），窗口由主进程自己按正常路径唤回，
+         然后弹这个说明——用户至少知道「刚才那次双击去哪儿了」。 -->
+    <div class="modal-mask" id="singleton-modal" hidden>
+      <div class="modal">
+        <div class="modal-title">轻贴已经在运行</div>
+        <div class="modal-text">
+          窗口已唤到前面。
+        </div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="singleton-ok">知道了</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 首次运行引导 1/2：开机自启。全新安装后的第一次启动才出现
+         （config 里 asked_autostart 一旦落盘就不再问，选「暂不」也算问过）。 -->
+    <div class="modal-mask" id="firstrun-autostart" hidden>
+      <div class="modal">
+        <div class="modal-title">要开机自动启动吗？</div>
+        <div class="modal-text">
+          开机后自动运行。<br />
+          可在「设置 → 通用」里打开。
+        </div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="fra-later">暂不开启</button>
+          <button class="btn-primary" id="fra-enable">开启自启</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 首次运行引导 2/2：第一次点关闭按钮时问「后台运行还是直接退出」。
+         用户明确要求把「关闭时后台运行」这个默认行为在第一次就讲清楚。 -->
+    <div class="modal-mask" id="firstrun-close" hidden>
+      <div class="modal">
+        <div class="modal-title">关闭后要怎样？</div>
+        <div class="modal-text">
+          选「后台运行」＝收起窗口、继续记录，双击托盘图标可唤回。<br />
+          以后可在「设置 → 通用」里改。
+        </div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="frc-quit">直接退出</button>
+          <button class="btn-primary" id="frc-tray">后台运行</button>
         </div>
       </div>
     </div>

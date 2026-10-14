@@ -87,7 +87,11 @@ git fetch --all --prune && git checkout feature/xxx && git pull
 ## 六、发版流程
 
 1. `feature/*` 合入 `main`、`develop` 快进（见第二节）。
-2. **统一改版本号**——少改一处就会不一致，检查清单：
+2. **补 `CHANGELOG.md`**：在本文件顶部（最新一节的位置）按 `## <版本号>` 的格式写这一版改了什么。
+   它会被**编译期内嵌**进 exe —— 关于页在没有新版本时就显示这一节，所以漏写的话，
+   beta / 未发布版本的用户会看到上一个正式版的说明。
+   > 改完最好 `touch src-tauri/src/about.rs` 再编译，确保内嵌内容被重新读取。
+3. **统一改版本号**——少改一处就会不一致，检查清单：
 
    ```
    package.json          "version"
@@ -98,12 +102,16 @@ git fetch --all --prune && git checkout feature/xxx && git pull
    src/main.js            版本号兜底字符串（grep "Version："）
    ```
 
-3. `git tag -a vX.Y.Z -m "..."` 并 `git push origin vX.Y.Z`。
-4. `npm run tauri build` 产出 NSIS 安装包（在 `src-tauri/target/release/bundle/nsis/`）。
+4. `git tag -a vX.Y.Z -m "..."` 并 `git push origin vX.Y.Z`。
+5. `npm run tauri build` 产出 NSIS 安装包（在 `src-tauri/target/release/bundle/nsis/`）。
    - 构建前先关掉正在运行的 `self-clipboard.exe`——它会锁住编译产物（`LNK1104 / 拒绝访问`）。
-5. 复制为 **ASCII 文件名**（如 `light_clip_vX.Y.Z_setup.exe`）再上传——`gh` 在 Windows 下会吞掉中文资产名。
-6. `gh release create vX.Y.Z <资产> --title "..." --notes-file <notes.md>`。
-7. Release notes 写明 **新增 / 修复 / 已知问题**。
+6. 复制为 **ASCII 文件名**（如 `light_clip_vX.Y.Z_setup.exe`）再上传——`gh` 在 Windows 下会吞掉中文资产名。
+7. `gh release create vX.Y.Z <资产> --title "..." --notes-file <notes.md>`。
+   - **beta 版勾 `--prerelease`**：正式用户查的 `/releases/latest` 会按定义跳过 pre-release，
+     所以 beta 不会打扰正式用户；而 beta 版自己查的是 `/releases` 列表，能看到全部（含 pre-release）。
+   - 单个 Release **没有**「设为私密」这种功能（可见性只到仓库级；draft 需要 token 才读得到），
+     想让正式用户看不到 beta，`--prerelease` 就是官方机制。
+8. Release notes 写明 **新增 / 修复 / 已知问题**。
 
 > 某些机器上 Tauri 自动下载 NSIS 工具链会被代理拦，需手动补到 `%LOCALAPPDATA%\tauri\NSIS\`（解压时**剥掉 `nsis-3.11/` 这一层**）。
 

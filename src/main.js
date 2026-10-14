@@ -23,6 +23,12 @@ let settings = null; // 后端配置（get_settings）
 // 切换标签后重新 settingsHtml() + bindSettings() 即可（见 bindSettings 里的标签点击）。
 let settingsTab = "general";
 
+// 更新检查结果。Rust 在启动时会自检一次并（有新版本时）推 update-available；
+// 前端其余时候只读缓存（update_state），**只有用户点按钮才重新联网**。
+let updateInfo = null;
+// 下载进度。存成模块状态是为了「切走再切回来」时还能把进度条画回去。
+let dlState = { running: false, percent: 0, error: "" };
+
 /** 窗口圆角上限（后端按材质档位下发，Win10 acrylic = 20px） */
 let maxRadius = 20;
 
@@ -66,6 +72,19 @@ function applyGlassAlpha(pct) {
 }
 
 /**
+ * 把浓度同步进模块级 `settings`（界面渲染读它）。
+ *
+ * 两个模式各记一档，所以要写的是**当前模式**那一档；
+ * `materialAlpha` 是「当前生效值」，滑块与读数都读它，一并更新。
+ */
+function syncAlphaToSettings(v) {
+  if (!settings) return;
+  settings.materialAlpha = v;
+  if (settings.roundMode) settings.alphaRound = v;
+  else settings.alphaStraight = v;
+}
+
+/**
  * 圆角模式：**圆角 + 不用系统模糊**。
  *
  * Win10 的 acrylic 由 DWM 合成、恒为矩形，裁不掉圆角，所以「圆角 + 系统模糊」
@@ -90,6 +109,15 @@ async function syncMaxState() {
   maxBtn.title = max ? "还原" : "最大化";
 }
 
+/** 真正执行关闭：按「关闭时清理缓存 + 退出前提醒」决定要不要先确认。 */
+function doCloseWindow() {
+  if (settings && settings.cleanOnClose && settings.cleanConfirmExit) {
+    openExitModal();
+  } else {
+    appWindow.close().catch((err) => toast("关闭失败：" + err));
+  }
+}
+
 function bindWindowControls() {
   const guard = (label, p) =>
     p.catch((err) => toast(label + "失败：" + err));
@@ -98,12 +126,16 @@ function bindWindowControls() {
   document.getElementById("btn-maximize").onclick = () =>
     guard("最大化", appWindow.toggleMaximize());
   document.getElementById("btn-close").onclick = () => {
-    // 「关闭时清理缓存」+「退出前弹窗提醒」都开启时，先确认再退出（需求 #2）
-    if (settings && settings.cleanOnClose && settings.cleanConfirmExit) {
-      openExitModal();
-    } else {
-      guard("关闭", appWindow.close());
+    // 首次关闭先问一次「后台运行 / 直接退出」（问过就不再问，见 firstrun-close 弹窗）
+    if (settings && !settings.askedTrayOnClose) {
+      const ask = document.getElementById("firstrun-close");
+      if (ask) {
+        ask.hidden = false;
+        return;
+      }
     }
+    // 「关闭时清理缓存」+「退出前弹窗提醒」都开启时，先确认再退出（需求 #2）
+    doCloseWindow();
   };
 
   // 窗口尺寸变化时同步图标
@@ -186,8 +218,8 @@ function openExitModal() {
   const modal = document.getElementById("exit-modal");
   const includePinned = settings && settings.cleanIncludePinned;
   document.getElementById("exit-modal-text").textContent = includePinned
-    ? "退出时将清理全部缓存内容（含置顶/收藏），确定退出吗？"
-    : "退出时将清理缓存内容（置顶/收藏会保留），确定退出吗？";
+    ? "将清理全部缓存（含置顶/收藏），确定退出？"
+    : "将清理缓存（保留置顶/收藏），确定退出？";
   modal.hidden = false;
 }
 
@@ -220,7 +252,7 @@ function openClearAllModal() {
     return;
   }
   document.getElementById("clear-all-modal-text").textContent =
-    `将清空全部历史，共 ${n} 条。置顶与收藏也会被一并删除，此操作不可撤销。`;
+    `共 ${n} 条，含置顶与收藏，此操作不可撤销。`;
   document.getElementById("clear-all-modal").hidden = false;
 }
 
@@ -276,7 +308,7 @@ function bindClearView() {
 async function doClearView(ids) {
   const uniq = [...new Set(ids)];
   if (uniq.length === 0) {
-    toast("没有选中任何可清理的条目");
+    toast("没有选中可清理的条目");
     return;
   }
   try {
@@ -295,8 +327,8 @@ function openClearViewModal({ normal, pinned, favs }) {
 
   document.getElementById("clear-view-modal-text").textContent =
     normal.length > 0
-      ? `将清除 ${normal.length} 条${query ? "搜索结果" : "内容"}，置顶与收藏默认保留。`
-      : "当前范围内没有普通条目（全是置顶或收藏）。勾选下方选项可将其一并清除。";
+      ? `将清除 ${normal.length} 条${query ? "搜索结果" : "内容"}，默认保留置顶与收藏。`
+      : "范围内没有普通条目（全是置顶或收藏），勾选下方选项可一并清除。";
 
   const pinRow = document.getElementById("clear-view-pinned-row");
   const favRow = document.getElementById("clear-view-fav-row");
@@ -495,8 +527,8 @@ function render({ keepScroll = false } = {}) {
   if (currentView === "files" && !fileCopyOn()) {
     document.getElementById("status-count").textContent = "共 0 条";
     view.innerHTML = `<div class="empty">
-      <div class="empty-title">文件复制功能已关闭</div>
-      <div class="empty-sub">需要记录资源管理器里复制的文件时，可在「设置 → 文件复制」中打开</div>
+      <div class="empty-title">文件复制已关闭</div>
+      <div class="empty-sub">可在「设置 → 记录与缓存」里打开</div>
     </div>`;
     return;
   }
@@ -616,10 +648,10 @@ function emptyHtml() {
   }
   const titles = {
     history: ["暂无内容", "复制点东西试试，会自动记录到这里"],
-    text: ["暂无文本", "复制的文本会自动记录到这里"],
-    favorites: ["暂无收藏内容", "在条目上右键选择「收藏」，会出现在这里"],
-    images: ["暂无图片", "复制的图片会自动记录到这里"],
-    files: ["暂无文件", "复制的文件会自动记录到这里"],
+    text: ["暂无文本", "复制的文本会出现在这里"],
+    favorites: ["暂无收藏", "右键条目选「收藏」即可"],
+    images: ["暂无图片", "复制的图片会出现在这里"],
+    files: ["暂无文件", "复制的文件会出现在这里"],
   };
   const [title, sub] = titles[currentView] || titles.history;
   return `<div class="empty"><div class="empty-title">${title}</div>
@@ -1071,10 +1103,18 @@ const SETTINGS_TABS = [
 
 function settingsHtml() {
   const s = settings || {};
+  // 有新版时「关于」标签本身带一个小红点（侧栏的「设置」红点在 applyUpdateState 里处理）
+  const hasUpd = !!updateInfo?.hasUpdate;
+  const dotTip = hasUpd ? `有新版本 v${updateInfo.latest}，点击查看` : "";
   const tabBar = `<div class="settings-tabs">${SETTINGS_TABS.map(
-    (t) =>
-      `<button class="tab${t.id === settingsTab ? " is-active" : ""}" ` +
-      `data-tab="${t.id}">${t.label}</button>`
+    (t) => {
+      const dot = t.id === "about" && hasUpd;
+      return (
+        `<button class="tab${t.id === settingsTab ? " is-active" : ""}` +
+        `${dot ? " has-dot" : ""}" data-tab="${t.id}"` +
+        `${dot ? ` title="${esc(dotTip)}"` : ""}>${t.label}</button>`
+      );
+    }
   ).join("")}</div>`;
 
   // 只渲染当前分类 —— 其余分类的控件这一刻**不在 DOM 里**，所以 bindSettings 里
@@ -1099,20 +1139,20 @@ function settingsGeneralHtml(s) {
   return `
     <div class="row"><label>开机自启</label>
       <input type="checkbox" id="set-autostart" ${s.autoStart ? "checked" : ""} />
-      <span class="hint">登录 Windows 后自动运行轻贴</span></div>
+      <span class="hint">开机后自动运行</span></div>
     <div class="row"><label>关闭时后台运行</label>
       <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
-      <span class="hint">点关闭按钮时隐藏到托盘继续后台运行（托盘图标始终常驻，右键可开菜单、双击唤回窗口）</span></div>`;
+      <span class="hint">关闭时收进托盘，继续在后台记录（右键托盘可开菜单）</span></div>`;
 }
 
 function settingsAppearanceHtml(s) {
   return `
     <div class="row"><label>材质浓度</label>
-      <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 62}" />
-      <span class="hint" id="material-val">${s.materialAlpha ?? 62}%（越高越厚实 · 越低越通透）</span></div>
+      <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 50}" />
+      <span class="hint" id="material-val">${s.materialAlpha ?? 50}%（越高越厚实 · 越低越通透）</span></div>
     <div class="row"><label>圆角模式</label>
       <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
-      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感</span></div>`;
+      <span class="hint">圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感</span></div>`;
 }
 
 // 「保留 N 天 / 永久保存」的展示文案。0 在语义上是「永久保留」，
@@ -1128,10 +1168,10 @@ function settingsDataHtml(s) {
   return `
     <div class="row"><label>文件复制</label>
       <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
-      <span class="hint">开启后记录在资源管理器里复制的文件（默认关闭，关闭时不采集也不显示文件条目）</span></div>
+      <span class="hint">记录资源管理器里复制的文件（默认关闭，关闭时不采集）</span></div>
     <div class="row"><label>保留天数</label>
       <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
-      <span class="hint">仅保留近 N 天内容，0 表示永久保留</span></div>
+      <span class="hint">0 表示永久保留</span></div>
     <div class="cache-box">
       <div class="cache-title">缓存目录 <span class="hint">${retentionLabel(s.retentionDays)}</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
@@ -1139,17 +1179,19 @@ function settingsDataHtml(s) {
       <div class="cache-actions">
         <button class="btn-ghost" id="btn-pick-dir">更改目录</button>
         <button class="btn-ghost" id="btn-open-dir">打开目录</button>
+        <button class="btn-ghost" id="btn-open-log">日志目录</button>
       </div>
+      <div class="cache-log-hint"><b>缓存与日志相互独立</b>：清空、保留天数、退出清理都不会影响日志，日志仅能手动删除。</div>
     </div>
     <div class="row"><label>关闭时清理缓存</label>
       <input type="checkbox" id="set-clean" ${s.cleanOnClose ? "checked" : ""} />
-      <span class="hint">退出时清理内容缓存与历史（置顶/收藏默认保留）</span></div>
+      <span class="hint">退出时清理缓存与历史（默认保留置顶/收藏）</span></div>
     <div class="row"><label>　└ 同时清理置顶/收藏</label>
       <input type="checkbox" id="set-clean-pinned" ${s.cleanIncludePinned ? "checked" : ""} />
-      <span class="hint">不勾选则置顶/收藏单独存放，不受清理影响</span></div>
+      <span class="hint">不勾选则置顶/收藏不受清理影响</span></div>
     <div class="row"><label>　└ 退出前弹窗提醒</label>
       <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
-      <span class="hint">每次退出时先弹窗确认</span></div>
+      <span class="hint">退出前弹窗确认</span></div>
     <button class="btn-danger" id="clear-all">清空全部历史</button>`;
 }
 
@@ -1272,16 +1314,18 @@ function settingsAboutHtml() {
     <div class="about-hero">
       <div class="about-hero-l">
         <div class="about-name">轻贴</div>
-        <p class="about-slogan">安静常驻托盘的剪贴板历史 · 全部存于本机，无账号、不联网、不上传</p>
+        <p class="about-slogan">安静常驻托盘的剪贴板历史 · 只存本机，无账号、不上传</p>
       </div>
       <div class="about-hero-r">
         <div class="about-badge">
           <div class="about-badge-l">当前版本</div>
           <div class="about-badge-v" id="about-ver">读取中…</div>
         </div>
-        <div class="about-state" id="about-update">正在获取版本信息…</div>
+        <div class="about-state" id="about-update">尚未检查更新</div>
         <div class="about-actions">
-          <button class="btn-ghost" id="btn-check-update">检查更新</button>
+          <button class="btn-ghost" id="btn-check-update">${
+            updateInfo?.hasUpdate ? "下载最新版" : "检查更新"
+          }</button>
           <button class="btn-ghost" id="btn-repo">项目主页</button>
           <button class="btn-ghost" id="btn-feedback">问题反馈</button>
         </div>
@@ -1349,47 +1393,103 @@ function renderNotes(tag, notes) {
   box.innerHTML = md(notes);
 }
 
-// 静默拉一次更新信息：只用来填充日志与状态，不弹任何提示。
-// 进入关于页就跑一次，所以日志是「常驻」的，不用先点检查更新。
-// manual=true（用户点了按钮）时才 toast 结果。
-async function loadReleaseNotes(manual) {
+// 关于页的更新区域只做「渲染」，不发请求 —— 数据来自 updateInfo（启动自检的缓存
+// 或用户手动检查的结果）。这样进关于页不会联网、不会卡，也不会再闪黑窗口。
+function renderUpdatePanels() {
+  const info = updateInfo;
+  const cur = info?.displayCurrent || info?.current || "";
+  const has = !!info?.hasUpdate;
+
+  const btn = document.getElementById("btn-check-update");
+  if (btn) {
+    if (dlState.running) {
+      setDownloadUi(dlState.percent);
+    } else {
+      btn.classList.remove("is-downloading");
+      btn.disabled = false;
+      btn.textContent = has ? "下载最新版" : "检查更新";
+    }
+  }
+
   const tip = document.getElementById("about-update");
+  if (!tip) return;
+
+  if (dlState.running) {
+    tip.className = "about-state is-new";
+    tip.textContent = `正在下载 v${info?.latest || ""}…`;
+  } else if (dlState.error) {
+    tip.className = "about-state is-err";
+    tip.textContent = "下载失败：" + dlState.error;
+  } else if (has) {
+    tip.className = "about-state is-new";
+    tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，当前 v${esc(cur)}`;
+  } else if (info?.latest) {
+    tip.className = "about-state is-ok";
+    tip.textContent = "已是最新版本（v" + cur + "）";
+  } else {
+    tip.className = "about-state";
+    tip.textContent = "尚未检查更新";
+  }
+
+  // 更新日志：标题带版本号，所以「这条说明属于哪一版」一眼可辨。
+  //   有新版 → 显示新版本的说明（这才是你要不要升级的依据）；
+  //   没有新版 → 显示**本机这版**的说明。它随包内置，所以 beta 这种
+  //              GitHub 上还没有 Release 的版本也能看到自己的更新日志；
+  //   两者都没有 → 回退到远端最近一个版本的说明。
+  if (has) {
+    renderNotes(info.latest, info.notes);
+  } else if (info?.localNotes) {
+    renderNotes(info.localTag || cur, info.localNotes);
+  } else {
+    renderNotes(info?.latest || "", info?.notes || "");
+  }
+}
+
+/** 下载进度画进按钮：背景由左向右填充（像手机装应用那样），文字盖在填充层上。 */
+function setDownloadUi(percent) {
+  const btn = document.getElementById("btn-check-update");
+  if (!btn) return;
+  if (!btn.classList.contains("is-downloading")) {
+    btn.classList.add("is-downloading");
+    btn.disabled = true;
+    btn.innerHTML = `<span class="dl-fill"></span><span class="dl-label"></span>`;
+  }
+  const fill = btn.querySelector(".dl-fill");
+  const label = btn.querySelector(".dl-label");
+  if (fill) fill.style.width = `${percent}%`;
+  if (label) label.textContent = `正在下载 ${percent}%`;
+}
+
+/** 下载完成后的那一步：按钮改文案，进度条填满。 */
+function setDownloadDone(text) {
+  const btn = document.getElementById("btn-check-update");
+  if (!btn) return;
+  setDownloadUi(100);
+  const label = btn.querySelector(".dl-label");
+  if (label) label.textContent = text;
+}
+
+/** 点「下载最新版」：Rust 下到缓存目录 update/，完成后自动拉起安装器并退出本进程。 */
+async function startDownload() {
+  if (dlState.running) return;
+  dlState = { running: true, percent: 0, error: "" };
+  renderUpdatePanels();
+  let downloaded = "";
   try {
-    const r = await invoke("check_update");
-    const cur = r.displayCurrent || r.current; // 带 -beta 的展示号
-    // 有新版本就显示新版本的日志，否则显示当前版本的 —— 这正是你要的常驻逻辑
-    const showTag = r.hasUpdate ? r.latest : String(cur).replace(/^v/, "");
-    renderNotes(showTag, r.notes);
-    if (tip) {
-      if (r.hasUpdate) {
-        tip.className = "about-state is-new";
-        tip.innerHTML =
-          `发现新版本 <b>v${esc(r.latest)}</b>，当前 v${esc(cur)}　` +
-          `<button class="btn-ghost" id="btn-go-dl">前往下载</button>`;
-        const go = document.getElementById("btn-go-dl");
-        if (go) go.onclick = () => invoke("open_external", { url: r.url });
-      } else {
-        tip.className = "about-state is-ok";
-        tip.textContent = "已是最新版本";
-      }
-    }
-    if (manual) {
-      toast(
-        r.hasUpdate
-          ? `发现新版本 v${r.latest}，当前 v${cur}`
-          : `已是最新版本（v${cur}）`
-      );
-    }
-    return r;
+    downloaded = await invoke("download_update");
+    setDownloadDone("下载完成，正在启动安装程序…");
+    // Rust 会先用 runas 拉起安装器（触发 UAC），再退出自己 ——
+    // 安装器要覆盖 exe，本进程正锁着它。
+    await invoke("install_downloaded", { path: downloaded });
   } catch (e) {
-    if (tip) {
-      tip.className = "about-state is-err";
-      tip.textContent = "检查更新失败";
-    }
-    renderNotes("", "");
-    // 静默进入时不打扰，只有点了按钮才提示失败
-    if (manual) toast("检查更新失败，请检查网络");
-    return null;
+    // 分开报：下载失败和「下载好了但安装器起不来」是两回事
+    dlState = {
+      running: false,
+      percent: 0,
+      error: downloaded ? `启动安装程序失败（${e}）` : String(e),
+    };
+    renderUpdatePanels();
+    toast(downloaded ? "无法启动安装程序：" + e : "下载失败：" + e);
   }
 }
 
@@ -1412,8 +1512,15 @@ async function loadAbout() {
   } catch (e) {
     setTxt("about-ver", "读取失败");
   }
-  // 日志与更新状态并行拉，不阻塞信息展示
-  loadReleaseNotes(true);
+  // 更新状态只读缓存；万一启动时的自检还没落地，这里补问一次（同样不联网）
+  if (!updateInfo) {
+    try {
+      updateInfo = await invoke("update_state");
+    } catch (e) {
+      updateInfo = null;
+    }
+  }
+  renderUpdatePanels();
 }
 
 async function aboutCheckUpdate() {
@@ -1424,9 +1531,152 @@ async function aboutCheckUpdate() {
     tip.className = "about-state";
     tip.textContent = "正在检查更新…";
   }
-  // 手动点击复用静默拉取：状态、日志都会刷新，并弹 toast 告知结果
-  await loadReleaseNotes(true);
-  if (btn) btn.disabled = false;
+  try {
+    updateInfo = await invoke("check_update");
+    dlState = { running: false, percent: 0, error: "" };
+    applyUpdateState();
+    toast(
+      updateInfo.hasUpdate
+        ? `发现新版本 v${updateInfo.latest}，当前 v${updateInfo.displayCurrent}`
+        : `已是最新版本（v${updateInfo.displayCurrent}）`
+    );
+  } catch (e) {
+    if (tip) {
+      tip.className = "about-state is-err";
+      tip.textContent = "检查更新失败";
+    }
+    toast("检查更新失败，请检查网络");
+  }
+  renderUpdatePanels();
+}
+
+/** 更新状态 → 侧栏「设置」红点 + 「关于」标签红点 + 关于页内容。 */
+function applyUpdateState() {
+  const has = !!updateInfo?.hasUpdate;
+  const tip = has ? `有新版本 v${updateInfo.latest}，点击查看` : "";
+
+  // 侧栏底部「设置」是常驻 DOM，直接改类名即可
+  const navSet = document.querySelector(
+    '.sidebar-footer .nav-item[data-view="settings"]'
+  );
+  if (navSet) {
+    navSet.classList.toggle("has-dot", has);
+    if (has) navSet.title = tip;
+    else navSet.removeAttribute("title");
+  }
+
+  // 「关于」标签在设置页里，随 settingsHtml() 渲染；这里兼顾「设置页已经开着」的情况
+  const tabAbout = document.querySelector('.settings-tabs .tab[data-tab="about"]');
+  if (tabAbout) {
+    tabAbout.classList.toggle("has-dot", has);
+    if (has) tabAbout.title = tip;
+    else tabAbout.removeAttribute("title");
+  }
+
+  renderUpdatePanels();
+}
+
+/** 启动自检发现新版本时的一次性提示：窗口顶部横幅，点「查看」直接跳到关于页。 */
+function showUpdateBanner() {
+  if (!updateInfo?.hasUpdate) return;
+  if (document.getElementById("update-banner")) return;
+
+  const el = document.createElement("div");
+  el.id = "update-banner";
+  el.innerHTML =
+    `<span class="ub-text">发现新版本 <b>v${esc(updateInfo.latest)}</b></span>` +
+    `<button class="ub-btn" id="ub-go">查看</button>` +
+    `<button class="ub-close" id="ub-close" title="关闭">×</button>`;
+  document.body.appendChild(el);
+
+  el.querySelector("#ub-go").onclick = () => {
+    el.remove();
+    // 先定好要显示的分类，再走真实点击 —— 导航是事件委托在 .sidebar 上的，
+    // 这样最不容易漏掉状态同步（render() 会按 settingsTab 渲染设置页）。
+    settingsTab = "about";
+    const nav = document.querySelector(
+      '.sidebar-footer .nav-item[data-view="settings"]'
+    );
+    if (nav) nav.click();
+  };
+  el.querySelector("#ub-close").onclick = () => el.remove();
+}
+
+/** 重复启动提示弹窗（常驻元素，绑一次）。 */
+function bindSingletonModal() {
+  const modal = document.getElementById("singleton-modal");
+  const ok = document.getElementById("singleton-ok");
+  if (modal && ok) ok.onclick = () => (modal.hidden = true);
+}
+
+/** 首次运行引导：开机自启（只在全新安装后的第一次启动出现）。 */
+function openAutostartAsk() {
+  const modal = document.getElementById("firstrun-autostart");
+  if (modal) modal.hidden = false;
+}
+
+/**
+ * 首次运行引导的两个弹窗（常驻元素，绑一次）。
+ *
+ * 两个引导都遵循同一原则：**不管用户选什么都算「问过了」**，
+ * 之后不再弹 —— 真正的开关随时能在设置里改，每次启动都追问才是骚扰。
+ */
+function bindFirstRunModals() {
+  // 记下「已经问过」，失败也不阻塞流程（顶多是下次再问一遍）
+  const dismiss = (kind) => invoke("dismiss_onboarding", { kind }).catch(() => {});
+  const refresh = async () => {
+    try {
+      settings = await invoke("get_settings");
+    } catch (e) {
+      /* 拿不到就保持旧值，不影响关闭流程 */
+    }
+  };
+
+  const auto = document.getElementById("firstrun-autostart");
+  const autoEnable = document.getElementById("fra-enable");
+  if (autoEnable)
+    autoEnable.onclick = async () => {
+      if (auto) auto.hidden = true;
+      try {
+        await invoke("set_autostart", { value: true });
+        toast("已开启开机自启");
+      } catch (e) {
+        toast("开启失败：" + e);
+      }
+      await dismiss("autostart");
+      await refresh();
+    };
+  const autoLater = document.getElementById("fra-later");
+  if (autoLater)
+    autoLater.onclick = async () => {
+      if (auto) auto.hidden = true;
+      await dismiss("autostart");
+      toast("以后可在「设置 → 通用」里打开");
+    };
+
+  const close = document.getElementById("firstrun-close");
+  const closeTray = document.getElementById("frc-tray");
+  if (closeTray)
+    closeTray.onclick = async () => {
+      if (close) close.hidden = true;
+      await invoke("set_tray_on_close", { value: true }).catch(() => {});
+      await dismiss("tray");
+      await refresh();
+      // 直接走关闭：Rust 侧 CloseRequested 会按 tray_on_close 把窗口收进托盘。
+      // 刻意**不**经过 doCloseWindow()——用户刚选了后台运行，
+      // 这时再弹「退出并清理」确认是自相矛盾的。
+      appWindow.close().catch((err) => toast("关闭失败：" + err));
+    };
+  const closeQuit = document.getElementById("frc-quit");
+  if (closeQuit)
+    closeQuit.onclick = async () => {
+      if (close) close.hidden = true;
+      await invoke("set_tray_on_close", { value: false }).catch(() => {});
+      await dismiss("tray");
+      await refresh();
+      // 选了直接退出 → 走正常关闭路径（该弹的清理确认照旧）
+      doCloseWindow();
+    };
 }
 
 async function aboutFeedback() {
@@ -1453,8 +1703,13 @@ async function refreshCacheInfo() {
     const pathEl = document.getElementById("cache-path");
     const statsEl = document.getElementById("cache-stats");
     if (pathEl) pathEl.textContent = info.dir;
-    if (statsEl)
-      statsEl.textContent = `${info.count} 个文件 · ${fmtSize(info.size)}`;
+    if (statsEl) {
+      // 日志单独标出来：既不隐瞒它占的空间，也说清它是「清不掉的那部分」。
+      const logPart = info.logSize
+        ? `，含日志 ${fmtSize(info.logSize)}`
+        : "";
+      statsEl.textContent = `${info.count} 个文件 · ${fmtSize(info.size)}${logPart}`;
+    }
   } catch (e) {
     console.error("cache_info failed", e);
   }
@@ -1513,7 +1768,7 @@ function bindSettings(view) {
         items = await invoke("get_history");
         settings = await invoke("get_settings");
         render();
-        toast(days === 0 ? "已改为永久保留" : `仅保留近 ${days} 天内容`);
+        toast(days === 0 ? "已改为永久保留" : `仅保留近 ${days} 天`);
       } catch (e) {
         toast("保存失败：" + e);
       }
@@ -1526,14 +1781,14 @@ function bindSettings(view) {
       if (label) label.textContent = `${v}%（越高越厚实 · 越低越通透）`;
     };
     // 拖动中：只改观感与本地状态，不落盘（高频写 config.json 没必要）。
-    // 关键是同步 settings.materialAlpha —— settingsHtml() 读的是模块级 settings，
-    // 不同步的话切到别的页面再回来，滑块会显示成旧值（看起来像「恢复默认」）。
+    // 关键是同步模块级 settings —— settingsHtml() 读的就是它，
+    // 不同步的话切到别的分类再回来，滑块会显示成旧值（看起来像「恢复默认」）。
     material.addEventListener("input", () => {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
       show(v);
       applyGlassAlpha(v);
-      if (settings) settings.materialAlpha = v;
+      syncAlphaToSettings(v);
     });
     // 松手才持久化
     material.addEventListener("change", () => {
@@ -1546,27 +1801,29 @@ function bindSettings(view) {
   }
 
   // 圆角模式：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启。
-  // 两种模式对「厚度」的要求不同，所以顺带把材质浓度也切到对应的档：
-  //   圆角模式没有背景模糊 → 半透就等于直接看到桌面，要更实（90）
-  //   直角模式有真模糊      → 50% 更通透好看
+  //
+  // **浓度不跟着动**：直角 / 圆角两个模式各记着自己那一档
+  // （后端 alpha_straight / alpha_round），切模式只是换用另一档 ——
+  // 直角调到 68 → 切圆角（用圆角那档，比如 45）→ 切回直角仍是 68。
+  // 这里把该模式记住的那一档取回来，同步到滑块 / 标签 / 观感。
   const round = view.querySelector("#set-round");
   if (round)
     round.onchange = async () => {
       try {
         await invoke("set_round_mode", { value: round.checked });
-        const alpha = round.checked ? 90 : 50;
-        await invoke("set_material_alpha", { value: alpha });
+        applyRoundMode(round.checked);
+        // 模式变了 → 当前生效的那一档（materialAlpha）也随之改变，重新拉一次配置
+        settings = await invoke("get_settings");
+        const alpha = settings.materialAlpha ?? 50;
         applyGlassAlpha(alpha);
         const slider = view.querySelector("#set-material");
         if (slider) slider.value = alpha;
         const label = view.querySelector("#material-val");
         if (label) label.textContent = `${alpha}%（越高越厚实 · 越低越通透）`;
-        applyRoundMode(round.checked);
-        settings = await invoke("get_settings");
         toast(
           round.checked
-            ? "已切换为圆角模式（无背景模糊）"
-            : "已切换为直角模式（保留背景模糊）"
+            ? `已切换为圆角模式（无背景模糊）· 浓度 ${alpha}%`
+            : `已切换为直角模式（保留背景模糊）· 浓度 ${alpha}%`
         );
       } catch (e) {
         toast("保存失败：" + e);
@@ -1599,11 +1856,18 @@ function bindSettings(view) {
     openDir.onclick = () =>
       invoke("open_cache_dir").catch((e) => toast("打开失败：" + e));
 
+  const openLog = view.querySelector("#btn-open-log");
+  if (openLog)
+    openLog.onclick = () =>
+      invoke("open_log_dir").catch((e) => toast("打开失败：" + e));
+
   // 「关于」页的按钮同理，只在切到该分类时存在 → 同样做存在性保护；
   // 顺便在进入该页时就把版本号与运行环境拉出来。
   const btnCheck = view.querySelector("#btn-check-update");
   if (btnCheck) {
-    btnCheck.onclick = aboutCheckUpdate;
+    // 有新版时这颗按钮就是「下载最新版」，其余时候才是「检查更新」
+    btnCheck.onclick = () =>
+      updateInfo?.hasUpdate ? startDownload() : aboutCheckUpdate();
     loadAbout();
   }
   const btnRepo = view.querySelector("#btn-repo");
@@ -1649,6 +1913,8 @@ async function main() {
   bindClearAllModal();
   bindClearView();
   bindClearViewModal();
+  bindSingletonModal();
+  bindFirstRunModals();
   bindNav();
   bindSearch();
   startTimeTicker();
@@ -1674,7 +1940,7 @@ async function main() {
   try {
     settings = await invoke("get_settings");
     // 应用材质浓度（CSS 层，窗口主体的不透明度）
-    applyGlassAlpha(settings.materialAlpha ?? 62);
+    applyGlassAlpha(settings.materialAlpha ?? 50);
     // 圆角模式（圆角 + 无系统模糊）
     applyRoundMode(settings.roundMode);
   } catch (e) {
@@ -1684,10 +1950,43 @@ async function main() {
     document.getElementById("status-version").textContent =
       `Version：${(await getVersion())}-ikun`;
   } catch (e) {
-    document.getElementById("status-version").textContent = "Version：2.1.5-ikun";
+    document.getElementById("status-version").textContent = "Version：2.1.9-ikun";
   }
 
   render();
+
+  // 首次运行引导（只在全新安装后的第一次启动出现）：先问开机自启。
+  // 「首次关闭时问后台运行」在 bindWindowControls 的关闭按钮里触发。
+  if (settings && !settings.askedAutostart) openAutostartAsk();
+
+  // ── 更新状态 ──────────────────────────────────────────────────────────
+  // Rust 启动时已在后台自检过一次（失败或没有新版都静默）。这里先读缓存把红点
+  // 补上，再监听自检结果事件 —— 自检通常比前端就绪慢，所以两条路都要走。
+  try {
+    updateInfo = await invoke("update_state");
+  } catch (e) {
+    updateInfo = null;
+  }
+  applyUpdateState();
+
+  await listen("update-available", (e) => {
+    updateInfo = e.payload;
+    applyUpdateState();
+    // 只在启动自检发现新版本时提示一次；失败/无新版不会有这条事件
+    showUpdateBanner();
+  });
+
+  await listen("update-progress", (e) => {
+    const p = e.payload?.percent ?? 0;
+    dlState.percent = p;
+    if (dlState.running) setDownloadUi(p);
+  });
+
+  // 重复启动 → 主进程已把窗口唤回，这里补一个说明
+  await listen("singleton-wake", () => {
+    const modal = document.getElementById("singleton-modal");
+    if (modal) modal.hidden = false;
+  });
 
   // 增量：复制新内容时 Rust 推事件，直接插到顶部
   await listen("clipboard-update", (e) => {

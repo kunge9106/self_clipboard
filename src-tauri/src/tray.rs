@@ -177,11 +177,12 @@ pub struct MenuLook {
 }
 
 fn look(win: &WebviewWindow) -> MenuLook {
-    let cfg = crate::settings::get();
     MenuLook {
         solid: crate::effects::current_tier().as_str() == "solid",
         round: true,
-        alpha: cfg.material_alpha.clamp(10, 95) as f64 / 100.0,
+        // 菜单恒用**圆角模式**的样式与材质（DESIGN 7.2）：浓度固定取圆角模式的默认档 90%，
+        // 不跟随设置页里调的浓度 —— 菜单是窄条、文字密度高，需要稳定厚实的底。
+        alpha: crate::settings::ROUND_ALPHA as f64 / 100.0,
         dark: matches!(win.theme().unwrap_or(tauri::Theme::Light), tauri::Theme::Dark),
     }
 }
@@ -225,7 +226,9 @@ pub fn tray_quit(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn show_main(app: &AppHandle) {
+/// 把主窗口唤回前台。托盘菜单与「重复启动」都用它，
+/// 所以「补齐材质 + relayout」这一套只此一份，不会两处漂移。
+pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         // 所有「补齐」动作都必须在窗口可见**之前**做完。显示之后再改材质或尺寸，
         // 用户会看到「先出现、再变样」的闪烁（上一版就是这么闪的）。

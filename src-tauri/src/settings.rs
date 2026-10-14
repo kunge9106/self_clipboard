@@ -29,9 +29,32 @@ pub struct Config {
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
-    /// 材质浓度：窗口主体层的不透明度百分比（25–90，默认 62）
-    #[serde(default = "default_material_alpha")]
-    pub material_alpha: u32,
+    /// **直角模式**下的材质浓度（窗口主体层不透明度百分比，40–90）
+    ///
+    /// 两个模式**各记一档**、互不影响：切换圆角模式只是换用另一档的值，
+    /// 切回去还是你上次为那个模式设的浓度。
+    /// （圆角模式没有背景模糊，同样浓度会显得更透，所以默认档更高。）
+    #[serde(default = "default_alpha_straight")]
+    pub alpha_straight: u32,
+    /// **圆角模式**下的材质浓度（40–90）
+    #[serde(default = "default_alpha_round")]
+    pub alpha_round: u32,
+    /// v2.1.8 及更早版本的「单一浓度」字段，**只用于迁移**。
+    ///
+    /// 读到后按**当时的模式**归进 `alpha_straight` / `alpha_round`（见 `migrate`），
+    /// 随后置空并且不再序列化（`skip_serializing_if`），所以 config.json 里不会再出现它。
+    #[serde(
+        default,
+        rename = "material_alpha",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_alpha: Option<u32>,
+    /// 首次运行引导：开机自启那一次问过了吗
+    #[serde(default)]
+    pub asked_autostart: bool,
+    /// 首次运行引导：第一次点关闭按钮时「后台运行还是退出」问过了吗
+    #[serde(default)]
+    pub asked_tray_on_close: bool,
     /// 圆角模式：**圆角 + 不用系统 blur**
     ///
     /// 为什么要有这个开关：Win10 的 acrylic 恒为**矩形**、`SetWindowRgn` 对它
@@ -53,16 +76,97 @@ pub struct Config {
     /// 自定义缓存目录（None = 使用 app_data_dir/clipboard）
     #[serde(default)]
     pub cache_dir: Option<String>,
+    /// 最近一次成功的更新检查结果（跨重启保留，用于设置红点与「最新版更新日志」）。
+    /// 检查失败时保持原值不动 —— 离线重启不该把已知的新版本信息抹掉。
+    #[serde(default)]
+    pub update_cache: Option<UpdateCache>,
+}
+
+/// 一次成功的 `releases/latest` 查询结果。
+///
+/// 只存「GitHub 上最新的那个正式版」的元信息，**不存 hasUpdate**——那是个
+/// 会随时间变的派生值（等用户升级之后同一个缓存就该判为「已是最新」），
+/// 所以一律拿 `latest` 与当前 `CARGO_PKG_VERSION` 现算。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateCache {
+    /// 最新版版本号（已去掉前缀 v）
+    #[serde(default)]
+    pub latest: String,
+    /// Release 正文（Markdown）
+    #[serde(default)]
+    pub notes: String,
+    /// Release 页面地址
+    #[serde(default)]
+    pub url: String,
+    /// 安装包直链（`assets[].browser_download_url`），没有则为空
+    #[serde(default)]
+    pub asset_url: String,
+    /// 安装包文件名（ASCII）
+    #[serde(default)]
+    pub asset_name: String,
+    /// 安装包字节数（0 = 未知）
+    #[serde(default)]
+    pub asset_size: u64,
+    /// 检查时间（epoch 秒）
+    #[serde(default)]
+    pub checked_at: u64,
 }
 
 fn default_retention() -> u32 {
     3
 }
 
-fn default_material_alpha() -> u32 {
-    // 现在这个值控制的是 CSS 主体层的不透明度（acrylic 的 tint 已固定压到 8%），
-    // 62% 相当于「看得出模糊、文字也清楚」的中间值
-    62
+/// 直角 / 圆角模式各自的**默认**浓度。
+///
+/// 圆角模式没有背景模糊，同样浓度会显得更透，所以默认档更高。
+pub const STRAIGHT_ALPHA: u32 = 50;
+pub const ROUND_ALPHA: u32 = 90;
+
+fn default_alpha_straight() -> u32 {
+    STRAIGHT_ALPHA
+}
+
+fn default_alpha_round() -> u32 {
+    ROUND_ALPHA
+}
+
+/// 浓度的合法区间（前端滑块 40–90，后端一律夹到这个范围）
+pub const ALPHA_MIN: u32 = 40;
+pub const ALPHA_MAX: u32 = 90;
+
+impl Config {
+    /// 当前模式生效的浓度。
+    pub fn alpha(&self) -> u32 {
+        if self.round_mode {
+            self.alpha_round
+        } else {
+            self.alpha_straight
+        }
+    }
+
+    /// 写入**当前模式**的浓度；另一个模式那一档不动。
+    pub fn set_alpha(&mut self, v: u32) {
+        let v = v.clamp(ALPHA_MIN, ALPHA_MAX);
+        if self.round_mode {
+            self.alpha_round = v;
+        } else {
+            self.alpha_straight = v;
+        }
+    }
+
+    /// 老配置迁移：把 v2.1.8 及更早的单一 `material_alpha` 归进对应模式那一档。
+    ///
+    /// 返回是否发生了迁移（调用方据此决定要不要立刻回写文件）。
+    /// 归到哪个模式取决于**当时**的 `round_mode`——那个值就是用户当时正在用的模式。
+    fn migrate(&mut self) -> bool {
+        match self.legacy_alpha.take() {
+            Some(v) => {
+                self.set_alpha(v);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 impl Default for Config {
@@ -73,10 +177,15 @@ impl Default for Config {
             clean_include_pinned: false,
             clean_confirm_exit: false,
             retention_days: default_retention(),
-            material_alpha: default_material_alpha(),
+            alpha_straight: default_alpha_straight(),
+            alpha_round: default_alpha_round(),
+            legacy_alpha: None,
+            asked_autostart: false,
+            asked_tray_on_close: false,
             round_mode: false,
             file_copy: false, // 默认关闭：不记录文件复制
             cache_dir: None,
+            update_cache: None,
         }
     }
 }
@@ -101,10 +210,20 @@ fn load() -> Config {
         return Config::default();
     };
     match fs::read_to_string(path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-            eprintln!("[settings] config.json 解析失败：{e}，使用默认配置");
-            Config::default()
-        }),
+        Ok(s) => {
+            let mut cfg: Config = serde_json::from_str(&s).unwrap_or_else(|e| {
+                eprintln!("[settings] config.json 解析失败：{e}，使用默认配置");
+                Config::default()
+            });
+            // 老配置的单一浓度归进对应模式那一档，并立刻回写 ——
+            // 否则每次启动都做一遍同样的迁移（虽然结果一致，但没必要）。
+            if cfg.migrate() {
+                if let Ok(out) = serde_json::to_string_pretty(&cfg) {
+                    let _ = fs::write(path, out);
+                }
+            }
+            cfg
+        }
         Err(_) => Config::default(),
     }
 }
@@ -148,12 +267,37 @@ pub fn get_settings() -> serde_json::Value {
         "cleanIncludePinned": cfg.clean_include_pinned,
         "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
-        "materialAlpha": cfg.material_alpha,
+        // 当前模式生效的那一档（前端滑块直接用这个）
+        "materialAlpha": cfg.alpha(),
+        // 两档原值：前端切换模式后可以立刻更新界面，不必再拉一次配置
+        "alphaStraight": cfg.alpha_straight,
+        "alphaRound": cfg.alpha_round,
         "roundMode": cfg.round_mode,
         "fileCopy": cfg.file_copy,
         "cacheDir": cfg.cache_dir,
         "autoStart": autostart::is_enabled(),
+        "askedAutostart": cfg.asked_autostart,
+        "askedTrayOnClose": cfg.asked_tray_on_close,
     })
+}
+
+/// 记下「首次运行引导」的某一项已经问过，之后不再打扰。
+///
+/// kind：`autostart`（首次运行问开机自启）/ `tray`（首次点关闭问后台运行）。
+/// 用户选什么都算问过——选了关掉也不该每次启动都再问一遍；
+/// 真正的开关随时可以在「设置」里改。
+#[tauri::command]
+pub fn dismiss_onboarding(kind: String) -> Result<(), String> {
+    match kind.as_str() {
+        "autostart" => {
+            update(|c| c.asked_autostart = true);
+        }
+        "tray" => {
+            update(|c| c.asked_tray_on_close = true);
+        }
+        other => return Err(format!("未知的引导项：{other}")),
+    }
+    Ok(())
 }
 
 #[tauri::command]

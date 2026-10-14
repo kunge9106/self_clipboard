@@ -36,7 +36,12 @@ fn effect_info() -> serde_json::Value {
     }
 }
 
-/// 圆角模式开关：圆角 + 不用系统 blur（四角真透明、100% 干净），立即生效
+/// 圆角模式开关：圆角 + 不用系统 blur（四角真透明、100% 干净），立即生效。
+///
+/// **只切模式本身，浓度一个字节都不动** —— 两个模式各记着自己那一档浓度
+/// （`alpha_straight` / `alpha_round`，见 settings.rs），切模式只是换用另一档：
+/// 直角下调到 68 再切圆角（用圆角那档，比如 45），切回直角还是 68。
+/// 从前两个模式共用同一个值，切一次就被覆盖一次，用户调好的浓度存不下来。
 #[tauri::command]
 fn set_round_mode(app: tauri::AppHandle, value: bool) -> Result<(), String> {
     settings::update(|c| c.round_mode = value);
@@ -55,10 +60,12 @@ fn set_round_mode(app: tauri::AppHandle, value: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// 材质浓度（设置页滑块）：更新 tint alpha 并立即重刷亚克力
+/// 材质浓度（设置页滑块）：更新 tint alpha 并立即重刷亚克力。
+///
+/// 只写入**当前模式**那一档，另一个模式记住的值不受影响。
 #[tauri::command]
 fn set_material_alpha(app: tauri::AppHandle, value: u32) -> Result<(), String> {
-    settings::update(|c| c.material_alpha = value.clamp(40, 90));
+    settings::update(|c| c.set_alpha(value));
     #[cfg(windows)]
     {
         use tauri::Manager;
@@ -110,7 +117,7 @@ fn setup_effects(app: &tauri::AppHandle) {
     effects::apply(hwnd, dark);
     effects::apply_rounded_corners(hwnd);
     // 失焦/聚焦时 Windows 会发 WM_NCACTIVATE 重绘原生标题栏，必须拦截
-    effects::install_focus_hook(hwnd);
+    effects::install_focus_hook(hwnd, app);
 
     let app_for_events = app.clone();
     let window_for_events = window.clone();
@@ -186,13 +193,13 @@ pub fn run() {
     logger::install_hook();
 
     // 单实例：同一版本只允许一个实例；测试版(debug)与正式版(release)锁名不同，可共存。
-    // 检测到同版本已在运行 → 把它的窗口唤到前台，本次启动直接结束（等价于"双击没反应"的反面：
-    // 用户至少能看到已存在的窗口被带到前面）。
+    // 检测到同版本已在运行 → **只给它发一条消息**，由它自己唤回窗口 + 弹应用内提示
+    // （本进程绝不跨进程去动那个窗口，详见 singleton::notify_existing_instance）。
     // 必须排在日志钩子之后、其余初始化之前：既保证崩了有记录，
     // 又避免第二个实例为了写一行日志去抢剪贴板监听等资源。
     #[cfg(windows)]
     if !singleton::ensure_single_instance() {
-        singleton::activate_existing_instance();
+        singleton::notify_existing_instance();
         std::process::exit(0);
     }
 
@@ -214,6 +221,9 @@ pub fn run() {
             set_round_mode,
             about::about_info,
             about::check_update,
+            about::update_state,
+            about::download_update,
+            about::install_downloaded,
             about::open_external,
             effects::drag_start,
             effects::resize_start,
@@ -229,7 +239,9 @@ pub fn run() {
             clipboard::cache_info,
             clipboard::pick_cache_dir,
             clipboard::open_cache_dir,
+            clipboard::open_log_dir,
             settings::get_settings,
+            settings::dismiss_onboarding,
             settings::set_tray_on_close,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
@@ -253,6 +265,9 @@ pub fn run() {
         setup_effects(app.handle());
         // 托盘图标常驻：程序一运行就显示（不再依赖「关闭时后台运行」开关）
         tray::create_tray(app.handle());
+        // 启动后自动检查一次更新：后台线程、静默 —— 有新版才发通知，
+        // 检查失败或没有新版一律不打扰用户（前端其余情况只认手动点击）。
+        about::auto_check(app.handle().clone());
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
         }
