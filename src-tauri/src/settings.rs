@@ -29,20 +29,26 @@ pub struct Config {
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
-    /// 材质浓度：窗口主体层的不透明度百分比（40–90）
+    /// **直角模式**下的材质浓度（窗口主体层不透明度百分比，40–90）
     ///
-    /// 默认取「直角模式」的推荐档（见 `default_material_alpha`）。
-    /// 圆角模式没有背景模糊，面板要更实，所以 `set_round_mode` 会按模式自动切档 ——
-    /// **但仅限用户没有手动调过**，见 `alpha_is_custom`。
-    #[serde(default = "default_material_alpha")]
-    pub material_alpha: u32,
-    /// 用户是否手动调过材质浓度。
+    /// 两个模式**各记一档**、互不影响：切换圆角模式只是换用另一档的值，
+    /// 切回去还是你上次为那个模式设的浓度。
+    /// （圆角模式没有背景模糊，同样浓度会显得更透，所以默认档更高。）
+    #[serde(default = "default_alpha_straight")]
+    pub alpha_straight: u32,
+    /// **圆角模式**下的材质浓度（40–90）
+    #[serde(default = "default_alpha_round")]
+    pub alpha_round: u32,
+    /// v2.1.8 及更早版本的「单一浓度」字段，**只用于迁移**。
     ///
-    /// `None` = 老配置里没有这个字段，用数值反推（见 `alpha_is_custom`）。
-    /// 一旦用户在设置页拖过滑块，就永远以用户的值优先，
-    /// 开关圆角模式不再动它 —— 之前无条件覆盖，用户调好的浓度会被悄悄改掉。
-    #[serde(default)]
-    pub material_alpha_custom: Option<bool>,
+    /// 读到后按**当时的模式**归进 `alpha_straight` / `alpha_round`（见 `migrate`），
+    /// 随后置空并且不再序列化（`skip_serializing_if`），所以 config.json 里不会再出现它。
+    #[serde(
+        default,
+        rename = "material_alpha",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_alpha: Option<u32>,
     /// 首次运行引导：开机自启那一次问过了吗
     #[serde(default)]
     pub asked_autostart: bool,
@@ -110,25 +116,56 @@ fn default_retention() -> u32 {
     3
 }
 
-/// 直角 / 圆角模式各自的推荐浓度。这两个值只在**用户没手动调过**时自动生效。
+/// 直角 / 圆角模式各自的**默认**浓度。
+///
+/// 圆角模式没有背景模糊，同样浓度会显得更透，所以默认档更高。
 pub const STRAIGHT_ALPHA: u32 = 50;
 pub const ROUND_ALPHA: u32 = 90;
 
-fn default_material_alpha() -> u32 {
-    // 新装默认 50（直角模式的推荐档）。以前是 62，但 62 既不是直角档也不是圆角档，
-    // 会让「没手动调过」这个判断失效（见 alpha_is_custom）。
+fn default_alpha_straight() -> u32 {
     STRAIGHT_ALPHA
 }
 
+fn default_alpha_round() -> u32 {
+    ROUND_ALPHA
+}
+
+/// 浓度的合法区间（前端滑块 40–90，后端一律夹到这个范围）
+pub const ALPHA_MIN: u32 = 40;
+pub const ALPHA_MAX: u32 = 90;
+
 impl Config {
-    /// 用户是否手动调过材质浓度。
+    /// 当前模式生效的浓度。
+    pub fn alpha(&self) -> u32 {
+        if self.round_mode {
+            self.alpha_round
+        } else {
+            self.alpha_straight
+        }
+    }
+
+    /// 写入**当前模式**的浓度；另一个模式那一档不动。
+    pub fn set_alpha(&mut self, v: u32) {
+        let v = v.clamp(ALPHA_MIN, ALPHA_MAX);
+        if self.round_mode {
+            self.alpha_round = v;
+        } else {
+            self.alpha_straight = v;
+        }
+    }
+
+    /// 老配置迁移：把 v2.1.8 及更早的单一 `material_alpha` 归进对应模式那一档。
     ///
-    /// 老配置没有 `material_alpha_custom` 字段（None），这时用数值反推：
-    /// 50 / 90 正是两种模式的自动档，除此之外的值必然是人手动拖出来的。
-    /// 新配置由 `Config::default()` 明确写成 `Some(false)`，不再依赖反推。
-    pub fn alpha_is_custom(&self) -> bool {
-        self.material_alpha_custom
-            .unwrap_or(self.material_alpha != STRAIGHT_ALPHA && self.material_alpha != ROUND_ALPHA)
+    /// 返回是否发生了迁移（调用方据此决定要不要立刻回写文件）。
+    /// 归到哪个模式取决于**当时**的 `round_mode`——那个值就是用户当时正在用的模式。
+    fn migrate(&mut self) -> bool {
+        match self.legacy_alpha.take() {
+            Some(v) => {
+                self.set_alpha(v);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -140,9 +177,9 @@ impl Default for Config {
             clean_include_pinned: false,
             clean_confirm_exit: false,
             retention_days: default_retention(),
-            material_alpha: default_material_alpha(),
-            // 新装即「没手动调过」——不需要靠数值反推
-            material_alpha_custom: Some(false),
+            alpha_straight: default_alpha_straight(),
+            alpha_round: default_alpha_round(),
+            legacy_alpha: None,
             asked_autostart: false,
             asked_tray_on_close: false,
             round_mode: false,
@@ -173,10 +210,20 @@ fn load() -> Config {
         return Config::default();
     };
     match fs::read_to_string(path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-            eprintln!("[settings] config.json 解析失败：{e}，使用默认配置");
-            Config::default()
-        }),
+        Ok(s) => {
+            let mut cfg: Config = serde_json::from_str(&s).unwrap_or_else(|e| {
+                eprintln!("[settings] config.json 解析失败：{e}，使用默认配置");
+                Config::default()
+            });
+            // 老配置的单一浓度归进对应模式那一档，并立刻回写 ——
+            // 否则每次启动都做一遍同样的迁移（虽然结果一致，但没必要）。
+            if cfg.migrate() {
+                if let Ok(out) = serde_json::to_string_pretty(&cfg) {
+                    let _ = fs::write(path, out);
+                }
+            }
+            cfg
+        }
         Err(_) => Config::default(),
     }
 }
@@ -220,7 +267,11 @@ pub fn get_settings() -> serde_json::Value {
         "cleanIncludePinned": cfg.clean_include_pinned,
         "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
-        "materialAlpha": cfg.material_alpha,
+        // 当前模式生效的那一档（前端滑块直接用这个）
+        "materialAlpha": cfg.alpha(),
+        // 两档原值：前端切换模式后可以立刻更新界面，不必再拉一次配置
+        "alphaStraight": cfg.alpha_straight,
+        "alphaRound": cfg.alpha_round,
         "roundMode": cfg.round_mode,
         "fileCopy": cfg.file_copy,
         "cacheDir": cfg.cache_dir,

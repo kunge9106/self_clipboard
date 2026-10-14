@@ -318,14 +318,21 @@ GUI 程序从双击启动，`stderr` 没人接收——出问题时用户只看�
 
 `TINT_ALPHA = 0x14`（约 8%）。压得这么低的理由：acrylic 的 tint 是单色的、压不低就会在纯色背景上「发平发廉价」；把 tint 降到只剩模糊，**窗口的明暗改由 CSS 这一层负责**。
 
-所以「材质浓度」滑块控制的是 CSS 变量 `--glass-alpha`（窗口主体的不透明度），可以在前端实时调整、无需重建窗口：
+所以「材质浓度」滑块控制的是 CSS 变量 `--glass-alpha`（窗口主体的不透明度），可以在前端实时调整、无需重建窗口。
+
+**两个模式各记一档浓度**（v2.1.9 起）：直角模式与圆角模式分别存 `alpha_straight` / `alpha_round`，切模式只是换用另一档，互不覆盖 —— 直角调到 68、圆角调到 45，来回切分别还是 68 / 45。默认档：直角 50、圆角 90（圆角模式没有背景模糊，同样浓度会显得更透）。
 
 ```
-设置 → 材质浓度 [25 … 90]（默认 62）
+设置 → 材质浓度 [40 … 90]（默认：直角 50 / 圆角 90）
         ↓ invoke set_material_alpha
-Rust: settings.material_alpha = clamp(40,90) + reapply_material()（重刷 acrylic）
-前端: --glass-alpha = value/100
+Rust: settings.set_alpha(v)   // 只写当前模式那一档，clamp(40,90)
+      + reapply_material()    // 重刷 acrylic
+前端: --glass-alpha = v/100
+切模式 ↓ invoke set_round_mode（只改 round_mode，不动浓度）
+      前端重新 get_settings → materialAlpha 已是另一档的值 → 同步滑块与观感
 ```
+
+老配置（v2.1.8 及更早）只有一个 `material_alpha`：加载时按**当时**的 `round_mode` 归进对应那一档，随后该字段置空并不再序列化（`Config::migrate`）。
 
 ### 5.5 去掉 DWM 画的 1px 边框
 
@@ -484,7 +491,7 @@ settings   设置页
 设置页按 **四个标签分页**（v2.1.8 起）——**通用 / 外观 / 记录与缓存 / 关于**，避免一长条列表翻找：
 
 - **通用**：开机自启、关闭时后台运行、退出清理相关；
-- **外观**：材质浓度、圆角模式（附注「Win11 原生即圆角，本开关只影响背景模糊与材质观感」）；
+- **外观**：材质浓度、圆角模式（附注「Win11 原生即圆角，本开关只影响背景模糊与材质观感；两个模式各自记住自己的浓度」）；
 - **记录与缓存**：文件复制开关、保留天数、缓存目录（路径 + 占用 + 迁移/打开）、清空全部历史；
 - **关于**：版本、运行环境自检、检查更新与更新日志、项目主页 / 问题反馈入口（详见 8.6）。
 
@@ -499,7 +506,9 @@ settings   设置页
 | `clean_include_pinned` | false | 清理时是否连置顶/收藏一起清 |
 | `clean_confirm_exit` | false | 退出前弹窗确认 |
 | `retention_days` | 3 | 保留天数，`0` = 永久 |
-| `material_alpha` | 62 | 材质浓度（25–90，Rust 侧夹到 40–90） |
+| `alpha_straight` | 50 | **直角模式**的材质浓度（40–90） |
+| `alpha_round` | 90 | **圆角模式**的材质浓度（40–90） |
+| `material_alpha` | — | v2.1.8 及更早的单一浓度字段，**仅用于迁移**，迁移后不再写入 |
 | `round_mode` | false | 圆角模式（圆角 + 无系统模糊 / 直角 + 系统模糊） |
 | `file_copy` | **false** | 是否记录文件复制（默认关闭） |
 | `cache_dir` | null | 自定义缓存目录（null = app_data_dir/clipboard） |
@@ -520,8 +529,8 @@ settings   设置页
 | 命令 | 作用 |
 |---|---|
 | `effect_info` | 返回实际生效的材质档位 / build / 圆角上限 / 圆角模式 |
-| `set_material_alpha` | 设置材质浓度并立即重刷 |
-| `set_round_mode` | 切换圆角模式并立即生效 |
+| `set_material_alpha` | 设置**当前模式**的材质浓度并立即重刷（另一档不受影响） |
+| `set_round_mode` | 切换圆角模式并立即生效（**不改浓度**） |
 | `drag_start` / `resize_start` | 自定义拖动 / 缩放 |
 | `get_history` | 取历史（元数据数组） |
 | `get_image` | 取某条图片数据 |

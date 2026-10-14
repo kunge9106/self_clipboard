@@ -72,6 +72,19 @@ function applyGlassAlpha(pct) {
 }
 
 /**
+ * 把浓度同步进模块级 `settings`（界面渲染读它）。
+ *
+ * 两个模式各记一档，所以要写的是**当前模式**那一档；
+ * `materialAlpha` 是「当前生效值」，滑块与读数都读它，一并更新。
+ */
+function syncAlphaToSettings(v) {
+  if (!settings) return;
+  settings.materialAlpha = v;
+  if (settings.roundMode) settings.alphaRound = v;
+  else settings.alphaStraight = v;
+}
+
+/**
  * 圆角模式：**圆角 + 不用系统模糊**。
  *
  * Win10 的 acrylic 由 DWM 合成、恒为矩形，裁不掉圆角，所以「圆角 + 系统模糊」
@@ -1139,7 +1152,7 @@ function settingsAppearanceHtml(s) {
       <span class="hint" id="material-val">${s.materialAlpha ?? 50}%（越高越厚实 · 越低越通透）</span></div>
     <div class="row"><label>圆角模式</label>
       <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
-      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感。圆角模式下没有背景模糊、面板会显得更透，<b>建议把上面的「材质浓度」调到 80% 以上</b>（此开关不会自动改你的浓度）</span></div>`;
+      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感。<b>两个模式各自记住自己的材质浓度</b>（默认：直角 50% / 圆角 90%），来回切换互不覆盖；圆角模式没有背景模糊、面板会显得更透，可以把它那一档调高些</span></div>`;
 }
 
 // 「保留 N 天 / 永久保存」的展示文案。0 在语义上是「永久保留」，
@@ -1768,14 +1781,14 @@ function bindSettings(view) {
       if (label) label.textContent = `${v}%（越高越厚实 · 越低越通透）`;
     };
     // 拖动中：只改观感与本地状态，不落盘（高频写 config.json 没必要）。
-    // 关键是同步 settings.materialAlpha —— settingsHtml() 读的是模块级 settings，
-    // 不同步的话切到别的页面再回来，滑块会显示成旧值（看起来像「恢复默认」）。
+    // 关键是同步模块级 settings —— settingsHtml() 读的就是它，
+    // 不同步的话切到别的分类再回来，滑块会显示成旧值（看起来像「恢复默认」）。
     material.addEventListener("input", () => {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
       show(v);
       applyGlassAlpha(v);
-      if (settings) settings.materialAlpha = v;
+      syncAlphaToSettings(v);
     });
     // 松手才持久化
     material.addEventListener("change", () => {
@@ -1789,18 +1802,17 @@ function bindSettings(view) {
 
   // 圆角模式：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启。
   //
-  // 浓度由**后端**按规则处理（见 lib.rs::set_round_mode）：
-  //   用户没手动调过 → 按模式的推荐档切（直角 50 / 圆角 90）；
-  //   用户手动调过   → 一个字节都不动，永远以用户的为准。
-  // 这里只负责把结果同步到界面（滑块 / 标签 / 观感）。
+  // **浓度不跟着动**：直角 / 圆角两个模式各记着自己那一档
+  // （后端 alpha_straight / alpha_round），切模式只是换用另一档 ——
+  // 直角调到 68 → 切圆角（用圆角那档，比如 45）→ 切回直角仍是 68。
+  // 这里把该模式记住的那一档取回来，同步到滑块 / 标签 / 观感。
   const round = view.querySelector("#set-round");
   if (round)
     round.onchange = async () => {
       try {
         await invoke("set_round_mode", { value: round.checked });
         applyRoundMode(round.checked);
-        // 浓度可能被后端按模式切了推荐档（用户没手动调过时才会），
-        // 所以要把滑块与观感按最新配置同步一次，否则界面显示的值跟实际不一致。
+        // 模式变了 → 当前生效的那一档（materialAlpha）也随之改变，重新拉一次配置
         settings = await invoke("get_settings");
         const alpha = settings.materialAlpha ?? 50;
         applyGlassAlpha(alpha);
@@ -1810,8 +1822,8 @@ function bindSettings(view) {
         if (label) label.textContent = `${alpha}%（越高越厚实 · 越低越通透）`;
         toast(
           round.checked
-            ? "已切换为圆角模式（无背景模糊）"
-            : "已切换为直角模式（保留背景模糊）"
+            ? `已切换为圆角模式（无背景模糊）· 浓度 ${alpha}%`
+            : `已切换为直角模式（保留背景模糊）· 浓度 ${alpha}%`
         );
       } catch (e) {
         toast("保存失败：" + e);

@@ -627,7 +627,9 @@ fn apply_acrylic(hwnd: isize, dark: bool) -> Result<(), i32> {
         clear_accent(hwnd);
         return Ok(());
     }
-    let alpha = crate::settings::get().material_alpha;
+    // 直角模式才会走到这里（圆角模式在上面的分支直接 clear_accent 返回），
+    // 所以 alpha() 取到的就是「直角档」那个值。
+    let alpha = crate::settings::get().alpha();
     set_accent_state(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, tint_for(dark, alpha))
 }
 

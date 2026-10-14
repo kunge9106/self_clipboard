@@ -181,7 +181,8 @@ fn look(win: &WebviewWindow) -> MenuLook {
     MenuLook {
         solid: crate::effects::current_tier().as_str() == "solid",
         round: true,
-        alpha: cfg.material_alpha.clamp(10, 95) as f64 / 100.0,
+        // 菜单恒用**圆角模式**的样式与材质（DESIGN 7.2），浓度也随之取圆角那一档
+        alpha: cfg.alpha_round.clamp(10, 95) as f64 / 100.0,
         dark: matches!(win.theme().unwrap_or(tauri::Theme::Light), tauri::Theme::Dark),
     }
 }
