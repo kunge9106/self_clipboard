@@ -9,9 +9,12 @@ mod effects;
 mod clipboard;
 #[cfg(windows)]
 mod singleton;
+#[cfg(windows)]
+mod about;
 mod settings;
 mod autostart;
 mod tray;
+mod logger;
 
 /// 前端启动时调用，拿到实际生效的材质档位与圆角上限。
 /// 注意：返回的是「实际生效」而非「尝试应用」的档位——这是 v1 静默失败的直接教训。
@@ -179,14 +182,29 @@ fn setup_effects(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    // panic 钩子最先装上：这样连「单实例检测阶段的崩溃」也能落进日志。
+    logger::install_hook();
+
     // 单实例：同一版本只允许一个实例；测试版(debug)与正式版(release)锁名不同，可共存。
     // 检测到同版本已在运行 → 把它的窗口唤到前台，本次启动直接结束（等价于"双击没反应"的反面：
     // 用户至少能看到已存在的窗口被带到前面）。
+    // 必须排在日志钩子之后、其余初始化之前：既保证崩了有记录，
+    // 又避免第二个实例为了写一行日志去抢剪贴板监听等资源。
     #[cfg(windows)]
     if !singleton::ensure_single_instance() {
         singleton::activate_existing_instance();
         std::process::exit(0);
     }
+
+    logger::write_line(
+        "INFO",
+        "boot",
+        &format!(
+            "轻贴启动 v{}（debug={}）",
+            about::version_display(),
+            cfg!(debug_assertions)
+        ),
+    );
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -194,6 +212,9 @@ pub fn run() {
             effect_info,
             set_material_alpha,
             set_round_mode,
+            about::about_info,
+            about::check_update,
+            about::open_external,
             effects::drag_start,
             effects::resize_start,
             clipboard::get_history,

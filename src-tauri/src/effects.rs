@@ -223,7 +223,7 @@ pub fn current_build() -> u32 {
 /// 用 RtlGetVersion 读真实 build 号。
 /// 不用 GetVersionEx：没有 manifest 声明时它会在 Win10 上返回 6.2（Win8），
 /// 这正是「静默失败」的典型来源。
-fn detect_build() -> u32 {
+pub fn detect_build() -> u32 {
     unsafe {
         let mut info: RtlOsVersionInfoExW = std::mem::zeroed();
         info.os_version_info_size = std::mem::size_of::<RtlOsVersionInfoExW>() as u32;

@@ -1066,6 +1066,7 @@ const SETTINGS_TABS = [
   { id: "general", label: "通用" },
   { id: "appearance", label: "外观" },
   { id: "data", label: "记录与缓存" },
+  { id: "about", label: "关于" },
 ];
 
 function settingsHtml() {
@@ -1080,6 +1081,7 @@ function settingsHtml() {
   // 每一个 querySelector 都必须做存在性保护，否则会 null.onclick / null.onchange 报错。
   let body = "";
   if (settingsTab === "appearance") body = settingsAppearanceHtml(s);
+  else if (settingsTab === "about") body = settingsAboutHtml();
   // "record" 已并入 "data"；带上这个旧值兜底，万一 settingsTab 还是它，
   // 也不会停在已经不存在的分类上。
   else if (settingsTab === "data" || settingsTab === "record")
@@ -1149,6 +1151,300 @@ function settingsDataHtml(s) {
       <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
       <span class="hint">每次退出时先弹窗确认</span></div>
     <button class="btn-danger" id="clear-all">清空全部历史</button>`;
+}
+
+// ── 关于页 ────────────────────────────────────────────────────────────────
+// 版本 / 检查更新 / 运行环境自检 / 快捷入口。
+// 材质在不同 Windows 版本上表现不一致，所以把「系统 build + 实际生效档位」直接
+// 摆在页面上——出问题时一眼能看到，不用再去翻日志找 [effects] 那几行。
+const TIER_LABEL = {
+  "system-backdrop": "系统材质（Mica / SystemBackdrop）",
+  mica: "Mica",
+  acrylic: "亚克力（Acrylic）",
+  solid: "纯色（Solid，材质不可用时的兜底）",
+};
+
+// 关于页会渲染缓存目录、Release 更新说明等外部文本，统一转义后再插 innerHTML。
+function esc(s) {
+  return String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
+}
+
+// ── 极简 Markdown 渲染 ──────────────────────────────────────────────────
+// Release 说明是 Markdown，纯文本显示会满屏 ** 和 -。不引第三方库（项目取向是
+// 依赖极少，且 CSP 禁了外部 CDN），只支持写 Release 时实际会用到的语法：
+// 标题、列表、粗体、行内代码、链接、代码块。
+//
+// 安全前提：先整体 esc 再做标签替换，所以任何标签/属性都不可能从输入注入；
+// 链接额外只放行 http(s)，挡掉 javascript: 之类。
+function mdInline(t) {
+  return (
+    t
+      // 行内代码优先，内容不再做后续替换，避免代码里的 * _ 被误当强调
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, text, url) => {
+        const u = esc(url);
+        // 只允许 http/https，其余降级成纯文本
+        return /^https?:\/\//i.test(url)
+          ? `<a href="${u}" data-ext="${u}">${text}</a>`
+          : text;
+      })
+  );
+}
+
+function md(src) {
+  const lines = String(src ?? "").replace(/\r\n?/g, "\n").split("\n");
+  let out = "";
+  let list = null; // 当前是否在列表中
+  let inCode = false;
+  let codeBuf = [];
+
+  const closeList = () => {
+    if (list) {
+      out += `</${list}>`;
+      list = null;
+    }
+  };
+
+  for (const raw of lines) {
+    // 围栏代码块：原样输出，不做任何行内解析
+    if (/^\s*```/.test(raw)) {
+      if (inCode) {
+        out += `<pre><code>${esc(codeBuf.join("\n"))}</code></pre>`;
+        codeBuf = [];
+        inCode = false;
+      } else {
+        closeList();
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) {
+      codeBuf.push(raw);
+      continue;
+    }
+
+    const line = esc(raw);
+    if (!line.trim()) {
+      closeList();
+      continue;
+    }
+
+    // 标题：### / ## / #
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (h) {
+      closeList();
+      const lv = Math.min(h[1].length + 2, 5); // h1 当 h3 用，避免抢页面标题层级
+      out += `<h${lv}>${mdInline(h[2])}</h${lv}>`;
+      continue;
+    }
+
+    // 列表项：- / * / + / 数字.
+    const li = /^(\s*)(?:[-*+]|\d+\.)\s+(.*)$/.exec(line);
+    if (li) {
+      const want = "ul";
+      if (list !== want) {
+        closeList();
+        out += `<${want}>`;
+        list = want;
+      }
+      out += `<li>${mdInline(li[2])}</li>`;
+      continue;
+    }
+
+    closeList();
+    out += `<p>${mdInline(line)}</p>`;
+  }
+
+  // 未闭合的围栏代码块：补上，避免内容丢失
+  if (inCode) out += `<pre><code>${esc(codeBuf.join("\n"))}</code></pre>`;
+  closeList();
+  return out;
+}
+
+function settingsAboutHtml() {
+  return `
+    <div class="about-hero">
+      <div class="about-hero-l">
+        <div class="about-name">轻贴</div>
+        <p class="about-slogan">安静常驻托盘的剪贴板历史 · 全部存于本机，无账号、不联网、不上传</p>
+      </div>
+      <div class="about-hero-r">
+        <div class="about-badge">
+          <div class="about-badge-l">当前版本</div>
+          <div class="about-badge-v" id="about-ver">读取中…</div>
+        </div>
+        <div class="about-state" id="about-update">正在获取版本信息…</div>
+        <div class="about-actions">
+          <button class="btn-ghost" id="btn-check-update">检查更新</button>
+          <button class="btn-ghost" id="btn-repo">项目主页</button>
+          <button class="btn-ghost" id="btn-feedback">问题反馈</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="about-facts">
+      <div class="about-fact">
+        <span class="about-fact-k">系统</span>
+        <span class="about-fact-v" id="ab-os">—</span>
+      </div>
+      <div class="about-fact">
+        <span class="about-fact-k">材质档位</span>
+        <span class="about-fact-v" id="ab-tier">—</span>
+      </div>
+      <div class="about-fact">
+        <span class="about-fact-k">圆角模式</span>
+        <span class="about-fact-v" id="ab-round">—</span>
+      </div>
+      <div class="about-fact">
+        <span class="about-fact-k">开机自启</span>
+        <span class="about-fact-v" id="ab-auto">—</span>
+      </div>
+      <div class="about-fact">
+        <span class="about-fact-k">内存占用</span>
+        <span class="about-fact-v" id="ab-mem">—</span>
+      </div>
+      <div class="about-fact">
+        <span class="about-fact-k">许可</span>
+        <span class="about-fact-v">MIT 开源许可</span>
+      </div>
+      <div class="about-fact">
+        <span class="about-fact-k">缓存目录</span>
+        <span class="about-fact-v about-path" id="ab-dir">—</span>
+      </div>
+    </div>
+
+    <div class="about-log">
+      <div class="about-log-h">
+        <h3 class="about-log-t" id="about-log-t">更新日志</h3>
+        <span class="about-log-v" id="about-log-v"></span>
+      </div>
+      <div id="about-notes" class="about-notes">正在读取…</div>
+    </div>`;
+}
+
+function setTxt(id, v) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = v;
+}
+
+// 渲染更新日志：标题带上版本号，让「常驻的是哪一版」一眼可辨。
+// 拉不到（离线/私有库）时给一句人话，不留空白。
+function renderNotes(tag, notes) {
+  const box = document.getElementById("about-notes");
+  const vt = document.getElementById("about-log-v");
+  if (vt) vt.textContent = tag ? "v" + tag : "";
+  if (!box) return;
+  if (!notes) {
+    box.className = "about-notes is-empty";
+    box.textContent = "暂无版本说明。";
+    return;
+  }
+  box.className = "about-notes";
+  box.innerHTML = md(notes);
+}
+
+// 静默拉一次更新信息：只用来填充日志与状态，不弹任何提示。
+// 进入关于页就跑一次，所以日志是「常驻」的，不用先点检查更新。
+// manual=true（用户点了按钮）时才 toast 结果。
+async function loadReleaseNotes(manual) {
+  const tip = document.getElementById("about-update");
+  try {
+    const r = await invoke("check_update");
+    const cur = r.displayCurrent || r.current; // 带 -beta 的展示号
+    // 有新版本就显示新版本的日志，否则显示当前版本的 —— 这正是你要的常驻逻辑
+    const showTag = r.hasUpdate ? r.latest : String(cur).replace(/^v/, "");
+    renderNotes(showTag, r.notes);
+    if (tip) {
+      if (r.hasUpdate) {
+        tip.className = "about-state is-new";
+        tip.innerHTML =
+          `发现新版本 <b>v${esc(r.latest)}</b>，当前 v${esc(cur)}　` +
+          `<button class="btn-ghost" id="btn-go-dl">前往下载</button>`;
+        const go = document.getElementById("btn-go-dl");
+        if (go) go.onclick = () => invoke("open_external", { url: r.url });
+      } else {
+        tip.className = "about-state is-ok";
+        tip.textContent = "已是最新版本";
+      }
+    }
+    if (manual) {
+      toast(
+        r.hasUpdate
+          ? `发现新版本 v${r.latest}，当前 v${cur}`
+          : `已是最新版本（v${cur}）`
+      );
+    }
+    return r;
+  } catch (e) {
+    if (tip) {
+      tip.className = "about-state is-err";
+      tip.textContent = "检查更新失败";
+    }
+    renderNotes("", "");
+    // 静默进入时不打扰，只有点了按钮才提示失败
+    if (manual) toast("检查更新失败，请检查网络");
+    return null;
+  }
+}
+
+async function loadAbout() {
+  try {
+    const a = await invoke("about_info");
+    setTxt("about-ver", "v" + a.version);
+    // 系统版本：产品名 + marketing version(26H2) + build(26300)，全部来自注册表。
+    // 缺哪段就省哪段，不显示「未知/undefined」这类脏字。
+    const parts = [];
+    if (a.osName) parts.push(a.osName);
+    if (a.osDisplay) parts.push(a.osDisplay);
+    if (a.osBuildRaw) parts.push("build " + a.osBuildRaw);
+    setTxt("ab-os", parts.length ? parts.join(" · ") : "Windows");
+    setTxt("ab-tier", TIER_LABEL[a.tier] || a.tier);
+    setTxt("ab-round", a.roundMode ? "开启" : "关闭");
+    setTxt("ab-auto", a.autoStart ? "已开启" : "未开启");
+    setTxt("ab-mem", `${a.memMb} MB`);
+    setTxt("ab-dir", a.dataDir || "（默认）");
+  } catch (e) {
+    setTxt("about-ver", "读取失败");
+  }
+  // 日志与更新状态并行拉，不阻塞信息展示
+  loadReleaseNotes(true);
+}
+
+async function aboutCheckUpdate() {
+  const btn = document.getElementById("btn-check-update");
+  if (btn) btn.disabled = true;
+  const tip = document.getElementById("about-update");
+  if (tip) {
+    tip.className = "about-state";
+    tip.textContent = "正在检查更新…";
+  }
+  // 手动点击复用静默拉取：状态、日志都会刷新，并弹 toast 告知结果
+  await loadReleaseNotes(true);
+  if (btn) btn.disabled = false;
+}
+
+async function aboutFeedback() {
+  try {
+    const a = await invoke("about_info");
+    const body =
+      `版本：${a.version}\n系统 build：${a.osBuild}\n` +
+      `材质档位：${a.tier}\n圆角模式：${a.roundMode ? "开" : "关"}\n\n` +
+      `问题描述：\n`;
+    const url =
+      "https://github.com/kunge9106/self_clipboard/issues/new?title=" +
+      encodeURIComponent("问题反馈") +
+      "&body=" +
+      encodeURIComponent(body);
+    await invoke("open_external", { url });
+  } catch (e) {
+    toast("打开反馈页面失败：" + e);
+  }
 }
 
 async function refreshCacheInfo() {
@@ -1302,6 +1598,34 @@ function bindSettings(view) {
   if (openDir)
     openDir.onclick = () =>
       invoke("open_cache_dir").catch((e) => toast("打开失败：" + e));
+
+  // 「关于」页的按钮同理，只在切到该分类时存在 → 同样做存在性保护；
+  // 顺便在进入该页时就把版本号与运行环境拉出来。
+  const btnCheck = view.querySelector("#btn-check-update");
+  if (btnCheck) {
+    btnCheck.onclick = aboutCheckUpdate;
+    loadAbout();
+  }
+  const btnRepo = view.querySelector("#btn-repo");
+  if (btnRepo)
+    btnRepo.onclick = () =>
+      invoke("open_external", {
+        url: "https://github.com/kunge9106/self_clipboard",
+      });
+  const btnFeedback = view.querySelector("#btn-feedback");
+  if (btnFeedback) btnFeedback.onclick = aboutFeedback;
+
+  // 更新日志里的链接：用事件委托交给系统浏览器打开。
+  // WebView 内的 <a href> 会被当作应用内导航（点了直接白屏），所以必须拦下。
+  const notesBox = view.querySelector("#about-notes");
+  if (notesBox) {
+    notesBox.addEventListener("click", (e) => {
+      const a = e.target.closest("a[data-ext]");
+      if (!a) return;
+      e.preventDefault();
+      invoke("open_external", { url: a.dataset.ext });
+    });
+  }
 
   // 危险操作：这里只负责把确认弹窗打开，真正的清空要用户在弹窗里再确认一次才执行
   const clear = view.querySelector("#clear-all");
