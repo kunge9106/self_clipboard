@@ -30,6 +30,7 @@ extern "system" {
     fn EnumWindows(cb: extern "system" fn(isize, isize) -> i32, param: isize) -> i32;
     fn GetWindowTextW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
     fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
+    fn SetForegroundWindow(hwnd: isize) -> i32;
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -127,5 +128,12 @@ pub fn notify_existing_instance() -> bool {
     if hwnd == 0 {
         return false;
     }
-    unsafe { PostMessageW(hwnd, WM_QINGTIE_WAKE, 0, 0) != 0 }
+    let posted = unsafe { PostMessageW(hwnd, WM_QINGTIE_WAKE, 0, 0) != 0 };
+    if !posted {
+        // 极少数情况下消息会被系统拦下（典型场景：对面以管理员身份运行，
+        // UIPI 不允许低完整性进程往高完整性窗口投递消息）。
+        // 这时退一步、至少把窗口带到前台——只改 Z 序、**不动尺寸**，安全。
+        unsafe { SetForegroundWindow(hwnd) };
+    }
+    posted
 }
