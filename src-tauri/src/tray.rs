@@ -177,12 +177,12 @@ pub struct MenuLook {
 }
 
 fn look(win: &WebviewWindow) -> MenuLook {
-    let cfg = crate::settings::get();
     MenuLook {
         solid: crate::effects::current_tier().as_str() == "solid",
         round: true,
-        // 菜单恒用**圆角模式**的样式与材质（DESIGN 7.2），浓度也随之取圆角那一档
-        alpha: cfg.alpha_round.clamp(10, 95) as f64 / 100.0,
+        // 菜单恒用**圆角模式**的样式与材质（DESIGN 7.2）：浓度固定取圆角模式的默认档 90%，
+        // 不跟随设置页里调的浓度 —— 菜单是窄条、文字密度高，需要稳定厚实的底。
+        alpha: crate::settings::ROUND_ALPHA as f64 / 100.0,
         dark: matches!(win.theme().unwrap_or(tauri::Theme::Light), tauri::Theme::Dark),
     }
 }

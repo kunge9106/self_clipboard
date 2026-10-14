@@ -1152,7 +1152,7 @@ function settingsAppearanceHtml(s) {
       <span class="hint" id="material-val">${s.materialAlpha ?? 50}%（越高越厚实 · 越低越通透）</span></div>
     <div class="row"><label>圆角模式</label>
       <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
-      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。注：Win11 的系统材质本身就带窗口圆角（系统默认行为），所以在 Win11 上无论开关，边角都是圆的——此开关主要改变的是背景模糊与材质观感。<b>两个模式各自记住自己的材质浓度</b>（默认：直角 50% / 圆角 90%），来回切换互不覆盖；圆角模式没有背景模糊、面板会显得更透，可以把它那一档调高些</span></div>`;
+      <span class="hint">勾选＝圆角 + 无背景模糊（四角完全干净）；不勾选＝直角 + 保留背景模糊。Win11 的系统材质本身就带窗口圆角，此开关主要改变的是背景模糊与材质观感</span></div>`;
 }
 
 // 「保留 N 天 / 永久保存」的展示文案。0 在语义上是「永久保留」，
