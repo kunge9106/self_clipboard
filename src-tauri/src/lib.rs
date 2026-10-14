@@ -7,9 +7,12 @@ use tauri::Manager;
 mod effects;
 #[cfg(windows)]
 mod clipboard;
+#[cfg(windows)]
+mod about;
 mod settings;
 mod autostart;
 mod tray;
+mod logger;
 
 /// 前端启动时调用，拿到实际生效的材质档位与圆角上限。
 /// 注意：返回的是「实际生效」而非「尝试应用」的档位——这是 v1 静默失败的直接教训。
@@ -177,12 +180,29 @@ fn setup_effects(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    // panic 钩子装在 logger::install_hook：崩溃时自动落日志，
+    // 用户反馈时把「轻贴.log」发来即可定位。
+    logger::install_hook();
+
+    logger::write_line(
+        "INFO",
+        "boot",
+        &format!(
+            "轻贴启动 v{}（debug={}）",
+            about::version_display(),
+            cfg!(debug_assertions)
+        ),
+    );
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             effect_info,
             set_material_alpha,
             set_round_mode,
+            about::about_info,
+            about::check_update,
+            about::open_external,
             effects::drag_start,
             effects::resize_start,
             clipboard::get_history,

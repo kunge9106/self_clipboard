@@ -788,6 +788,10 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* 与 .history 同一套做法：滚动条不贴死右缘，在留白里视觉居中。
+     12px 与 .view 的 padding-right 相等，两者一减滚动条正好落在内容与窗框中间。 */
+  scrollbar-gutter: stable;
+  padding-right: 12px;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -833,6 +837,18 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   /* 至少留 150px 宽，放不下就整块换到下一行，避免文字被压成竖排 */
   flex: 1 1 150px;
   min-width: 0;
+}
+
+/* 材质浓度：标签 + 滑块 + 百分比固定排成一行。
+   .hint 默认 flex-basis:150px 会把 160+180+150 撑破容器导致换行，
+   这里改成按内容宽度、不参与换行（nowrap 兜底）。 */
+.settings .row:has(#set-material) {
+  flex-wrap: nowrap;
+}
+
+.settings .row:has(#set-material) .hint {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .settings input[type="checkbox"] {
@@ -1200,4 +1216,267 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   bottom: 0;
   right: 0;
   cursor: nwse-resize;
+}
+
+
+/* ── 关于页 ──────────────────────────────────────────────────────────────
+   布局取「左主右辅 + 下方整宽日志」：
+   左上是名称与操作（视线起点），右上放版本与更新状态（视线终点），
+   中间一排等宽事实格把运行环境铺满，底部日志独占整宽——Markdown 里的
+   列表和代码需要横向空间，挤进窄栏必然换行错乱。 */
+.settings:has(.about-hero) {
+  max-width: none;
+}
+
+/* ── 顶部：标识 + 操作 | 版本 + 状态 ── */
+.about-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 32px;
+  padding: 20px 24px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+}
+
+.about-hero-l {
+  min-width: 0;
+}
+
+.about-name {
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: 0.5px;
+}
+
+.about-slogan {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text-dim);
+  max-width: 46ch;
+  line-height: 1.55;
+}
+
+/* 操作区移到右上角：靠 auto 外边距推到最右，与版本号/状态同列右对齐 */
+.about-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.about-hero-r {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  text-align: right;
+}
+
+/* 版本号做主角：等宽数字 + 稍大字号，右上角一眼可见 */
+.about-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.about-badge-l {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.about-badge-v {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+/* 更新状态：前缀符号给状态，不引第二套图标语言 */
+.about-state {
+  font-size: 12px;
+  color: var(--text-dim);
+  min-height: 18px;
+}
+
+.about-state.is-ok::before {
+  content: "✓ ";
+  color: #3fa860;
+}
+
+.about-state.is-new {
+  color: var(--text);
+}
+
+.about-state.is-new::before {
+  content: "↑ ";
+  color: var(--text);
+}
+
+.about-state.is-err {
+  color: #d9534f;
+}
+
+/* ── 事实表：列排（标签在左、值在右），对齐 Windows 设置的「属性表」 ── */
+.about-facts {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+}
+
+.about-fact {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 9px 16px;
+}
+
+/* 行间用内缩进的分隔线，右侧留出padding 让短线不贴边 */
+.about-fact + .about-fact {
+  border-top: 1px solid var(--stroke);
+}
+
+/* 标签列定宽，所有值自动对齐到同一条竖线 */
+.about-fact-k {
+  flex: 0 0 76px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.about-fact-v {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+  user-select: text;
+}
+
+.about-path {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 更新日志：整宽区块 ── */
+.about-log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 20px 18px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+}
+
+.about-log-h {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.about-log-t {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* 版本号跟着标题走，明确「下面这段是哪个版本的」 */
+.about-log-v {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.about-notes {
+  max-height: 260px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text);
+  /* 与 .history / .settings-body 同一套居中做法：右侧留白 + 稳定沟槽，
+     滚动条落在内容与区块右缘之间，不贴死。 */
+  scrollbar-gutter: stable;
+  padding-right: 12px;
+}
+
+.about-notes.is-empty {
+  color: var(--text-dim);
+}
+
+/* ── Markdown 排版 ── */
+.about-notes h3,
+.about-notes h4,
+.about-notes h5 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.about-notes h3:first-child,
+.about-notes h4:first-child,
+.about-notes h5:first-child,
+.about-notes p:first-child,
+.about-notes ul:first-child {
+  margin-top: 0;
+}
+
+.about-notes p {
+  margin: 0 0 8px;
+}
+
+.about-notes ul {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.about-notes li {
+  margin: 3px 0;
+}
+
+.about-notes strong {
+  font-weight: 700;
+}
+
+.about-notes code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--glass);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+}
+
+.about-notes pre {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--glass);
+  overflow: auto;
+}
+
+.about-notes pre code {
+  padding: 0;
+  background: none;
+  line-height: 1.55;
+}
+
+.about-notes a {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+/* 圆角模式下没有背景模糊，有底色的块需要阴影撑层次 */
+body.round .about-log,
+body.round .about-hero,
+body.round .about-notes pre,
+body.round .about-notes code {
+  box-shadow: var(--card-shadow);
 }
