@@ -1445,28 +1445,44 @@ function renderUpdatePanels() {
   }
 }
 
-/** 下载进度画进按钮：背景由左向右填充（像手机装应用那样），文字盖在填充层上。 */
+/**
+ * 下载进度画进按钮：底色是从左向右推进的进度条。
+ *
+ * 进度值走 CSS 变量 `--p`，填充层与「已填充部分的文字」共用同一条裁剪线，
+ * 所以两者永远同步；按钮还有一层固定的空轨底色，否则根本看不出填充从哪儿开始。
+ */
 function setDownloadUi(percent) {
   const btn = document.getElementById("btn-check-update");
   if (!btn) return;
+  const p = Math.min(100, Math.max(0, Math.round(Number(percent) || 0)));
   if (!btn.classList.contains("is-downloading")) {
     btn.classList.add("is-downloading");
     btn.disabled = true;
-    btn.innerHTML = `<span class="dl-fill"></span><span class="dl-label"></span>`;
+    btn.innerHTML =
+      `<span class="dl-fill" aria-hidden="true"></span>` +
+      `<span class="dl-label dl-label-off" aria-hidden="true"></span>` +
+      `<span class="dl-label dl-label-on" aria-hidden="true"></span>`;
   }
-  const fill = btn.querySelector(".dl-fill");
-  const label = btn.querySelector(".dl-label");
-  if (fill) fill.style.width = `${percent}%`;
-  if (label) label.textContent = `正在下载 ${percent}%`;
+  setDownloadLabel(`正在下载 ${p}%`);
+  btn.style.setProperty("--p", `${p}%`);
 }
 
-/** 下载完成后的那一步：按钮改文案，进度条填满。 */
+/** 进度按钮的两层文字必须同内容（一层在空轨上、一层在填充上），一起改。 */
+function setDownloadLabel(text) {
+  const btn = document.getElementById("btn-check-update");
+  if (!btn) return;
+  btn.querySelectorAll(".dl-label").forEach((el) => (el.textContent = text));
+  // 两层文字都是装饰性的（aria-hidden），可读文本由按钮自己的 aria-label 承担
+  btn.setAttribute("aria-label", text);
+}
+
+/** 下载完成后的那一步：进度条填满，文字换成结果（如「正在启动安装程序…」）。 */
 function setDownloadDone(text) {
   const btn = document.getElementById("btn-check-update");
   if (!btn) return;
-  setDownloadUi(100);
-  const label = btn.querySelector(".dl-label");
-  if (label) label.textContent = text;
+  if (!btn.classList.contains("is-downloading")) setDownloadUi(100);
+  btn.style.setProperty("--p", "100%");
+  setDownloadLabel(text);
 }
 
 /** 点「下载最新版」：Rust 下到缓存目录 update/，完成后自动拉起安装器并退出本进程。 */
@@ -1576,7 +1592,26 @@ function applyUpdateState() {
   renderUpdatePanels();
 }
 
-/** 启动自检发现新版本时的一次性提示：窗口顶部横幅，点「查看」直接跳到关于页。 */
+// 横幅自动收起的计时器（0 = 没在计时）
+let bannerTimer = 0;
+
+/** 收起横幅：手动关闭、点「查看」、到点自动收起，三条路都走这里（顺带清掉计时器）。 */
+function closeUpdateBanner() {
+  if (bannerTimer) {
+    clearTimeout(bannerTimer);
+    bannerTimer = 0;
+  }
+  const el = document.getElementById("update-banner");
+  if (!el) return;
+  el.classList.add("is-out");
+  // 等淡出走完再摘掉节点，别「啪」一下消失
+  setTimeout(() => el.remove(), 200);
+}
+
+/**
+ * 启动自检发现新版本时的一次性提示：窗口顶部横幅，点「查看」直接跳到关于页。
+ * 出现 **10 秒后自动收起** —— 通知到就够了，不该一直占住标题栏下方。
+ */
 function showUpdateBanner() {
   if (!updateInfo?.hasUpdate) return;
   if (document.getElementById("update-banner")) return;
@@ -1590,7 +1625,7 @@ function showUpdateBanner() {
   document.body.appendChild(el);
 
   el.querySelector("#ub-go").onclick = () => {
-    el.remove();
+    closeUpdateBanner();
     // 先定好要显示的分类，再走真实点击 —— 导航是事件委托在 .sidebar 上的，
     // 这样最不容易漏掉状态同步（render() 会按 settingsTab 渲染设置页）。
     settingsTab = "about";
@@ -1599,7 +1634,9 @@ function showUpdateBanner() {
     );
     if (nav) nav.click();
   };
-  el.querySelector("#ub-close").onclick = () => el.remove();
+  el.querySelector("#ub-close").onclick = closeUpdateBanner;
+  // 10 秒后自动收起
+  bannerTimer = setTimeout(closeUpdateBanner, 10000);
 }
 
 /** 重复启动提示弹窗（常驻元素，绑一次）。 */
