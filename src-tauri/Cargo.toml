@@ -51,3 +51,16 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+# 开发构建也把**依赖**编译成优化版。
+#
+# 起因：debug 下微信复制大图要 4~5 秒才出现，而同样的解码在 release 里只要
+# 几百毫秒 —— 差别全在 `image` 的解码循环没开优化（debug 默认 opt-level=0）。
+# 用户是用 debug 构建在测，看到的就是这个被放大的耗时。
+#
+# `package."*"` 只作用于依赖，**不含本 crate**：
+#   - 本 crate 仍以 opt-level=0 编译 → 编译快、断点变量可读，调试体验不变
+#   - 依赖很少变动，首次多花一点编译时间，之后不再重编
+# 收益：JPEG/PNG 解码提速约一个数量级，是「复制到出现」这段耗时的主要来源。
+[profile.dev.package."*"]
+opt-level = 3

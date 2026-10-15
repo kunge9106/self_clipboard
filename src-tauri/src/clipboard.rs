@@ -45,7 +45,7 @@ static LAST_IMG: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
-static WORKER: OnceLock<std::sync::mpsc::Sender<RawClip>> = OnceLock::new();
+static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip)>> = OnceLock::new();
 /// 已投递给工作线程、尚未落盘完成的条数。退出前据此等待，避免「刚复制就退出」丢数据。
 static PENDING: AtomicU32 = AtomicU32::new(0);
 
@@ -490,17 +490,17 @@ fn spawn_clipboard_watchdog() {
 fn spawn_worker() {
     // app 走全局 APP（OnceLock，在 init 首行写入）；worker 在订阅监听之前
     // 启动，所以取用时必定已就绪。
-    let (tx, rx) = std::sync::mpsc::channel::<RawClip>();
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip)>();
     std::thread::Builder::new()
         .name("clipboard-store".into())
         .spawn(move || {
-            while let Ok(raw) = rx.recv() {
+            while let Ok((captured_ms, raw)) = rx.recv() {
                 // guard 保证 PENDING 一定减回去 —— handle_clip 里判重拦截会
                 // 提前 return，手写 fetch_sub 迟早漏掉一次。
                 let _guard = PendingGuard;
                 // handle_clip 内部完成：解码 → 同图判重 → 落盘 → emit。
                 // 这里只负责串行投递，保证与复制顺序一致。
-                handle_clip(raw);
+                handle_clip(captured_ms, raw);
             }
         })
         .map_err(|e| crate::log_warn!("[clipboard] 落盘工作线程启动失败：{e}"))
@@ -621,13 +621,20 @@ pub fn on_clipboard_update() {
     // 主线程现在只做一次 memcpy（把剪贴板里的字节拷出来），立刻返回；
     // 解码、缩略图、写盘、emit 全在工作线程完成。单工作线程串行消费，
     // 历史顺序与复制顺序保持一致。
+    //
+    // ⚠️ **时间戳必须在这里打**（捕获时刻），不能到 worker 里再取当前时间。
+    // worker 是单线程串行的，前面压着一张大图的解码时，本条要排队几秒才轮到；
+    // 那时再取时间，判重窗口算出来的「间隔」就是「排队时长 + 真实间隔」，
+    // 完全失真 —— 实测日志里出现过「同一秒、同一指纹、却记了两条」，
+    // 根因就在这里。
+    let captured_ms = now_ms();
     if let Some(tx) = WORKER.get() {
-        if tx.send(raw).is_ok() {
+        if tx.send((captured_ms, raw)).is_ok() {
             PENDING.fetch_add(1, Ordering::Relaxed);
         }
     } else {
         // 工作线程还没起来（正常不会发生——init 里先启线程再订阅监听）
-        handle_clip(raw);
+        handle_clip(captured_ms, raw);
     }
 }
 
@@ -653,80 +660,42 @@ pub fn flush_pending(timeout: std::time::Duration) {
 ///
 /// 顺序很重要：先 `resolve`（解码），再做图片指纹判重 —— 指纹要基于像素
 /// 内容算，未解码前拿不到。
-fn handle_clip(raw: RawClip) {
+fn handle_clip(captured_ms: u64, raw: RawClip) {
     let Some(raw) = resolve(raw) else { return };
 
     // 图片判重：微信等应用复制一张图会**反复**改写剪贴板。
     //
-    // 实测（对应 2.1.11 反馈「微信复制大图还是出现两张」的日志）：同一张 50MB
-    // 的图在 4 秒内被写入 6 次 —— 06:30:19 / :23 / :31 / :35 / :46 / :50，
-    // 间隔 4~15 秒递增。旧判重只比「相邻一条 + 800ms 窗口」，间隔一超过窗口
-    // 就全部放行，历史里落下 6 条一样的记录；每条都要做一次秒级的解码+写盘，
-    // 卡顿被放大 6 倍 —— 这正是「大图卡顿很久」的直接来源。
+    // 实测（2.1.11 日志）：同一张图被写入 8 次，跨越 81 秒 ——
+    // 06:30:19/23/31/35/46/50、06:31:36/40。若不合并，历史里会落下 8 条
+    // 一样的记录，每条都要做一次秒级解码+写盘，卡顿被放大数倍。
     //
-    // 改为在整个最近队列里查（滑动窗口几秒），命中即合并。
+    // 判据演进与踩过的坑：
+    //   1. 「宽高 + 800ms」→ 固定区域截图（宽高必然相同）被误杀。
+    //   2. 「像素指纹 + 800ms」→ 微信补写间隔 4~46s，远超窗口，拦不住。
+    //   3. 「队列 + 90s 窗口」→ 又踩两个坑：
+    //      a. 用 `.max()` 取了**最远**的那次匹配，间隔恒偏大，阈值形同虚设；
+    //      b. 用 worker 的**处理时刻**，而 worker 被大图解码堵住时该时刻已失真
+    //         （实测「同一秒、同一指纹、记了两条」）。
+    //   4. 现在：**捕获时刻** + 只比**最近一条** + 命中时**滑动刷新时间戳**。
+    //
+    // 为什么「只比最近一条」就够：微信的补写是**连续**的（上一条就是同一张图）。
+    // 与整个队列比对反而会误伤 A→B→A 里的第二个 A（用户确实复制了两次 A，
+    // 中间夹了 B，这是**正常操作**，必须放行）。
+    //
+    // 为什么命中要**刷新时间戳**：这是「连续复制仍出现两张」的根因。
+    // 若命中只 return 不更新时间，基准永远停在第一次，只要用户持续复制，
+    // gap 就会一路累加，涨过阈值后又冒出一条。刷新后，只要同一张图持续到来，
+    // 它们始终落在同一簇里。
     if let RawClip::Image(dib) = &raw {
-        let now = now_ms();
         let fp = image_fingerprint(dib);
-        // 找出窗口内指纹相同、且**距最近一次**最久的那条
-        let hit = match LAST_IMG.lock().ok() {
-            Some(g) => g
-                .iter()
-                .filter(|(lfp, lt)| *lfp == fp && now - *lt < DUP_WINDOW_MS)
-                .map(|(_, lt)| now - *lt)
-                .max(),
-            None => None,
-        };
-
-        // 关于「用户主动又截了一次相同的图」与「应用补写」怎么区分：
-        //
-        // 先前一版用 `idle_ms() < 3s`（最近 3 秒有键鼠输入 → 视为用户主动），
-        // 实测**失效**，日志：「指纹与近期条目相同，但检测到用户正在操作」
-        // 之后紧接着又新增一条。原因是用户按下复制键后，应用在几秒内就补写了，
-        // 此时 `idle_ms` 仍在 3s 内 —— 判据把补写误当成用户主动操作。
-        // 这个信号表达的是「用户刚有动作」，而补写恰恰就发生在那个动作之后，
-        // 两者时间上重叠，无法区分。
-        //
-        // 改用**间隔时长**这一本来就有的维度来切分：微信补写是密集簇
-        // （实测 1~20 秒内连来），而用户主动重复截图之间通常隔更久
-        // （要看一眼、确认、再按快捷键）。所以：
-        //   - 间隔 <  DUP_MERGE_MS  → 一律判为补写，合并（不查输入状态）
-        //   - 间隔 >= DUP_MERGE_MS  → 才认为可能是用户主动操作，此时若检测到
-        //                              近期确有键鼠输入就放行，否则仍按补写合并
-        const DUP_MERGE_MS: u64 = 25_000;
-        const USER_ACTIVE_MS: u64 = 10_000;
-
-        if let Some(gap) = hit {
-            if gap < DUP_MERGE_MS {
-                crate::logger::write_line(
-                    "INFO",
-                    "clipboard",
-                    &format!("重复图片已合并（距上次 {gap}ms，属密集补写）"),
-                );
-                return;
-            }
-            // 间隔已经很长：这时才区分「用户主动又截了一次」与「超长补写簇」。
-            if idle_ms() < USER_ACTIVE_MS {
-                crate::logger::write_line(
-                    "INFO",
-                    "clipboard",
-                    &format!("指纹相同但距上次 {gap}ms 且用户正在操作 → 按新条目记录"),
-                );
-            } else {
-                crate::logger::write_line(
-                    "INFO",
-                    "clipboard",
-                    &format!("重复图片已合并（距上次 {gap}ms，用户无键鼠输入）"),
-                );
-                return;
-            }
-        }
         if let Ok(mut g) = LAST_IMG.lock() {
-            g.push((fp, now));
-            g.retain(|(_, t)| now - *t < DUP_WINDOW_MS);
-            let len = g.len();
-            if len > LAST_IMG_KEEP {
-                g.drain(0..len - LAST_IMG_KEEP);
+            if dedup_merge(&mut g, fp, captured_ms) {
+                crate::logger::write_line(
+                    "INFO",
+                    "clipboard",
+                    "重复图片已合并（与上一条指纹一致，滑动窗口续期）",
+                );
+                return;
             }
         }
     }
@@ -735,6 +704,29 @@ fn handle_clip(raw: RawClip) {
     if let Some(app) = APP.get() {
         let _ = app.emit("clipboard-update", item);
     }
+}
+
+/// 判重决策（抽成独立函数，便于单测**直接验证真实实现**而不是在测试里重写一遍）。
+///
+/// 返回 `true` = 判为重复、应合并（调用方直接 return，不落盘）。
+///
+/// 规则：**只与队列最后一条比对**（微信补写必然紧挨着上一条）；命中则把它的
+/// 时间戳刷新为 `now`（滑动续期），使持续到来的同图始终保持在同一簇里。
+/// 未命中则入队并清理过期项。
+fn dedup_merge(g: &mut Vec<(u64, u64)>, fp: u64, now: u64) -> bool {
+    if let Some(last) = g.last_mut() {
+        if last.0 == fp && now.saturating_sub(last.1) < DUP_WINDOW_MS {
+            last.1 = now; // 滑动窗口：续上这一簇
+            return true;
+        }
+    }
+    g.push((fp, now));
+    g.retain(|(_, t)| now.saturating_sub(*t) < DUP_WINDOW_MS);
+    let len = g.len();
+    if len > LAST_IMG_KEEP {
+        g.drain(0..len - LAST_IMG_KEEP);
+    }
+    false
 }
 
 /// 把「待处理」的剪贴板内容整理成可存储形态：
@@ -968,17 +960,23 @@ unsafe fn read_clipboard() -> Option<RawClip> {
 /// 封顶）在屏幕上与原图肉眼无差，却让前端负载降到 1/4。
 const MAX_SIDE: u32 = 2048;
 
-/// 图片判重的滑动窗口（毫秒）。
+/// 图片判重的滑动窗口（毫秒）—— 衡量的是**相邻两次同图写入的间隔**。
 ///
-/// 取值来自实测而非估计。日志里同一张 50MB 的图被微信反复写进剪贴板，时间点
-/// 06:30:19 / :23 / :31 / :35 / :46 / :50 —— 密集段在前 30 秒，但下一簇又出现在
-/// 06:31:36 / :40，整体跨度超过 80 秒。原先的 800ms 只覆盖毫秒级双写，拦不住。
+/// 取值来自实测。微信把同一张图反复写进剪贴板，相邻间隔实测为：
+/// 4s / 8s / 4s / 11s / 4s / **46s** / 4s。注意最后那个 46 秒 ——
+/// 窗口必须大于它，否则这一簇会从中间断开、后半段又落一条重复记录。
 ///
-/// 窗口取 90s 的理由：微信的补写是无用户动作触发的后台行为，会持续一两分钟；
-/// 而人主动反复截同一画面（页面没动）虽然指纹也一致，但两次之间总有操作间隔，
-/// 且 90s 内不会连着截十几次。这个值宁可偏大 —— 误合并的代价只是历史少一条，
-/// 漏合并的代价是重复存进几十 MB 并卡顿数秒。
-const DUP_WINDOW_MS: u64 = 90_000;
+/// 与上一版的区别：**窗口不再需要覆盖整个跨度**。现在命中一次就刷新时间戳
+/// （滑动续期），所以只要相邻间隔在窗口内，整簇就会一直延续；上一版不刷新，
+/// 窗口才被迫放大到 90s 去兜住 81s 的总跨度。
+///
+/// 取 60s：覆盖实测最大相邻间隔 46s，并留出余量；同时明显短于「人主动重复
+/// 截同一画面」的常见间隔，减少误合并。
+const DUP_WINDOW_MS: u64 = 60_000;
+
+/// 相邻两次同图写入的最大实测间隔（46s）+ 余量，供单测断言窗口确实覆盖得住。
+/// 抽成常量是为了让「窗口够不够大」这件事在测试里显式、可校验。
+const OBSERVED_MAX_ADJACENT_GAP_MS: u64 = 46_000;
 
 /// 对 DIB 的像素内容做量化采样，得出一个 64 位指纹。
 ///
@@ -1038,11 +1036,13 @@ fn image_fingerprint(dib: &[u8]) -> u64 {
 
 /// 距上一次键鼠输入过了多少毫秒。取不到时返回 u64::MAX（视作「不确定」）。
 ///
-/// 用途：区分两种「同一张图被重复写入」——
-///   - 微信复制大图后的**后台补写**：用户全程没动鼠标键盘，间隔越拉越长
-///   - 用户在固定区域**反复主动截图**：每次都有按键/点按
-/// 判重窗口不得不放大到 90s（微信补写跨度实测 81s），这个副作用就是
-/// 「用户连着截两次相同画面，第二次会被吞」。用输入活跃度把两者分开。
+/// ⚠️ 当前**没有调用点**（保留是因为 2.1.11 期间反复用到，删了下次还要重写）。
+///
+/// 曾经用它区分「应用后台补写」与「用户主动操作」，实测证明**行不通**：
+/// 用户按下复制键后，应用在几秒内就补写，此时「距上次输入」必然很短 ——
+/// 两个信号在时间上完全重叠，无法区分。判重最终改用「捕获时刻 + 滑动窗口」，
+/// 不再需要输入活跃度。若将来要用，先想清楚这一点。
+#[allow(dead_code)]
 fn idle_ms() -> u64 {
     unsafe {
         let mut li = LastInputInfo {
@@ -2229,66 +2229,100 @@ mod tests {
     /// 间隔远大于原先 800ms 的窗口。队列判重必须全部合并，只留一条。
     ///
     /// 间隔取自日志实测（06:30:19 / :23 / :31 / :35 / :46 / :50 / 06:31:36 / :40）。
+    /// 复现 2.1.11 的真实故障：微信把同一张图反复写进剪贴板。
+    ///
+    /// 间隔取自日志实测（06:30:19 → :23 → :31 → :35 → :46 → :50 →
+    /// 06:31:36 → :40），相邻间隔为 4/8/4/11/4/46/4 秒。
+    /// **直接调用生产代码 `dedup_merge`**，而不是在测试里重写一遍判重逻辑 ——
+    /// 后者只能验证「我理解对了」，前者才能验证「代码写对了」。
     #[test]
-    fn repeated_writes_within_queue_all_merged() {
-        let g = Mutex::new(Vec::new());
-        let fp = image_fingerprint(&solid_dib(400, 300, [10, 20, 30, 255]));
-        let t0 = 1_000_000u64;
-        let gaps = [
-            0u64,    // 首次
-            4_000,   // +4s
-            8_000,   // +8s
-            4_000,   // +4s
-            11_000,  // +11s
-            4_000,   // +4s   —— 距首次 31s
-            46_000,  // +46s  —— 距首次 77s（第二簇）
-            4_000,   // +4s   —— 距首次 81s
-        ];
-
-        let mut kept = 0;
-        let mut t = t0;
-        for gap in gaps {
-            let now = t + gap;
-            let dup = g
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(lfp, lt)| *lfp == fp && now - *lt < DUP_WINDOW_MS);
-            if !dup {
-                g.lock().unwrap().push((fp, now));
-                kept += 1;
-            }
-            t = now;
-        }
-        assert_eq!(kept, 1, "同一张图的 8 次反复写入只应保留 1 条");
-    }
-
-    /// 窗口必须够大到能覆盖微信的补写跨度，否则上面那条测试就是假通过。
-    #[test]
-    fn dup_window_covers_observed_wechat_span() {
-        // 实测最远一次距首次约 81s
-        assert!(DUP_WINDOW_MS > 81_000, "窗口必须覆盖实测的 81s 跨度");
-    }
-
-    /// 队列不能无限增长，也不能把不同图片挤掉。
-    #[test]
-    fn queue_is_bounded_and_keeps_distinct_images() {
+    fn repeated_writes_collapse_to_one_entry() {
         let mut g: Vec<(u64, u64)> = Vec::new();
-        let t0 = 1_000_000u64;
-        // 20 张互不相同的图，窗口内交替写入
-        for i in 0..20u64 {
-            let now = t0 + i * 100;
-            let fp = image_fingerprint(&solid_dib(400, 300, [i as u8, 1, 2, 255]));
-            g.push((fp, now));
-            g.retain(|(_, t)| now - *t < DUP_WINDOW_MS);
-            let len = g.len();
-            if len > LAST_IMG_KEEP {
-                g.drain(0..len - LAST_IMG_KEEP);
+        let fp = image_fingerprint(&solid_dib(400, 300, [10, 20, 30, 255]));
+        let gaps = [0u64, 4_000, 8_000, 4_000, 11_000, 4_000, 46_000, 4_000];
+
+        let mut merged_count = 0;
+        let mut t = 1_000_000u64;
+        for gap in gaps {
+            t += gap;
+            if dedup_merge(&mut g, fp, t) {
+                merged_count += 1;
             }
+        }
+        assert_eq!(merged_count, gaps.len() - 1, "8 次写入应合并 7 次");
+        assert_eq!(g.len(), 1, "最终队列里只该留下 1 条同图记录");
+    }
+
+    /// 「连续不间断复制」必须始终合并 —— 这是用户报的「连续复制出现两张」。
+    ///
+    /// 旧实现在命中时不刷新时间戳，基准永远停在第一次，gap 累加超过阈值就
+    /// 又记一条。这条测试锁住「滑动续期」这一行为：即便总时长远超窗口，
+    /// 只要相邻间隔在窗口内，就始终是一条。
+    #[test]
+    fn continuous_repeat_never_creates_second_entry() {
+        let mut g: Vec<(u64, u64)> = Vec::new();
+        let fp = image_fingerprint(&solid_dib(400, 300, [9, 9, 9, 255]));
+        let mut t = 1_000_000u64;
+        // 每 20s 来一次，共 30 次 → 总跨度 600s，远超窗口 60s。
+        // 首次应记录（merged=false），其后的每一次都必须被合并 ——
+        // 「连续复制」场景下用户预期始终只有一条。
+        for i in 0..30 {
+            t += 20_000;
+            let merged = dedup_merge(&mut g, fp, t);
+            if i == 0 {
+                assert!(!merged, "首次应记录");
+            } else {
+                assert!(merged, "第 {i} 次连续复制（总跨度已超窗口）必须被合并");
+            }
+        }
+        assert_eq!(g.len(), 1, "全程只该有 1 条");
+    }
+
+    /// 窗口必须大于实测的最大**相邻**间隔，否则上面第一条测试是假通过。
+    #[test]
+    fn dup_window_covers_observed_adjacent_gap() {
+        assert!(
+            DUP_WINDOW_MS > OBSERVED_MAX_ADJACENT_GAP_MS,
+            "窗口 {DUP_WINDOW_MS}ms 必须覆盖实测相邻间隔 {OBSERVED_MAX_ADJACENT_GAP_MS}ms"
+        );
+    }
+
+    /// A → B → A：用户确实复制了两次 A（中间夹了别的图），必须**放行**。
+    /// 这正是「只与最后一条比对」的设计意图 —— 与整个队列比对会误合并第二个 A。
+    #[test]
+    fn interleaved_distinct_image_resets_cluster() {
+        let mut g: Vec<(u64, u64)> = Vec::new();
+        // ⚠️ 颜色要选**量化后仍不同**的值：指纹采样前会 >>3，
+        // 所以 [1,1,1] 与 [2,2,2] 都会变成 0、判为同一张 —— 这不是 bug，
+        // 而是量化在容忍「两条写入路径的重采样差异」（见 image_fingerprint）。
+        // 测试数据须避开这个区间，否则测的是量化行为而非判重逻辑。
+        let a = image_fingerprint(&solid_dib(400, 300, [200, 40, 40, 255]));
+        let b = image_fingerprint(&solid_dib(400, 300, [40, 40, 200, 255]));
+        assert_ne!(a, b, "两图指纹必须不同，否则本测试无意义");
+        let mut t = 1_000_000u64;
+
+        assert!(!dedup_merge(&mut g, a, t), "首次 A 应记录");
+        t += 1_000;
+        assert!(!dedup_merge(&mut g, b, t), "B 与 A 不同，应记录");
+        t += 1_000;
+        assert!(
+            !dedup_merge(&mut g, a, t),
+            "中间的 B 打断了簇，第二个 A 应作为新条目记录"
+        );
+        assert_eq!(g.len(), 3);
+    }
+
+    /// 队列不能无限增长。
+    #[test]
+    fn queue_is_bounded() {
+        let mut g: Vec<(u64, u64)> = Vec::new();
+        let mut t = 1_000_000u64;
+        for i in 0..40u64 {
+            t += 100;
+            let fp = image_fingerprint(&solid_dib(400, 300, [i as u8, 1, 2, 255]));
+            dedup_merge(&mut g, fp, t);
         }
         assert!(g.len() <= LAST_IMG_KEEP, "队列长度必须受限");
-        // 队首是最早的，应已被淘汰
-        assert_eq!(g[0].1, t0 + (20 - LAST_IMG_KEEP as u64) * 100);
     }
 
     /// 缩略图跳采样的方向必须正确。
@@ -2363,49 +2397,26 @@ mod tests {
         assert_eq!(keep[0].1, (2, 200));
     }
 
-    /// 判重分层：微信的补写是**密集簇**，用户主动重复截图间隔更长。
+    /// 超过窗口的间隔必须**放行**（判为新条目），否则用户的正常重复操作会被吞。
     ///
-    /// 这是 2.1.11 的核心教训：先前统一用「窗口内指纹相同即合并」会在用户
-    /// 主动重复截图时误吞；改用「窗口内相同即合并」又会让微信补写漏过。
-    /// 现在按**距最近一条的间隔**分层，锁住这个行为：
-    ///   - 间隔 < DUP_MERGE_MS（25s）→ 判为补写，一律合并（实测簇内间隔 1~20s）
-    ///   - 间隔 >= DUP_MERGE_MS       → 才可能放行，避免吞掉用户的独立操作
+    /// 与上一条测试互补：上一条验证窗口内合并，这条验证窗口外放行。
+    /// 两条一起才说明窗口阈值真正起到了分界作用，而不是「一律合并」或「一律放行」。
     #[test]
-    fn dense_cluster_merges_but_long_gap_may_pass() {
-        const DUP_MERGE_MS: u64 = 25_000;
+    fn gap_beyond_window_creates_new_entry() {
+        let mut g: Vec<(u64, u64)> = Vec::new();
         let fp = image_fingerprint(&solid_dib(400, 300, [7, 7, 7, 255]));
+        let t0 = 1_000_000u64;
 
-        // 复刻 handle_clip 的分层逻辑
-        let decide = |prev_times: &[u64], now: u64, user_active: bool| -> bool {
-            // 返回 true = 合并（丢弃）
-            let gap = prev_times
-                .iter()
-                .filter(|t| now - **t < DUP_WINDOW_MS)
-                .map(|t| now - *t)
-                .max();
-            match gap {
-                None => false,
-                Some(g) if g < DUP_MERGE_MS => true,
-                Some(_) => !user_active,
-            }
-        };
-
-        // 微信补写簇：距上一条 1s / 8s / 20s → 全部合并，即便用户正在操作
-        let t0 = 1_000_000;
-        assert!(decide(&[t0], t0 + 1_000, true), "簇内 1s 应合并");
-        assert!(decide(&[t0], t0 + 20_000, true), "簇内 20s 应合并");
-        // 簇内即便用户无输入也合并
-        assert!(decide(&[t0], t0 + 8_000, false), "簇内 8s 应合并");
-
-        // 长间隔 + 用户无输入 → 仍按补写合并
+        assert!(!dedup_merge(&mut g, fp, t0), "首次应记录");
+        // 正好在窗口边缘之内 → 合并
         assert!(
-            decide(&[t0], t0 + 60_000, false),
-            "长间隔但用户无操作，仍应合并"
+            dedup_merge(&mut g, fp, t0 + DUP_WINDOW_MS - 1),
+            "窗口内应合并"
         );
-        // 长间隔 + 用户正在操作 → 放行（用户的主动重复截图）
+        // 超过窗口 → 放行（此时上一条已被边缘那次刷新到 t0+WINDOW-1）
         assert!(
-            !decide(&[t0], t0 + 60_000, true),
-            "长间隔且用户主动操作，应放行"
+            !dedup_merge(&mut g, fp, t0 + DUP_WINDOW_MS - 1 + DUP_WINDOW_MS + 1),
+            "超出窗口的间隔应放行"
         );
     }
 }

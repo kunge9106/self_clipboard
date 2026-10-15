@@ -153,21 +153,62 @@ macro_rules! log_warn {
     }};
 }
 
-/// 本地时间戳 `MM-DD HH:MM:SS`。手算避免引chrono/chrono 依赖。
+/// 本地时间戳 `YYYY-MM-DD HH:MM:SS`。
+///
+/// ⚠️ 必须是**本地时间**。改动前这里是「拿 UNIX 秒数手算年月日时分秒」——
+/// 那算出来的是 **UTC**，于是日志时间比本地时间慢 8 小时（中国区），
+/// 用户对日志时会以为「时间戳坏了/日志是早上的旧文件」。用户实测反馈过。
+/// 手算还无法处理时区与夏令时，不如直接问系统。
 fn stamp() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs / 86_400;
-    let rem = secs % 86_400;
-    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    // 2000-01-01 起的累计天数转年月日
-    let (y, mo, d) = civil_from_days(days as i64);
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02}")
+    #[cfg(windows)]
+    {
+        let mut st = SystemTimeLocal::default();
+        unsafe {
+            GetLocalTime(&mut st);
+        }
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            st.w_year, st.w_month, st.w_day, st.w_hour, st.w_minute, st.w_second
+        )
+    }
+    // 非 Windows（本项目实际不发布，仅为让代码在其它平台可编译/可测）：
+    // 退回 UTC，并显式标注，避免误读成本地时间。
+    #[cfg(not(windows))]
+    {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let days = secs / 86_400;
+        let rem = secs % 86_400;
+        let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+        let (y, mo, d) = civil_from_days(days as i64);
+        format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02}")
+    }
+}
+
+/// Win32 SYSTEMTIME。字段即日历值，无需再做换算。
+#[repr(C)]
+#[derive(Default)]
+struct SystemTimeLocal {
+    w_year: u16,
+    w_month: u16,
+    w_day_of_week: u16,
+    w_day: u16,
+    w_hour: u16,
+    w_minute: u16,
+    w_second: u16,
+    w_milliseconds: u16,
+}
+
+#[cfg(windows)]
+extern "system" {
+    fn GetLocalTime(lp_system_time: *mut SystemTimeLocal);
 }
 
 /// days since 1970-01-01 → (年, 月, 日)，Howard Hinnant 的算法。
+/// 仅供非 Windows 回退路径使用。
+#[cfg(not(windows))]
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
