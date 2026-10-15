@@ -178,11 +178,14 @@
       </div>
     </div>
 
-    <!-- 全文详情弹窗。
-         起因：列表只能显示 preview（正文首行的前 120 字），长文本看不全。
+    <!-- 全文详情弹窗（查看态 + 编辑态共用）。
+         起因：列表只能显示 preview（首行前 120 字），长文本看不全。
          方案参考 CopyQ 的「Show Item Content」—— 独立窗口显示全文；
          正文用 <pre> 保留换行与空白、并且可选中，否则挑着复制时格式会乱。
-         超长内容由后端截断显示，但「复制全文」取的是磁盘上的完整原文。 -->
+         超长内容由后端截断显示，但「复制全文」取的是磁盘上的完整原文。
+
+         编辑按「**编辑副本**」设计：改的是要粘贴出去的内容，不是历史里那条记录。
+         历史必须忠实反映「当初复制了什么」，所以保存动作 = 写剪贴板，不改原文。 -->
     <div class="modal-mask" id="detail-modal" hidden>
       <div class="modal modal-detail">
         <div class="modal-head">
@@ -190,10 +193,22 @@
           <div class="modal-sub" id="detail-meta"></div>
         </div>
         <pre class="detail-body" id="detail-body" tabindex="0"></pre>
+        <textarea
+          class="detail-body detail-editor"
+          id="detail-editor"
+          spellcheck="false"
+          hidden
+        ></textarea>
         <div class="modal-actions">
+          <!-- 查看态 -->
           <button class="btn-ghost" id="detail-select">全选</button>
+          <button class="btn-ghost" id="detail-edit">编辑</button>
           <button class="btn-ghost" id="detail-copy">复制全文</button>
-          <button class="btn-primary" id="detail-close">关闭</button>
+          <button class="btn-ghost" id="detail-close">关闭</button>
+          <!-- 编辑态：只留「取消 / 保存」，没有第三个出口 —— 与常见编辑弹窗一致，
+               避免「手一滑把改动丢了」 -->
+          <button class="btn-ghost" id="detail-revert" hidden>取消编辑</button>
+          <button class="btn-primary" id="detail-save" hidden>保存到剪贴板</button>
         </div>
       </div>
     </div>

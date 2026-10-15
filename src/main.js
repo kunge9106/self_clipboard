@@ -1166,21 +1166,69 @@ function showMenu(x, y, entries) {
 }
 
 // ---------------------------------------------------------------------------
-// 全文详情弹窗
+// 全文详情弹窗（查看态 + 编辑态）
 //
-// 起因：列表只显示 preview（正文**首行的前 120 字**），长文本根本看不全。
+// 起因：列表只显示 preview（**开头几行的摘要**），长文本根本看不全。
 // 方案参考 CopyQ 的「Show Item Content」：用一个独立窗口显示全文。
 // 正文用 <pre> 保留换行与缩进，并且可选中 —— 这个弹窗的主要用途就是
 // 「读一遍」或「挑一段复制」，两者都要求格式不乱。
+//
+// 编辑按「**编辑副本**」设计：保存 = 写剪贴板，**不改历史里那条记录**。
+// 理由：历史必须忠实反映「当初复制了什么」，能原地改会让人怀疑
+// 「我明明复制的是 A，怎么变成 B 了」；且剪贴板历史常被当安全网，改动不可逆是大事。
 // ---------------------------------------------------------------------------
 
 let detailItem = null;
+/// 编辑缓冲的**原始内容**：用于「取消编辑」与判断是否有未保存改动
+let detailOriginal = "";
+/// 后端是否因过长而截断了正文。截断时**禁止编辑** —— 否则保存会把
+/// 截断后的内容写回剪贴板，等于静默丢数据。
+let detailTruncated = false;
 
-async function openDetail(item) {
-  const mask = document.getElementById("detail-modal");
-  const body = document.getElementById("detail-body");
-  const meta = document.getElementById("detail-meta");
-  const title = document.getElementById("detail-title");
+const $detail = (id) => document.getElementById(id);
+
+/** 查看态 / 编辑态互斥切换 */
+function setDetailMode(mode) {
+  const editing = mode === "edit";
+  $detail("detail-body").hidden = editing;
+  $detail("detail-editor").hidden = !editing;
+  $detail("detail-select").hidden = editing;
+  $detail("detail-edit").hidden = editing;
+  $detail("detail-copy").hidden = editing;
+  $detail("detail-close").hidden = editing;
+  $detail("detail-revert").hidden = !editing;
+  $detail("detail-save").hidden = !editing;
+  if (editing) {
+    $detail("detail-editor").focus();
+  } else {
+    // 退出编辑时丢弃改动，视图回到原文
+    $detail("detail-editor").value = detailOriginal;
+    $detail("detail-body").textContent = detailOriginal;
+    window.getSelection()?.removeAllRanges();
+    $detail("detail-select").textContent = "全选";
+  }
+}
+
+function isDetailEditing() {
+  const ed = $detail("detail-editor");
+  return !!ed && !ed.hidden;
+}
+
+function enterDetailEdit() {
+  if (!detailItem) return;
+  // 截断的内容不能编辑：保存会把截断结果写回去 → 静默丢数据
+  if (detailTruncated) {
+    toast("内容过长，不便在此编辑；可先「复制全文」到别处处理");
+    return;
+  }
+  setDetailMode("edit");
+}
+
+async function openDetail(item, { startEdit = false } = {}) {
+  const mask = $detail("detail-modal");
+  const body = $detail("detail-body");
+  const meta = $detail("detail-meta");
+  const title = $detail("detail-title");
   if (!mask || !body || !meta || !title) return;
 
   title.textContent = item.kind === "files" ? "全部路径" : "全文";
@@ -1196,7 +1244,10 @@ async function openDetail(item) {
   }
 
   detailItem = item;
+  detailOriginal = data.text;
+  detailTruncated = !!data.truncated;
   body.textContent = data.text;
+  $detail("detail-editor").value = data.text;
 
   // 规模信息：帮助判断内容大小，也是「有没有被截断」的唯一提示
   const parts = [
@@ -1206,6 +1257,7 @@ async function openDetail(item) {
   if (data.truncated) parts.push("超出显示上限，仅显示前 20 万字");
   meta.textContent = parts.join(" · ");
 
+  setDetailMode("view");
   mask.hidden = false;
   body.scrollTop = 0;
   // 聚焦正文：用户多半想紧接着 Ctrl+A / Ctrl+C 或直接滚动
@@ -1213,15 +1265,33 @@ async function openDetail(item) {
   // 每次打开都回到「未选中」状态 —— 上一次的选区可能还残留，
   // 那样按钮文案会显示成「取消全选」，与实际不符。
   window.getSelection()?.removeAllRanges();
-  const btnSelect = document.getElementById("detail-select");
-  if (btnSelect) btnSelect.textContent = "全选";
+  $detail("detail-select").textContent = "全选";
+
+  // 右键「复制并编辑」→ 打开即进入编辑态，省一次点击
+  if (startEdit) enterDetailEdit();
+}
+
+/**
+ * 「请求关闭」：编辑态下**先退回查看态**，不直接关闭。
+ *
+ * 渐进式退出的用意：编辑缓冲里可能有用户敲了一半的内容，直接关窗等于静默丢弃。
+ * 第一次 Esc/点遮罩只退出编辑，第二次才关弹窗 —— 与常见编辑弹窗的直觉一致。
+ */
+function requestCloseDetail() {
+  if (isDetailEditing()) {
+    setDetailMode("view");
+    return;
+  }
+  closeDetail();
 }
 
 function closeDetail() {
-  const mask = document.getElementById("detail-modal");
+  const mask = $detail("detail-modal");
   if (mask && !mask.hidden) {
     mask.hidden = true;
     detailItem = null;
+    detailOriginal = "";
+    detailTruncated = false;
   }
 }
 
@@ -1231,12 +1301,30 @@ function bindDetailModal() {
   const btnSelect = document.getElementById("detail-select");
   if (!mask || !body || !btnSelect) return;
 
-  document.getElementById("detail-close").onclick = closeDetail;
+  document.getElementById("detail-close").onclick = requestCloseDetail;
 
-  // 点遮罩关闭（点弹窗本体不关）——这是「查看类」弹窗的通用预期
+  // 点遮罩关闭（点弹窗本体不关）——这是「查看类」弹窗的通用预期。
+  // 编辑态下先退回查看态，不直接关：避免「手一滑改动全没了」。
   mask.addEventListener("mousedown", (e) => {
-    if (e.target === mask) closeDetail();
+    if (e.target === mask) requestCloseDetail();
   });
+
+  document.getElementById("detail-edit").onclick = enterDetailEdit;
+  document.getElementById("detail-revert").onclick = () => setDetailMode("view");
+
+  document.getElementById("detail-save").onclick = async () => {
+    const text = $detail("detail-editor").value;
+    try {
+      // ⚠️ 保存 = 写剪贴板，**不改历史那条记录**（用户选定的「编辑副本」方案）。
+      // 历史上必须忠实反映「当初复制了什么」；而且这个动作不产生新条目
+      // （Rust 侧会 mark_skip，与「点击条目复制」一致）。
+      await invoke("set_clipboard_text", { text });
+      toast("已保存到剪贴板");
+      closeDetail();
+    } catch (err) {
+      toast("保存失败：" + err);
+    }
+  };
 
   document.getElementById("detail-copy").onclick = async () => {
     if (!detailItem) return;
@@ -1308,7 +1396,7 @@ function openContextMenu(x, y, item) {
       ? "取消置顶"
       : "取消同步置顶"
     : (pinnedHere ? "取消置顶" : "置顶") + (settings?.pinGlobal ? "" : `（${viewName}）`);
-  // 长文本 / 长路径列表在卡片里只显示 preview（首行前 120 字），看不全 ——
+  // 长文本 / 长路径列表在卡片里只显示 preview，看不全 ——
   // 所以给这两类补一个「看全文」入口，放在菜单最前（最常用的新增项）。
   const entries = [];
   if (item.kind === "text" || item.kind === "files") {
@@ -1316,8 +1404,17 @@ function openContextMenu(x, y, item) {
       label: item.kind === "files" ? "查看全部路径" : "查看全文",
       act: () => openDetail(item),
     });
-    entries.push({ sep: true });
   }
+  // 「复制并编辑」只给文本条目。
+  // 文件条目的内容是**路径清单**，编辑它再写回剪贴板会退化成一段纯文本
+  // （文件语义丢失，粘贴出去不再是文件）—— 那不是用户要的。
+  if (item.kind === "text") {
+    entries.push({
+      label: "复制并编辑",
+      act: () => openDetail(item, { startEdit: true }),
+    });
+  }
+  if (entries.length) entries.push({ sep: true });
   entries.push(
     { label: "复制", act: () => copyBack(item) },
     {
@@ -1366,7 +1463,11 @@ document.addEventListener(
 );
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    closeDetail();
+    // 详情弹窗优先：编辑态先退出编辑，否则关闭弹窗（见 requestCloseDetail）
+    if (!document.getElementById("detail-modal")?.hidden) {
+      requestCloseDetail();
+      return;
+    }
     closeContextMenu();
     hideImagePreview();
     exitSelectMode();

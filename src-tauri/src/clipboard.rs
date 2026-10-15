@@ -354,6 +354,24 @@ fn summarize_content(raw: String) -> FullContent {
     }
 }
 
+/// 把任意文本写入系统剪贴板（供「复制并编辑」的保存动作使用）。
+///
+/// **为什么是「编辑副本」而不是「直接改历史」**：历史必须忠实反映「当初复制了
+/// 什么」。若能原地改，用户会怀疑「我明明复制的是 A，怎么变成 B 了」；而且剪贴板
+/// 历史常被当安全网（删了还在），改动它却不可逆是件危险的事。
+/// 所以保存动作 = **写剪贴板**，不碰 index.json、不改原文。
+///
+/// **不会产生新条目**：内部走 `write_text_to_clipboard`，它会 `mark_skip()`，
+/// 于是这次自写不会被当成一次外部复制回灌成新记录 —— 与「点击条目复制回剪贴板」
+/// 的行为保持一致（历史只由**外部**复制产生）。
+#[tauri::command]
+pub fn set_clipboard_text(text: String) -> Result<(), String> {
+    if text.is_empty() {
+        return Err("内容为空，未写入剪贴板".into());
+    }
+    unsafe { write_text_to_clipboard(&text) }
+}
+
 /// 缩略图：列表与悬浮预览专用（PNG，长边 ≤512，单张几十 KB）。
 /// 返回 data URL；失败返回 Err，前端显示占位图。
 ///
@@ -653,8 +671,17 @@ pub fn init(app: &AppHandle) {
     // 老版本 index.json 把文件路径内联在 files 里、没有落盘清单 → 补一份，
     // 让历史文件条目在缓存目录里也有实体（返回补了几条）
     let backfilled = backfill_files(&dir, &mut hist);
+    // 老条目的 preview 是在「只取首行」的旧规则下写入的 —— 首行短就只显示几个字。
+    // 规则改成「开头最多 3 行」后必须**重算存量**，否则用户看到的还是旧预览，
+    // 会以为修复没生效。
+    let refreshed = refresh_text_previews(&dir, &mut hist);
     if backfilled > 0 {
         crate::log_print!("[clipboard] 已为 {backfilled} 条历史文件条目补写 files/ 清单");
+    }
+    if refreshed > 0 {
+        crate::log_print!("[clipboard] 已按新规则重算 {refreshed} 条文本条目的预览");
+    }
+    if backfilled > 0 || refreshed > 0 {
         save_index(&dir, &hist);
     }
 
@@ -1434,6 +1461,109 @@ fn decode_image_file(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
     Some(dib)
 }
 
+/// 生成列表卡片的预览摘要。
+///
+/// 规则（按用户实测反馈定的，两条都是踩过的坑）：
+///   1. **跳过开头的空行**。复制自网页/文档的文本常以空行开头，不跳预览就是一片空白。
+///   2. **最多取 3 行、累计不超过 200 字**。卡片正文区是 3 行（CSS `line-clamp: 3`），
+///      取满即可。
+///   3. **有内容被丢弃时补「…」**。改动前按 120 字硬截且没有省略号，视觉上像
+///      「话说了半截断掉」，用户反馈「这两行为什么显示不全」就是这个。
+///
+/// **为什么不能只取首行**（改动前的做法）：用户实测反馈「第一段只有两个字，
+/// 条目里就只露出两个字」—— 而正文其实很长。只取首行等于把整条内容藏起来。
+fn make_text_preview(text: &str) -> String {
+    /// 卡片正文区是 3 行，取满即可
+    const MAX_LINES: usize = 3;
+    /// 与 3 行大致匹配的字符预算（按中文字符保守估计）
+    const MAX_CHARS: usize = 200;
+
+    if text.trim().is_empty() {
+        return "[空白文本]".into();
+    }
+
+    let mut out = String::new();
+    let mut lines_taken = 0usize;
+    let mut chars_taken = 0usize;
+    let mut truncated = false;
+
+    for line in text.lines() {
+        let t = line.trim_end();
+        // 只跳过**开头**的空行；中间的空行保留 —— 那是段落分隔，有信息量
+        if lines_taken == 0 && t.trim().is_empty() {
+            continue;
+        }
+        if lines_taken >= MAX_LINES || chars_taken >= MAX_CHARS {
+            truncated = true;
+            break;
+        }
+
+        let remain = MAX_CHARS - chars_taken;
+        let piece: String = t.chars().take(remain).collect();
+        let used = piece.chars().count();
+
+        if lines_taken > 0 {
+            out.push('\n'); // 换行本身也占位，避免无限增长
+            chars_taken += 1;
+        }
+        out.push_str(&piece);
+        chars_taken += used;
+        lines_taken += 1;
+
+        // 这一行没取完 → 后面还有内容
+        if used < t.chars().count() {
+            truncated = true;
+            break;
+        }
+    }
+
+    if truncated {
+        out.push('…');
+    }
+    out
+}
+
+/// 按当前规则重算文本条目的 preview，返回**真正发生变化**的条数。
+///
+/// 为什么要迁移：老条目是在「只取首行」的旧规则下写入的，规则改成「开头最多
+/// 3 行」后存量不会自动更新 —— 用户看到的还是旧预览（首行短就只显示几个字），
+/// 会以为修复没生效。
+///
+/// 幂等：只有值确实变了才计数，所以跑过一次之后就不再写盘。
+/// 只读**文件头**而不是整个文件：preview 只用到开头的行，读几 MB 的日志纯属浪费。
+/// 返回值给调用方决定是否 `save_index`。
+fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usize {
+    /// 足够覆盖「开头 3 个非空行」；再长的前导空行不现实
+    const HEAD_BYTES: usize = 64 * 1024;
+
+    let mut changed = 0usize;
+    for item in hist.iter_mut() {
+        // 只处理文本条目 —— 文件条目的 preview 是「名字 等 N 个文件」，另一套规则
+        if item.kind != "text" {
+            continue;
+        }
+        let Some(rel) = item.text_path.as_ref() else {
+            continue;
+        };
+        let Ok(mut f) = fs::File::open(dir.join(rel)) else {
+            continue;
+        };
+        let mut buf = vec![0u8; HEAD_BYTES];
+        let n = std::io::Read::read(&mut f, &mut buf).unwrap_or(0);
+        if n == 0 {
+            continue;
+        }
+        buf.truncate(n);
+        // 文件可能被从多字节字符中间截断 —— 用 lossy，不让编码问题拖垮整条迁移
+        let new_preview = make_text_preview(&String::from_utf8_lossy(&buf));
+        if new_preview != item.preview {
+            item.preview = new_preview;
+            changed += 1;
+        }
+    }
+    changed
+}
+
 fn store_raw(raw: RawClip) -> HistoryItem {
     let dir = DIR.get().unwrap().clone();
     let ts = now_ms();
@@ -1457,12 +1587,7 @@ fn store_raw(raw: RawClip) -> HistoryItem {
         RawClip::Text(text) => {
             item.kind = "text".into();
             item.size = text.len() as u64;
-            let first_line = text.lines().next().unwrap_or("").trim().to_string();
-            item.preview = if text.trim().is_empty() {
-                "[空白文本]".into()
-            } else {
-                first_line.chars().take(120).collect()
-            };
+            item.preview = make_text_preview(&text);
             // 无论长短都落盘全文：内存只保留截断后的 preview 摘要，
             // 这样既遵守「内容不走内存」红线，复制回去时也不会被截断。
             let rel = format!("data/{}.txt", id);
@@ -2790,5 +2915,59 @@ mod tests {
         assert_eq!(c.text.chars().count(), DETAIL_DISPLAY_CAP);
         // 全文都是「中」，能正常取到就说明没有在字节中间切断
         assert!(c.text.chars().all(|ch| ch == '中'));
+    }
+
+    /// 预览：**首行很短时必须带上后续行**。
+    ///
+    /// 这是用户实测反馈的原话场景：「第一段只有两个字，条目里就只露出两个字」，
+    /// 而正文其实很长。改动前只取首行（`lines().next()`），等于把内容藏起来。
+    #[test]
+    fn preview_includes_lines_after_a_short_first_line() {
+        let p = make_text_preview("采集\n这是第二段的内容\n第三段");
+        assert_eq!(p, "采集\n这是第二段的内容\n第三段");
+    }
+
+    /// 预览：开头的空行要跳过。
+    /// 复制自网页/文档的文本常以空行开头，不跳的话预览是一片空白。
+    #[test]
+    fn preview_skips_leading_blank_lines() {
+        let p = make_text_preview("\n\n  \n正文第一行\n正文第二行");
+        assert_eq!(p, "正文第一行\n正文第二行");
+    }
+
+    /// 预览：中间的空行要**保留** —— 那是段落分隔，有信息量。
+    #[test]
+    fn preview_keeps_inner_blank_lines() {
+        let p = make_text_preview("第一段\n\n第二段");
+        assert_eq!(p, "第一段\n\n第二段");
+    }
+
+    /// 预览：最多 3 行，且**被丢弃内容时必须补省略号**。
+    /// 改动前按 120 字硬截且没有省略号，视觉上像「话说半截断掉」——
+    /// 用户反馈「这两行为什么显示不全」就是这个。
+    #[test]
+    fn preview_limits_lines_and_marks_truncation() {
+        let p = make_text_preview("一\n二\n三\n四\n五");
+        assert_eq!(p, "一\n二\n三…", "超过 3 行要截断并补省略号");
+    }
+
+    /// 预览：单行超长时截到字符预算并补省略号。
+    #[test]
+    fn preview_truncates_a_very_long_single_line() {
+        let p = make_text_preview(&"x".repeat(500));
+        assert_eq!(p.chars().count(), 201, "200 字 + 省略号");
+        assert!(p.ends_with('…'));
+    }
+
+    /// 预览：空白文本给占位，不能返回空串（否则卡片一片空白，看着像坏了）。
+    #[test]
+    fn preview_blank_text_placeholder() {
+        assert_eq!(make_text_preview("   \n\t\n"), "[空白文本]");
+    }
+
+    /// 预览：正常短文本**不应**多出省略号。
+    #[test]
+    fn preview_short_text_has_no_ellipsis() {
+        assert_eq!(make_text_preview("就两个字"), "就两个字");
     }
 }

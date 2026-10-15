@@ -1303,6 +1303,26 @@ body.dark .detail-body {
   background: rgba(255, 255, 255, 0.05);
 }
 
+/* 编辑态用 <textarea> 承载正文。它同时挂着 .detail-body，所以内边距、边框、
+   底色、等宽字体全部复用 —— 查看态切到编辑态时视觉不跳动。
+   这里只补 textarea 自己的默认值覆盖。 */
+.detail-editor {
+  /* textarea 默认带拖拽柄，会把弹窗布局撑乱 */
+  resize: none;
+  width: 100%;
+  box-sizing: border-box;
+  /* 与 .detail-body 的 line-height 对齐，避免切换时行高变化 */
+  line-height: inherit;
+}
+
+/* 查看态 / 编辑态互斥的按钮靠 hidden 属性切换。
+   .modal-actions 是 flex 容器，按钮是 flex item；若某个按钮类将来加了 display，
+   UA 的 [hidden]{display:none} 就会被盖掉（本项目已有 .modal-check[hidden] 的
+   同类先例），这里显式兜住。 */
+.modal-actions > [hidden] {
+  display: none;
+}
+
 /* 垃圾桶弹窗：「是否连置顶/收藏一起清」的勾选行。
    没有对应条目时整行由 JS 置 hidden，不占位。 */
 .modal-checks {
