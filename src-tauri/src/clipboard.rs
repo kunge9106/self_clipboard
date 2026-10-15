@@ -1127,15 +1127,18 @@ fn decode_image_file(path: &std::path::Path) -> Option<Vec<u8>> {
     // 峰值内存只需最终尺寸那一份（约 12MB）。
     let (w0, h0) = image::image_dimensions(path).ok()?;
     let img = if w0.max(h0) > MAX_SIDE {
-        crate::logger::write_line(
-            "INFO",
-            "clipboard",
-            &format!("图片 {} 超 {}px，降采样 {}×{} 存储", path.display(), MAX_SIDE, w0, h0),
-        );
         // 等比算出目标尺寸（thumbnail 的语义：只缩不放）
         let ratio = MAX_SIDE as f32 / w0.max(h0) as f32;
         let tw = ((w0 as f32 * ratio).round() as u32).max(1);
         let th = ((h0 as f32 * ratio).round() as u32).max(1);
+        crate::logger::write_line(
+            "INFO",
+            "clipboard",
+            &format!(
+                "图片 {} 超 {MAX_SIDE}px，降采样 {w0}×{h0} → {tw}×{th} 存储",
+                path.display()
+            ),
+        );
         // fast_rgb：最近邻缩放，跳过插值开销。缩略图/历史缩略场景足够。
         image::open(path)
             .ok()?
