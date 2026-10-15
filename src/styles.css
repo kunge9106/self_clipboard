@@ -844,7 +844,11 @@ body.dark.round .tag-kind {
   white-space: pre-wrap;
   word-break: break-all;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  /* 2 行：列表是「扫一眼找哪条」的视图，不是用来读正文的 ——
+     想细看有右键「查看全文」。2 行让卡片高度更整齐、同屏条数更多。
+     （后端 make_text_preview 也按 2 行生成，两边必须一致，否则会出现
+      「内容够 3 行但被这里截成 2 行」的错位感。） */
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   user-select: text;
@@ -871,7 +875,10 @@ body.dark.round .tag-kind {
   position: fixed;
   z-index: 1000;
   min-width: 132px;
-  padding: 4px;
+  /* 内边距 + 1px 行距：条目之间留一丝缝，悬浮高亮块才不会彼此贴死成一整块。
+     改动前没有 gap，相邻两项的高亮圆角直接相接，看起来「间距很奇怪」。 */
+  padding: 5px;
+  gap: 1px;
   display: flex;
   flex-direction: column;
   border-radius: var(--radius-sm);
@@ -917,11 +924,17 @@ html:not(.hovers-off) .ctx-item.danger:hover {
   pointer-events: none;
 }
 
-/* 菜单分组分隔线 */
+/* 菜单分组分隔线。
+   ⚠️ 必须用 --track-bg（「比底色深一点的中性色」），不能用 --stroke：
+   --stroke 是给**玻璃面**用的白色描边，而菜单底色接近不透明浅色，
+   白线在上面等于隐形 —— 于是用户只看到一段莫名的空白，反馈「间距看着很奇怪」。
+   --track-bg 在明/暗两套主题下都有定义，语义也正是「必须看得见的分隔」。 */
 .ctx-sep {
   height: 1px;
-  margin: 4px 8px;
-  background: var(--stroke);
+  /* 左右 12px = .ctx-item 的水平内边距，让分隔线两端与条目文字对齐，
+     不会比文字多凸出去一截（原来 8px，线与文字错开，看着别扭）。 */
+  margin: 4px 12px;
+  background: var(--track-bg);
 }
 
 /* 设置页 */
@@ -1246,12 +1259,25 @@ body.dark .modal {
    普通 .modal 的 max-width 只有 320px —— 那是给「确认/取消」这种一句话弹窗
    用的，放正文完全不够。这里单独放宽，并让正文区可滚动。
 --------------------------------------------------------------------------- */
+/* 固定尺寸：查看态与编辑态**共用同一块区域**，切换模式时不跳动，
+   也不随内容多少或窗口大小变化（用户要求「默认大小、不可缩放」）。
+   取 720×520 —— 应用窗口的最小尺寸是 880×580，即便把窗口缩到最小，
+   弹窗四周仍有余量，不会溢出。 */
 .modal-detail {
-  min-width: min(560px, 86vw);
-  max-width: min(760px, 92vw);
-  max-height: 80vh;
-  /* 头部 + 正文 + 按钮三段；正文 flex:1 吃掉剩余高度，故这里要能收缩 */
+  width: 720px;
+  height: 520px;
+  /* 覆盖 .modal 的 min-width:260px / max-width:320px（那是给一句话确认框的） */
+  min-width: 0;
+  max-width: none;
+  max-height: none;
+  /* 头部 + 正文 + 按钮三段；中间由 flex:1 吃掉剩余高度 */
   overflow: hidden;
+}
+
+/* 头部与按钮行都按内容高度，不参与伸缩 —— 只剩正文区去分配剩余空间 */
+.modal-detail .modal-head,
+.modal-detail .modal-actions {
+  flex: none;
 }
 
 /* 标题与「共 N 字 · M 行」同一行，右侧信息不换行 */
@@ -1271,9 +1297,10 @@ body.dark .modal {
 
 .detail-body {
   margin: 0;
+  /* flex:1 + 弹窗的固定高度 → 查看态(<pre>)与编辑态(<textarea>)自动是同一块尺寸。
+     改动前没给 textarea 兜底，它按 rows 默认高度渲染，所以编辑框明显比查看区小。 */
   flex: 1 1 auto;
-  min-height: 72px;
-  max-height: 58vh;
+  min-height: 0;
   overflow: auto;
   padding: 10px 12px;
   border: 1px solid var(--stroke);
@@ -1282,8 +1309,8 @@ body.dark .modal {
   background: rgba(0, 0, 0, 0.04);
   font-family: ui-monospace, "Cascadia Mono", Consolas, "Microsoft YaHei UI",
     monospace;
-  font-size: 12.5px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.7;
   color: var(--text);
   /* 保留换行与缩进（正文原样呈现）；同时超长无空格串（URL/base64）必须能折行，
      否则会把弹窗横向撑出滚动条。 */

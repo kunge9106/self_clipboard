@@ -141,9 +141,15 @@ pub fn delete_item(id: String) -> Result<(), String> {
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
     if let Some(pos) = hist.iter().position(|i| i.id == id) {
         let item = hist.remove(pos);
+        let kind = item.kind.clone();
         drop(hist);
         remove_item_files(&dir, &item);
         save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
+        // 只记 id / kind 等元数据，不含内容。
+        crate::log_print!("[clipboard] 删除条目 {id} kind={kind}");
+    } else {
+        // 前端理论上不会删不存在的条目；真出现说明前后端状态不同步，值得记一笔。
+        crate::log_warn!("[clipboard] 删除失败：条目不存在 {id}");
     }
     Ok(())
 }
@@ -183,6 +189,13 @@ pub fn toggle_pin(id: String, view: String) -> Result<Vec<String>, String> {
         }
         out = i.pinned_views.clone();
     })?;
+    // 只记「哪条、哪个分类、切完是置顶还是取消、互通开关状态」——都是元数据。
+    let state = if out.is_empty() {
+        "取消置顶"
+    } else {
+        "置顶"
+    };
+    crate::log_print!("[clipboard] {state} {id} view={view} 互通={global}");
     Ok(out)
 }
 
@@ -228,7 +241,16 @@ pub fn normalize_pins(global: bool, cancel_propagated: bool) {
 
 #[tauri::command]
 pub fn toggle_favorite(id: String) -> Result<(), String> {
-    patch_item(&id, |i| i.favorite = !i.favorite)
+    let mut now = false;
+    patch_item(&id, |i| {
+        i.favorite = !i.favorite;
+        now = i.favorite;
+    })?;
+    crate::log_print!(
+        "[clipboard] {} 收藏 {id}",
+        if now { "加入" } else { "取消" }
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -237,11 +259,13 @@ pub fn clear_all() -> Result<(), String> {
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
     // 只删条目自己的实体（文本 / 图片 / 文件清单），不碰目录里其它内容——
     // 尤其不碰 `log/`（见 CONTENT_DIRS 注释）。
+    let n = hist.len();
     for item in hist.iter() {
         remove_item_files(&dir, item);
     }
     hist.clear();
     save_index(&dir, &hist);
+    crate::log_print!("[clipboard] 清空全部历史，共 {n} 条");
     Ok(())
 }
 
@@ -263,7 +287,11 @@ pub fn get_image(id: String) -> Result<String, String> {
     if size > MAX_IMAGE_BYTES {
         crate::logger::note_error(
             "clipboard",
-            &format!("get_image 拒绝 {}：{}MB 超上限（考虑删除该条目）", id, size / 1048576),
+            &format!(
+                "get_image 拒绝 {}：{}MB 超上限（考虑删除该条目）",
+                id,
+                size / 1048576
+            ),
         );
         return Err(format!("图片过大（{}MB），无法在界面显示", size / 1048576));
     }
@@ -317,7 +345,10 @@ pub fn get_full_content(id: String) -> Result<FullContent, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let item = {
         let hist = HISTORY.get().unwrap().lock().unwrap();
-        hist.iter().find(|i| i.id == id).cloned().ok_or("条目不存在")?
+        hist.iter()
+            .find(|i| i.id == id)
+            .cloned()
+            .ok_or("条目不存在")?
     };
 
     // 文本正文优先；其次是文件路径清单。图片没有可查看的长文本。
@@ -369,7 +400,20 @@ pub fn set_clipboard_text(text: String) -> Result<(), String> {
     if text.is_empty() {
         return Err("内容为空，未写入剪贴板".into());
     }
-    unsafe { write_text_to_clipboard(&text) }
+    match unsafe { write_text_to_clipboard(&text) } {
+        Ok(()) => {
+            // 只记字符数，绝不记内容本身（编辑后的正文同样是用户数据）。
+            crate::log_print!(
+                "[clipboard] 编辑保存：写回剪贴板 {} 字符",
+                text.chars().count()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            crate::log_err!("clipboard", "编辑保存：写回剪贴板失败 {e}");
+            Err(e)
+        }
+    }
 }
 
 /// 缩略图：列表与悬浮预览专用（PNG，长边 ≤512，单张几十 KB）。
@@ -385,7 +429,10 @@ pub async fn get_image_thumb(id: String) -> Result<String, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let item = {
         let hist = HISTORY.get().unwrap().lock().unwrap();
-        hist.iter().find(|i| i.id == id).cloned().ok_or("条目不存在")?
+        hist.iter()
+            .find(|i| i.id == id)
+            .cloned()
+            .ok_or("条目不存在")?
     };
     match ensure_thumb(&dir, &item) {
         Some(png) => {
@@ -411,96 +458,112 @@ const PASTE_MAX_SIDE: u32 = 8192;
 pub fn copy_back(id: String) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let hist = HISTORY.get().unwrap().lock().unwrap();
-    let item = hist.iter().find(|i| i.id == id).cloned().ok_or("条目不存在")?;
+    let item = hist
+        .iter()
+        .find(|i| i.id == id)
+        .cloned()
+        .ok_or("条目不存在")?;
     drop(hist);
 
-    match item.kind.as_str() {
-        "text" => {
-            let text = match &item.text_path {
-                Some(rel) => fs::read_to_string(dir.join(rel)).map_err(|e| e.to_string())?,
-                None => item.preview.clone(),
-            };
-            unsafe { write_text_to_clipboard(&text) }.map(|_| None)
-        }
-        "files" => {
-            // 以落盘清单为唯一数据源（与文本条目走 text_path 一致）；
-            // 旧版 index.json 把路径内联在 files 里、没有 files_path，回退到内存中的 files。
-            let files: Vec<String> = match &item.files_path {
-                Some(rel) => fs::read_to_string(dir.join(rel))
-                    .map_err(|e| e.to_string())?
-                    .lines()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .collect(),
-                None => item.files.clone().ok_or("文件列表缺失")?,
-            };
-            if files.is_empty() {
-                return Err("文件列表为空".into());
+    let kind = item.kind.clone();
+    // 各分支统一收口到 `result`，最后只落**一条**日志再返回——
+    // 原来这里一个分支都没记日志，用户遇到「点了条目粘贴不出来」时无从排查。
+    // 用立即调用的闭包收口，使分支里的 `return` / `?` 只退出闭包、不绕过日志。
+    let result: Result<Option<String>, String> = (|| -> Result<Option<String>, String> {
+        match kind.as_str() {
+            "text" => {
+                let text = match &item.text_path {
+                    Some(rel) => fs::read_to_string(dir.join(rel)).map_err(|e| e.to_string())?,
+                    None => item.preview.clone(),
+                };
+                unsafe { write_text_to_clipboard(&text) }.map(|_| None)
             }
-            // —— 失效检测 ——
-            // 文件条目存的是**路径引用**而不是文件副本，原文件被移动/改名/删除后就粘不出来了。
-            // 全部失效直接报错；部分失效就跳过失效的那几个，并把情况带回前端提示。
-            let total = files.len();
-            let alive: Vec<String> = files
-                .into_iter()
-                .filter(|p| std::path::Path::new(p).exists())
-                .collect();
-            if alive.is_empty() {
-                return Err(format!(
-                    "原文件都已不存在（{total} 个），可能被移动或删除"
-                ));
-            }
-            unsafe { write_files_to_clipboard(&alive)? }
-            let missing = total - alive.len();
-            Ok(if missing > 0 {
-                Some(format!(
-                    "已复制 {} 个文件（跳过 {missing} 个失效文件）",
-                    alive.len()
-                ))
-            } else {
-                None
-            })
-        }
-        "image" => {
-            // 落盘格式有三种，按扩展名分派（都是我们自己写下的，可信）：
-            //   - .bmp  → 掐掉 14 字节文件头即 DIB
-            //   - .dib  → 本身就是裸 DIB，直接用（极少数兜底条目）
-            //   - 其它  → 原图（jpg/png/tiff/svg…），此刻才解码成 DIB
-            // 解码放在这里，是因为它只发生在**用户点击回贴**时，感知不到延迟。
-            let rel = item.img_path.ok_or("图片文件缺失")?;
-            let path = dir.join(rel.clone());
-            let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-            let dib = if rel.ends_with(".bmp") {
-                if bytes.len() < 54 || &bytes[0..2] != b"BM" {
-                    return Err("图片数据损坏".into());
+            "files" => {
+                // 以落盘清单为唯一数据源（与文本条目走 text_path 一致）；
+                // 旧版 index.json 把路径内联在 files 里、没有 files_path，回退到内存中的 files。
+                let files: Vec<String> = match &item.files_path {
+                    Some(rel) => fs::read_to_string(dir.join(rel))
+                        .map_err(|e| e.to_string())?
+                        .lines()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect(),
+                    None => item.files.clone().ok_or("文件列表缺失")?,
+                };
+                if files.is_empty() {
+                    return Err("文件列表为空".into());
                 }
-                bytes[14..].to_vec()
-            } else if rel.ends_with(".dib") {
-                bytes
-            } else {
-                match image_file_to_dib(&path, PASTE_MAX_SIDE) {
-                    Some(d) => d,
-                    None => {
-                        // 格式不设限的代价：有些图片 image 库解不开
-                        // （SVG 是矢量文本、HEIC/AVIF 缺解码器、PSD 是分层工程文件）。
-                        // 解不开不等于没用 —— 退回**按文件粘贴**，用户仍能把它
-                        // 丢进聊天窗口/文件夹，而不是点了没反应。
-                        unsafe {
-                            write_files_to_clipboard(&[path.to_string_lossy().to_string()])?;
-                        }
-                        crate::logger::write_line(
-                            "INFO",
-                            "clipboard",
-                            &format!("图片 {rel} 无法解码为位图，已按文件写回剪贴板"),
-                        );
-                        return Ok(Some("该图片格式无法转为位图，已按文件复制".into()));
+                // —— 失效检测 ——
+                // 文件条目存的是**路径引用**而不是文件副本，原文件被移动/改名/删除后就粘不出来了。
+                // 全部失效直接报错；部分失效就跳过失效的那几个，并把情况带回前端提示。
+                let total = files.len();
+                let alive: Vec<String> = files
+                    .into_iter()
+                    .filter(|p| std::path::Path::new(p).exists())
+                    .collect();
+                if alive.is_empty() {
+                    return Err(format!("原文件都已不存在（{total} 个），可能被移动或删除"));
+                }
+                unsafe { write_files_to_clipboard(&alive)? }
+                let missing = total - alive.len();
+                Ok(if missing > 0 {
+                    Some(format!(
+                        "已复制 {} 个文件（跳过 {missing} 个失效文件）",
+                        alive.len()
+                    ))
+                } else {
+                    None
+                })
+            }
+            "image" => {
+                // 落盘格式有三种，按扩展名分派（都是我们自己写下的，可信）：
+                //   - .bmp  → 掐掉 14 字节文件头即 DIB
+                //   - .dib  → 本身就是裸 DIB，直接用（极少数兜底条目）
+                //   - 其它  → 原图（jpg/png/tiff/svg…），此刻才解码成 DIB
+                // 解码放在这里，是因为它只发生在**用户点击回贴**时，感知不到延迟。
+                let rel = item.img_path.ok_or("图片文件缺失")?;
+                let path = dir.join(rel.clone());
+                let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+                let dib = if rel.ends_with(".bmp") {
+                    if bytes.len() < 54 || &bytes[0..2] != b"BM" {
+                        return Err("图片数据损坏".into());
                     }
-                }
-            };
-            unsafe { write_dib_to_clipboard(&dib) }.map(|_| None)
+                    bytes[14..].to_vec()
+                } else if rel.ends_with(".dib") {
+                    bytes
+                } else {
+                    match image_file_to_dib(&path, PASTE_MAX_SIDE) {
+                        Some(d) => d,
+                        None => {
+                            // 格式不设限的代价：有些图片 image 库解不开
+                            // （SVG 是矢量文本、HEIC/AVIF 缺解码器、PSD 是分层工程文件）。
+                            // 解不开不等于没用 —— 退回**按文件粘贴**，用户仍能把它
+                            // 丢进聊天窗口/文件夹，而不是点了没反应。
+                            unsafe {
+                                write_files_to_clipboard(&[path.to_string_lossy().to_string()])?;
+                            }
+                            crate::logger::write_line(
+                                "INFO",
+                                "clipboard",
+                                &format!("图片 {rel} 无法解码为位图，已按文件写回剪贴板"),
+                            );
+                            return Ok(Some("该图片格式无法转为位图，已按文件复制".into()));
+                        }
+                    }
+                };
+                unsafe { write_dib_to_clipboard(&dib) }.map(|_| None)
+            }
+            _ => Err("未知类型".into()),
         }
-        _ => Err("未知类型".into()),
+    })();
+
+    // 回贴成功/失败一律记录（元数据，不含内容）。
+    match &result {
+        Ok(Some(msg)) => crate::log_print!("[clipboard] 回贴 {id} kind={kind} 成功（{msg}）"),
+        Ok(None) => crate::log_print!("[clipboard] 回贴 {id} kind={kind} 成功"),
+        Err(e) => crate::log_err!("clipboard", "回贴 {id} kind={kind} 失败：{e}"),
     }
+    result
 }
 
 /// 失效检测（前端列表标记用）：传入条目 id，返回其中**至少有一个原路径已不存在**的 id。
@@ -754,7 +817,17 @@ pub fn on_clipboard_update() {
     }
 
     let raw = unsafe { read_clipboard() };
-    let Some(raw) = raw else { return };
+    let Some(raw) = raw else {
+        // 剪贴板序号确实变了（真有一次外部复制），但没读出可记录的内容。
+        // 常见于：关闭「文件复制」时复制单个非图片文件、对方只写了私有格式。
+        //
+        // 记一条是有价值的：用户反馈「复制了却没进软件」时，
+        // 有这条 = 「事件到了、是识别环节没捞到」；没这条 = 「事件根本没到」
+        // （查监听是否订阅成功、窗口是否最小化导致消息不投递）。
+        // 两者的排查方向完全不同。
+        crate::logger::write_line("INFO", "clipboard", "剪贴板已更新，但未识别出可记录内容");
+        return;
+    };
 
     // 交给后台线程：解码（慢）+ 同图去重 + 落盘 + 通知前端。
     //
@@ -806,7 +879,16 @@ pub fn flush_pending(timeout: std::time::Duration) {
 /// 顺序很重要：先 `resolve`（解码），再做图片指纹判重 —— 指纹要基于像素
 /// 内容算，未解码前拿不到。
 fn handle_clip(captured_ms: u64, raw: RawClip) {
-    let Some(raw) = resolve(raw) else { return };
+    let Some(raw) = resolve(raw) else {
+        // resolve 只在「临时文件读不出」或「不是图片」且「文件复制」关闭时返回 None，
+        // 即按用户设置主动跳过。记一条，便于区分「被设置跳过」与「识别失败」。
+        crate::logger::write_line(
+            "INFO",
+            "clipboard",
+            "内容按设置跳过（非图片文件且未开启文件复制）",
+        );
+        return;
+    };
 
     // 图片判重：微信等应用复制一张图会**反复**改写剪贴板。
     //
@@ -1009,7 +1091,10 @@ fn extra_magic_ext(b: &[u8]) -> Option<&'static str> {
         if brand == b"avif" || brand == b"avis" {
             return Some("avif");
         }
-        if matches!(brand, b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1") {
+        if matches!(
+            brand,
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1"
+        ) {
             return Some("heic");
         }
     }
@@ -1463,20 +1548,22 @@ fn decode_image_file(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
 
 /// 生成列表卡片的预览摘要。
 ///
-/// 规则（按用户实测反馈定的，两条都是踩过的坑）：
+/// 规则（按用户实测反馈定的，都是踩过的坑）：
 ///   1. **跳过开头的空行**。复制自网页/文档的文本常以空行开头，不跳预览就是一片空白。
-///   2. **最多取 3 行、累计不超过 200 字**。卡片正文区是 3 行（CSS `line-clamp: 3`），
-///      取满即可。
+///   2. **最多 2 行、累计不超过 140 字**。列表是「扫一眼找哪条」的视图，不是用来
+///      读正文的 —— 想细看有右键「查看全文」。2 行让卡片高度更整齐、同屏条数更多。
+///      ⚠️ 必须与 CSS 的 `-webkit-line-clamp` 保持一致（同样是 2），否则会出现
+///      「后端给了 3 行、前端截成 2 行」的错位感。
 ///   3. **有内容被丢弃时补「…」**。改动前按 120 字硬截且没有省略号，视觉上像
 ///      「话说了半截断掉」，用户反馈「这两行为什么显示不全」就是这个。
 ///
-/// **为什么不能只取首行**（改动前的做法）：用户实测反馈「第一段只有两个字，
+/// **为什么不能只取首行**（更早的做法）：用户实测反馈「第一段只有两个字，
 /// 条目里就只露出两个字」—— 而正文其实很长。只取首行等于把整条内容藏起来。
 fn make_text_preview(text: &str) -> String {
-    /// 卡片正文区是 3 行，取满即可
-    const MAX_LINES: usize = 3;
-    /// 与 3 行大致匹配的字符预算（按中文字符保守估计）
-    const MAX_CHARS: usize = 200;
+    /// 与 CSS `.card-preview { -webkit-line-clamp }` 一致
+    const MAX_LINES: usize = 2;
+    /// 与 2 行大致匹配的字符预算（按中文字符保守估计）
+    const MAX_CHARS: usize = 140;
 
     if text.trim().is_empty() {
         return "[空白文本]".into();
@@ -1489,8 +1576,11 @@ fn make_text_preview(text: &str) -> String {
 
     for line in text.lines() {
         let t = line.trim_end();
-        // 只跳过**开头**的空行；中间的空行保留 —— 那是段落分隔，有信息量
-        if lines_taken == 0 && t.trim().is_empty() {
+        // **空行一律跳过**（不只是开头）。
+        // 2 行的预算很紧，而空行不提供任何识别信息 —— 占掉一行就等于白白少显示
+        // 一行正文。段落结构在「查看全文」里可以完整看到，预览的首要任务是
+        // 「让人一眼认出这是哪条」。
+        if t.trim().is_empty() {
             continue;
         }
         if lines_taken >= MAX_LINES || chars_taken >= MAX_CHARS {
@@ -1591,7 +1681,9 @@ fn store_raw(raw: RawClip) -> HistoryItem {
             // 无论长短都落盘全文：内存只保留截断后的 preview 摘要，
             // 这样既遵守「内容不走内存」红线，复制回去时也不会被截断。
             let rel = format!("data/{}.txt", id);
-            let _ = fs::write(dir.join(&rel), text.as_bytes());
+            if let Err(e) = fs::write(dir.join(&rel), text.as_bytes()) {
+                crate::log_err!("clipboard", "文本条目落盘失败 {rel}：{e}");
+            }
             item.text_path = Some(rel);
         }
         RawClip::Files(files) => {
@@ -1614,7 +1706,9 @@ fn store_raw(raw: RawClip) -> HistoryItem {
             // 否则「文件」条目的数据在缓存目录里完全看不到。
             let rel = format!("files/{}.txt", id);
             let body = files.join("\r\n");
-            let _ = fs::write(dir.join(&rel), body.as_bytes());
+            if let Err(e) = fs::write(dir.join(&rel), body.as_bytes()) {
+                crate::log_err!("clipboard", "文件清单落盘失败 {rel}：{e}");
+            }
             item.files_path = Some(rel);
             item.files = Some(files);
         }
@@ -1631,8 +1725,9 @@ fn store_raw(raw: RawClip) -> HistoryItem {
             item.size = bytes.len() as u64;
             item.preview = "[图片]".into();
             let rel = format!("images/{}.{}", id, ext);
-            if fs::write(dir.join(&rel), &bytes).is_ok() {
-                item.img_path = Some(rel);
+            match fs::write(dir.join(&rel), &bytes) {
+                Ok(()) => item.img_path = Some(rel),
+                Err(e) => crate::log_err!("clipboard", "图片原图落盘失败 {rel}：{e}"),
             }
         }
         RawClip::Image(bytes) => {
@@ -1641,7 +1736,9 @@ fn store_raw(raw: RawClip) -> HistoryItem {
             item.preview = "[图片]".into();
             let rel = format!("images/{}.bmp", id);
             if let Ok(bmp) = dib_to_bmp(&bytes) {
-                let _ = fs::write(dir.join(&rel), &bmp);
+                if let Err(e) = fs::write(dir.join(&rel), &bmp) {
+                    crate::log_err!("clipboard", "位图落盘失败 {rel}：{e}");
+                }
                 item.img_path = Some(rel);
                 // 顺手把缩略图一起生成了。
                 //
@@ -1652,11 +1749,15 @@ fn store_raw(raw: RawClip) -> HistoryItem {
                 //
                 // 现在复用内存里的 DIB 直接生成：省掉回读与全量解码。
                 // 落盘失败无妨 —— `ensure_thumb` 仍会在下次被调用时现场生成。
-                save_thumb_from_dib(&dir, &id, &bytes);
+                if save_thumb_from_dib(&dir, &id, &bytes).is_none() {
+                    crate::log_warn!("[clipboard] 内存缩略图生成失败 {id}，将由 ensure_thumb 兜底");
+                }
             } else {
                 // 兜底：直接存 DIB，前端无法显示但至少保留
                 let rel = format!("images/{}.dib", id);
-                let _ = fs::write(dir.join(&rel), &bytes);
+                if let Err(e) = fs::write(dir.join(&rel), &bytes) {
+                    crate::log_err!("clipboard", "DIB 兜底落盘失败 {rel}：{e}");
+                }
                 item.img_path = Some(rel);
             }
         }
@@ -1668,9 +1769,17 @@ fn store_raw(raw: RawClip) -> HistoryItem {
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
     hist.insert(0, item.clone());
     save_index(&dir, &hist);
+    // ⚠️ 只记**元数据**，绝不记内容。
+    //
+    // 改动前这里打的是 `preview={:?}`，而 preview 就是剪贴板正文的开头几行 ——
+    // 等于把用户复制的文本**明文**写进日志文件。日志的用途是排查问题，
+    // 不该顺带成为一份内容副本；用户明确反馈过「不安全」。
+    // 需要定位内容相关问题时，用这里的 id 去缓存目录里找对应条目即可。
     crate::log_print!(
-        "[clipboard] 新增 {} 条目 kind={} preview={:?} size={}",
-        id, item.kind, item.preview, item.size
+        "[clipboard] 新增 {} 条目 kind={} size={}",
+        id,
+        item.kind,
+        item.size
     );
     item
 }
@@ -1698,7 +1807,11 @@ fn dib_to_bmp(dib: &[u8]) -> Result<Vec<u8>, String> {
         (0, _) if bi_bit_count > 8 => 0,
         (0, _) => {
             let used = u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]]);
-            let used = if used == 0 { 1u32 << bi_bit_count } else { used };
+            let used = if used == 0 {
+                1u32 << bi_bit_count
+            } else {
+                used
+            };
             used as usize * 4
         }
         _ => return Err(format!("不支持的 DIB 压缩类型 {}", bi_compression)),
@@ -1886,16 +1999,34 @@ fn ensure_thumb(dir: &std::path::Path, item: &HistoryItem) -> Option<Vec<u8>> {
         return Some(bytes);
     }
     // 2) 从原图现场生成
-    let bytes = fs::read(&src).ok()?;
+    let bytes = match fs::read(&src) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::log_err!("clipboard", "缩略图：读取原图失败 {}：{e}", src.display());
+            return None;
+        }
+    };
     if bytes.len() > 256 * 1024 * 1024 {
         crate::logger::write_line(
             "ERROR",
             "clipboard",
-            &format!("图片 {} 达 {}MB，超出处理能力，缩略图跳过", src.display(), bytes.len() / 1048576),
+            &format!(
+                "图片 {} 达 {}MB，超出处理能力，缩略图跳过",
+                src.display(),
+                bytes.len() / 1048576
+            ),
         );
         return None;
     }
-    let img = image::load_from_memory(&bytes).ok()?;
+    let img = match image::load_from_memory(&bytes) {
+        Ok(i) => i,
+        Err(e) => {
+            // 这就是「图片条目一直显示占位图」的原因所在（SVG/PSD/缺解码器的格式）。
+            // 记下具体格式错误，比前端只显示一个灰块有用得多。
+            crate::log_warn!("[clipboard] 缩略图：图片无法解码 {}：{e}", src.display());
+            return None;
+        }
+    };
     let small = img.thumbnail(THUMB_SIDE, THUMB_SIDE);
     let mut png = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(small.to_rgba8())
@@ -2057,8 +2188,15 @@ fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
 
 fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
     let path = dir.join("index.json");
-    if let Ok(s) = serde_json::to_string_pretty(hist) {
-        let _ = fs::write(&path, s);
+    match serde_json::to_string_pretty(hist) {
+        Ok(s) => {
+            // 写失败要记：index.json 是重启后恢复历史/置顶/收藏的唯一依据，
+            // 静默失败会表现为「重启后记录全没了」却查无实据。
+            if let Err(e) = fs::write(&path, s) {
+                crate::log_err!("clipboard", "index.json 写入失败：{e}");
+            }
+        }
+        Err(e) => crate::log_err!("clipboard", "index.json 序列化失败：{e}"),
     }
 }
 
@@ -2241,13 +2379,12 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
     .map_err(|e| e.to_string())?;
 
     let Some(picked) = picked else {
+        crate::log_print!("[clipboard] 更换缓存目录：用户取消");
         return Ok(None); // 用户取消
     };
     let new_dir: PathBuf = match picked {
         tauri_plugin_dialog::FilePath::Path(p) => p,
-        tauri_plugin_dialog::FilePath::Url(u) => {
-            return Err(format!("不支持的路径：{u}"))
-        }
+        tauri_plugin_dialog::FilePath::Url(u) => return Err(format!("不支持的路径：{u}")),
     };
     if !new_dir.is_dir() {
         return Err("所选路径不是目录".into());
@@ -2267,6 +2404,7 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
 
     if old_c == new_c {
         // 选的就是当前目录：什么都不用做，更不能迁移
+        crate::log_print!("[clipboard] 更换缓存目录：所选即当前目录，无需迁移");
         return Ok(Some((strip_ext_prefix(&new_dir.to_string_lossy()), false)));
     }
 
@@ -2491,8 +2629,7 @@ where
 }
 
 fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0];
@@ -2522,7 +2659,8 @@ fn base64_encode(data: &[u8]) -> String {
 const GMEM_MOVEABLE: u32 = 0x0002;
 
 extern "system" {
-    fn OpenClipboard(hwnd: isize) -> i32;    fn AddClipboardFormatListener(hwnd: isize) -> i32;
+    fn OpenClipboard(hwnd: isize) -> i32;
+    fn AddClipboardFormatListener(hwnd: isize) -> i32;
     fn CloseClipboard() -> i32;
     fn EmptyClipboard() -> i32;
     fn GetClipboardData(format: u32) -> isize;
@@ -2772,7 +2910,11 @@ mod tests {
         g2.push((p_of(9), (1, 100), vec![1]));
         g2.push((p_of(9), (2, 200), vec![2]));
         // 真实代码用的是 `p == path`（path 是 &Path）；这里等价模拟一次剔除
-        let keep: Vec<_> = g2.iter().filter(|(p, s, _)| *s != (1, 100)).cloned().collect();
+        let keep: Vec<_> = g2
+            .iter()
+            .filter(|(p, s, _)| *s != (1, 100))
+            .cloned()
+            .collect();
         assert_eq!(keep.len(), 1, "旧 stamp 的条目应被剔除");
         assert_eq!(keep[0].1, (2, 200));
     }
@@ -2806,7 +2948,10 @@ mod tests {
     fn detects_many_image_formats_by_magic() {
         let p = std::path::Path::new("no_ext"); // 无扩展名 → 只能靠魔数
         let cases: [(&str, &[u8]); 9] = [
-            ("png", &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]),
+            (
+                "png",
+                &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0],
+            ),
             ("jpg", &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0]),
             ("gif", b"GIF89a____________"),
             ("bmp", b"BM____________"),
@@ -2860,7 +3005,7 @@ mod tests {
         assert_eq!(detect_image_ext(b"hello, world", p), None);
         assert_eq!(detect_image_ext(b"PK\x03\x04____________", p), None); // zip/docx
         assert_eq!(detect_image_ext(b"%PDF-1.7____________", p), None); // pdf
-        // 空文件
+                                                                        // 空文件
         assert_eq!(detect_image_ext(b"", p), None);
         // 无意义的短数据
         assert_eq!(detect_image_ext(b"\x00\x01\x02", p), None);
@@ -2888,7 +3033,11 @@ mod tests {
         let raw = "x".repeat(DETAIL_DISPLAY_CAP + 5_000);
         let c = summarize_content(raw);
         assert!(c.truncated, "超上限必须标记截断");
-        assert_eq!(c.text.chars().count(), DETAIL_DISPLAY_CAP, "显示部分应恰好截到上限");
+        assert_eq!(
+            c.text.chars().count(),
+            DETAIL_DISPLAY_CAP,
+            "显示部分应恰好截到上限"
+        );
         assert_eq!(
             c.total_chars,
             DETAIL_DISPLAY_CAP + 5_000,
@@ -2920,42 +3069,40 @@ mod tests {
     /// 预览：**首行很短时必须带上后续行**。
     ///
     /// 这是用户实测反馈的原话场景：「第一段只有两个字，条目里就只露出两个字」，
-    /// 而正文其实很长。改动前只取首行（`lines().next()`），等于把内容藏起来。
+    /// 而正文其实很长。更早的实现只取首行（`lines().next()`），等于把内容藏起来。
     #[test]
     fn preview_includes_lines_after_a_short_first_line() {
         let p = make_text_preview("采集\n这是第二段的内容\n第三段");
-        assert_eq!(p, "采集\n这是第二段的内容\n第三段");
+        assert_eq!(p, "采集\n这是第二段的内容…", "2 行取满，多的补省略号");
     }
 
-    /// 预览：开头的空行要跳过。
-    /// 复制自网页/文档的文本常以空行开头，不跳的话预览是一片空白。
+    /// 预览：空行要跳过（**不只是开头**）。
+    /// 复制自网页/文档的文本常以空行开头，不跳预览就是一片空白；
+    /// 而 2 行的预算很紧，中间的空行同样是在浪费额度。
     #[test]
-    fn preview_skips_leading_blank_lines() {
-        let p = make_text_preview("\n\n  \n正文第一行\n正文第二行");
-        assert_eq!(p, "正文第一行\n正文第二行");
+    fn preview_skips_blank_lines() {
+        assert_eq!(
+            make_text_preview("\n\n  \n正文第一行\n正文第二行"),
+            "正文第一行\n正文第二行"
+        );
+        // 中间的空行也跳 —— 段落结构在「查看全文」里完整可见
+        assert_eq!(make_text_preview("第一段\n\n第二段"), "第一段\n第二段");
     }
 
-    /// 预览：中间的空行要**保留** —— 那是段落分隔，有信息量。
-    #[test]
-    fn preview_keeps_inner_blank_lines() {
-        let p = make_text_preview("第一段\n\n第二段");
-        assert_eq!(p, "第一段\n\n第二段");
-    }
-
-    /// 预览：最多 3 行，且**被丢弃内容时必须补省略号**。
+    /// 预览：最多 2 行，且**被丢弃内容时必须补省略号**。
     /// 改动前按 120 字硬截且没有省略号，视觉上像「话说半截断掉」——
     /// 用户反馈「这两行为什么显示不全」就是这个。
     #[test]
     fn preview_limits_lines_and_marks_truncation() {
         let p = make_text_preview("一\n二\n三\n四\n五");
-        assert_eq!(p, "一\n二\n三…", "超过 3 行要截断并补省略号");
+        assert_eq!(p, "一\n二…", "超过 2 行要截断并补省略号");
     }
 
     /// 预览：单行超长时截到字符预算并补省略号。
     #[test]
     fn preview_truncates_a_very_long_single_line() {
         let p = make_text_preview(&"x".repeat(500));
-        assert_eq!(p.chars().count(), 201, "200 字 + 省略号");
+        assert_eq!(p.chars().count(), 141, "140 字 + 省略号");
         assert!(p.ends_with('…'));
     }
 
