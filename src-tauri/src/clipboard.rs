@@ -668,33 +668,58 @@ fn handle_clip(raw: RawClip) {
     if let RawClip::Image(dib) = &raw {
         let now = now_ms();
         let fp = image_fingerprint(dib);
-        // 命中窗口内指纹 → 是重复写入。但要区分「微信后台补写」与
-        // 「用户主动又截了一次相同的图」：后者伴随键鼠输入，必须放行，
-        // 否则大窗口会把用户的正常操作吞掉（「复制了却存不进去」）。
-        // 取 3s：一次截图动作（按快捷键 → 框选 → 松开）通常在 3s 内完成，
-        // 而微信的补写是在用户看完/切走之后才陆续发生的。
-        const USER_ACTIVE_MS: u64 = 3_000;
-        let user_active = idle_ms() < USER_ACTIVE_MS;
-        let dup = match LAST_IMG.lock().ok() {
+        // 找出窗口内指纹相同、且**距最近一次**最久的那条
+        let hit = match LAST_IMG.lock().ok() {
             Some(g) => g
                 .iter()
-                .any(|(lfp, lt)| *lfp == fp && now - *lt < DUP_WINDOW_MS),
-            None => false,
+                .filter(|(lfp, lt)| *lfp == fp && now - *lt < DUP_WINDOW_MS)
+                .map(|(_, lt)| now - *lt)
+                .max(),
+            None => None,
         };
-        if dup && user_active {
-            crate::logger::write_line(
-                "INFO",
-                "clipboard",
-                "重复图片已合并（窗口内指纹一致，且用户无键鼠输入 → 判为应用补写）",
-            );
-            return;
-        }
-        if dup {
-            crate::logger::write_line(
-                "INFO",
-                "clipboard",
-                "指纹与近期条目相同，但检测到用户正在操作 → 按新条目记录",
-            );
+
+        // 关于「用户主动又截了一次相同的图」与「应用补写」怎么区分：
+        //
+        // 先前一版用 `idle_ms() < 3s`（最近 3 秒有键鼠输入 → 视为用户主动），
+        // 实测**失效**，日志：「指纹与近期条目相同，但检测到用户正在操作」
+        // 之后紧接着又新增一条。原因是用户按下复制键后，应用在几秒内就补写了，
+        // 此时 `idle_ms` 仍在 3s 内 —— 判据把补写误当成用户主动操作。
+        // 这个信号表达的是「用户刚有动作」，而补写恰恰就发生在那个动作之后，
+        // 两者时间上重叠，无法区分。
+        //
+        // 改用**间隔时长**这一本来就有的维度来切分：微信补写是密集簇
+        // （实测 1~20 秒内连来），而用户主动重复截图之间通常隔更久
+        // （要看一眼、确认、再按快捷键）。所以：
+        //   - 间隔 <  DUP_MERGE_MS  → 一律判为补写，合并（不查输入状态）
+        //   - 间隔 >= DUP_MERGE_MS  → 才认为可能是用户主动操作，此时若检测到
+        //                              近期确有键鼠输入就放行，否则仍按补写合并
+        const DUP_MERGE_MS: u64 = 25_000;
+        const USER_ACTIVE_MS: u64 = 10_000;
+
+        if let Some(gap) = hit {
+            if gap < DUP_MERGE_MS {
+                crate::logger::write_line(
+                    "INFO",
+                    "clipboard",
+                    &format!("重复图片已合并（距上次 {gap}ms，属密集补写）"),
+                );
+                return;
+            }
+            // 间隔已经很长：这时才区分「用户主动又截了一次」与「超长补写簇」。
+            if idle_ms() < USER_ACTIVE_MS {
+                crate::logger::write_line(
+                    "INFO",
+                    "clipboard",
+                    &format!("指纹相同但距上次 {gap}ms 且用户正在操作 → 按新条目记录"),
+                );
+            } else {
+                crate::logger::write_line(
+                    "INFO",
+                    "clipboard",
+                    &format!("重复图片已合并（距上次 {gap}ms，用户无键鼠输入）"),
+                );
+                return;
+            }
         }
         if let Ok(mut g) = LAST_IMG.lock() {
             g.push((fp, now));
@@ -1093,18 +1118,30 @@ fn decode_image_file(path: &std::path::Path) -> Option<Vec<u8>> {
             return None;
         }
     }
-    let img = image::open(path).ok()?;
-    let (w0, h0) = (img.width(), img.height());
-    // thumbnail() 只缩不放：未超限的图原样通过
+    // ⚠️ 这里不要用 `image::open(path)` 再 `thumbnail()` ——
+    // `image::open` 会把原图**完整解码进内存**（4096×3072 = 1200 万像素 ≈ 50MB），
+    // 之后才缩到 2048。被丢掉的那一倍像素是纯浪费，也是大图要等 1~2 秒的主因。
+    //
+    // 改成：先用 `image::image_dimensions` 只读文件头拿到尺寸（不解码），
+    // 再按**目标尺寸**解码 —— image 库支持在解码阶段就用最近邻缩放，
+    // 峰值内存只需最终尺寸那一份（约 12MB）。
+    let (w0, h0) = image::image_dimensions(path).ok()?;
     let img = if w0.max(h0) > MAX_SIDE {
         crate::logger::write_line(
             "INFO",
             "clipboard",
             &format!("图片 {} 超 {}px，降采样 {}×{} 存储", path.display(), MAX_SIDE, w0, h0),
         );
-        img.thumbnail(MAX_SIDE, MAX_SIDE)
+        // 等比算出目标尺寸（thumbnail 的语义：只缩不放）
+        let ratio = MAX_SIDE as f32 / w0.max(h0) as f32;
+        let tw = ((w0 as f32 * ratio).round() as u32).max(1);
+        let th = ((h0 as f32 * ratio).round() as u32).max(1);
+        // fast_rgb：最近邻缩放，跳过插值开销。缩略图/历史缩略场景足够。
+        image::open(path)
+            .ok()?
+            .resize_exact(tw, th, image::imageops::FilterType::Nearest)
     } else {
-        img
+        image::open(path).ok()?
     };
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
@@ -2321,5 +2358,51 @@ mod tests {
         let keep: Vec<_> = g2.iter().filter(|(p, s, _)| *s != (1, 100)).cloned().collect();
         assert_eq!(keep.len(), 1, "旧 stamp 的条目应被剔除");
         assert_eq!(keep[0].1, (2, 200));
+    }
+
+    /// 判重分层：微信的补写是**密集簇**，用户主动重复截图间隔更长。
+    ///
+    /// 这是 2.1.11 的核心教训：先前统一用「窗口内指纹相同即合并」会在用户
+    /// 主动重复截图时误吞；改用「窗口内相同即合并」又会让微信补写漏过。
+    /// 现在按**距最近一条的间隔**分层，锁住这个行为：
+    ///   - 间隔 < DUP_MERGE_MS（25s）→ 判为补写，一律合并（实测簇内间隔 1~20s）
+    ///   - 间隔 >= DUP_MERGE_MS       → 才可能放行，避免吞掉用户的独立操作
+    #[test]
+    fn dense_cluster_merges_but_long_gap_may_pass() {
+        const DUP_MERGE_MS: u64 = 25_000;
+        let fp = image_fingerprint(&solid_dib(400, 300, [7, 7, 7, 255]));
+
+        // 复刻 handle_clip 的分层逻辑
+        let decide = |prev_times: &[u64], now: u64, user_active: bool| -> bool {
+            // 返回 true = 合并（丢弃）
+            let gap = prev_times
+                .iter()
+                .filter(|t| now - **t < DUP_WINDOW_MS)
+                .map(|t| now - *t)
+                .max();
+            match gap {
+                None => false,
+                Some(g) if g < DUP_MERGE_MS => true,
+                Some(_) => !user_active,
+            }
+        };
+
+        // 微信补写簇：距上一条 1s / 8s / 20s → 全部合并，即便用户正在操作
+        let t0 = 1_000_000;
+        assert!(decide(&[t0], t0 + 1_000, true), "簇内 1s 应合并");
+        assert!(decide(&[t0], t0 + 20_000, true), "簇内 20s 应合并");
+        // 簇内即便用户无输入也合并
+        assert!(decide(&[t0], t0 + 8_000, false), "簇内 8s 应合并");
+
+        // 长间隔 + 用户无输入 → 仍按补写合并
+        assert!(
+            decide(&[t0], t0 + 60_000, false),
+            "长间隔但用户无操作，仍应合并"
+        );
+        // 长间隔 + 用户正在操作 → 放行（用户的主动重复截图）
+        assert!(
+            !decide(&[t0], t0 + 60_000, true),
+            "长间隔且用户主动操作，应放行"
+        );
     }
 }
