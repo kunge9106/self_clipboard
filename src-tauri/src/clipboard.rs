@@ -32,8 +32,17 @@ static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
 static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
 /// id 计数器，避免同毫秒碰撞
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// 最近一条图片条目的 (宽, 高, 时间戳ms)：微信等应用同图双写的判重依据
-static LAST_IMG: Mutex<Option<(i32, i32, u64)>> = Mutex::new(None);
+/// 最近一条图片条目的 (内容指纹, 时间戳ms)：微信等应用同图双写的判重依据。
+/// 用指纹而非「宽高」——见 image_fingerprint 的说明。
+static LAST_IMG: Mutex<Option<(u64, u64)>> = Mutex::new(None);
+/// 连续因「同图」被拦截的次数。指纹判定不是万能的，连续命中多次说明
+/// 很可能是固定区域重复截图这类正常操作，此时强制放行（安全阀）。
+static DUP_STREAK: AtomicU32 = AtomicU32::new(0);
+/// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
+/// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
+static WORKER: OnceLock<std::sync::mpsc::Sender<RawClip>> = OnceLock::new();
+/// 已投递给工作线程、尚未落盘完成的条数。退出前据此等待，避免「刚复制就退出」丢数据。
+static PENDING: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
 // 数据结构
@@ -387,6 +396,45 @@ pub fn delete_items(ids: Vec<String>) -> Result<(), String> {
 // 初始化
 // ---------------------------------------------------------------------------
 
+/// 启动剪贴板落盘工作线程。
+///
+/// 为什么要有它：`on_clipboard_update` 跑在 WndProc 里，也就是**主线程**。
+/// 而落盘一张大图要经历「解码 → 展开成 RGBA → 缩放到上限 → 拼 BMP → 写盘」，
+/// 手机原图能到 200MB 像素数据、耗时数秒。同步做就是界面卡死，用户看到的
+/// 是「复制大图后软件卡死等待」。
+///
+/// 主线程只做「OpenClipboard → 拷贝字节 → CloseClipboard」（纯 memcpy），
+/// 之后把字节所有权整个移交给这里，解码等重活在后台慢慢跑，跑完再 emit。
+/// 单线程串行消费，历史顺序不会被打乱。
+/// 计数守卫：析构时把 PENDING 减一。配合 RAII，任何退出路径都不会漏减。
+struct PendingGuard;
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        PENDING.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn spawn_worker() {
+    // app 走全局 APP（OnceLock，在 init 首行写入）；worker 在订阅监听之前
+    // 启动，所以取用时必定已就绪。
+    let (tx, rx) = std::sync::mpsc::channel::<RawClip>();
+    std::thread::Builder::new()
+        .name("clipboard-store".into())
+        .spawn(move || {
+            while let Ok(raw) = rx.recv() {
+                // guard 保证 PENDING 一定减回去 —— handle_clip 里判重拦截会
+                // 提前 return，手写 fetch_sub 迟早漏掉一次。
+                let _guard = PendingGuard;
+                // handle_clip 内部完成：解码 → 同图判重 → 落盘 → emit。
+                // 这里只负责串行投递，保证与复制顺序一致。
+                handle_clip(raw);
+            }
+        })
+        .map_err(|e| crate::log_warn!("[clipboard] 落盘工作线程启动失败：{e}"))
+        .ok();
+    let _ = WORKER.set(tx);
+}
+
 pub fn init(app: &AppHandle) {
     let _ = APP.set(app.clone());
     if let Some(w) = app.get_webview_window("main") {
@@ -424,6 +472,10 @@ pub fn init(app: &AppHandle) {
     let hist = prune_history(hist, &dir, days);
 
     let _ = HISTORY.set(Mutex::new(hist));
+
+    // 工作线程必须在订阅监听**之前**就位：否则第一批 WM_CLIPBOARDUPDATE
+    // 到达时 WORKER 还没初始化，会退化成主线程同步落盘。
+    spawn_worker();
 
     // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
     unsafe {
@@ -473,38 +525,109 @@ pub fn on_clipboard_update() {
     let raw = unsafe { read_clipboard() };
     let Some(raw) = raw else { return };
 
+    // 交给后台线程：解码（慢）+ 同图去重 + 落盘 + 通知前端。
+    //
+    // 为什么必须在后台：解码一张 8000×6000 的原图要展开近 200MB 像素再缩放，
+    // 耗时可达数秒。而 WM_CLIPBOARDUPDATE 是在 **WndProc 主线程**上处理的，
+    // 在这里同步解码等于把整个界面（含窗口拖动、按钮响应）冻住 —— 这就是
+    // 2.1.10「微信复制大图后软件卡死等待」的成因。
+    //
+    // 主线程现在只做一次 memcpy（把剪贴板里的字节拷出来），立刻返回；
+    // 解码、缩略图、写盘、emit 全在工作线程完成。单工作线程串行消费，
+    // 历史顺序与复制顺序保持一致。
+    if let Some(tx) = WORKER.get() {
+        if tx.send(raw).is_ok() {
+            PENDING.fetch_add(1, Ordering::Relaxed);
+        }
+    } else {
+        // 工作线程还没起来（正常不会发生——init 里先启线程再订阅监听）
+        handle_clip(raw);
+    }
+}
+
+/// 等待工作线程把手头的条目落盘（最多等 timeout）。
+///
+/// 异步化带来的新风险：复制完立刻退出时，工作线程可能还在解码大图，
+/// 进程一退就丢了这条记录。所以在退出流程里先等一小会儿。
+pub fn flush_pending(timeout: std::time::Duration) {
+    let start = std::time::Instant::now();
+    while PENDING.load(Ordering::Relaxed) > 0 {
+        if start.elapsed() >= timeout {
+            crate::log_warn!(
+                "[clipboard] 退出等待超时，仍有 {} 条未落盘",
+                PENDING.load(Ordering::Relaxed)
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// 工作线程里跑的一整条落盘流水线。
+///
+/// 顺序很重要：先 `resolve`（解码），再做图片指纹判重 —— 指纹要基于像素
+/// 内容算，未解码前拿不到。
+fn handle_clip(raw: RawClip) {
+    let Some(raw) = resolve(raw) else { return };
+
     // 图片双写判重：微信复制一张图会**分两次**改写剪贴板（先放 CF_HDROP 的
     // 临时图片文件，再放 CF_DIB 位图），每次序号都变，序号判重拦不住 →
-    // 同一张图出现两条。两次写的位图尺寸必然相同，且间隔在毫秒级 ——
-    // 用「宽高相同 + 间隔 <1s」判定为同图双写。人手在 1s 内连续复制两张
-    // 不同图且恰好同尺寸，实际不可能发生。
+    // 同一张图出现两条。判据是「像素内容指纹一致 + 间隔很短」，
+    // 详见 image_fingerprint 的注释。
     if let RawClip::Image(dib) = &raw {
-        if dib.len() >= 12 {
-            let w = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
-            let h = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
-            let now = now_ms();
-            if let Ok(g) = LAST_IMG.lock() {
-                if let Some((lw, lh, lt)) = *g {
-                    let gap = now - lt;
-                    if lw == w && lh == h && gap < 1000 {
-                        crate::logger::write_line(
-                            "INFO",
-                            "clipboard",
-                            &format!("同图双写拦截：{w}×{h} 距上次 {gap}ms"),
-                        );
-                        return;
-                    }
-                }
+        let now = now_ms();
+        let fp = image_fingerprint(dib);
+        let dup = match LAST_IMG.lock().ok().and_then(|g| *g) {
+            Some((lfp, lt)) => lfp == fp && now - lt < SAME_IMAGE_WINDOW_MS,
+            None => false,
+        };
+        if dup {
+            let streak = DUP_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
+            // 安全阀：指纹判定不是万能的。若连续拦到 3 次，说明更可能是
+            // 「在固定区域反复截到画面相同的图」这类正常操作，用户本意就是要
+            // 再存一条 —— 此时无条件放行。宁可多一条历史，也不能让用户
+            // 复制了却存不进去（这正是 2.1.10 反馈里最难受的一点）。
+            if streak < 3 {
+                crate::logger::write_line(
+                    "INFO",
+                    "clipboard",
+                    &format!("同图双写拦截：像素指纹一致（连续第 {streak} 次）"),
+                );
+                return;
             }
-            if let Ok(mut g) = LAST_IMG.lock() {
-                *g = Some((w, h, now));
-            }
+            crate::logger::write_line(
+                "WARN",
+                "clipboard",
+                "同图判定连续触发 3 次，本次强制放行（疑似固定区域重复截图，非程序双写）",
+            );
+        }
+        DUP_STREAK.store(0, Ordering::Relaxed);
+        if let Ok(mut g) = LAST_IMG.lock() {
+            *g = Some((fp, now));
         }
     }
 
     let item = store_raw(raw);
     if let Some(app) = APP.get() {
-        let _ = app.emit("clipboard-update", item.clone());
+        let _ = app.emit("clipboard-update", item);
+    }
+}
+
+/// 把「待处理」的剪贴板内容整理成可存储形态：
+/// 图片文件解码成 DIB、超大位图降采样到 MAX_SIDE 以内。
+///
+/// 这是整条链路上唯一耗时的部分（解码大图要展开上百 MB 像素），
+/// 所以只在工作线程里调用，绝不能回到主线程。
+fn resolve(raw: RawClip) -> Option<RawClip> {
+    match raw {
+        RawClip::ImageFile(path) => match image_file_to_dib(&path) {
+            Some(dib) => Some(RawClip::Image(dib)),
+            // 解码失败：不是图片 / 文件损坏 / 微信的临时文件已被清理
+            // → 退回按「文件」记录，与改动前行为一致。
+            None => Some(RawClip::Files(vec![path.to_string_lossy().to_string()])),
+        },
+        RawClip::ImageRaw(bytes) => Some(RawClip::Image(clamp_dib(bytes))),
+        other => Some(other),
     }
 }
 
@@ -516,6 +639,12 @@ enum RawClip {
     Text(String),
     Image(Vec<u8>), // DIB 字节
     Files(Vec<String>),
+    /// 待解码的图片文件（CF_HDROP 只给了一张）。
+    /// 解码要展开上百 MB 像素，很慢 —— 只在后台线程 resolve 里做。
+    ImageFile(PathBuf),
+    /// 待处理的原始 CF_DIB 字节（可能超过尺寸上限）。
+    /// 降采样同样只在后台线程做。
+    ImageRaw(Vec<u8>),
 }
 
 unsafe fn read_clipboard() -> Option<RawClip> {
@@ -587,9 +716,9 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                 // 缩略图、点击回贴成位图这些形态全丢了。只有一张且扩展名是图片时，
                 // 就地解码转成图片条目；多张或混合文件维持「文件」条目不变。
                 if files.len() == 1 {
-                    if let Some(dib) = image_file_to_dib(std::path::Path::new(&files[0])) {
-                        return Some(RawClip::Image(dib));
-                    }
+                    // 只记住路径，解码推迟到后台线程 —— 主线程（WndProc）不能
+                    // 被解码大图拖住，否则界面直接冻住。
+                    return Some(RawClip::ImageFile(PathBuf::from(&files[0])));
                 }
                 return Some(RawClip::Files(files));
             }
@@ -603,8 +732,9 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                     let bytes = std::slice::from_raw_parts(p as *const u8, size as usize).to_vec();
                     GlobalUnlock(h);
                     // 与 image_file_to_dib 同一上限：CF_DIB 也可能来自超大位图
-                    // （微信第二次写入、专业软件复制），超限降采样，防巨型 BMP 落盘
-                    return Some(RawClip::Image(clamp_dib(bytes)));
+                    // （微信第二次写入、专业软件复制），超限降采样，防巨型 BMP 落盘。
+                    // 降采样推迟到后台线程，主线程只做完这次 memcpy 就返回。
+                    return Some(RawClip::ImageRaw(bytes));
                 }
             }
         }
@@ -632,6 +762,68 @@ unsafe fn read_clipboard() -> Option<RawClip> {
 /// —— 2.1.10 的「内存不足，无法打开此页面」即此因。超过上限按比例降采样，
 /// 屏幕上并看不出差别；上限取 4096 长边（≈16.7M 像素、BMP 67MB 封顶）。
 const MAX_SIDE: u32 = 4096;
+
+/// 同图双写的时间窗口（毫秒）。
+///
+/// 微信复制一张图会在**毫秒级**内连写两次剪贴板；而人重复截图，哪怕动作很
+/// 快（截图→粘贴→再截图）也在 1 秒量级。取 800ms 把两者分开。
+const SAME_IMAGE_WINDOW_MS: u64 = 800;
+
+/// 对 DIB 的像素内容做量化采样，得出一个 64 位指纹。
+///
+/// **为什么不用「宽高相同」判重**：固定区域连续截图（位置相近、面积差不多）
+/// 宽高必然一模一样，仅比尺寸会把用户的正常操作误判成双写 —— 后果是「复制
+/// 了却存不进历史、也粘贴不出来」，这就是 2.1.10 反馈的问题。改成比像素内容
+/// 后，画面不同的两张图即使尺寸相同也不会误拦。
+///
+/// **为什么采样前先 >>3**：微信两次写出虽是同一张图，但走了不同路径（一次
+/// 从 PNG 临时文件解码、一次直接从 CF_DIB 位图取），重采样后像素值可能差个
+/// 位数。丢掉低 3 位后这类微小差异被抹平，指纹仍然一致。
+fn image_fingerprint(dib: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut h = FNV_OFFSET;
+    let mut mix = |b: u8| {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    };
+
+    if dib.len() < 40 {
+        // 头部都不完整，退化为按内容粗略取指纹（不至于误拦，只可能漏拦）
+        for b in dib.iter().take(64) {
+            mix(*b);
+        }
+        return h;
+    }
+
+    // 宽高参与：尺寸不同必然不是同一张图
+    for b in &dib[4..12] {
+        mix(*b);
+    }
+
+    // 像素区起点 = BITMAPINFOHEADER(40) + 调色板（≤8bpp 时存在）
+    let bpp = u16::from_le_bytes([dib[14], dib[15]]) as u32;
+    let clr_used = u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]]);
+    let palette = if bpp <= 8 {
+        (if clr_used > 0 { clr_used } else { 1u32 << bpp }) * 4
+    } else {
+        0
+    };
+    let off = (40 + palette as usize).min(dib.len());
+    let px = &dib[off..];
+    let n = px.len();
+    if n > 0 {
+        // 均匀取约 128 个采样点，覆盖整张图而不只是开头几行
+        let step = (n / 128).max(1);
+        let mut i = 0usize;
+        while i < n {
+            mix(px[i] >> 3);
+            i += step;
+        }
+    }
+    h
+}
 
 fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
     const EXTS: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
@@ -764,6 +956,9 @@ fn store_raw(raw: RawClip) -> HistoryItem {
                 item.img_path = Some(rel);
             }
         }
+        // ImageFile / ImageRaw 是「待处理」形态，经 resolve() 后会变成
+        // Image 或 Files 才到这儿；留空分支兜底，不走 panic。
+        RawClip::ImageFile(_) | RawClip::ImageRaw(_) => {}
     }
 
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
@@ -1438,6 +1633,10 @@ const CONTENT_DIRS: [&str; 3] = ["data", "images", "files"];
 
 /// 在 RunEvent::Exit 时调用。clean_on_close 开启则清空全部内容文件与历史索引。
 pub fn on_app_exit() {
+    // 落盘已挪到后台线程，退出前得等它跑完，否则「刚复制就退出」会丢记录。
+    // 上限 2 秒：大图解码可能较久，但不至于让退出卡住。
+    flush_pending(std::time::Duration::from_secs(2));
+
     let cfg = crate::settings::get();
     if !cfg.clean_on_close {
         return;
@@ -1551,4 +1750,67 @@ extern "system" {
     fn DragQueryFileW(hdrop: isize, i: u32, buf: *mut u16, buflen: u32) -> u32;
     // 注意：这里**故意不声明 DragFinish**。它只适用于 WM_DROPFILES 的临时 HDROP，
     // 用在本模块的剪贴板 HDROP 上会导致二次释放崩溃（详见 read_clipboard 内的说明）。
+}
+
+// ---------------------------------------------------------------------------
+// 单元测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 拼一个 32bpp BI_RGB 的纯色 DIB，供指纹测试用。
+    fn solid_dib(w: i32, h: i32, color: [u8; 4]) -> Vec<u8> {
+        let px = (w as usize) * (h as usize) * 4;
+        let mut v = Vec::with_capacity(40 + px);
+        v.extend_from_slice(&40u32.to_le_bytes()); // biSize
+        v.extend_from_slice(&w.to_le_bytes());
+        v.extend_from_slice(&h.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+        v.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
+        v.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+        v.extend_from_slice(&(px as u32).to_le_bytes());
+        v.extend_from_slice(&0i32.to_le_bytes());
+        v.extend_from_slice(&0i32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..(w * h) {
+            v.extend_from_slice(&color);
+        }
+        v
+    }
+
+    /// 用户反馈的核心场景：相近位置反复截图，尺寸一样但画面不同 —— 必须放行。
+    #[test]
+    fn same_size_different_content_is_not_dup() {
+        let red = image_fingerprint(&solid_dib(400, 300, [200, 40, 40, 255]));
+        let blue = image_fingerprint(&solid_dib(400, 300, [40, 40, 200, 255]));
+        assert_ne!(red, blue, "同尺寸不同画面必须判为不同图");
+    }
+
+    /// 微信一次复制的两条写入内容相同 —— 必须拦截。
+    #[test]
+    fn same_content_is_dup() {
+        let a = solid_dib(400, 300, [10, 20, 30, 255]);
+        let mut b = a.clone();
+        // 模拟两条写入路径的差异（一路从 PNG 解码、一路直读位图）,
+        // 像素值只差几个低位。
+        if let Some(p) = b.get_mut(40) {
+            *p ^= 0b0000_0101;
+        }
+        assert_eq!(
+            image_fingerprint(&a),
+            image_fingerprint(&b),
+            "内容一致的两次写入必须判为同图"
+        );
+    }
+
+    /// 尺寸是判据的一部分：不同尺寸必然不是同一张。
+    #[test]
+    fn different_size_is_not_dup() {
+        let wide = image_fingerprint(&solid_dib(400, 300, [200, 40, 40, 255]));
+        let tall = image_fingerprint(&solid_dib(300, 400, [200, 40, 40, 255]));
+        assert_ne!(wide, tall);
+    }
 }

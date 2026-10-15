@@ -74,7 +74,8 @@ fn mem_mb() -> u64 {
         pagefile_usage: 0,
         peak_pagefile_usage: 0,
     };
-    let ok = unsafe { GetProcessMemoryInfo(unsafe { GetCurrentProcess() }, &mut c, c.cb) };
+    // GetCurrentProcess() 本身是 safe，只有读取内存计数需要 unsafe
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
     if ok != 0 {
         (c.working_set_size / 1024 / 1024) as u64
     } else {

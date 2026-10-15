@@ -181,21 +181,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// 异常快照：把当前日志复制成 `轻贴-异常_<时间>.log`。
-/// 用户反馈时把这个文件发来即可定位问题。
-pub fn snapshot_on_error(reason: &str) -> PathBuf {
-    let stamp = stamp().replace(' ', "_").replace(':', "-");
-    let name = format!("轻贴-异常_{stamp}.log");
-    let dst = log_dir().join(name);
-
-    // 先把本次异常也写进主日志，再快照，避免快照里缺这一条
-    write_line("ERROR", "crash", reason);
-
-    let src = log_file();
-    let _ = std::fs::copy(&src, &dst);
-    dst
-}
-
 /// 错误发生的次数计数（用于判断是否重复问题）。
 static ERROR_COUNT: Mutex<u32> = Mutex::new(0);
 
