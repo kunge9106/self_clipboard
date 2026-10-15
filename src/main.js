@@ -1210,6 +1210,11 @@ async function openDetail(item) {
   body.scrollTop = 0;
   // 聚焦正文：用户多半想紧接着 Ctrl+A / Ctrl+C 或直接滚动
   body.focus();
+  // 每次打开都回到「未选中」状态 —— 上一次的选区可能还残留，
+  // 那样按钮文案会显示成「取消全选」，与实际不符。
+  window.getSelection()?.removeAllRanges();
+  const btnSelect = document.getElementById("detail-select");
+  if (btnSelect) btnSelect.textContent = "全选";
 }
 
 function closeDetail() {
@@ -1222,7 +1227,9 @@ function closeDetail() {
 
 function bindDetailModal() {
   const mask = document.getElementById("detail-modal");
-  if (!mask) return;
+  const body = document.getElementById("detail-body");
+  const btnSelect = document.getElementById("detail-select");
+  if (!mask || !body || !btnSelect) return;
 
   document.getElementById("detail-close").onclick = closeDetail;
 
@@ -1245,17 +1252,49 @@ function bindDetailModal() {
     }
   };
 
-  // 全选正文。不能靠 Ctrl+A —— 那是「选中整个文档」，会把侧边栏/按钮
-  // 的文本一起选进去。
-  document.getElementById("detail-select").onclick = () => {
-    const body = document.getElementById("detail-body");
-    const range = document.createRange();
-    range.selectNodeContents(body);
+  // 「全选」是**切换**语义：全选后文案变「取消全选」，再点即取消选中。
+  //
+  // ⚠️ 状态**不靠布尔量硬记**。用户随时会手动拖选、或点正文别处取消选区，
+  // 硬记的标记必然与真实选区失配（以为还在「全选」态，其实早变了）。
+  // 直接问「当前选区是不是正好等于整个正文」—— O(1) 且永远准确：
+  // 正文是单个文本节点，全选时 range 落在 <pre> 自身、起点 0、终点 = 子节点数。
+  const isAllSelected = () => {
     const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    body.focus();
+    if (!sel || sel.rangeCount !== 1 || !body.childNodes.length) return false;
+    const r = sel.getRangeAt(0);
+    return (
+      r.startContainer === body &&
+      r.startOffset === 0 &&
+      r.endContainer === body &&
+      r.endOffset === body.childNodes.length
+    );
   };
+  const syncSelectLabel = () => {
+    btnSelect.textContent = isAllSelected() ? "取消全选" : "全选";
+  };
+
+  // ⚠️ 点按钮会移动焦点、从而清掉选区 —— 必须在 mousedown 阶段
+  // preventDefault 把它按住。否则「取消全选」会点了没反应：
+  // 选区在 click 触发之前就已经被清空了，isAllSelected() 永远读到 false。
+  btnSelect.addEventListener("mousedown", (e) => e.preventDefault());
+  btnSelect.onclick = () => {
+    if (isAllSelected()) {
+      window.getSelection().removeAllRanges();
+    } else {
+      const range = document.createRange();
+      range.selectNodeContents(body);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      body.focus();
+    }
+    syncSelectLabel();
+  };
+
+  // 手动拖选 / 点击别处改动选区时，同步按钮文案
+  document.addEventListener("selectionchange", () => {
+    if (!mask.hidden) syncSelectLabel();
+  });
 }
 
 function openContextMenu(x, y, item) {
