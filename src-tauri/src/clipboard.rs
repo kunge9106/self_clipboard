@@ -32,12 +32,17 @@ static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
 static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
 /// id 计数器，避免同毫秒碰撞
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// 最近一条图片条目的 (内容指纹, 时间戳ms)：微信等应用同图双写的判重依据。
+/// 最近若干条图片条目的 (内容指纹, 时间戳ms)：图片判重依据。
 /// 用指纹而非「宽高」——见 image_fingerprint 的说明。
-static LAST_IMG: Mutex<Option<(u64, u64)>> = Mutex::new(None);
-/// 连续因「同图」被拦截的次数。指纹判定不是万能的，连续命中多次说明
-/// 很可能是固定区域重复截图这类正常操作，此时强制放行（安全阀）。
-static DUP_STREAK: AtomicU32 = AtomicU32::new(0);
+///
+/// 存多条而非一条：微信复制一张大图会在**数秒内反复改写剪贴板**（实测同一张
+/// 50MB 的图 4 秒内被写 6 次，每次间隔递增）。只记最后一条的话，间隔一旦超过
+/// 窗口就全放行，历史里会冒出 6 条一模一样的 50MB 记录 —— 既是「复制大图出现
+/// 两张（实际是好几张）」的成因，也意味着要重复做 6 次秒级的解码+写盘，卡顿被
+/// 放大数倍。保留一个小队列，窗口内的重复一律合并。
+static LAST_IMG: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+/// 队列上限：只关心「最近这一小段时间」，不用无限增长。
+const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
 static WORKER: OnceLock<std::sync::mpsc::Sender<RawClip>> = OnceLock::new();
@@ -250,8 +255,14 @@ pub fn get_image(id: String) -> Result<String, String> {
 
 /// 缩略图：列表与悬浮预览专用（PNG，长边 ≤512，单张几十 KB）。
 /// 返回 data URL；失败返回 Err，前端显示占位图。
+///
+/// 必须是 **async**：Tauri 的同步命令跑在**主线程**上，而 `ensure_thumb` 首次
+/// 生成时要「整图解码 → 缩放 → PNG 编码」，一张 16MB 落盘图也要数百毫秒。
+/// 同步执行会让主线程卡住，表现为「复制大图后整个程序冻住一阵」，
+/// 且列表滚动/置顶等交互全部无响应。异步后解码在 Tauri 的异步运行时线程池，
+/// 主线程只等结果。
 #[tauri::command]
-pub fn get_image_thumb(id: String) -> Result<String, String> {
+pub async fn get_image_thumb(id: String) -> Result<String, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let item = {
         let hist = HISTORY.get().unwrap().lock().unwrap();
@@ -570,40 +581,53 @@ pub fn flush_pending(timeout: std::time::Duration) {
 fn handle_clip(raw: RawClip) {
     let Some(raw) = resolve(raw) else { return };
 
-    // 图片双写判重：微信复制一张图会**分两次**改写剪贴板（先放 CF_HDROP 的
-    // 临时图片文件，再放 CF_DIB 位图），每次序号都变，序号判重拦不住 →
-    // 同一张图出现两条。判据是「像素内容指纹一致 + 间隔很短」，
-    // 详见 image_fingerprint 的注释。
+    // 图片判重：微信等应用复制一张图会**反复**改写剪贴板。
+    //
+    // 实测（对应 2.1.11 反馈「微信复制大图还是出现两张」的日志）：同一张 50MB
+    // 的图在 4 秒内被写入 6 次 —— 06:30:19 / :23 / :31 / :35 / :46 / :50，
+    // 间隔 4~15 秒递增。旧判重只比「相邻一条 + 800ms 窗口」，间隔一超过窗口
+    // 就全部放行，历史里落下 6 条一样的记录；每条都要做一次秒级的解码+写盘，
+    // 卡顿被放大 6 倍 —— 这正是「大图卡顿很久」的直接来源。
+    //
+    // 改为在整个最近队列里查（滑动窗口几秒），命中即合并。
     if let RawClip::Image(dib) = &raw {
         let now = now_ms();
         let fp = image_fingerprint(dib);
-        let dup = match LAST_IMG.lock().ok().and_then(|g| *g) {
-            Some((lfp, lt)) => lfp == fp && now - lt < SAME_IMAGE_WINDOW_MS,
+        // 命中窗口内指纹 → 是重复写入。但要区分「微信后台补写」与
+        // 「用户主动又截了一次相同的图」：后者伴随键鼠输入，必须放行，
+        // 否则大窗口会把用户的正常操作吞掉（「复制了却存不进去」）。
+        // 取 3s：一次截图动作（按快捷键 → 框选 → 松开）通常在 3s 内完成，
+        // 而微信的补写是在用户看完/切走之后才陆续发生的。
+        const USER_ACTIVE_MS: u64 = 3_000;
+        let user_active = idle_ms() < USER_ACTIVE_MS;
+        let dup = match LAST_IMG.lock().ok() {
+            Some(g) => g
+                .iter()
+                .any(|(lfp, lt)| *lfp == fp && now - *lt < DUP_WINDOW_MS),
             None => false,
         };
-        if dup {
-            let streak = DUP_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
-            // 安全阀：指纹判定不是万能的。若连续拦到 3 次，说明更可能是
-            // 「在固定区域反复截到画面相同的图」这类正常操作，用户本意就是要
-            // 再存一条 —— 此时无条件放行。宁可多一条历史，也不能让用户
-            // 复制了却存不进去（这正是 2.1.10 反馈里最难受的一点）。
-            if streak < 3 {
-                crate::logger::write_line(
-                    "INFO",
-                    "clipboard",
-                    &format!("同图双写拦截：像素指纹一致（连续第 {streak} 次）"),
-                );
-                return;
-            }
+        if dup && user_active {
             crate::logger::write_line(
-                "WARN",
+                "INFO",
                 "clipboard",
-                "同图判定连续触发 3 次，本次强制放行（疑似固定区域重复截图，非程序双写）",
+                "重复图片已合并（窗口内指纹一致，且用户无键鼠输入 → 判为应用补写）",
+            );
+            return;
+        }
+        if dup {
+            crate::logger::write_line(
+                "INFO",
+                "clipboard",
+                "指纹与近期条目相同，但检测到用户正在操作 → 按新条目记录",
             );
         }
-        DUP_STREAK.store(0, Ordering::Relaxed);
         if let Ok(mut g) = LAST_IMG.lock() {
-            *g = Some((fp, now));
+            g.push((fp, now));
+            g.retain(|(_, t)| now - *t < DUP_WINDOW_MS);
+            let len = g.len();
+            if len > LAST_IMG_KEEP {
+                g.drain(0..len - LAST_IMG_KEEP);
+            }
         }
     }
 
@@ -832,14 +856,29 @@ unsafe fn read_clipboard() -> Option<RawClip> {
 /// ⚠️ 尺寸上限：手机原图/高清截图可达 8000×6000，DIB 未压缩即 190MB，
 /// 落盘 BMP 同量级，前端一旦读取（base64 后再放大 1.33 倍）直接打爆 WebView2
 /// —— 2.1.10 的「内存不足，无法打开此页面」即此因。超过上限按比例降采样，
-/// 屏幕上并看不出差别；上限取 4096 长边（≈16.7M 像素、BMP 67MB 封顶）。
-const MAX_SIDE: u32 = 4096;
-
-/// 同图双写的时间窗口（毫秒）。
+/// 屏幕上并看不出差别。
 ///
-/// 微信复制一张图会在**毫秒级**内连写两次剪贴板；而人重复截图，哪怕动作很
-/// 快（截图→粘贴→再截图）也在 1 秒量级。取 800ms 把两者分开。
-const SAME_IMAGE_WINDOW_MS: u64 = 800;
+/// 2.1.11 把上限从 4096 降到 2048：4096 的门槛意味着 4096×3000 这类「常见手机
+/// 横图」恰好卡在限内、原样落 50MB（实测日志里反复出现 size=50331688）。
+/// 前端把这种条目 base64 后是 67MB 字符串，WebView2 加载必然失败 → 用户看到
+/// 破图占位（截图里那条带「图片」字样的破图条目）；缩略图还要把整张 50MB 再
+/// 完整解码一次才能生成，页面因此卡死数秒。
+///
+/// 剪贴板历史的用途是「刚复制过、回头找得到」，2048 长边（≈4M 像素、BMP 16MB
+/// 封顶）在屏幕上与原图肉眼无差，却让前端负载降到 1/4。
+const MAX_SIDE: u32 = 2048;
+
+/// 图片判重的滑动窗口（毫秒）。
+///
+/// 取值来自实测而非估计。日志里同一张 50MB 的图被微信反复写进剪贴板，时间点
+/// 06:30:19 / :23 / :31 / :35 / :46 / :50 —— 密集段在前 30 秒，但下一簇又出现在
+/// 06:31:36 / :40，整体跨度超过 80 秒。原先的 800ms 只覆盖毫秒级双写，拦不住。
+///
+/// 窗口取 90s 的理由：微信的补写是无用户动作触发的后台行为，会持续一两分钟；
+/// 而人主动反复截同一画面（页面没动）虽然指纹也一致，但两次之间总有操作间隔，
+/// 且 90s 内不会连着截十几次。这个值宁可偏大 —— 误合并的代价只是历史少一条，
+/// 漏合并的代价是重复存进几十 MB 并卡顿数秒。
+const DUP_WINDOW_MS: u64 = 90_000;
 
 /// 对 DIB 的像素内容做量化采样，得出一个 64 位指纹。
 ///
@@ -895,6 +934,27 @@ fn image_fingerprint(dib: &[u8]) -> u64 {
         }
     }
     h
+}
+
+/// 距上一次键鼠输入过了多少毫秒。取不到时返回 u64::MAX（视作「不确定」）。
+///
+/// 用途：区分两种「同一张图被重复写入」——
+///   - 微信复制大图后的**后台补写**：用户全程没动鼠标键盘，间隔越拉越长
+///   - 用户在固定区域**反复主动截图**：每次都有按键/点按
+/// 判重窗口不得不放大到 90s（微信补写跨度实测 81s），这个副作用就是
+/// 「用户连着截两次相同画面，第二次会被吞」。用输入活跃度把两者分开。
+fn idle_ms() -> u64 {
+    unsafe {
+        let mut li = LastInputInfo {
+            cb_size: std::mem::size_of::<LastInputInfo>() as u32,
+            dw_time: 0,
+        };
+        if GetLastInputInfo(&mut li) == 0 {
+            return u64::MAX;
+        }
+        // GetTickCount 约 49.7 天回绕，这里按 u32 自然回绕做减法（wrapping 语义）
+        GetTickCount().wrapping_sub(li.dw_time) as u64
+    }
 }
 
 fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
@@ -1768,6 +1828,16 @@ fn make_id(ts: u64) -> String {
     format!("{:x}-{}", ts, c)
 }
 
+/// LASTINPUTINFO：dwTime 是最后一次键鼠输入的 tick 计数。
+///
+/// 必须定义在 `extern` 块**外面** —— extern 块内只允许声明 foreign item
+/// （函数/静态量），不能放 struct 定义。
+#[repr(C)]
+pub struct LastInputInfo {
+    pub cb_size: u32,
+    pub dw_time: u32,
+}
+
 fn non_null<T>(v: T) -> Option<T>
 where
     T: PartialEq + Default,
@@ -1811,8 +1881,7 @@ fn base64_encode(data: &[u8]) -> String {
 const GMEM_MOVEABLE: u32 = 0x0002;
 
 extern "system" {
-    fn OpenClipboard(hwnd: isize) -> i32;
-    fn AddClipboardFormatListener(hwnd: isize) -> i32;
+    fn OpenClipboard(hwnd: isize) -> i32;    fn AddClipboardFormatListener(hwnd: isize) -> i32;
     fn CloseClipboard() -> i32;
     fn EmptyClipboard() -> i32;
     fn GetClipboardData(format: u32) -> isize;
@@ -1820,6 +1889,8 @@ extern "system" {
     fn IsClipboardFormatAvailable(format: u32) -> i32;
     fn GetClipboardSequenceNumber() -> u32;
     fn GetClipboardOwner() -> isize;
+    fn GetLastInputInfo(pli: *mut LastInputInfo) -> i32;
+    fn GetTickCount() -> u32;
 
     fn GlobalAlloc(flags: u32, bytes: usize) -> isize;
     fn GlobalLock(handle: isize) -> *mut std::ffi::c_void;
@@ -1891,5 +1962,71 @@ mod tests {
         let wide = image_fingerprint(&solid_dib(400, 300, [200, 40, 40, 255]));
         let tall = image_fingerprint(&solid_dib(300, 400, [200, 40, 40, 255]));
         assert_ne!(wide, tall);
+    }
+
+    /// 复现 2.1.11 的真实故障：微信把同一张图在八十多秒内反复写进剪贴板，
+    /// 间隔远大于原先 800ms 的窗口。队列判重必须全部合并，只留一条。
+    ///
+    /// 间隔取自日志实测（06:30:19 / :23 / :31 / :35 / :46 / :50 / 06:31:36 / :40）。
+    #[test]
+    fn repeated_writes_within_queue_all_merged() {
+        let g = Mutex::new(Vec::new());
+        let fp = image_fingerprint(&solid_dib(400, 300, [10, 20, 30, 255]));
+        let t0 = 1_000_000u64;
+        let gaps = [
+            0u64,    // 首次
+            4_000,   // +4s
+            8_000,   // +8s
+            4_000,   // +4s
+            11_000,  // +11s
+            4_000,   // +4s   —— 距首次 31s
+            46_000,  // +46s  —— 距首次 77s（第二簇）
+            4_000,   // +4s   —— 距首次 81s
+        ];
+
+        let mut kept = 0;
+        let mut t = t0;
+        for gap in gaps {
+            let now = t + gap;
+            let dup = g
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(lfp, lt)| *lfp == fp && now - *lt < DUP_WINDOW_MS);
+            if !dup {
+                g.lock().unwrap().push((fp, now));
+                kept += 1;
+            }
+            t = now;
+        }
+        assert_eq!(kept, 1, "同一张图的 8 次反复写入只应保留 1 条");
+    }
+
+    /// 窗口必须够大到能覆盖微信的补写跨度，否则上面那条测试就是假通过。
+    #[test]
+    fn dup_window_covers_observed_wechat_span() {
+        // 实测最远一次距首次约 81s
+        assert!(DUP_WINDOW_MS > 81_000, "窗口必须覆盖实测的 81s 跨度");
+    }
+
+    /// 队列不能无限增长，也不能把不同图片挤掉。
+    #[test]
+    fn queue_is_bounded_and_keeps_distinct_images() {
+        let mut g: Vec<(u64, u64)> = Vec::new();
+        let t0 = 1_000_000u64;
+        // 20 张互不相同的图，窗口内交替写入
+        for i in 0..20u64 {
+            let now = t0 + i * 100;
+            let fp = image_fingerprint(&solid_dib(400, 300, [i as u8, 1, 2, 255]));
+            g.push((fp, now));
+            g.retain(|(_, t)| now - *t < DUP_WINDOW_MS);
+            let len = g.len();
+            if len > LAST_IMG_KEEP {
+                g.drain(0..len - LAST_IMG_KEEP);
+            }
+        }
+        assert!(g.len() <= LAST_IMG_KEEP, "队列长度必须受限");
+        // 队首是最早的，应已被淘汰
+        assert_eq!(g[0].1, t0 + (20 - LAST_IMG_KEEP as u64) * 100);
     }
 }
