@@ -1,6 +1,6 @@
 [package]
 name = "self-clipboard"
-version = "2.1.10"
+version = "2.2.0"
 description = "轻贴 — 本地剪贴板管理工具"
 authors = ["kunge9106"]
 edition = "2021"
@@ -32,14 +32,29 @@ serde_json = "1"
 # 缓存目录「更改目录」的文件夹选择框（仅 Rust 侧调用，无需前端 JS 包与权限）
 tauri-plugin-dialog = "2"
 
-# 微信等应用「复制图片」放进剪贴板的是 CF_HDROP（临时 PNG/JPG 文件）而非位图，
-# 要转成图片条目必须解码文件。只开用得到的格式特性，不拖入无关解码器。
+# 微信等应用「复制图片」放进剪贴板的是 CF_HDROP（临时图片文件）而非位图，
+# 解码只发生在**真正需要时**（生成缩略图、回贴），捕获路径上不解码。
+#
+# 格式**不做限制**：凡 image 库能解码的都认。除主流的 png/jpeg/gif/bmp/webp，
+# 另开 ico（图标）、tiff（扫描件）、tga/dds（游戏素材）、pnm/hdr/qoi/ff（小众）
+# —— 都是纯 Rust 实现，不引入系统库、不拖 C 依赖。
+# 刻意**不开** avif：image 0.25 的 AVIF 解码依赖 dav1d（系统库），
+# 为一个小众格式引入外部依赖不值得；这类格式仍会被识别并原样存盘，
+# 只是缩略图与回贴会走「按文件」兜底（见 copy_back）。
 image = { version = "0.25", default-features = false, features = [
   "png",
   "jpeg",
   "bmp",
   "gif",
   "webp",
+  "ico",
+  "tiff",
+  "tga",
+  "dds",
+  "pnm",
+  "hdr",
+  "qoi",
+  "ff",
 ] }
 
 # Windows 材质与剪贴板一律走手写 FFI，不引入 windows crate：
@@ -51,3 +66,16 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+# 开发构建也把**依赖**编译成优化版。
+#
+# 起因：debug 下微信复制大图要 4~5 秒才出现，而同样的解码在 release 里只要
+# 几百毫秒 —— 差别全在 `image` 的解码循环没开优化（debug 默认 opt-level=0）。
+# 用户是用 debug 构建在测，看到的就是这个被放大的耗时。
+#
+# `package."*"` 只作用于依赖，**不含本 crate**：
+#   - 本 crate 仍以 opt-level=0 编译 → 编译快、断点变量可读，调试体验不变
+#   - 依赖很少变动，首次多花一点编译时间，之后不再重编
+# 收益：JPEG/PNG 解码提速约一个数量级，是「复制到出现」这段耗时的主要来源。
+[profile.dev.package."*"]
+opt-level = 3

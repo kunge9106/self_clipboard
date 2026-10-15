@@ -74,7 +74,8 @@ fn mem_mb() -> u64 {
         pagefile_usage: 0,
         peak_pagefile_usage: 0,
     };
-    let ok = unsafe { GetProcessMemoryInfo(unsafe { GetCurrentProcess() }, &mut c, c.cb) };
+    // GetCurrentProcess() 本身是 safe，只有读取内存计数需要 unsafe
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
     if ok != 0 {
         (c.working_set_size / 1024 / 1024) as u64
     } else {
@@ -595,6 +596,15 @@ fn changelog_section(v: &str) -> String {
 /// 统一的结果 payload（`check_update` 与 `update_state` 返回同一个形状）。
 fn payload(rel: &Release) -> serde_json::Value {
     let cur = env!("CARGO_PKG_VERSION");
+    // 已下载但未安装的安装包（用户上次在安装器上取消了）：有的话前端把
+    // 按钮切成「重新安装」。只认当前版本的资产名，旧版本包不算数。
+    let downloaded = crate::settings::get().update_cache.as_ref().and_then(|c| {
+        if c.asset_name.is_empty() {
+            return None;
+        }
+        let p = crate::clipboard::cache_dir().join("update").join(&c.asset_name);
+        p.is_file().then(|| p.to_string_lossy().to_string())
+    });
     json!({
         "hasUpdate": is_newer(&rel.latest, cur),
         "latest": rel.latest,
@@ -606,6 +616,7 @@ fn payload(rel: &Release) -> serde_json::Value {
         "assetUrl": rel.asset_url,
         "assetName": rel.asset_name,
         "assetSize": rel.asset_size,
+        "downloadedPath": downloaded,
         // 本机这版的说明（随包内置）。没有新版本时前端显示它，
         // 这样 beta / 未发布版本也能看到自己的更新日志。
         "localTag": cur,
@@ -653,16 +664,16 @@ pub fn auto_check(app: tauri::AppHandle) {
         let rel = match fetch_release() {
             Ok(r) => r,
             Err(e) => {
-                println!("[update] 启动自检未完成（静默）：{e}");
+                crate::log_print!("[update] 启动自检未完成（静默）：{e}");
                 return;
             }
         };
         save_cache(&rel);
         if !is_newer(&rel.latest, env!("CARGO_PKG_VERSION")) {
-            println!("[update] 启动自检：已是最新（远端 {}）", rel.latest);
+            crate::log_print!("[update] 启动自检：已是最新（远端 {}）", rel.latest);
             return;
         }
-        println!("[update] 启动自检：发现新版本 {}", rel.latest);
+        crate::log_print!("[update] 启动自检：发现新版本 {}", rel.latest);
         let _ = app.emit("update-available", payload(&rel));
     });
 }
@@ -693,6 +704,83 @@ pub fn update_state() -> serde_json::Value {
         }),
         None => payload(&Release::default()),
     }
+}
+
+/// 清掉「已经装上了」的安装包。
+///
+/// 更新流程：下载到 `<缓存>/update/` → 拉起安装器 → 本进程退出。装完后版本号
+/// 就追平了，那份包的唯一用途（供安装）已经结束，留在磁盘上只是垃圾。
+///
+/// 为什么不能只认 `asset_name`：它记的是**最近一次检查**的版本。若后来远端
+/// 又发了新版，缓存里的 `asset_name` 就指向新包，旧包便再也没人管，越积越多。
+/// 所以这里扫描整个目录，逐个比对，只删「不比当前版本新」的那几份。
+pub fn prune_stale_installers() {
+    let dir = crate::clipboard::cache_dir().join("update");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let cur = match parse_semver(env!("CARGO_PKG_VERSION")) {
+        Some(v) => v,
+        None => return,
+    };
+
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(v) = parse_semver(&name) else {
+            continue;
+        };
+        // 还比当前版本新 → 用户上次取消了安装，留着让他能继续装
+        if v > cur {
+            continue;
+        }
+        let _ = std::fs::remove_file(&p);
+        crate::log_print!("[update] 清理安装包 v{}（已安装或过期）", name);
+    }
+}
+
+/// 从文件名里取出第一组 `主.次.修` 版本号，取不到返回 None。
+///
+/// 安装包名形如 `轻贴_2.1.8_x64-setup.exe` / `light_clip_v2.1.8_setup.exe`，
+/// 统一按「数字.数字.数字」扫描即可，不必区分命名风格。
+fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = 0usize;
+
+    while i < n {
+        if !b[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let mut parts = [0u32; 3];
+        let mut k = 0usize;
+        let mut j = i;
+
+        loop {
+            let mut v = 0u32;
+            while j < n && b[j].is_ascii_digit() {
+                v = v * 10 + (b[j] - b'0') as u32;
+                j += 1;
+            }
+            parts[k] = v;
+            k += 1;
+
+            if k == 3 {
+                return Some((parts[0], parts[1], parts[2]));
+            }
+            if j < n && b[j] == b'.' {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        i = if j > i { j } else { i + 1 };
+    }
+    None
 }
 
 /// 打开外部链接（项目主页 / 新建反馈 / 下载页）。
@@ -778,7 +866,7 @@ fn download_inner(app: &tauri::AppHandle) -> Result<String, String> {
             rel
         }
         Err(e) => {
-            println!("[update] 下载前重新获取发布信息失败，改用缓存：{e}");
+            crate::log_print!("[update] 下载前重新获取发布信息失败，改用缓存：{e}");
             Release {
                 latest: cached.latest,
                 notes: cached.notes,
@@ -887,7 +975,7 @@ fn download_inner(app: &tauri::AppHandle) -> Result<String, String> {
                 "update-progress",
                 json!({ "got": got, "total": total, "percent": 100 }),
             );
-            println!("[update] 安装包已就绪：{}", final_path.display());
+            crate::log_print!("[update] 安装包已就绪：{}", final_path.display());
             return Ok(final_path.to_string_lossy().to_string());
         }
         if last_err.is_empty() {

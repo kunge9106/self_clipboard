@@ -124,7 +124,7 @@ fn set_window_composition_attribute() -> Option<SetWindowCompositionAttributeFn>
 
         let dll = LoadLibraryA(b"user32.dll\0".as_ptr() as *const i8);
         if dll == 0 {
-            eprintln!("[effects] 加载 user32.dll 失败");
+            crate::log_warn!("[effects] 加载 user32.dll 失败");
             return None;
         }
         let proc = GetProcAddress(
@@ -132,7 +132,7 @@ fn set_window_composition_attribute() -> Option<SetWindowCompositionAttributeFn>
             b"SetWindowCompositionAttribute\0".as_ptr() as *const i8,
         );
         if proc.is_null() {
-            eprintln!("[effects] user32 中找不到 SetWindowCompositionAttribute 导出");
+            crate::log_warn!("[effects] user32 中找不到 SetWindowCompositionAttribute 导出");
             return None;
         }
         Some(std::mem::transmute::<
@@ -229,7 +229,7 @@ pub fn detect_build() -> u32 {
         info.os_version_info_size = std::mem::size_of::<RtlOsVersionInfoExW>() as u32;
         let status = RtlGetVersion(&mut info as *mut _);
         if status < 0 {
-            eprintln!("[effects] RtlGetVersion 失败 status=0x{:08X}，按 solid 处理", status);
+            crate::log_warn!("[effects] RtlGetVersion 失败 status=0x{:08X}，按 solid 处理", status);
             return 0;
         }
         info.build_number
@@ -261,7 +261,7 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     let _ = BUILD.set(build);
     let _ = TIER.set(tier);
 
-    println!(
+    crate::log_print!(
         "[effects] windows build={} → tier={} (radius≤{}px)",
         build,
         tier.as_str(),
@@ -297,12 +297,12 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
 
     match result {
         Ok(()) => {
-            println!("[effects] 材质应用完成：{}", tier.as_str());
+            crate::log_print!("[effects] 材质应用完成：{}", tier.as_str());
             tier
         }
         Err(code) => {
             // 开发原则 3：降级必须显式，不能假装成功
-            eprintln!(
+            crate::log_warn!(
                 "[effects] 材质 {} 应用失败 code=0x{:08X}，降级为 solid",
                 tier.as_str(),
                 code
@@ -440,13 +440,13 @@ pub fn apply_rounded_corners(hwnd: isize) {
 
         let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, d, d);
         if rgn == 0 {
-            eprintln!("[effects] CreateRoundRectRgn 失败");
+            crate::log_warn!("[effects] CreateRoundRectRgn 失败");
             return;
         }
         if SetWindowRgn(hwnd, rgn, 1) == 0 {
             // 失败时 region 所有权还在我们手里，要释放
             DeleteObject(rgn);
-            eprintln!("[effects] SetWindowRgn 失败");
+            crate::log_warn!("[effects] SetWindowRgn 失败");
         }
     }
 }
@@ -516,7 +516,7 @@ fn strip_window_frame(hwnd: isize) {
         let mask = WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
         let cur = GetWindowLongPtrW(hwnd, GWL_STYLE);
         if cur == 0 {
-            eprintln!("[effects] 读取窗口样式失败");
+            crate::log_warn!("[effects] 读取窗口样式失败");
             return;
         }
         let want = cur & !mask;
@@ -534,7 +534,7 @@ fn strip_window_frame(hwnd: isize) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
-        println!(
+        crate::log_print!(
             "[effects] 已移除窗口 frame 样式位（0x{:X} → 0x{:X}）",
             cur, want
         );
@@ -562,7 +562,7 @@ fn disable_nc_rendering(hwnd: isize) {
             std::mem::size_of::<u32>() as u32,
         );
         if hr < 0 {
-            eprintln!("[effects] 关闭 NC 渲染失败 hr=0x{:08X}", hr);
+            crate::log_warn!("[effects] 关闭 NC 渲染失败 hr=0x{:08X}", hr);
         }
     }
 }
@@ -577,7 +577,7 @@ fn set_immersive_dark(hwnd: isize, dark: bool) {
             std::mem::size_of::<u32>() as u32,
         );
         if hr < 0 {
-            eprintln!("[effects] immersive dark 设置失败 hr=0x{:08X}", hr);
+            crate::log_warn!("[effects] immersive dark 设置失败 hr=0x{:08X}", hr);
         }
     }
 }
@@ -1236,12 +1236,12 @@ pub fn disable_resize_border(hwnd: isize) {
         }
         let prev = SetWindowLongPtrW(found, GWLP_WNDPROC_BORDER, border_proc as isize);
         if prev == 0 {
-            eprintln!("[effects] 缩放边框子窗口子类化失败");
+            crate::log_warn!("[effects] 缩放边框子窗口子类化失败");
             return;
         }
         BORDER_ORIG.store(prev, std::sync::atomic::Ordering::Relaxed);
         BORDER_HWND.store(found, std::sync::atomic::Ordering::Relaxed);
-        eprintln!("[effects] 缩放边框子窗口已接管（hwnd={found}）");
+        crate::log_warn!("[effects] 缩放边框子窗口已接管（hwnd={found}）");
     }
 }
 
@@ -1359,9 +1359,9 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
 
     let orig = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as isize) };
     if orig == 0 {
-        eprintln!("[effects] WndProc 子类挂载失败（SetWindowLongPtrW 返回 0）");
+        crate::log_warn!("[effects] WndProc 子类挂载失败（SetWindowLongPtrW 返回 0）");
         return;
     }
     ORIG_WNDPROC.store(orig, std::sync::atomic::Ordering::Relaxed);
-    println!("[effects] 焦点 hook 已挂载（WM_NCACTIVATE → 不重绘 NC 区）");
+    crate::log_print!("[effects] 焦点 hook 已挂载（WM_NCACTIVATE → 不重绘 NC 区）");
 }

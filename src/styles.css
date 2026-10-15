@@ -844,7 +844,11 @@ body.dark.round .tag-kind {
   white-space: pre-wrap;
   word-break: break-all;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  /* 2 行：列表是「扫一眼找哪条」的视图，不是用来读正文的 ——
+     想细看有右键「查看全文」。2 行让卡片高度更整齐、同屏条数更多。
+     （后端 make_text_preview 也按 2 行生成，两边必须一致，否则会出现
+      「内容够 3 行但被这里截成 2 行」的错位感。） */
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   user-select: text;
@@ -871,7 +875,10 @@ body.dark.round .tag-kind {
   position: fixed;
   z-index: 1000;
   min-width: 132px;
-  padding: 4px;
+  /* 内边距 + 1px 行距：条目之间留一丝缝，悬浮高亮块才不会彼此贴死成一整块。
+     改动前没有 gap，相邻两项的高亮圆角直接相接，看起来「间距很奇怪」。 */
+  padding: 5px;
+  gap: 1px;
   display: flex;
   flex-direction: column;
   border-radius: var(--radius-sm);
@@ -891,11 +898,43 @@ body.dark .ctx-menu {
   color: var(--text);
   font-family: var(--font);
   font-size: 13px;
+  /* 图标 + 文字：整行横向排列，文字那格 flex:1 吃掉剩余宽度，
+     于是整行都是可点区域，鼠标落在图标上也能点中。 */
+  display: flex;
+  align-items: center;
+  gap: 9px;
   text-align: left;
   padding: 7px 12px;
   border-radius: 5px;
   cursor: default;
   transition: background 0.1s ease;
+}
+
+/* 菜单项左侧图标。
+   颜色刻意不写死：stroke 用 currentColor，危险项（.danger）的图标会自动变红，
+   悬浮反白时也自动跟着变白，不用为每种状态各写一条规则。 */
+.ctx-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ctx-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ctx-label {
+  flex: 1 1 auto;
+  white-space: nowrap;
 }
 
 html:not(.hovers-off) .ctx-item:hover {
@@ -917,11 +956,17 @@ html:not(.hovers-off) .ctx-item.danger:hover {
   pointer-events: none;
 }
 
-/* 菜单分组分隔线 */
+/* 菜单分组分隔线。
+   ⚠️ 必须用 --track-bg（「比底色深一点的中性色」），不能用 --stroke：
+   --stroke 是给**玻璃面**用的白色描边，而菜单底色接近不透明浅色，
+   白线在上面等于隐形 —— 于是用户只看到一段莫名的空白，反馈「间距看着很奇怪」。
+   --track-bg 在明/暗两套主题下都有定义，语义也正是「必须看得见的分隔」。 */
 .ctx-sep {
   height: 1px;
-  margin: 4px 8px;
-  background: var(--stroke);
+  /* 左右 12px = .ctx-item 的水平内边距，让分隔线两端与条目文字对齐，
+     不会比文字多凸出去一截（原来 8px，线与文字错开，看着别扭）。 */
+  margin: 4px 12px;
+  background: var(--track-bg);
 }
 
 /* 设置页 */
@@ -1239,6 +1284,104 @@ body.dark .modal {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+   全文详情弹窗
+   普通 .modal 的 max-width 只有 320px —— 那是给「确认/取消」这种一句话弹窗
+   用的，放正文完全不够。这里单独放宽，并让正文区可滚动。
+--------------------------------------------------------------------------- */
+/* 固定尺寸：查看态与编辑态**共用同一块区域**，切换模式时不跳动，
+   也不随内容多少或窗口大小变化（用户要求「默认大小、不可缩放」）。
+   取 720×520 —— 应用窗口的最小尺寸是 880×580，即便把窗口缩到最小，
+   弹窗四周仍有余量，不会溢出。 */
+.modal-detail {
+  width: 720px;
+  height: 520px;
+  /* 覆盖 .modal 的 min-width:260px / max-width:320px（那是给一句话确认框的） */
+  min-width: 0;
+  max-width: none;
+  max-height: none;
+  /* 头部 + 正文 + 按钮三段；中间由 flex:1 吃掉剩余高度 */
+  overflow: hidden;
+}
+
+/* 头部与按钮行都按内容高度，不参与伸缩 —— 只剩正文区去分配剩余空间 */
+.modal-detail .modal-head,
+.modal-detail .modal-actions {
+  flex: none;
+}
+
+/* 标题与「共 N 字 · M 行」同一行，右侧信息不换行 */
+.modal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex: none;
+}
+
+.modal-sub {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.detail-body {
+  margin: 0;
+  /* flex:1 + 弹窗的固定高度 → 查看态(<pre>)与编辑态(<textarea>)自动是同一块尺寸。
+     改动前没给 textarea 兜底，它按 rows 默认高度渲染，所以编辑框明显比查看区小。 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  /* 比窗口底稍深一点，让正文区看起来是「一块内容」而不是浮在玻璃上 */
+  background: rgba(0, 0, 0, 0.04);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "Microsoft YaHei UI",
+    monospace;
+  /* 15px：比列表正文（13px）明显大一档，长文本连读不费眼。
+     查看态与编辑态共用这个类，所以两边字号永远一致。 */
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--text);
+  /* 保留换行与缩进（正文原样呈现）；同时超长无空格串（URL/base64）必须能折行，
+     否则会把弹窗横向撑出滚动条。 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* 明确允许选中与光标样式：这个弹窗的主要用途就是「挑一段复制」 */
+  user-select: text;
+  cursor: text;
+}
+
+.detail-body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+body.dark .detail-body {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* 编辑态用 <textarea> 承载正文。它同时挂着 .detail-body，所以内边距、边框、
+   底色、等宽字体全部复用 —— 查看态切到编辑态时视觉不跳动。
+   这里只补 textarea 自己的默认值覆盖。 */
+.detail-editor {
+  /* textarea 默认带拖拽柄，会把弹窗布局撑乱 */
+  resize: none;
+  width: 100%;
+  box-sizing: border-box;
+  /* 与 .detail-body 的 line-height 对齐，避免切换时行高变化 */
+  line-height: inherit;
+}
+
+/* 查看态 / 编辑态互斥的按钮靠 hidden 属性切换。
+   .modal-actions 是 flex 容器，按钮是 flex item；若某个按钮类将来加了 display，
+   UA 的 [hidden]{display:none} 就会被盖掉（本项目已有 .modal-check[hidden] 的
+   同类先例），这里显式兜住。 */
+.modal-actions > [hidden] {
+  display: none;
 }
 
 /* 垃圾桶弹窗：「是否连置顶/收藏一起清」的勾选行。
@@ -1696,4 +1839,17 @@ body.round .about-hero,
 body.round .about-notes pre,
 body.round .about-notes code {
   box-shadow: var(--card-shadow);
+}
+
+/* 图片过大占位（2.1.10 OOM 灾难条目）：保留卡片可选中删除，不再拖垮页面 */
+.card-image.is-oversize {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: left;
+  white-space: pre-line;
+  font-size: 12px;
+  color: var(--text-dim);
+  border: 1px dashed var(--stroke);
+  border-radius: var(--radius-sm);
 }

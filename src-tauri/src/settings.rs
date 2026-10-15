@@ -226,7 +226,7 @@ pub fn init(app: &tauri::AppHandle) {
     let _ = CONFIG_PATH.set(dir.join("config.json"));
 
     let cfg = load();
-    println!("[settings] 已加载配置：{:?}", cfg);
+    crate::log_print!("[settings] 已加载配置：{:?}", cfg);
     let _ = CONFIG.set(Mutex::new(cfg));
 }
 
@@ -237,7 +237,7 @@ fn load() -> Config {
     match fs::read_to_string(path) {
         Ok(s) => {
             let mut cfg: Config = serde_json::from_str(&s).unwrap_or_else(|e| {
-                eprintln!("[settings] config.json 解析失败：{e}，使用默认配置");
+                crate::log_warn!("[settings] config.json 解析失败：{e}，使用默认配置");
                 Config::default()
             });
             // 老配置的单一浓度归进对应模式那一档，并立刻回写 ——

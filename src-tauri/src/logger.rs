@@ -18,10 +18,13 @@ const MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// 保留多少：截断后留下尾部这么多
 const KEEP_BYTES: u64 = MAX_BYTES / 2;
 
-/// 安装全局钩子：`println!` / `eprintln!` 的内容自动追加到日志文件。
+/// 安装 panic 钩子。
 ///
-/// 这样全项目几十处打印语句不用逐个改，也能全部留痕——排查问题时
-/// 「日志里有没有这一行」直接决定能不能定位。
+/// ⚠️ 诚实说明：本文件早期注释声称「println!/eprintln! 自动进日志文件」，
+/// 这是错的——Rust stable 没有拦截标准输出/错误的钩子，此前只有 panic
+/// 和显式调 write_line 的地方落盘，其余几十处 println 全部只进了没人接的
+/// stderr。这就是「报错没被记录到」的根因之一。
+/// 现在的补法：项目内统一改用下方 log_print!/log_warn! 宏（写文件 + stdout）。
 pub fn install_hook() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -41,12 +44,32 @@ pub fn install_hook() {
             // 崩溃是用户最需要反馈的场景：另存一份带时间戳的文件，
             // 用户把这个发过来就能看到崩溃前的完整上下文。
             let dst = log_dir().join(format!(
-                "轻贴-崩溃_{}.log",
+                "Clipboard-崩溃_{}.log",
                 stamp().replace(' ', "_").replace(':', "-")
             ));
             let _ = std::fs::copy(log_file(), &dst);
         }));
     });
+}
+
+/// 原样落盘一行（保留消息里的既有 [标签] 前缀，级别归 INFO）。
+/// 供全模块 println! 的批量替换用：行为对用户完全不变，多了一份文件记录。
+pub fn write_raw(line: &str) {
+    let line = line.trim_end_matches('\n');
+    if line.trim().is_empty() {
+        return;
+    }
+    write_line("INFO", "app", line);
+}
+
+/// 同 write_raw，级别归 WARN（对应原 eprintln!——它通常意味着出了状况）。
+pub fn write_raw_warn(line: &str) {
+    let line = line.trim_end_matches('\n');
+    if line.trim().is_empty() {
+        return;
+    }
+    write_line("WARN", "app", line);
+    eprintln!("{line}");
 }
 
 fn log_dir() -> PathBuf {
@@ -65,10 +88,13 @@ fn log_dir() -> PathBuf {
     d
 }
 
-/// 日志文件路径：正常是 `log/轻贴.log`；一旦出现异常就另存
-/// `轻贴-异常_<时间戳>.log`，用户把那个发过来即可。
+/// 日志文件路径：正常是 `log/Clipboard.log`；一旦出现异常就另存
+/// `Clipboard-异常_<时间戳>.log`，用户把那个发过来即可。
+///
+/// 文件名刻意用 ASCII 的 `Clipboard`：日志常常要发给别人看，
+/// 纯 ASCII 名在各类聊天工具、邮件、压缩包里都不会变成乱码。
 pub fn log_file() -> PathBuf {
-    log_dir().join("轻贴.log")
+    log_dir().join("Clipboard.log")
 }
 
 /// 追加一行。带级别与模块标签，便于按需grep。
@@ -98,35 +124,94 @@ pub fn write_line(level: &str, tag: &str, msg: &str) {
 /// 记一条错误（同时打一份到 stderr，保持原有调试体验）。
 #[macro_export]
 macro_rules! log_err {
-    ($tag:expr, $($arg:tt)*) => {
+    ($tag:expr, $($arg:tt)*) => {{
         $crate::logger::write_line("ERROR", $tag, &format!($($arg)*));
         eprintln!("[{}] {}", $tag, format!($($arg)*));
-    };
+    }};
 }
 
 /// 记一条普通信息。
 #[macro_export]
 macro_rules! log_info {
-    ($tag:expr, $($arg:tt)*) => {
+    ($tag:expr, $($arg:tt)*) => {{
         $crate::logger::write_line("INFO", $tag, &format!($($arg)*));
-    };
+    }};
 }
 
-/// 本地时间戳 `MM-DD HH:MM:SS`。手算避免引chrono/chrono 依赖。
+/// 替代 println!：输出到 stdout 的同时写进日志文件。
+/// 消息文本原样保留（项目内 println 惯例自带 [模块] 前缀）。
+/// 用块表达式包裹，使其可用于 match 分支等表达式位置。
+#[macro_export]
+macro_rules! log_print {
+    ($($arg:tt)*) => {{
+        $crate::logger::write_raw(&format!($($arg)*));
+    }};
+}
+
+/// 替代 eprintln!：输出到 stderr 的同时以 WARN 级别写进日志文件。
+#[macro_export]
+macro_rules! log_warn {
+    ($($arg:tt)*) => {{
+        $crate::logger::write_raw_warn(&format!($($arg)*));
+    }};
+}
+
+/// 本地时间戳 `YYYY-MM-DD HH:MM:SS`。
+///
+/// ⚠️ 必须是**本地时间**。改动前这里是「拿 UNIX 秒数手算年月日时分秒」——
+/// 那算出来的是 **UTC**，于是日志时间比本地时间慢 8 小时（中国区），
+/// 用户对日志时会以为「时间戳坏了/日志是早上的旧文件」。用户实测反馈过。
+/// 手算还无法处理时区与夏令时，不如直接问系统。
 fn stamp() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs / 86_400;
-    let rem = secs % 86_400;
-    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    // 2000-01-01 起的累计天数转年月日
-    let (y, mo, d) = civil_from_days(days as i64);
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02}")
+    #[cfg(windows)]
+    {
+        let mut st = SystemTimeLocal::default();
+        unsafe {
+            GetLocalTime(&mut st);
+        }
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            st.w_year, st.w_month, st.w_day, st.w_hour, st.w_minute, st.w_second
+        )
+    }
+    // 非 Windows（本项目实际不发布，仅为让代码在其它平台可编译/可测）：
+    // 退回 UTC，并显式标注，避免误读成本地时间。
+    #[cfg(not(windows))]
+    {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let days = secs / 86_400;
+        let rem = secs % 86_400;
+        let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+        let (y, mo, d) = civil_from_days(days as i64);
+        format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02}")
+    }
+}
+
+/// Win32 SYSTEMTIME。字段即日历值，无需再做换算。
+#[repr(C)]
+#[derive(Default)]
+struct SystemTimeLocal {
+    w_year: u16,
+    w_month: u16,
+    w_day_of_week: u16,
+    w_day: u16,
+    w_hour: u16,
+    w_minute: u16,
+    w_second: u16,
+    w_milliseconds: u16,
+}
+
+#[cfg(windows)]
+extern "system" {
+    fn GetLocalTime(lp_system_time: *mut SystemTimeLocal);
 }
 
 /// days since 1970-01-01 → (年, 月, 日)，Howard Hinnant 的算法。
+/// 仅供非 Windows 回退路径使用。
+#[cfg(not(windows))]
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -140,23 +225,32 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// 异常快照：把当前日志复制成 `轻贴-异常_<时间>.log`。
-/// 用户反馈时把这个文件发来即可定位问题。
-pub fn snapshot_on_error(reason: &str) -> PathBuf {
-    let stamp = stamp().replace(' ', "_").replace(':', "-");
-    let name = format!("轻贴-异常_{stamp}.log");
-    let dst = log_dir().join(name);
-
-    // 先把本次异常也写进主日志，再快照，避免快照里缺这一条
-    write_line("ERROR", "crash", reason);
-
-    let src = log_file();
-    let _ = std::fs::copy(&src, &dst);
-    dst
-}
-
 /// 错误发生的次数计数（用于判断是否重复问题）。
 static ERROR_COUNT: Mutex<u32> = Mutex::new(0);
+
+/// 前端（WebView/JS）错误上报入口。
+///
+/// 渲染进程的错误——JS 异常、图片解码失败、资源加载失败——Rust 的
+/// panic 钩子完全看不到；2.1.10 那次 OOM 白屏在日志里一片空白就是
+/// 这个缺口。前端装全局钩子后经此落盘。
+/// 超长消息截断，防止异常内容本身把日志撑爆。
+#[tauri::command]
+pub fn frontend_log(level: String, tag: String, msg: String) {
+    let level = match level.as_str() {
+        "ERROR" | "WARN" | "INFO" => level.as_str(),
+        _ => "INFO",
+    };
+    let msg = text_head_trunc(&msg, 2000);
+    write_line(level, &format!("fe/{tag}"), &msg);
+    // ERROR 级别走计数与快照逻辑（与 note_error 一致）
+    if level == "ERROR" {
+        note_error(&format!("fe/{tag}"), &msg);
+    }
+}
+
+fn text_head_trunc(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
 
 /// 记一次异常；每第 5 次额外做一份快照文件名，方便用户直接发送。
 pub fn note_error(tag: &str, msg: &str) {

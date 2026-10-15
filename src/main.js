@@ -5,6 +5,50 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const appWindow = getCurrentWindow();
 
+// ---------------------------------------------------------------------------
+// 前端错误上报：JS 异常、未处理的 Promise 拒绝、console.error → Rust 日志。
+//
+// 2.1.10 的教训：WebView OOM 白屏后日志一片空白——渲染进程里发生的一切
+// Rust 的 panic 钩子根本看不到。这个上报通道是排查前端侧问题的唯一线索。
+//
+// 防递归：reportFrontend 自身绝不再调 console.error（内部全 try/catch 吞掉），
+// 否则上报失败→console.error→再上报→死循环。
+// ---------------------------------------------------------------------------
+function reportFrontend(level, tag, msg) {
+  try {
+    invoke("frontend_log", {
+      level,
+      tag,
+      msg: String(msg).slice(0, 2000),
+    }).catch(() => {});
+  } catch {
+    /* 上报失败就放弃，绝不能再抛 */
+  }
+}
+
+window.addEventListener("error", (e) => {
+  // 资源加载失败（img/script/link）与 JS 运行时错误都在这里
+  const what = e.target && e.target !== window
+    ? `资源加载失败: ${e.target.tagName || "?"} ${(e.target.src || e.target.href || "")}`
+    : `${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`;
+  reportFrontend("ERROR", "window.onerror", what);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const r = e.reason;
+  reportFrontend("ERROR", "unhandledrejection", r instanceof Error ? `${r.message}\n${r.stack || ""}` : String(r));
+});
+{
+  const origError = console.error.bind(console);
+  console.error = (...args) => {
+    origError(...args);
+    reportFrontend(
+      "ERROR",
+      "console.error",
+      args.map((a) => (a instanceof Error ? `${a.message}\n${a.stack || ""}` : String(a))).join(" ")
+    );
+  };
+}
+
 /** 材质档位 → 实际可用的圆角上限（由 Rust 端判定，前端不自行猜测） */
 const TIER_CLASS = {
   "system-backdrop": "tier-system-backdrop",
@@ -858,8 +902,14 @@ function shrinkImage(dataUrl, maxEdge, quality = 0.82) {
 async function loadImage(id) {
   const hit = imageCache.get(id);
   if (hit) return hit;
-  const raw = await invoke("get_image", { id: id }); // 原始 BMP（大）→ 用完即弃
-  const url = await shrinkImage(raw, IMAGE_MAX_EDGE);
+  // 2.1.10 灾难修复：这里原先走 get_image——整张未压缩 BMP（微信原图可达
+  // 上百 MB）base64 后经 IPC 进来，<img> 解码峰值直接打爆 WebView2（页面
+  // 「内存不足」白屏，且每次启动列表都会重演）。现改用 Rust 侧生成的缩略图
+  // （PNG 长边 ≤512，几十 KB），原图永远不进前端；回贴走 copy_back 在
+  // Rust 侧读文件，不受影响。
+  const raw = await invoke("get_image_thumb", { id: id });
+  // Rust 已保证 ≤512px；shrinkImage 保留为兜底（万一未来返回大图）
+  const url = await shrinkImage(raw, IMAGE_MAX_EDGE).catch(() => raw);
   imageCache.set(id, url);
   if (imageCache.size > IMAGE_CACHE_MAX) {
     imageCache.delete(imageCache.keys().next().value);
@@ -901,9 +951,17 @@ function observeImages(rootEl) {
               img.src = url;
               img.dataset.imgLoaded = "1";
             })
-            .catch(() => {
+            .catch((e) => {
               img.dataset.imgLoaded = "0";
-              img.remove(); // 文件缺失/损坏 → 不占位
+              // 失败两种可能：文件缺失/损坏（老行为，移除）；或图片超大被
+              // get_image 拒绝（2.1.10 灾难条目，需保留占位让用户能选中删除）
+              if (String(e).includes("过大")) {
+                img.removeAttribute("src");
+                img.textContent = "图片过大，无法显示\n可右键删除";
+                img.classList.add("is-oversize");
+              } else {
+                img.remove(); // 文件缺失/损坏 → 不占位
+              }
             });
         } else if (state === "1") {
           // 远离视野（>700px）→ 固化尺寸后释放解码位图
@@ -965,9 +1023,15 @@ function placePreview(box, card) {
 }
 
 function bindImagePreview(card, item) {
+  // 悬浮多久才弹预览。
+  //
+  // 演进：120ms（一碰就弹，扫过列表连弹十几次，晃眼且白触发缩略图加载）
+  //   → 2000ms（用户嫌长）→ 1000ms。
+  // 1s 是个平衡点：快速扫过列表不会触发，停下来看一眼时也不觉得迟。
+  const HOVER_DELAY_MS = 1000;
   card.addEventListener("mouseenter", () => {
     if (previewTimer) clearTimeout(previewTimer);
-    previewTimer = setTimeout(() => showImagePreview(card, item), 120);
+    previewTimer = setTimeout(() => showImagePreview(card, item), HOVER_DELAY_MS);
   });
   card.addEventListener("mouseleave", hideImagePreview);
 }
@@ -1062,6 +1126,27 @@ function applyMissingMarks() {
 
 let ctxMenuEl = null;
 
+/** 右键菜单图标（16×16 描边风格，与侧栏 .nav-icon 同一套语言）。
+ *  颜色不写死 —— stroke 用 currentColor，于是危险项的红色图标自动跟着 `.danger` 走。 */
+const CTX_ICONS = {
+  // 眼睛 = 查看
+  view: '<svg viewBox="0 0 16 16"><path d="M1.6 8s2.4-4.6 6.4-4.6S14.4 8 14.4 8s-2.4 4.6-6.4 4.6S1.6 8 1.6 8z"/><circle cx="8" cy="8" r="2"/></svg>',
+  // 两张叠起来的纸 = 复制
+  copy: '<svg viewBox="0 0 16 16"><rect x="5.6" y="5.6" width="8.4" height="8.4" rx="1.6"/><path d="M10.4 5.6V3.6A1.6 1.6 0 008.8 2H3.6A1.6 1.6 0 002 3.6v5.2a1.6 1.6 0 001.6 1.6h2"/></svg>',
+  // 铅笔 = 编辑
+  edit: '<svg viewBox="0 0 16 16"><path d="M2.2 13.8l.9-3.3 7.2-7.2a1.5 1.5 0 012.4 0l1 1a1.5 1.5 0 010 2.4l-7.2 7.2z"/><path d="M9.4 4.1l2.5 2.5"/></svg>',
+  // 图钉 = 置顶
+  pin: '<svg viewBox="0 0 16 16"><path d="M9.6 1.6l4.8 4.8-1.3 1.2-.7-.2-2.3 2.3.3 2.5-1.5 1.5-2.2-2.2-3.2 3.2-.9-.9 3.2-3.2-2.2-2.2 1.5-1.5 2.5.3 2.3-2.3-.2-.7z"/></svg>',
+  // 星星 = 收藏
+  star: '<svg viewBox="0 0 16 16"><path d="M8 1.9l1.9 4.2 4.4.5-3.3 3 .9 4.5L8 11.9l-3.9 2.2.9-4.5-3.3-3 4.4-.5z"/></svg>',
+  // 方框打勾 = 批量选中
+  select:
+    '<svg viewBox="0 0 16 16"><rect x="2.2" y="2.2" width="11.6" height="11.6" rx="2.4"/><path d="M5.4 8.2l1.9 1.9 3.5-4"/></svg>',
+  // 垃圾桶 = 删除
+  trash:
+    '<svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>',
+};
+
 function closeContextMenu() {
   if (ctxMenuEl) {
     ctxMenuEl.remove();
@@ -1069,7 +1154,7 @@ function closeContextMenu() {
   }
 }
 
-/** 通用浮层菜单。entries = [{ label, act, danger?, disabled? } | { sep: true }] */
+/** 通用浮层菜单。entries = [{ label, act, icon?, danger?, disabled? } | { sep: true }] */
 function showMenu(x, y, entries) {
   closeContextMenu();
 
@@ -1085,7 +1170,17 @@ function showMenu(x, y, entries) {
     }
     const btn = document.createElement("button");
     btn.className = "ctx-item" + (entry.danger ? " danger" : "");
-    btn.textContent = entry.label;
+    if (entry.icon) {
+      const ic = document.createElement("span");
+      ic.className = "ctx-icon";
+      ic.innerHTML = entry.icon;
+      btn.appendChild(ic);
+    }
+    // 文字单独占一格（flex:1）：这样整行都是可点区域，长文案也不会把图标挤扁
+    const label = document.createElement("span");
+    label.className = "ctx-label";
+    label.textContent = entry.label;
+    btn.appendChild(label);
     btn.disabled = !!entry.disabled;
     btn.onclick = () => {
       closeContextMenu();
@@ -1101,6 +1196,226 @@ function showMenu(x, y, entries) {
   ctxMenuEl = menu;
 }
 
+// ---------------------------------------------------------------------------
+// 全文详情弹窗（查看态 + 编辑态）
+//
+// 起因：列表只显示 preview（**开头几行的摘要**），长文本根本看不全。
+// 方案参考 CopyQ 的「Show Item Content」：用一个独立窗口显示全文。
+// 正文用 <pre> 保留换行与缩进，并且可选中 —— 这个弹窗的主要用途就是
+// 「读一遍」或「挑一段复制」，两者都要求格式不乱。
+//
+// 编辑按「**编辑副本**」设计：保存 = 写剪贴板，**不改历史里那条记录**。
+// 理由：历史必须忠实反映「当初复制了什么」，能原地改会让人怀疑
+// 「我明明复制的是 A，怎么变成 B 了」；且剪贴板历史常被当安全网，改动不可逆是大事。
+// ---------------------------------------------------------------------------
+
+let detailItem = null;
+/// 编辑缓冲的**原始内容**：用于「取消编辑」与判断是否有未保存改动
+let detailOriginal = "";
+/// 后端是否因过长而截断了正文。截断时**禁止编辑** —— 否则保存会把
+/// 截断后的内容写回剪贴板，等于静默丢数据。
+let detailTruncated = false;
+
+const $detail = (id) => document.getElementById(id);
+
+/** 查看态 / 编辑态互斥切换 */
+function setDetailMode(mode) {
+  const editing = mode === "edit";
+  $detail("detail-body").hidden = editing;
+  $detail("detail-editor").hidden = !editing;
+  $detail("detail-select").hidden = editing;
+  $detail("detail-edit").hidden = editing;
+  $detail("detail-copy").hidden = editing;
+  $detail("detail-close").hidden = editing;
+  $detail("detail-revert").hidden = !editing;
+  $detail("detail-save").hidden = !editing;
+  if (editing) {
+    $detail("detail-editor").focus();
+  } else {
+    // 退出编辑时丢弃改动，视图回到原文
+    $detail("detail-editor").value = detailOriginal;
+    $detail("detail-body").textContent = detailOriginal;
+    window.getSelection()?.removeAllRanges();
+    $detail("detail-select").textContent = "全选";
+  }
+}
+
+function isDetailEditing() {
+  const ed = $detail("detail-editor");
+  return !!ed && !ed.hidden;
+}
+
+function enterDetailEdit() {
+  if (!detailItem) return;
+  // 截断的内容不能编辑：保存会把截断结果写回去 → 静默丢数据
+  if (detailTruncated) {
+    toast("内容过长，不便在此编辑；可先「复制全文」到别处处理");
+    return;
+  }
+  setDetailMode("edit");
+}
+
+async function openDetail(item, { startEdit = false } = {}) {
+  const mask = $detail("detail-modal");
+  const body = $detail("detail-body");
+  const meta = $detail("detail-meta");
+  const title = $detail("detail-title");
+  if (!mask || !body || !meta || !title) return;
+
+  title.textContent = item.kind === "files" ? "全部路径" : "全文";
+  meta.textContent = "读取中…";
+  body.textContent = "";
+
+  let data;
+  try {
+    data = await invoke("get_full_content", { id: item.id });
+  } catch (err) {
+    toast("读取失败：" + err);
+    return;
+  }
+
+  detailItem = item;
+  detailOriginal = data.text;
+  detailTruncated = !!data.truncated;
+  body.textContent = data.text;
+  $detail("detail-editor").value = data.text;
+
+  // 规模信息：帮助判断内容大小，也是「有没有被截断」的唯一提示
+  const parts = [
+    `共 ${data.totalChars.toLocaleString()} 字`,
+    `${data.totalLines.toLocaleString()} 行`,
+  ];
+  if (data.truncated) parts.push("超出显示上限，仅显示前 20 万字");
+  meta.textContent = parts.join(" · ");
+
+  setDetailMode("view");
+  mask.hidden = false;
+  body.scrollTop = 0;
+  // 聚焦正文：用户多半想紧接着 Ctrl+A / Ctrl+C 或直接滚动
+  body.focus();
+  // 每次打开都回到「未选中」状态 —— 上一次的选区可能还残留，
+  // 那样按钮文案会显示成「取消全选」，与实际不符。
+  window.getSelection()?.removeAllRanges();
+  $detail("detail-select").textContent = "全选";
+
+  // 右键「复制并编辑」→ 打开即进入编辑态，省一次点击
+  if (startEdit) enterDetailEdit();
+}
+
+/**
+ * 「请求关闭」：编辑态下**先退回查看态**，不直接关闭。
+ *
+ * 渐进式退出的用意：编辑缓冲里可能有用户敲了一半的内容，直接关窗等于静默丢弃。
+ * 第一次 Esc/点遮罩只退出编辑，第二次才关弹窗 —— 与常见编辑弹窗的直觉一致。
+ */
+function requestCloseDetail() {
+  if (isDetailEditing()) {
+    setDetailMode("view");
+    return;
+  }
+  closeDetail();
+}
+
+function closeDetail() {
+  const mask = $detail("detail-modal");
+  if (mask && !mask.hidden) {
+    mask.hidden = true;
+    detailItem = null;
+    detailOriginal = "";
+    detailTruncated = false;
+  }
+}
+
+function bindDetailModal() {
+  const mask = document.getElementById("detail-modal");
+  const body = document.getElementById("detail-body");
+  const btnSelect = document.getElementById("detail-select");
+  if (!mask || !body || !btnSelect) return;
+
+  document.getElementById("detail-close").onclick = requestCloseDetail;
+
+  // 点遮罩关闭（点弹窗本体不关）——这是「查看类」弹窗的通用预期。
+  // 编辑态下先退回查看态，不直接关：避免「手一滑改动全没了」。
+  mask.addEventListener("mousedown", (e) => {
+    if (e.target === mask) requestCloseDetail();
+  });
+
+  document.getElementById("detail-edit").onclick = enterDetailEdit;
+  document.getElementById("detail-revert").onclick = () => setDetailMode("view");
+
+  document.getElementById("detail-save").onclick = async () => {
+    const text = $detail("detail-editor").value;
+    try {
+      // ⚠️ 保存 = 写剪贴板，**不改历史那条记录**（用户选定的「编辑副本」方案）。
+      // 历史上必须忠实反映「当初复制了什么」；而且这个动作不产生新条目
+      // （Rust 侧会 mark_skip，与「点击条目复制」一致）。
+      await invoke("set_clipboard_text", { text });
+      toast("已保存到剪贴板");
+      closeDetail();
+    } catch (err) {
+      toast("保存失败：" + err);
+    }
+  };
+
+  document.getElementById("detail-copy").onclick = async () => {
+    if (!detailItem) return;
+    const id = detailItem.id;
+    try {
+      // ⚠️ 走 copy_back：它在 Rust 侧**直接读盘**写剪贴板，不经过前端，
+      // 所以即使上面的正文因为超长被截断显示，复制出去的仍是**完整原文**。
+      const hint = await invoke("copy_back", { id });
+      toast(hint || "已复制全文");
+      closeDetail();
+    } catch (err) {
+      toast("复制失败：" + err);
+    }
+  };
+
+  // 「全选」是**切换**语义：全选后文案变「取消全选」，再点即取消选中。
+  //
+  // ⚠️ 状态**不靠布尔量硬记**。用户随时会手动拖选、或点正文别处取消选区，
+  // 硬记的标记必然与真实选区失配（以为还在「全选」态，其实早变了）。
+  // 直接问「当前选区是不是正好等于整个正文」—— O(1) 且永远准确：
+  // 正文是单个文本节点，全选时 range 落在 <pre> 自身、起点 0、终点 = 子节点数。
+  const isAllSelected = () => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount !== 1 || !body.childNodes.length) return false;
+    const r = sel.getRangeAt(0);
+    return (
+      r.startContainer === body &&
+      r.startOffset === 0 &&
+      r.endContainer === body &&
+      r.endOffset === body.childNodes.length
+    );
+  };
+  const syncSelectLabel = () => {
+    btnSelect.textContent = isAllSelected() ? "取消全选" : "全选";
+  };
+
+  // ⚠️ 点按钮会移动焦点、从而清掉选区 —— 必须在 mousedown 阶段
+  // preventDefault 把它按住。否则「取消全选」会点了没反应：
+  // 选区在 click 触发之前就已经被清空了，isAllSelected() 永远读到 false。
+  btnSelect.addEventListener("mousedown", (e) => e.preventDefault());
+  btnSelect.onclick = () => {
+    if (isAllSelected()) {
+      window.getSelection().removeAllRanges();
+    } else {
+      const range = document.createRange();
+      range.selectNodeContents(body);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      body.focus();
+    }
+    syncSelectLabel();
+  };
+
+  // 手动拖选 / 点击别处改动选区时，同步按钮文案
+  document.addEventListener("selectionchange", () => {
+    if (!mask.hidden) syncSelectLabel();
+  });
+}
+
 function openContextMenu(x, y, item) {
   const pinnedHere = isPinnedIn(item, currentView);
   const viewName = { history: "历史", text: "文本", images: "图片", files: "文件", favorites: "收藏" }[currentView] || currentView;
@@ -1112,10 +1427,37 @@ function openContextMenu(x, y, item) {
       ? "取消置顶"
       : "取消同步置顶"
     : (pinnedHere ? "取消置顶" : "置顶") + (settings?.pinGlobal ? "" : `（${viewName}）`);
-  showMenu(x, y, [
-    { label: "复制", act: () => copyBack(item) },
+  // 菜单分组（顺序按「使用频次 + 语义亲疏」排，见分组间的分隔线）：
+  //   一、阅读与复制：查看全文 → 复制 → 复制并编辑
+  //       「复制并编辑」是从「复制」派生出来的动作，必须紧挨着「复制」，
+  //       中间隔了别的项会让用户以为是另一类操作。
+  //   二、状态变更：置顶（改排序）→ 收藏（改归属）
+  //   三、危险操作：批量删除 → 删除
+  const entries = [];
+  if (item.kind === "text" || item.kind === "files") {
+    entries.push({
+      label: item.kind === "files" ? "查看全部路径" : "查看全文",
+      icon: CTX_ICONS.view,
+      act: () => openDetail(item),
+    });
+  }
+  // 「复制」对所有类型都有意义，永远排在阅读项之后、置顶之前。
+  entries.push({ label: "复制", icon: CTX_ICONS.copy, act: () => copyBack(item) });
+  // 「复制并编辑」只给文本条目。
+  // 文件条目的内容是**路径清单**，编辑它再写回剪贴板会退化成一段纯文本
+  // （文件语义丢失，粘贴出去不再是文件）—— 那不是用户要的。
+  if (item.kind === "text") {
+    entries.push({
+      label: "复制并编辑",
+      icon: CTX_ICONS.edit,
+      act: () => openDetail(item, { startEdit: true }),
+    });
+  }
+  entries.push({ sep: true });
+  entries.push(
     {
       label: pinLabel,
+      icon: CTX_ICONS.pin,
       act: async () => {
         // 新集合由后端按当前模式算好回传，前端不再重复实现一遍置顶规则
         item.pinnedViews = await invoke("toggle_pin", { id: item.id, view: currentView });
@@ -1124,27 +1466,35 @@ function openContextMenu(x, y, item) {
     },
     {
       label: item.favorite ? "取消收藏" : "收藏",
+      icon: CTX_ICONS.star,
       act: async () => {
         await invoke("toggle_favorite", { id: item.id });
         item.favorite = !item.favorite;
         render({ keepScroll: true });
       },
-    },
+    }
+  );
+  // 危险操作单独成组：低频，但一旦点错代价最大，分组能靠肌肉记忆避开
+  entries.push({ sep: true });
+  entries.push(
     {
       // 批量删除是个模式：进入后左键改为选中，再点一次同一项即取消选中
       label: selectMode ? "退出批量选中" : "批量删除",
+      icon: CTX_ICONS.select,
       act: () => (selectMode ? exitSelectMode() : enterSelectMode()),
     },
     {
       label: "删除",
+      icon: CTX_ICONS.trash,
       danger: true,
       act: async () => {
         await invoke("delete_item", { id: item.id });
         items = items.filter((i) => i.id !== item.id);
         render({ keepScroll: true });
       },
-    },
-  ]);
+    }
+  );
+  showMenu(x, y, entries);
 }
 
 // 点空白处 / 滚动 / Esc → 关闭；非卡片区域右键 → 只关不弹
@@ -1159,6 +1509,11 @@ document.addEventListener(
 );
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    // 详情弹窗优先：编辑态先退出编辑，否则关闭弹窗（见 requestCloseDetail）
+    if (!document.getElementById("detail-modal")?.hidden) {
+      requestCloseDetail();
+      return;
+    }
     closeContextMenu();
     hideImagePreview();
     exitSelectMode();
@@ -1428,9 +1783,7 @@ function settingsAboutHtml() {
         </div>
         <div class="about-state" id="about-update">尚未检查更新</div>
         <div class="about-actions">
-          <button class="btn-ghost" id="btn-check-update">${
-            updateInfo?.hasUpdate ? "下载最新版" : "检查更新"
-          }</button>
+          <button class="btn-ghost" id="btn-check-update">${updateBtnLabel()}</button>
           <button class="btn-ghost" id="btn-repo">项目主页</button>
           <button class="btn-ghost" id="btn-feedback">问题反馈</button>
         </div>
@@ -1500,6 +1853,25 @@ function renderNotes(tag, notes) {
 
 // 关于页的更新区域只做「渲染」，不发请求 —— 数据来自 updateInfo（启动自检的缓存
 // 或用户手动检查的结果）。这样进关于页不会联网、不会卡，也不会再闪黑窗口。
+/**
+ * 主按钮文案：区分三种情况。
+ *
+ * 「已下好待装」和「有新版本待下」是完成同一次更新的两步，所以共用主按钮；
+ * 而「已是最新」时主按钮回归「检查更新」—— 不能因为本地躺着一份安装包
+ * 就把主按钮占死，那样用户既没法复查更新，看着也很莫名。
+ */
+/// 主按钮文案三态，与下方点击分发一一对应（顺序也必须一致）：
+///   1. 本地已有下载好的安装包（上次取消过安装）→「立即安装」
+///   2. 有新版但没下载                          →「下载最新版」
+///   3. 其余（已是最新 / 未检查）                →「检查更新」
+/// 「重新安装」不再抢占主按钮：装成功后 prune_stale_installers 会清掉
+/// 本地包，按钮自动回到「检查更新」，不会挡住检查更新的入口。
+function updateBtnLabel() {
+  if (updateInfo?.downloadedPath) return "立即安装";
+  if (updateInfo?.hasUpdate) return "下载最新版";
+  return "检查更新";
+}
+
 function renderUpdatePanels() {
   const info = updateInfo;
   const cur = info?.displayCurrent || info?.current || "";
@@ -1512,7 +1884,7 @@ function renderUpdatePanels() {
     } else {
       btn.classList.remove("is-downloading");
       btn.disabled = false;
-      btn.textContent = has ? "下载最新版" : "检查更新";
+      btn.textContent = updateBtnLabel();
     }
   }
 
@@ -1525,6 +1897,10 @@ function renderUpdatePanels() {
   } else if (dlState.error) {
     tip.className = "about-state is-err";
     tip.textContent = "下载失败：" + dlState.error;
+  } else if (has && info?.downloadedPath) {
+    // 有新版，且包已经下好了（用户上次在安装器上取消了）→ 提示直接装
+    tip.className = "about-state is-new";
+    tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，已下载，点击「立即安装」`;
   } else if (has) {
     tip.className = "about-state is-new";
     tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，当前 v${esc(cur)}`;
@@ -1612,6 +1988,23 @@ async function startDownload() {
     };
     renderUpdatePanels();
     toast(downloaded ? "无法启动安装程序：" + e : "下载失败：" + e);
+  }
+}
+
+/**
+ * 「重新安装」：安装包已在本地（上次下载完成后用户取消了安装），
+ * 直接拉起，不再下载。装完 update_state 里的 downloadedPath 自然消失。
+ */
+async function installDownloaded() {
+  const path = updateInfo?.downloadedPath;
+  if (!path) return;
+  setDownloadDone("正在启动安装程序…");
+  try {
+    await invoke("install_downloaded", { path });
+  } catch (e) {
+    // UAC 点否 / 安装器起不来：文件还在，按钮保持「重新安装」
+    toast("无法启动安装程序：" + e);
+    renderUpdatePanels();
   }
 }
 
@@ -2026,11 +2419,18 @@ function bindSettings(view) {
   // 顺便在进入该页时就把版本号与运行环境拉出来。
   const btnCheck = view.querySelector("#btn-check-update");
   if (btnCheck) {
-    // 有新版时这颗按钮就是「下载最新版」，其余时候才是「检查更新」
-    btnCheck.onclick = () =>
-      updateInfo?.hasUpdate ? startDownload() : aboutCheckUpdate();
+    // 有新版且已下好 → 直接装；有新版没包 → 先下；没新版 → 复查
+    btnCheck.onclick = () => {
+      // 与 updateBtnLabel() 的三态严格同序：有包先装、有新版下载、
+      // 其余检查更新。顺序若与文案不一致，边缘情况（版本追平但包还在）
+      // 会出现「按钮写着立即安装、点的却是检查更新」的割裂。
+      if (updateInfo?.downloadedPath) return installDownloaded();
+      if (updateInfo?.hasUpdate) return startDownload();
+      return aboutCheckUpdate();
+    };
     loadAbout();
   }
+
   const btnRepo = view.querySelector("#btn-repo");
   if (btnRepo)
     btnRepo.onclick = () =>
@@ -2077,6 +2477,7 @@ async function main() {
   bindClearViewModal();
   bindSingletonModal();
   bindFirstRunModals();
+  bindDetailModal();
   bindNav();
   bindSearch();
   startTimeTicker();
