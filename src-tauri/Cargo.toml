@@ -32,14 +32,29 @@ serde_json = "1"
 # 缓存目录「更改目录」的文件夹选择框（仅 Rust 侧调用，无需前端 JS 包与权限）
 tauri-plugin-dialog = "2"
 
-# 微信等应用「复制图片」放进剪贴板的是 CF_HDROP（临时 PNG/JPG 文件）而非位图，
-# 要转成图片条目必须解码文件。只开用得到的格式特性，不拖入无关解码器。
+# 微信等应用「复制图片」放进剪贴板的是 CF_HDROP（临时图片文件）而非位图，
+# 解码只发生在**真正需要时**（生成缩略图、回贴），捕获路径上不解码。
+#
+# 格式**不做限制**：凡 image 库能解码的都认。除主流的 png/jpeg/gif/bmp/webp，
+# 另开 ico（图标）、tiff（扫描件）、tga/dds（游戏素材）、pnm/hdr/qoi/ff（小众）
+# —— 都是纯 Rust 实现，不引入系统库、不拖 C 依赖。
+# 刻意**不开** avif：image 0.25 的 AVIF 解码依赖 dav1d（系统库），
+# 为一个小众格式引入外部依赖不值得；这类格式仍会被识别并原样存盘，
+# 只是缩略图与回贴会走「按文件」兜底（见 copy_back）。
 image = { version = "0.25", default-features = false, features = [
   "png",
   "jpeg",
   "bmp",
   "gif",
   "webp",
+  "ico",
+  "tiff",
+  "tga",
+  "dds",
+  "pnm",
+  "hdr",
+  "qoi",
+  "ff",
 ] }
 
 # Windows 材质与剪贴板一律走手写 FFI，不引入 windows crate：

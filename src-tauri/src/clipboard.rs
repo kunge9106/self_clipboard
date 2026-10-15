@@ -305,6 +305,13 @@ pub async fn get_image_thumb(id: String) -> Result<String, String> {
     }
 }
 
+/// 回贴（copy_back）解码时的长边上限。
+///
+/// 因为落盘的是**原图**，回贴理应还原原图，所以上限给得比存储期宽松得多
+/// （存储期是 MAX_SIDE=2048，那是给前端看的；现在前端只看缩略图，已不需要）。
+/// 仍设上限是防极端大图把内存打爆：8192 长边 ≈ 6700 万像素 ≈ 268MB DIB。
+const PASTE_MAX_SIDE: u32 = 8192;
+
 /// 把历史条目内容写回系统剪贴板（文本 / 图片 / 文件列表）。
 ///
 /// 返回 Ok(Some(提示)) 时前端用该提示替代默认的「已复制到剪贴板」——
@@ -364,10 +371,10 @@ pub fn copy_back(id: String) -> Result<Option<String>, String> {
             })
         }
         "image" => {
-            // 落盘格式现在有三种，按扩展名分派（都是我们自己写下的，可信）：
+            // 落盘格式有三种，按扩展名分派（都是我们自己写下的，可信）：
             //   - .bmp  → 掐掉 14 字节文件头即 DIB
             //   - .dib  → 本身就是裸 DIB，直接用（极少数兜底条目）
-            //   - .jpg/.png/... → 原图，此刻才解码成 DIB
+            //   - 其它  → 原图（jpg/png/tiff/svg…），此刻才解码成 DIB
             // 解码放在这里，是因为它只发生在**用户点击回贴**时，感知不到延迟。
             let rel = item.img_path.ok_or("图片文件缺失")?;
             let path = dir.join(rel.clone());
@@ -380,7 +387,24 @@ pub fn copy_back(id: String) -> Result<Option<String>, String> {
             } else if rel.ends_with(".dib") {
                 bytes
             } else {
-                image_file_to_dib(&path).ok_or("图片解码失败")?
+                match image_file_to_dib(&path, PASTE_MAX_SIDE) {
+                    Some(d) => d,
+                    None => {
+                        // 格式不设限的代价：有些图片 image 库解不开
+                        // （SVG 是矢量文本、HEIC/AVIF 缺解码器、PSD 是分层工程文件）。
+                        // 解不开不等于没用 —— 退回**按文件粘贴**，用户仍能把它
+                        // 丢进聊天窗口/文件夹，而不是点了没反应。
+                        unsafe {
+                            write_files_to_clipboard(&[path.to_string_lossy().to_string()])?;
+                        }
+                        crate::logger::write_line(
+                            "INFO",
+                            "clipboard",
+                            &format!("图片 {rel} 无法解码为位图，已按文件写回剪贴板"),
+                        );
+                        return Ok(Some("该图片格式无法转为位图，已按文件复制".into()));
+                    }
+                }
             };
             unsafe { write_dib_to_clipboard(&dib) }.map(|_| None)
         }
@@ -799,16 +823,11 @@ fn resolve(raw: RawClip) -> Option<RawClip> {
                 };
             };
 
-            // 用**图片魔数**判定真实格式，而不是文件名后缀。
-            //
-            // 为什么：微信/QQ 的临时文件常常没有后缀或后缀不可信（`wx_image_tmp`、
-            // 纯 hash 名）。按后缀判会漏掉真图片；按魔数判则只有真是图片才过 ——
-            // 顺带天然完成了「这个文件到底是不是图片」的判定，比原来的扩展名
-            // 白名单更准，也不需要维护白名单。
-            let Some(ext) = image_ext_from_magic(&bytes) else {
+            // 判定「这是不是图片、是什么格式」。**不限制格式** —— 见 detect_image_ext。
+            let Some(ext) = detect_image_ext(&bytes, &path) else {
                 // 不是图片（比如用户复制了单个 .txt/.pdf 文件）。
                 // 这类属于「文件复制」范畴，**听开关的** —— 开关关闭时不记录。
-                // （图片不受开关影响，上一段已经处理完并返回了。）
+                // （图片不受开关影响，上面几行已经处理完并返回了。）
                 return if crate::settings::get().file_copy {
                     Some(RawClip::Files(vec![path.to_string_lossy().to_string()]))
                 } else {
@@ -816,47 +835,89 @@ fn resolve(raw: RawClip) -> Option<RawClip> {
                 };
             };
             let hash = content_hash(&bytes);
-            Some(RawClip::ImageOriginal {
-                bytes,
-                ext: ext.to_string(),
-                hash,
-            })
+            Some(RawClip::ImageOriginal { bytes, ext, hash })
         }
         RawClip::ImageRaw(bytes) => Some(RawClip::Image(clamp_dib(bytes))),
         other => Some(other),
     }
 }
 
-/// 按**文件头魔数**判断图片真实格式，返回规范扩展名。
+/// 判断文件是否为图片、以及它的规范扩展名。**不限制格式。**
 ///
-/// 只认该管线实际会遇到的几种（与 Cargo.toml 里 `image` 开启的 feature 一致）。
-/// 不信任文件后缀 —— 微信临时文件名是内容哈希，没有可信后缀。
-fn image_ext_from_magic(b: &[u8]) -> Option<&'static str> {
-    if b.len() < 12 {
-        return None;
+/// 分三级判定，从「最可信」到「最宽松」：
+///   1. **交给 `image` 库按魔数识别** —— 覆盖所有已启用的编解码器
+///      （png/jpeg/gif/bmp/webp/ico/tiff/tga/dds/pnm/hdr/qoi/ff）。
+///      库认的格式自动跟随 Cargo.toml 的 feature，无需在此维护白名单。
+///   2. **补充几个库不认但常见的魔数**（tiff/ico/cur/psd/avif/heic…）。
+///      这一步只影响「识别」，不影响解码；识别出来的图会原样存盘。
+///   3. **退回文件扩展名**，专为 SVG 这类**文本格式**准备 —— 它们没有二进制
+///      魔数，第 1、2 步都认不出来，但确实是图片。
+///
+/// 为什么不只用扩展名：微信/QQ 的剪贴板临时文件名是**内容哈希**、没有可信后缀，
+/// 按后缀判会漏掉真图片（这正是 2.1.11 反馈的「微信复制图片识别不到」）。
+/// 但也不能只用魔数：SVG/PSD 之类会被误判成非图片。
+/// 两者结合才既不漏也不误。
+fn detect_image_ext(bytes: &[u8], path: &std::path::Path) -> Option<String> {
+    // 1) 交给 image 库（魔数识别，最可信）
+    if let Ok(fmt) = image::guess_format(bytes) {
+        if let Some(e) = fmt.extensions_str().first() {
+            return Some((*e).to_string());
+        }
     }
-    // PNG: 89 50 4E 47 0D 0A 1A 0A
-    if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
-        return Some("png");
+
+    // 2) 库不认的常见魔数
+    if let Some(e) = extra_magic_ext(bytes) {
+        return Some(e.to_string());
     }
-    // JPEG: FF D8 FF
-    if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return Some("jpg");
-    }
-    // GIF: "GIF87a" / "GIF89a"
-    if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
-        return Some("gif");
-    }
-    // BMP: "BM"
-    if b.starts_with(b"BM") {
-        return Some("bmp");
-    }
-    // WebP: "RIFF" .... "WEBP"（第 4..8 字节是长度，8..12 是 WEBP）
-    if b.starts_with(b"RIFF") && &b[8..12] == b"WEBP" {
-        return Some("webp");
+
+    // 3) 文本类图片（SVG 等）只能看扩展名
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let ext = ext.to_ascii_lowercase();
+        if TEXT_IMAGE_EXTS.contains(&ext.as_str()) {
+            return Some(ext);
+        }
     }
     None
 }
+
+/// 库不认、但值得识别的图片格式魔数。
+///
+/// 这里只做「是不是图片」的判定（用于决定按图片还是按文件记录），
+/// 不承诺能解码 —— 解不开的格式在缩略图处会退回占位、在回贴处退回按文件复制。
+fn extra_magic_ext(b: &[u8]) -> Option<&'static str> {
+    if b.len() < 12 {
+        return None;
+    }
+    // TIFF：小端 "II*\0" / 大端 "MM\0*"
+    if b.starts_with(b"II\x2A\x00") || b.starts_with(b"MM\x00\x2A") {
+        return Some("tiff");
+    }
+    // ICO / CUR
+    if b.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
+        return Some("ico");
+    }
+    if b.starts_with(&[0x00, 0x00, 0x02, 0x00]) {
+        return Some("cur");
+    }
+    // Photoshop: "8BPS"
+    if b.starts_with(b"8BPS") {
+        return Some("psd");
+    }
+    // ISO BMFF 家族（AVIF / HEIC）：第 4..8 字节是 "ftyp"，8..12 是品牌
+    if &b[4..8] == b"ftyp" {
+        let brand = &b[8..12];
+        if brand == b"avif" || brand == b"avis" {
+            return Some("avif");
+        }
+        if matches!(brand, b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1") {
+            return Some("heic");
+        }
+    }
+    None
+}
+
+/// 没有二进制魔数、只能靠扩展名识别的图片格式（主要是矢量/文本类）。
+const TEXT_IMAGE_EXTS: [&str; 4] = ["svg", "svgz", "xbm", "xpm"];
 
 /// 文件内容哈希（FNV-1a 64 位）。
 ///
@@ -1177,7 +1238,7 @@ fn idle_ms() -> u64 {
     }
 }
 
-fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
+fn image_file_to_dib(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
     // 缓存命中判定：同一路径 + 文件的 (mtime, size) 未变 → 说明还是同一张图，
     // 直接复用上次解码结果，省掉一次完整的 open + 解码 + 缩放（4096×3072 约 2 秒）。
     // 用 mtime/size 而不是仅路径：微信的 RWTemp 目录里路径可复用，内容会换。
@@ -1203,7 +1264,7 @@ fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
         }
     }
 
-    let dib = decode_image_file(path)?;
+    let dib = decode_image_file(path, max_side)?;
 
     if let Some(st) = stamp {
         if let Ok(mut g) = DECODE_CACHE.lock() {
@@ -1221,45 +1282,29 @@ fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
 
 /// 真正做解码（`image_file_to_dib` 的未缓存部分）。拆出来是为了让缓存逻辑
 /// 保持单一职责，也便于将来单独测试。
-fn decode_image_file(path: &std::path::Path) -> Option<Vec<u8>> {
-    const EXTS: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
-    // 扩展名只用来「快速排除明显不是图片的路径」（如 .txt / .pdf），**不能**作为
-    // 唯一的准入条件 —— 微信/QQ 的剪贴板临时图片文件常常没有扩展名
-    // （形如 `wx_image_tmp`、`{guid}`），改动前按扩展名一刀切会让这些图片
-    // 解码失败、退回成「文件」条目，用户反馈就是「微信复制图片识别不到」。
-    // 所以有扩展名时先判；扩展名不认识或干脆没有，则交给 image 库按文件头
-    // 嗅探（image::open 会验证 magic number，不是图片自然失败）。
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        let ext = ext.to_ascii_lowercase();
-        let looks_like_other = !ext.is_empty()
-            && !EXTS.contains(&ext.as_str())
-            && !matches!(ext.as_str(), "tmp" | "dat" | "bin" | "");
-        if looks_like_other {
-            return None;
-        }
-    }
-    // ⚠️ 这里不要用 `image::open(path)` 再 `thumbnail()` ——
-    // `image::open` 会把原图**完整解码进内存**（4096×3072 = 1200 万像素 ≈ 50MB），
-    // 之后才缩到 2048。被丢掉的那一倍像素是纯浪费，也是大图要等 1~2 秒的主因。
+fn decode_image_file(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
+    // ⚠️ 这里**不按扩展名过滤**。
     //
-    // 改成：先用 `image::image_dimensions` 只读文件头拿到尺寸（不解码），
-    // 再按**目标尺寸**解码 —— image 库支持在解码阶段就用最近邻缩放，
-    // 峰值内存只需最终尺寸那一份（约 12MB）。
+    // 改动前有一份 6 项扩展名白名单（png/jpg/jpeg/bmp/gif/webp），加上一条
+    // 「不认识的后缀就拒绝」的规则 —— 于是 tiff、ico、svg、heic 等一律被拒。
+    // 格式不该被限制：交给 image 库判定，能解的自然成功，解不开的自然返回 None。
+    // 「是不是图片」的判定已在 capture 阶段由 detect_image_ext 完成，
+    // 到这里只需回答「能不能解出来」。
     let (w0, h0) = image::image_dimensions(path).ok()?;
-    let img = if w0.max(h0) > MAX_SIDE {
+    let img = if w0.max(h0) > max_side {
         // 等比算出目标尺寸（thumbnail 的语义：只缩不放）
-        let ratio = MAX_SIDE as f32 / w0.max(h0) as f32;
+        let ratio = max_side as f32 / w0.max(h0) as f32;
         let tw = ((w0 as f32 * ratio).round() as u32).max(1);
         let th = ((h0 as f32 * ratio).round() as u32).max(1);
         crate::logger::write_line(
             "INFO",
             "clipboard",
             &format!(
-                "图片 {} 超 {MAX_SIDE}px，降采样 {w0}×{h0} → {tw}×{th} 存储",
+                "图片 {} 超 {max_side}px，降采样 {w0}×{h0} → {tw}×{th} 存储",
                 path.display()
             ),
         );
-        // fast_rgb：最近邻缩放，跳过插值开销。缩略图/历史缩略场景足够。
+        // 最近邻缩放：跳过插值开销。缩略图/回贴场景足够。
         image::open(path)
             .ok()?
             .resize_exact(tw, th, image::imageops::FilterType::Nearest)
@@ -2555,5 +2600,76 @@ mod tests {
             !dedup_merge(&mut g, fp, t0 + DUP_WINDOW_MS - 1 + DUP_WINDOW_MS + 1),
             "超出窗口的间隔应放行"
         );
+    }
+
+    /// **格式不设限**：各类图片都要能被识别（这是 2.1.11 之后用户明确要求的
+    /// 「对图片格式不要做限制」）。逐格式喂真实文件头，断言都能识别出来。
+    #[test]
+    fn detects_many_image_formats_by_magic() {
+        let p = std::path::Path::new("no_ext"); // 无扩展名 → 只能靠魔数
+        let cases: [(&str, &[u8]); 9] = [
+            ("png", &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]),
+            ("jpg", &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            ("gif", b"GIF89a____________"),
+            ("bmp", b"BM____________"),
+            ("webp", b"RIFF____WEBPVP8 "),
+            // TIFF 两种字节序都要认
+            ("tiff", b"II\x2A\x00____________"),
+            ("tiff", b"MM\x00\x2A____________"),
+            ("ico", &[0x00, 0x00, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0]),
+            ("psd", b"8BPS____________"),
+        ];
+        for (want, bytes) in cases {
+            assert_eq!(
+                detect_image_ext(bytes, p).as_deref(),
+                Some(want),
+                "{want} 的魔数应被识别"
+            );
+        }
+    }
+
+    /// 库认不出、但确实该算图片的格式（AVIF/HEIC 属于 ISO BMFF 家族）。
+    #[test]
+    fn detects_iso_bmff_family() {
+        let p = std::path::Path::new("no_ext");
+        // ........ftyp avif
+        let mut avif = b"\x00\x00\x00\x20ftypavif".to_vec();
+        avif.extend_from_slice(&[0u8; 8]);
+        assert_eq!(detect_image_ext(&avif, p).as_deref(), Some("avif"));
+
+        let mut heic = b"\x00\x00\x00\x20ftypheic".to_vec();
+        heic.extend_from_slice(&[0u8; 8]);
+        assert_eq!(detect_image_ext(&heic, p).as_deref(), Some("heic"));
+    }
+
+    /// **文本类图片**（SVG）没有二进制魔数，只能靠扩展名 —— 也必须认出来，
+    /// 否则「格式不设限」就是空话。
+    #[test]
+    fn detects_text_based_image_by_extension() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>".to_vec();
+        assert_eq!(
+            detect_image_ext(&svg, std::path::Path::new("a.svg")).as_deref(),
+            Some("svg")
+        );
+        // 同样的内容但扩展名不是图片 → 不认（避免把普通 XML 当图片）
+        assert_eq!(detect_image_ext(&svg, std::path::Path::new("a.xml")), None);
+    }
+
+    /// 反例：真正的非图片必须被排除，否则会把文档/压缩包也记成图片。
+    #[test]
+    fn rejects_non_images() {
+        let p = std::path::Path::new("no_ext");
+        assert_eq!(detect_image_ext(b"hello, world", p), None);
+        assert_eq!(detect_image_ext(b"PK\x03\x04____________", p), None); // zip/docx
+        assert_eq!(detect_image_ext(b"%PDF-1.7____________", p), None); // pdf
+        // 空文件
+        assert_eq!(detect_image_ext(b"", p), None);
+        // 无意义的短数据
+        assert_eq!(detect_image_ext(b"\x00\x01\x02", p), None);
+        // ⚠️ 注意：`FF D8 FF` 只有 3 字节，但它**确实是** JPEG 的完整 magic
+        // （image 库判定 JPEG 只需这 3 字节），所以这里应当认出 jpg，
+        // 而不是因为「太短」被拒 —— 截断的 JPEG 仍会被识别，缩略图阶段失败后
+        // 走占位/按文件粘贴兜底，不影响条目存在。
+        assert_eq!(detect_image_ext(b"\xFF\xD8\xFF", p).as_deref(), Some("jpg"));
     }
 }
