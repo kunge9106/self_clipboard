@@ -1241,6 +1241,68 @@ body.dark .modal {
   gap: 8px;
 }
 
+/* ---------------------------------------------------------------------------
+   全文详情弹窗
+   普通 .modal 的 max-width 只有 320px —— 那是给「确认/取消」这种一句话弹窗
+   用的，放正文完全不够。这里单独放宽，并让正文区可滚动。
+--------------------------------------------------------------------------- */
+.modal-detail {
+  min-width: min(560px, 86vw);
+  max-width: min(760px, 92vw);
+  max-height: 80vh;
+  /* 头部 + 正文 + 按钮三段；正文 flex:1 吃掉剩余高度，故这里要能收缩 */
+  overflow: hidden;
+}
+
+/* 标题与「共 N 字 · M 行」同一行，右侧信息不换行 */
+.modal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex: none;
+}
+
+.modal-sub {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.detail-body {
+  margin: 0;
+  flex: 1 1 auto;
+  min-height: 72px;
+  max-height: 58vh;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  /* 比窗口底稍深一点，让正文区看起来是「一块内容」而不是浮在玻璃上 */
+  background: rgba(0, 0, 0, 0.04);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "Microsoft YaHei UI",
+    monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text);
+  /* 保留换行与缩进（正文原样呈现）；同时超长无空格串（URL/base64）必须能折行，
+     否则会把弹窗横向撑出滚动条。 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* 明确允许选中与光标样式：这个弹窗的主要用途就是「挑一段复制」 */
+  user-select: text;
+  cursor: text;
+}
+
+.detail-body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+body.dark .detail-body {
+  background: rgba(255, 255, 255, 0.05);
+}
+
 /* 垃圾桶弹窗：「是否连置顶/收藏一起清」的勾选行。
    没有对应条目时整行由 JS 置 hidden，不占位。 */
 .modal-checks {

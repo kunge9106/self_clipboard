@@ -281,6 +281,79 @@ pub fn get_image(id: String) -> Result<String, String> {
     Ok(format!("data:{mime};base64,{}", b64))
 }
 
+/// 详情弹窗显示正文时的**字符上限**。
+///
+/// 文本可能很大（日志、整篇文档），把几 MB 的字符串经 IPC 塞进 WebView 再渲染成
+/// 一个文本节点，轻则卡顿重则 OOM。所以显示有上限。
+///
+/// ⚠️ **这不影响「复制全文」**：那条路径（`copy_back`）是在 Rust 侧直接读盘写
+/// 剪贴板的，根本不经过前端 —— 所以完整的原文始终能复制出去，不因显示截断而丢失。
+const DETAIL_DISPLAY_CAP: usize = 200_000;
+
+/// 详情弹窗的返回体。
+///
+/// `rename_all = "camelCase"`：本项目**没有**全局的字段名转换（见 HistoryItem 里
+/// 对 pinnedViews 的显式 rename），跨到前端就得逐个显式命名，避免前端拿到
+/// `total_chars` 还是 `totalChars` 全靠猜。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FullContent {
+    /// 正文（超长时只返回前 `DETAIL_DISPLAY_CAP` 个字符）
+    pub text: String,
+    /// 是否因过长而被截断（前端据此提示用户）
+    pub truncated: bool,
+    /// 完整内容的字符总数
+    pub total_chars: usize,
+    /// 完整内容的总行数
+    pub total_lines: usize,
+}
+
+/// 读取条目的**完整内容**，供详情弹窗显示。
+///
+/// 文本条目读 `data/<id>.txt`；文件条目读 `files/<id>.txt` 的路径清单 —— 两者
+/// 都落在缓存目录里，也都能长到列表显示不下，所以共用一个通道。
+#[tauri::command]
+pub fn get_full_content(id: String) -> Result<FullContent, String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let item = {
+        let hist = HISTORY.get().unwrap().lock().unwrap();
+        hist.iter().find(|i| i.id == id).cloned().ok_or("条目不存在")?
+    };
+
+    // 文本正文优先；其次是文件路径清单。图片没有可查看的长文本。
+    let rel = item
+        .text_path
+        .as_ref()
+        .or(item.files_path.as_ref())
+        .ok_or("该条目没有可查看的文本内容")?;
+    let raw = fs::read_to_string(dir.join(rel)).map_err(|e| e.to_string())?;
+    Ok(summarize_content(raw))
+}
+
+/// 按显示上限截断正文，并统计**完整内容**的规模。
+///
+/// 抽成独立函数是为了能单测 —— `get_full_content` 依赖全局的目录与历史，
+/// 而这里只做纯计算。
+///
+/// 关键点：`total_chars` / `total_lines` 统计的是**截断前**的完整内容。
+/// 若统计截断后的长度，用户会看到「共 200000 字」而误以为内容就这么长。
+fn summarize_content(raw: String) -> FullContent {
+    let total_chars = raw.chars().count();
+    let total_lines = raw.lines().count();
+    let truncated = total_chars > DETAIL_DISPLAY_CAP;
+    let text = if truncated {
+        raw.chars().take(DETAIL_DISPLAY_CAP).collect()
+    } else {
+        raw
+    };
+    FullContent {
+        text,
+        truncated,
+        total_chars,
+        total_lines,
+    }
+}
+
 /// 缩略图：列表与悬浮预览专用（PNG，长边 ≤512，单张几十 KB）。
 /// 返回 data URL；失败返回 Err，前端显示占位图。
 ///
@@ -2671,5 +2744,51 @@ mod tests {
         // 而不是因为「太短」被拒 —— 截断的 JPEG 仍会被识别，缩略图阶段失败后
         // 走占位/按文件粘贴兜底，不影响条目存在。
         assert_eq!(detect_image_ext(b"\xFF\xD8\xFF", p).as_deref(), Some("jpg"));
+    }
+
+    /// 详情弹窗：短文本原样返回，统计正确。
+    #[test]
+    fn summarize_content_short_text() {
+        let c = summarize_content("第一行\n第二行\n第三行".to_string());
+        assert!(!c.truncated);
+        assert_eq!(c.text, "第一行\n第二行\n第三行");
+        assert_eq!(c.total_lines, 3);
+        assert_eq!(c.total_chars, "第一行\n第二行\n第三行".chars().count());
+    }
+
+    /// 详情弹窗：超长文本的显示被截断，但**统计仍是完整内容的规模** ——
+    /// 否则用户看到「共 200000 字」会误以为内容只有这么长。
+    #[test]
+    fn summarize_content_truncates_display_but_keeps_true_size() {
+        let raw = "x".repeat(DETAIL_DISPLAY_CAP + 5_000);
+        let c = summarize_content(raw);
+        assert!(c.truncated, "超上限必须标记截断");
+        assert_eq!(c.text.chars().count(), DETAIL_DISPLAY_CAP, "显示部分应恰好截到上限");
+        assert_eq!(
+            c.total_chars,
+            DETAIL_DISPLAY_CAP + 5_000,
+            "统计必须是完整内容的长度，不是截断后的"
+        );
+    }
+
+    /// 边界：正好等于上限时**不应**标记截断（否则会多一条无意义的提示）。
+    #[test]
+    fn summarize_content_at_cap_is_not_truncated() {
+        let raw = "y".repeat(DETAIL_DISPLAY_CAP);
+        let c = summarize_content(raw);
+        assert!(!c.truncated, "恰好等于上限不算超限");
+        assert_eq!(c.text.chars().count(), DETAIL_DISPLAY_CAP);
+    }
+
+    /// 截断要按**字符**而不是字节 —— 否则会在多字节字符（中文/emoji）中间切开，
+    /// 产出乱码或 panic。
+    #[test]
+    fn summarize_content_truncates_on_char_boundary() {
+        let raw = "中".repeat(DETAIL_DISPLAY_CAP + 10);
+        let c = summarize_content(raw);
+        assert!(c.truncated);
+        assert_eq!(c.text.chars().count(), DETAIL_DISPLAY_CAP);
+        // 全文都是「中」，能正常取到就说明没有在字节中间切断
+        assert!(c.text.chars().all(|ch| ch == '中'));
     }
 }

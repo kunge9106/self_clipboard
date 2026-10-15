@@ -235,6 +235,7 @@ pub fn run() {
             clipboard::clear_all,
             clipboard::get_image,
             clipboard::get_image_thumb,
+            clipboard::get_full_content,
             logger::frontend_log,
             clipboard::copy_back,
             clipboard::check_files_alive,

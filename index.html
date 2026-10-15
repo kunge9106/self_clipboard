@@ -178,6 +178,26 @@
       </div>
     </div>
 
+    <!-- 全文详情弹窗。
+         起因：列表只能显示 preview（正文首行的前 120 字），长文本看不全。
+         方案参考 CopyQ 的「Show Item Content」—— 独立窗口显示全文；
+         正文用 <pre> 保留换行与空白、并且可选中，否则挑着复制时格式会乱。
+         超长内容由后端截断显示，但「复制全文」取的是磁盘上的完整原文。 -->
+    <div class="modal-mask" id="detail-modal" hidden>
+      <div class="modal modal-detail">
+        <div class="modal-head">
+          <div class="modal-title" id="detail-title">全文</div>
+          <div class="modal-sub" id="detail-meta"></div>
+        </div>
+        <pre class="detail-body" id="detail-body" tabindex="0"></pre>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="detail-select">全选</button>
+          <button class="btn-ghost" id="detail-copy">复制全文</button>
+          <button class="btn-primary" id="detail-close">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 首次运行引导 1/2：开机自启。全新安装后的第一次启动才出现
          （config 里 asked_autostart 一旦落盘就不再问，选「暂不」也算问过）。 -->
     <div class="modal-mask" id="firstrun-autostart" hidden>

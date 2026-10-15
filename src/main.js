@@ -1165,6 +1165,99 @@ function showMenu(x, y, entries) {
   ctxMenuEl = menu;
 }
 
+// ---------------------------------------------------------------------------
+// 全文详情弹窗
+//
+// 起因：列表只显示 preview（正文**首行的前 120 字**），长文本根本看不全。
+// 方案参考 CopyQ 的「Show Item Content」：用一个独立窗口显示全文。
+// 正文用 <pre> 保留换行与缩进，并且可选中 —— 这个弹窗的主要用途就是
+// 「读一遍」或「挑一段复制」，两者都要求格式不乱。
+// ---------------------------------------------------------------------------
+
+let detailItem = null;
+
+async function openDetail(item) {
+  const mask = document.getElementById("detail-modal");
+  const body = document.getElementById("detail-body");
+  const meta = document.getElementById("detail-meta");
+  const title = document.getElementById("detail-title");
+  if (!mask || !body || !meta || !title) return;
+
+  title.textContent = item.kind === "files" ? "全部路径" : "全文";
+  meta.textContent = "读取中…";
+  body.textContent = "";
+
+  let data;
+  try {
+    data = await invoke("get_full_content", { id: item.id });
+  } catch (err) {
+    toast("读取失败：" + err);
+    return;
+  }
+
+  detailItem = item;
+  body.textContent = data.text;
+
+  // 规模信息：帮助判断内容大小，也是「有没有被截断」的唯一提示
+  const parts = [
+    `共 ${data.totalChars.toLocaleString()} 字`,
+    `${data.totalLines.toLocaleString()} 行`,
+  ];
+  if (data.truncated) parts.push("超出显示上限，仅显示前 20 万字");
+  meta.textContent = parts.join(" · ");
+
+  mask.hidden = false;
+  body.scrollTop = 0;
+  // 聚焦正文：用户多半想紧接着 Ctrl+A / Ctrl+C 或直接滚动
+  body.focus();
+}
+
+function closeDetail() {
+  const mask = document.getElementById("detail-modal");
+  if (mask && !mask.hidden) {
+    mask.hidden = true;
+    detailItem = null;
+  }
+}
+
+function bindDetailModal() {
+  const mask = document.getElementById("detail-modal");
+  if (!mask) return;
+
+  document.getElementById("detail-close").onclick = closeDetail;
+
+  // 点遮罩关闭（点弹窗本体不关）——这是「查看类」弹窗的通用预期
+  mask.addEventListener("mousedown", (e) => {
+    if (e.target === mask) closeDetail();
+  });
+
+  document.getElementById("detail-copy").onclick = async () => {
+    if (!detailItem) return;
+    const id = detailItem.id;
+    try {
+      // ⚠️ 走 copy_back：它在 Rust 侧**直接读盘**写剪贴板，不经过前端，
+      // 所以即使上面的正文因为超长被截断显示，复制出去的仍是**完整原文**。
+      const hint = await invoke("copy_back", { id });
+      toast(hint || "已复制全文");
+      closeDetail();
+    } catch (err) {
+      toast("复制失败：" + err);
+    }
+  };
+
+  // 全选正文。不能靠 Ctrl+A —— 那是「选中整个文档」，会把侧边栏/按钮
+  // 的文本一起选进去。
+  document.getElementById("detail-select").onclick = () => {
+    const body = document.getElementById("detail-body");
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    body.focus();
+  };
+}
+
 function openContextMenu(x, y, item) {
   const pinnedHere = isPinnedIn(item, currentView);
   const viewName = { history: "历史", text: "文本", images: "图片", files: "文件", favorites: "收藏" }[currentView] || currentView;
@@ -1176,7 +1269,17 @@ function openContextMenu(x, y, item) {
       ? "取消置顶"
       : "取消同步置顶"
     : (pinnedHere ? "取消置顶" : "置顶") + (settings?.pinGlobal ? "" : `（${viewName}）`);
-  showMenu(x, y, [
+  // 长文本 / 长路径列表在卡片里只显示 preview（首行前 120 字），看不全 ——
+  // 所以给这两类补一个「看全文」入口，放在菜单最前（最常用的新增项）。
+  const entries = [];
+  if (item.kind === "text" || item.kind === "files") {
+    entries.push({
+      label: item.kind === "files" ? "查看全部路径" : "查看全文",
+      act: () => openDetail(item),
+    });
+    entries.push({ sep: true });
+  }
+  entries.push(
     { label: "复制", act: () => copyBack(item) },
     {
       label: pinLabel,
@@ -1207,8 +1310,9 @@ function openContextMenu(x, y, item) {
         items = items.filter((i) => i.id !== item.id);
         render({ keepScroll: true });
       },
-    },
-  ]);
+    }
+  );
+  showMenu(x, y, entries);
 }
 
 // 点空白处 / 滚动 / Esc → 关闭；非卡片区域右键 → 只关不弹
@@ -1223,6 +1327,7 @@ document.addEventListener(
 );
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    closeDetail();
     closeContextMenu();
     hideImagePreview();
     exitSelectMode();
@@ -2186,6 +2291,7 @@ async function main() {
   bindClearViewModal();
   bindSingletonModal();
   bindFirstRunModals();
+  bindDetailModal();
   bindNav();
   bindSearch();
   startTimeTicker();
