@@ -49,6 +49,19 @@ static WORKER: OnceLock<std::sync::mpsc::Sender<RawClip>> = OnceLock::new();
 /// 已投递给工作线程、尚未落盘完成的条数。退出前据此等待，避免「刚复制就退出」丢数据。
 static PENDING: AtomicU32 = AtomicU32::new(0);
 
+/// 「图片文件路径 → 已解码 DIB」的小缓存。
+///
+/// **为什么需要**：微信复制一张图后会在一两分钟内**反复**把同一个临时文件重新
+/// 放进剪贴板（实测 6 次，日志时间点 06:50:18/22/27/31、06:51:30/55）。没有缓存时
+/// 每次都要 `image::open` 完整解码那张 4096×3072 的原图 —— 单次约 2 秒，
+/// 6 次就是十几秒，用户看到的就是「复制完要等 10 秒才出现」。
+/// 缓存后第一次解码、其余 5 次直接命中，第二次起接近瞬时。
+///
+/// 只缓存最近一条：微信补写的一定是**同一张图**（同一路径），命中率已经足够；
+/// 也不怕用户真去复制另一张图 —— 那是不同路径，直接未命中、走正常解码。
+/// 只留 1 条还顺带把常驻内存压到最小（DIB 本身已有 MAX_SIDE 上限，≤16MB）。
+static DECODE_CACHE: Mutex<Option<(PathBuf, (u64, u64), Vec<u8>)>> = Mutex::new(None);
+
 // ---------------------------------------------------------------------------
 // 数据结构
 // ---------------------------------------------------------------------------
@@ -425,6 +438,49 @@ impl Drop for PendingGuard {
     }
 }
 
+/// 兜底轮询线程：定期比对剪贴板序号，补上窗口消息漏掉的那部分。
+///
+/// 存在的理由：`WM_CLIPBOARDUPDATE` 只在**主窗口 WndProc** 里被处理，而该消息
+/// 在窗口不可见时（最小化、不在前台、锁屏）系统并不保证投递 —— 漏掉即永久丢失。
+/// 用户反馈正是「窗口开着但在后台时，复制的东西进不来」。
+///
+/// 为什么用序号而不是直接读剪贴板：`GetClipboardSequenceNumber` 是纯粹的读取，
+/// 不会像 OpenClipboard 那样去抢全局锁（对方正在写入时只会返回当前值）。
+/// 发现序号变了才去读内容，成本可忽略。
+///
+/// 幂等性：主线程与本线程都走 `on_clipboard_update`，入口第一件事就是拿
+/// `GetClipboardSequenceNumber()` 与 `LAST_SEQ` 比对，先到者处理、后到者直接
+/// 返回，所以两条通道并存不会重复入库。
+fn spawn_clipboard_watchdog() {
+    std::thread::Builder::new()
+        .name("clipboard-watchdog".into())
+        .spawn(|| {
+            // 1.5s 间隔：兼顾「后台不丢」与「几乎不耗 CPU」。
+            // 相比原先纯事件驱动的方案，多出的开销是每 1.5s 一次整数读取，
+            // 可忽略；而相比秒级轮询，复制后最多 1.5s 就被捕获。
+            const INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+            loop {
+                std::thread::sleep(INTERVAL);
+                let seq = unsafe { GetClipboardSequenceNumber() };
+                if seq == 0 {
+                    continue;
+                }
+                // 只有「有变化且主线程尚未处理过」才补刀。
+                // seq == LAST_SEQ 说明消息通道已经处理过了（绝大多数情况）。
+                if seq == LAST_SEQ.load(Ordering::Relaxed) {
+                    continue;
+                }
+                crate::logger::write_line(
+                    "INFO",
+                    "clipboard",
+                    "兜底轮询捕获到漏掉的剪贴板变化（窗口消息未送达）",
+                );
+                on_clipboard_update();
+            }
+        })
+        .ok();
+}
+
 fn spawn_worker() {
     // app 走全局 APP（OnceLock，在 init 首行写入）；worker 在订阅监听之前
     // 启动，所以取用时必定已就绪。
@@ -496,6 +552,19 @@ pub fn init(app: &AppHandle) {
             crate::log_print!("[clipboard] 已订阅 WM_CLIPBOARDUPDATE（事件驱动监听）");
         }
     }
+
+    // 兜底轮询：窗口消息**不是可靠通道**。
+    //
+    // 用户反馈「软件在后台运行时（窗口开着但最小化/不在最前），任何复制的东西
+    // 都可能不进软件」。原因是主路径依赖 WM_CLIPBOARDUPDATE，而它只在
+    // **主窗口 WndProc** 里被处理（见 effects.rs 的 hook_proc），窗口不可见时
+    // 消息投递本身就不保证 —— 最小化、锁屏、部分 DWM 状态下系统会跳过或延迟
+    // 投递该消息，事件也就永久丢失（该通知不会补发）。
+    //
+    // 所以再加一条独立的低频兜底：定期比对 `GetClipboardSequenceNumber`，
+    // 发现变化且主线程没处理过就补一次。序号比对天然幂等 ——
+    // 两条通道谁先谁后都只会落一条（LAST_SEQ 互斥）。
+    spawn_clipboard_watchdog();
 
     crate::log_print!(
         "[clipboard] 初始化完成，历史条目 {} 条，目录 {}",
@@ -958,6 +1027,41 @@ fn idle_ms() -> u64 {
 }
 
 fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
+    // 缓存命中判定：同一路径 + 文件的 (mtime, size) 未变 → 说明还是同一张图，
+    // 直接复用上次解码结果，省掉一次完整的 open + 解码 + 缩放（4096×3072 约 2 秒）。
+    // 用 mtime/size 而不是仅路径：微信的 RWTemp 目录里路径可复用，内容会换。
+    let stamp = std::fs::metadata(path).ok().map(|m| {
+        let t = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        (t ^ (m.len().wrapping_mul(31) << 1), m.len())
+    });
+    if let Some(st) = stamp {
+        if let Ok(g) = DECODE_CACHE.lock() {
+            if let Some((cp, cstamp, cdib)) = g.as_ref() {
+                if cp == path && *cstamp == st {
+                    return Some(cdib.clone());
+                }
+            }
+        }
+    }
+
+    let dib = decode_image_file(path)?;
+
+    if let Some(st) = stamp {
+        if let Ok(mut g) = DECODE_CACHE.lock() {
+            *g = Some((path.to_path_buf(), st, dib.clone()));
+        }
+    }
+    Some(dib)
+}
+
+/// 真正做解码（`image_file_to_dib` 的未缓存部分）。拆出来是为了让缓存逻辑
+/// 保持单一职责，也便于将来单独测试。
+fn decode_image_file(path: &std::path::Path) -> Option<Vec<u8>> {
     const EXTS: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
     // 扩展名只用来「快速排除明显不是图片的路径」（如 .txt / .pdf），**不能**作为
     // 唯一的准入条件 —— 微信/QQ 的剪贴板临时图片文件常常没有扩展名
@@ -1009,13 +1113,29 @@ fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
     dib.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerMeter
     dib.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
     dib.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
-    for y in (0..h).rev() {
-        for x in 0..w {
-            let p = rgba.get_pixel(x, y);
-            dib.push(p[2]);
-            dib.push(p[1]);
-            dib.push(p[0]);
-            dib.push(p[3]);
+
+    // 像素搬运：**一次性切片转换**，不用 `get_pixel` 双重循环。
+    //
+    // 改动前是 `for y in (0..h).rev() { for x in 0..w { get_pixel + 4×push } }`：
+    // 一张 4096×3072 的图要走 1200 万次循环，每像素还要过 4 次带边界检查的
+    // `get_pixel` 和 4 次 `push` —— 实测这是大图处理里最大的一块纯 CPU 开销。
+    //
+    // 语义等价：DIB 要求自下而上（末行在最前）、每像素 BGRA。
+    // 按行倒序遍历源 RGBA，行内把 RGBA 交换成 BGRA。
+    let src = rgba.as_raw();
+    let row_bytes = (w as usize) * 4;
+    let total = row_bytes * (h as usize);
+    if src.len() < total {
+        return None;
+    }
+    dib.reserve_exact(total);
+    for y in (0..h as usize).rev() {
+        let row = &src[y * row_bytes..(y + 1) * row_bytes];
+        for px in row.chunks_exact(4) {
+            dib.push(px[2]); // B
+            dib.push(px[1]); // G
+            dib.push(px[0]); // R
+            dib.push(px[3]); // A
         }
     }
     Some(dib)
