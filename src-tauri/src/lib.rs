@@ -267,6 +267,10 @@ pub fn run() {
         // 开机启动失败。这里每次启动比对一次，内容不符就重写。
         autostart::repair_if_needed();
         setup_effects(app.handle());
+        // 上次下载后用户取消了安装 → 包还在，保留；装完了 → 版本号已追平，删掉，
+        // 免得「重新安装」一直挂着挡住检查更新。必须在 clipboard::init 之后
+        // （要读缓存目录）。
+        about::prune_stale_installers();
         // 托盘图标常驻：程序一运行就显示（不再依赖「关闭时后台运行」开关）
         tray::create_tray(app.handle());
         // 启动后自动检查一次更新：后台线程、静默 —— 有新版才发通知，

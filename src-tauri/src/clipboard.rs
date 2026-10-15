@@ -620,12 +620,37 @@ fn handle_clip(raw: RawClip) {
 /// 所以只在工作线程里调用，绝不能回到主线程。
 fn resolve(raw: RawClip) -> Option<RawClip> {
     match raw {
-        RawClip::ImageFile(path) => match image_file_to_dib(&path) {
-            Some(dib) => Some(RawClip::Image(dib)),
-            // 解码失败：不是图片 / 文件损坏 / 微信的临时文件已被清理
-            // → 退回按「文件」记录，与改动前行为一致。
-            None => Some(RawClip::Files(vec![path.to_string_lossy().to_string()])),
-        },
+        RawClip::ImageFile(path) => {
+            // 微信给的临时图片文件随时可能被它自己清掉。解码推迟到后台线程后，
+            // 从「读到路径」到「真正打开文件」之间隔了一段（主线程还要处理后续
+            // 消息），这个窗口足够让文件消失 —— 于是图片莫名其妙就没了。
+            // 找不到文件时重试几次再放弃。
+            let mut dib = None;
+            for attempt in 0..3u32 {
+                dib = image_file_to_dib(&path);
+                if dib.is_some() {
+                    break;
+                }
+                if attempt < 2 {
+                    crate::logger::write_line(
+                        "INFO",
+                        "clipboard",
+                        &format!(
+                            "临时图片文件暂不可读（{}），重试 {}/2",
+                            path.display(),
+                            attempt + 1
+                        ),
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+            }
+            match dib {
+                Some(dib) => Some(RawClip::Image(dib)),
+                // 确实读不出来：不是图片 / 文件已损坏或被清理
+                // → 退回按「文件」记录，与改动前行为一致。
+                None => Some(RawClip::Files(vec![path.to_string_lossy().to_string()])),
+            }
+        }
         RawClip::ImageRaw(bytes) => Some(RawClip::Image(clamp_dib(bytes))),
         other => Some(other),
     }
@@ -647,6 +672,27 @@ enum RawClip {
     ImageRaw(Vec<u8>),
 }
 
+/// 尝试打开剪贴板，失败则短暂退避后重试。
+///
+/// 剪贴板锁是全局独占的，而 WM_CLIPBOARDUPDATE 偏偏在对方刚改写完就发过来 ——
+/// 大概率正撞上对方还持锁的窗口。这种「拿不到锁」不是「没有内容」，重试即可。
+///
+/// 退避 2/4/8/16ms 递增，总计约 30ms：对一次正常复制完全感知不到（真正的
+/// 耗时在后台解码），却足以覆盖绝大多数同进程内的分次写入。上限刻意压得低，
+/// 因为这个函数跑在主线程（WndProc），拖久了界面会卡。
+fn open_clipboard_retry() -> bool {
+    const MAX_ATTEMPTS: u32 = 5;
+    for attempt in 0..MAX_ATTEMPTS {
+        if unsafe { OpenClipboard(0) } != 0 {
+            return true;
+        }
+        if attempt + 1 < MAX_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(2u64 << attempt));
+        }
+    }
+    false
+}
+
 unsafe fn read_clipboard() -> Option<RawClip> {
     const CF_UNICODETEXT: u32 = 13;
     const CF_DIB: u32 = 8;
@@ -656,7 +702,25 @@ unsafe fn read_clipboard() -> Option<RawClip> {
     // 在 OpenClipboard 之前读取，避免持有剪贴板锁时再去碰 settings 的互斥锁。
     let file_copy = crate::settings::get().file_copy;
 
-    if OpenClipboard(0) == 0 {
+    // ⚠️ 剪贴板是**全局独占锁**，任何进程持锁期间别人都拿不到。
+    //
+    // 微信/QQ/浏览器复制图片时会**分多次**改写剪贴板（先写位图，再补文件列表
+    // 或反之），而 WM_CLIPBOARDUPDATE 是在每次改写后立刻发给订阅方的 —— 也就是
+    // 说我们极可能在它还持着锁的时候就被叫醒。此时 OpenClipboard 直接失败。
+    //
+    // 改动前这里是一个 `if OpenClipboard(0) == 0 { return None }`：拿不到锁就
+    // 当作「这次没有内容」，可 WM_CLIPBOARDUPDATE 只有一次通知，不会重发 →
+    // 这一次复制就**永久丢失**。用户看到的就是「微信复制图片有时候完全没反应」
+    // （2.1.11 反馈的新问题）。
+    //
+    // 正确做法是重试：拿不到锁不代表剪贴板是空的，只是对方还没写完。短暂退避
+    // 后重试，覆盖住整个写入窗口。
+    if !open_clipboard_retry() {
+        crate::logger::write_line(
+            "WARN",
+            "clipboard",
+            "OpenClipboard 重试耗尽，放弃本次剪贴板内容（对方应用长时间持锁）",
+        );
         return None;
     }
 
@@ -683,7 +747,7 @@ unsafe fn read_clipboard() -> Option<RawClip> {
             }
         }
 
-        if file_copy && IsClipboardFormatAvailable(CF_HDROP) != 0 {
+        if IsClipboardFormatAvailable(CF_HDROP) != 0 {
             if let Some(h) = non_null(GetClipboardData(CF_HDROP)) {
                 const ALL: u32 = 0xFFFFFFFF;
                 let count = DragQueryFileW(h, ALL, std::ptr::null_mut(), 0);
@@ -711,16 +775,24 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                 // 对应到轻贴的现象：复制文件（读一次）→ 之后点击文件条目（写回 → OpenClipboard）
                 // → 崩溃。这正是本次上报的 bug。
                 // 内存无需手动释放：CloseClipboard 后由剪贴板自身管理。
-                // 微信等应用复制图片时给的是 CF_HDROP（一个临时 PNG/JPG 文件路径），
-                // 不是位图数据 —— 若按文件记，用户看到的就是「文件」条目，图片的
-                // 缩略图、点击回贴成位图这些形态全丢了。只有一张且扩展名是图片时，
-                // 就地解码转成图片条目；多张或混合文件维持「文件」条目不变。
+                //
+                // ⚠️ 单文件图片的判定**不能**被「文件复制」开关挡住（2.1.11 反馈：
+                // 「微信复制图片都有可能识别不到」）。微信/QQ 复制图片给的往往就是
+                // CF_HDROP（一个临时图片文件路径）而不是 CF_DIB，而 file_copy 默认
+                // 关闭 —— 改动前这里整段挂在 `file_copy &&` 后面，于是微信复制图片
+                // 整条路径被跳过，什么都读不到。图片和文件是两回事：开关管的是
+                // 「要不要记录文件条目」，不该决定「要不要记录图片」。
                 if files.len() == 1 {
                     // 只记住路径，解码推迟到后台线程 —— 主线程（WndProc）不能
                     // 被解码大图拖住，否则界面直接冻住。
                     return Some(RawClip::ImageFile(PathBuf::from(&files[0])));
                 }
-                return Some(RawClip::Files(files));
+                // 多张 / 非图片：属于「文件复制」范畴，听开关的。
+                if file_copy {
+                    return Some(RawClip::Files(files));
+                }
+                // 单个非图片文件且开关关闭：不记录。
+                return None;
             }
         }
 
@@ -827,13 +899,20 @@ fn image_fingerprint(dib: &[u8]) -> u64 {
 
 fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
     const EXTS: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
-    let is_image = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| EXTS.contains(&e.to_ascii_lowercase().as_str()))
-        .unwrap_or(false);
-    if !is_image {
-        return None;
+    // 扩展名只用来「快速排除明显不是图片的路径」（如 .txt / .pdf），**不能**作为
+    // 唯一的准入条件 —— 微信/QQ 的剪贴板临时图片文件常常没有扩展名
+    // （形如 `wx_image_tmp`、`{guid}`），改动前按扩展名一刀切会让这些图片
+    // 解码失败、退回成「文件」条目，用户反馈就是「微信复制图片识别不到」。
+    // 所以有扩展名时先判；扩展名不认识或干脆没有，则交给 image 库按文件头
+    // 嗅探（image::open 会验证 magic number，不是图片自然失败）。
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let ext = ext.to_ascii_lowercase();
+        let looks_like_other = !ext.is_empty()
+            && !EXTS.contains(&ext.as_str())
+            && !matches!(ext.as_str(), "tmp" | "dat" | "bin" | "");
+        if looks_like_other {
+            return None;
+        }
     }
     let img = image::open(path).ok()?;
     let (w0, h0) = (img.width(), img.height());

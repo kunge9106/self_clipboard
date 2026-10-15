@@ -1486,9 +1486,7 @@ function settingsAboutHtml() {
         </div>
         <div class="about-state" id="about-update">尚未检查更新</div>
         <div class="about-actions">
-          <button class="btn-ghost" id="btn-check-update">${
-            updateInfo?.hasUpdate ? "下载最新版" : "检查更新"
-          }</button>
+          <button class="btn-ghost" id="btn-check-update">${updateBtnLabel()}</button>
           <button class="btn-ghost" id="btn-repo">项目主页</button>
           <button class="btn-ghost" id="btn-feedback">问题反馈</button>
         </div>
@@ -1558,6 +1556,25 @@ function renderNotes(tag, notes) {
 
 // 关于页的更新区域只做「渲染」，不发请求 —— 数据来自 updateInfo（启动自检的缓存
 // 或用户手动检查的结果）。这样进关于页不会联网、不会卡，也不会再闪黑窗口。
+/**
+ * 主按钮文案：区分三种情况。
+ *
+ * 「已下好待装」和「有新版本待下」是完成同一次更新的两步，所以共用主按钮；
+ * 而「已是最新」时主按钮回归「检查更新」—— 不能因为本地躺着一份安装包
+ * 就把主按钮占死，那样用户既没法复查更新，看着也很莫名。
+ */
+/// 主按钮文案三态，与下方点击分发一一对应（顺序也必须一致）：
+///   1. 本地已有下载好的安装包（上次取消过安装）→「立即安装」
+///   2. 有新版但没下载                          →「下载最新版」
+///   3. 其余（已是最新 / 未检查）                →「检查更新」
+/// 「重新安装」不再抢占主按钮：装成功后 prune_stale_installers 会清掉
+/// 本地包，按钮自动回到「检查更新」，不会挡住检查更新的入口。
+function updateBtnLabel() {
+  if (updateInfo?.downloadedPath) return "立即安装";
+  if (updateInfo?.hasUpdate) return "下载最新版";
+  return "检查更新";
+}
+
 function renderUpdatePanels() {
   const info = updateInfo;
   const cur = info?.displayCurrent || info?.current || "";
@@ -1570,12 +1587,7 @@ function renderUpdatePanels() {
     } else {
       btn.classList.remove("is-downloading");
       btn.disabled = false;
-      // 优先级：已下载未装 →「重新安装」；有新版 →「下载最新版」；否则「检查更新」
-      btn.textContent = info?.downloadedPath
-        ? "重新安装"
-        : has
-          ? "下载最新版"
-          : "检查更新";
+      btn.textContent = updateBtnLabel();
     }
   }
 
@@ -1588,10 +1600,10 @@ function renderUpdatePanels() {
   } else if (dlState.error) {
     tip.className = "about-state is-err";
     tip.textContent = "下载失败：" + dlState.error;
-  } else if (info?.downloadedPath) {
-    // 安装包已在本地：用户上次在 UAC/安装器上取消了，不必再下一次
+  } else if (has && info?.downloadedPath) {
+    // 有新版，且包已经下好了（用户上次在安装器上取消了）→ 提示直接装
     tip.className = "about-state is-new";
-    tip.textContent = `安装包已下载，点击「重新安装」继续（v${info.latest}）`;
+    tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，已下载，点击「立即安装」`;
   } else if (has) {
     tip.className = "about-state is-new";
     tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，当前 v${esc(cur)}`;
@@ -2110,16 +2122,18 @@ function bindSettings(view) {
   // 顺便在进入该页时就把版本号与运行环境拉出来。
   const btnCheck = view.querySelector("#btn-check-update");
   if (btnCheck) {
-    // 已下载未装（用户在安装器上点过取消）→「重新安装」，直接拉起本地包；
-    // 有新版 →「下载最新版」；其余 →「检查更新」
-    btnCheck.onclick = () =>
-      updateInfo?.downloadedPath
-        ? installDownloaded()
-        : updateInfo?.hasUpdate
-          ? startDownload()
-          : aboutCheckUpdate();
+    // 有新版且已下好 → 直接装；有新版没包 → 先下；没新版 → 复查
+    btnCheck.onclick = () => {
+      // 与 updateBtnLabel() 的三态严格同序：有包先装、有新版下载、
+      // 其余检查更新。顺序若与文案不一致，边缘情况（版本追平但包还在）
+      // 会出现「按钮写着立即安装、点的却是检查更新」的割裂。
+      if (updateInfo?.downloadedPath) return installDownloaded();
+      if (updateInfo?.hasUpdate) return startDownload();
+      return aboutCheckUpdate();
+    };
     loadAbout();
   }
+
   const btnRepo = view.querySelector("#btn-repo");
   if (btnRepo)
     btnRepo.onclick = () =>

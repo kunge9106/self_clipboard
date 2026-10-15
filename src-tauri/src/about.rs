@@ -706,6 +706,83 @@ pub fn update_state() -> serde_json::Value {
     }
 }
 
+/// 清掉「已经装上了」的安装包。
+///
+/// 更新流程：下载到 `<缓存>/update/` → 拉起安装器 → 本进程退出。装完后版本号
+/// 就追平了，那份包的唯一用途（供安装）已经结束，留在磁盘上只是垃圾。
+///
+/// 为什么不能只认 `asset_name`：它记的是**最近一次检查**的版本。若后来远端
+/// 又发了新版，缓存里的 `asset_name` 就指向新包，旧包便再也没人管，越积越多。
+/// 所以这里扫描整个目录，逐个比对，只删「不比当前版本新」的那几份。
+pub fn prune_stale_installers() {
+    let dir = crate::clipboard::cache_dir().join("update");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let cur = match parse_semver(env!("CARGO_PKG_VERSION")) {
+        Some(v) => v,
+        None => return,
+    };
+
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(v) = parse_semver(&name) else {
+            continue;
+        };
+        // 还比当前版本新 → 用户上次取消了安装，留着让他能继续装
+        if v > cur {
+            continue;
+        }
+        let _ = std::fs::remove_file(&p);
+        crate::log_print!("[update] 清理安装包 v{}（已安装或过期）", name);
+    }
+}
+
+/// 从文件名里取出第一组 `主.次.修` 版本号，取不到返回 None。
+///
+/// 安装包名形如 `轻贴_2.1.8_x64-setup.exe` / `light_clip_v2.1.8_setup.exe`，
+/// 统一按「数字.数字.数字」扫描即可，不必区分命名风格。
+fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = 0usize;
+
+    while i < n {
+        if !b[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let mut parts = [0u32; 3];
+        let mut k = 0usize;
+        let mut j = i;
+
+        loop {
+            let mut v = 0u32;
+            while j < n && b[j].is_ascii_digit() {
+                v = v * 10 + (b[j] - b'0') as u32;
+                j += 1;
+            }
+            parts[k] = v;
+            k += 1;
+
+            if k == 3 {
+                return Some((parts[0], parts[1], parts[2]));
+            }
+            if j < n && b[j] == b'.' {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        i = if j > i { j } else { i + 1 };
+    }
+    None
+}
+
 /// 打开外部链接（项目主页 / 新建反馈 / 下载页）。
 ///
 /// 走系统 shell 的 `open` 动词，只允许 http(s)，避免被塞进 `file://` 之类的本地路径。
