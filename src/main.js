@@ -1025,10 +1025,10 @@ function placePreview(box, card) {
 function bindImagePreview(card, item) {
   // 悬浮多久才弹预览。
   //
-  // 改动前是 120ms —— 鼠标扫过列表就接连弹框，扫十几行能弹十几次，
-  // 既晃眼又白白触发缩略图加载（每张都要走一次 IPC + 解码）。
-  // 改成 2s：只有「停在某张图上不动」这个明确意图才弹，扫过即忽略。
-  const HOVER_DELAY_MS = 2000;
+  // 演进：120ms（一碰就弹，扫过列表连弹十几次，晃眼且白触发缩略图加载）
+  //   → 2000ms（用户嫌长）→ 1000ms。
+  // 1s 是个平衡点：快速扫过列表不会触发，停下来看一眼时也不觉得迟。
+  const HOVER_DELAY_MS = 1000;
   card.addEventListener("mouseenter", () => {
     if (previewTimer) clearTimeout(previewTimer);
     previewTimer = setTimeout(() => showImagePreview(card, item), HOVER_DELAY_MS);
