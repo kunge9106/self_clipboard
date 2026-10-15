@@ -256,8 +256,8 @@ pub fn get_image(id: String) -> Result<String, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let hist = HISTORY.get().unwrap().lock().unwrap();
     let item = hist.iter().find(|i| i.id == id).ok_or("条目不存在")?;
-    let rel = item.img_path.as_ref().ok_or("该条目不是图片")?;
-    let path = dir.join(rel);
+    let rel = item.img_path.as_ref().ok_or("该条目不是图片")?.clone();
+    let path = dir.join(&rel);
     let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     drop(hist);
     if size > MAX_IMAGE_BYTES {
@@ -269,7 +269,16 @@ pub fn get_image(id: String) -> Result<String, String> {
     }
     let bytes = fs::read(&path).map_err(|e| e.to_string())?;
     let b64 = base64_encode(&bytes);
-    Ok(format!("data:image/bmp;base64,{}", b64))
+    // MIME 按扩展名给。改动前硬编码 `image/bmp` —— 那时落盘的都是 BMP 转换结果，
+    // 现在存的是原图（多为 JPEG），继续硬编码会让浏览器按错误类型解码。
+    let mime = match rel.rsplit('.').next().unwrap_or("") {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "image/bmp",
+    };
+    Ok(format!("data:{mime};base64,{}", b64))
 }
 
 /// 缩略图：列表与悬浮预览专用（PNG，长边 ≤512，单张几十 KB）。
@@ -355,13 +364,25 @@ pub fn copy_back(id: String) -> Result<Option<String>, String> {
             })
         }
         "image" => {
-            // BMP 文件去掉 14 字节文件头即为 DIB，直接放回 CF_DIB
+            // 落盘格式现在有三种，按扩展名分派（都是我们自己写下的，可信）：
+            //   - .bmp  → 掐掉 14 字节文件头即 DIB
+            //   - .dib  → 本身就是裸 DIB，直接用（极少数兜底条目）
+            //   - .jpg/.png/... → 原图，此刻才解码成 DIB
+            // 解码放在这里，是因为它只发生在**用户点击回贴**时，感知不到延迟。
             let rel = item.img_path.ok_or("图片文件缺失")?;
-            let bmp = fs::read(dir.join(rel)).map_err(|e| e.to_string())?;
-            if bmp.len() < 54 || &bmp[0..2] != b"BM" {
-                return Err("图片数据损坏".into());
-            }
-            unsafe { write_dib_to_clipboard(&bmp[14..]) }.map(|_| None)
+            let path = dir.join(rel.clone());
+            let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+            let dib = if rel.ends_with(".bmp") {
+                if bytes.len() < 54 || &bytes[0..2] != b"BM" {
+                    return Err("图片数据损坏".into());
+                }
+                bytes[14..].to_vec()
+            } else if rel.ends_with(".dib") {
+                bytes
+            } else {
+                image_file_to_dib(&path).ok_or("图片解码失败")?
+            };
+            unsafe { write_dib_to_clipboard(&dib) }.map(|_| None)
         }
         _ => Err("未知类型".into()),
     }
@@ -686,8 +707,15 @@ fn handle_clip(captured_ms: u64, raw: RawClip) {
     // 若命中只 return 不更新时间，基准永远停在第一次，只要用户持续复制，
     // gap 就会一路累加，涨过阈值后又冒出一条。刷新后，只要同一张图持续到来，
     // 它们始终落在同一簇里。
-    if let RawClip::Image(dib) = &raw {
-        let fp = image_fingerprint(dib);
+    // 判重：两种形态各有各的指纹来源，但都**不需要解码**。
+    //   - ImageOriginal（微信走的就是这条）：文件内容哈希（FNV-1a）
+    //   - Image（CF_DIB 原始位图，本机实测微信不走）：像素量化指纹
+    let fp = match &raw {
+        RawClip::ImageOriginal { hash, .. } => Some(*hash),
+        RawClip::Image(dib) => Some(image_fingerprint(dib)),
+        _ => None,
+    };
+    if let Some(fp) = fp {
         if let Ok(mut g) = LAST_IMG.lock() {
             if dedup_merge(&mut g, fp, captured_ms) {
                 crate::logger::write_line(
@@ -729,22 +757,23 @@ fn dedup_merge(g: &mut Vec<(u64, u64)>, fp: u64, now: u64) -> bool {
     false
 }
 
-/// 把「待处理」的剪贴板内容整理成可存储形态：
-/// 图片文件解码成 DIB、超大位图降采样到 MAX_SIDE 以内。
+/// 把「待处理」的剪贴板内容整理成可存储形态。
 ///
-/// 这是整条链路上唯一耗时的部分（解码大图要展开上百 MB 像素），
-/// 所以只在工作线程里调用，绝不能回到主线程。
+/// **关键：CF_HDROP 图片不再解码**。只读出文件字节、嗅探真实格式、算内容哈希。
+/// 解码要 495ms（实测），而解码产物在捕获那一刻没人需要 —— 缩略图是懒加载、
+/// 回贴要用户点击。原样存盘后，「复制 → 出现」只剩「读文件 + 哈希 + 写文件」。
 fn resolve(raw: RawClip) -> Option<RawClip> {
     match raw {
         RawClip::ImageFile(path) => {
-            // 微信给的临时图片文件随时可能被它自己清掉。解码推迟到后台线程后，
+            // 微信给的临时图片文件随时可能被它自己清掉。读字节推迟到后台线程后，
             // 从「读到路径」到「真正打开文件」之间隔了一段（主线程还要处理后续
             // 消息），这个窗口足够让文件消失 —— 于是图片莫名其妙就没了。
-            // 找不到文件时重试几次再放弃。
-            let mut dib = None;
+            // 读不到时重试几次。
+            let mut bytes = None;
             for attempt in 0..3u32 {
-                dib = image_file_to_dib(&path);
-                if dib.is_some() {
+                // ⚠️ 这里读的是**原文件字节**（微信给的多是 JPEG），不是解码结果。
+                bytes = std::fs::read(&path).ok().filter(|b| !b.is_empty());
+                if bytes.is_some() {
                     break;
                 }
                 if attempt < 2 {
@@ -760,16 +789,92 @@ fn resolve(raw: RawClip) -> Option<RawClip> {
                     std::thread::sleep(std::time::Duration::from_millis(30));
                 }
             }
-            match dib {
-                Some(dib) => Some(RawClip::Image(dib)),
-                // 确实读不出来：不是图片 / 文件已损坏或被清理
-                // → 退回按「文件」记录，与改动前行为一致。
-                None => Some(RawClip::Files(vec![path.to_string_lossy().to_string()])),
-            }
+            let Some(bytes) = bytes else {
+                // 确实读不出来（文件已被清理/无权限）。此时无法判断它是不是图片，
+                // 按「文件」记录只对开了文件复制的用户有意义；关闭时直接放弃。
+                return if crate::settings::get().file_copy {
+                    Some(RawClip::Files(vec![path.to_string_lossy().to_string()]))
+                } else {
+                    None
+                };
+            };
+
+            // 用**图片魔数**判定真实格式，而不是文件名后缀。
+            //
+            // 为什么：微信/QQ 的临时文件常常没有后缀或后缀不可信（`wx_image_tmp`、
+            // 纯 hash 名）。按后缀判会漏掉真图片；按魔数判则只有真是图片才过 ——
+            // 顺带天然完成了「这个文件到底是不是图片」的判定，比原来的扩展名
+            // 白名单更准，也不需要维护白名单。
+            let Some(ext) = image_ext_from_magic(&bytes) else {
+                // 不是图片（比如用户复制了单个 .txt/.pdf 文件）。
+                // 这类属于「文件复制」范畴，**听开关的** —— 开关关闭时不记录。
+                // （图片不受开关影响，上一段已经处理完并返回了。）
+                return if crate::settings::get().file_copy {
+                    Some(RawClip::Files(vec![path.to_string_lossy().to_string()]))
+                } else {
+                    None
+                };
+            };
+            let hash = content_hash(&bytes);
+            Some(RawClip::ImageOriginal {
+                bytes,
+                ext: ext.to_string(),
+                hash,
+            })
         }
         RawClip::ImageRaw(bytes) => Some(RawClip::Image(clamp_dib(bytes))),
         other => Some(other),
     }
+}
+
+/// 按**文件头魔数**判断图片真实格式，返回规范扩展名。
+///
+/// 只认该管线实际会遇到的几种（与 Cargo.toml 里 `image` 开启的 feature 一致）。
+/// 不信任文件后缀 —— 微信临时文件名是内容哈希，没有可信后缀。
+fn image_ext_from_magic(b: &[u8]) -> Option<&'static str> {
+    if b.len() < 12 {
+        return None;
+    }
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("png");
+    }
+    // JPEG: FF D8 FF
+    if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("jpg");
+    }
+    // GIF: "GIF87a" / "GIF89a"
+    if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        return Some("gif");
+    }
+    // BMP: "BM"
+    if b.starts_with(b"BM") {
+        return Some("bmp");
+    }
+    // WebP: "RIFF" .... "WEBP"（第 4..8 字节是长度，8..12 是 WEBP）
+    if b.starts_with(b"RIFF") && &b[8..12] == b"WEBP" {
+        return Some("webp");
+    }
+    None
+}
+
+/// 文件内容哈希（FNV-1a 64 位）。
+///
+/// 用途是**判重**：微信把同一张图反复写进剪贴板时，临时文件名与内容都完全一致
+/// （文件名就是内容哈希），所以「字节相同」是比「像素指纹相同」更省、更准的判据 ——
+/// 不需要解码就能得到。
+///
+/// 大文件全量哈希：4096×3072 的 JPEG 约 4.7MB，FNV 遍历约 5ms，可接受。
+/// 若将来要处理几十 MB 的图，可改为「采样哈希」（头/中/尾各取几 KB）。
+fn content_hash(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut h = OFFSET;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    h
 }
 
 // ---------------------------------------------------------------------------
@@ -780,12 +885,26 @@ enum RawClip {
     Text(String),
     Image(Vec<u8>), // DIB 字节
     Files(Vec<String>),
-    /// 待解码的图片文件（CF_HDROP 只给了一张）。
-    /// 解码要展开上百 MB 像素，很慢 —— 只在后台线程 resolve 里做。
+    /// CF_HDROP 给的图片**原文件路径**（尚未读取）。
     ImageFile(PathBuf),
     /// 待处理的原始 CF_DIB 字节（可能超过尺寸上限）。
     /// 降采样同样只在后台线程做。
     ImageRaw(Vec<u8>),
+    /// CF_HDROP 图片的**原文件字节**（已读入，尚未解码）。
+    ///
+    /// 这是「无感复制」的关键：**原样落盘，捕获路径上不做任何解码**。
+    /// 解码要 495ms（实测 4096×3072 JPEG：解码 55ms + 降采样 319ms + 拼 DIB），
+    /// 而解码结果（12MB BMP）在捕获那一刻**没有任何人需要** ——
+    /// 列表只用 512px 缩略图（前端本就懒加载），回贴要用户点击才发生。
+    /// 两者都可以推迟到真正需要时再解码，于是「复制 → 出现」只剩
+    /// 「读文件 + 哈希 + 写文件」，十几毫秒。
+    ImageOriginal {
+        bytes: Vec<u8>,
+        /// 落盘用的扩展名（按图片魔数判定，不信任原文件名）。
+        ext: String,
+        /// 文件字节的内容哈希，用于判重 —— **无需解码**即可判重。
+        hash: u64,
+    },
 }
 
 /// 尝试打开剪贴板，失败则短暂退避后重试。
@@ -976,6 +1095,7 @@ const DUP_WINDOW_MS: u64 = 60_000;
 
 /// 相邻两次同图写入的最大实测间隔（46s）+ 余量，供单测断言窗口确实覆盖得住。
 /// 抽成常量是为了让「窗口够不够大」这件事在测试里显式、可校验。
+#[cfg(test)]
 const OBSERVED_MAX_ADJACENT_GAP_MS: u64 = 46_000;
 
 /// 对 DIB 的像素内容做量化采样，得出一个 64 位指纹。
@@ -1255,6 +1375,23 @@ fn store_raw(raw: RawClip) -> HistoryItem {
             item.files_path = Some(rel);
             item.files = Some(files);
         }
+        RawClip::ImageOriginal { bytes, ext, .. } => {
+            // 直接把**原始文件字节**落盘（微信给的是 JPEG，几百 KB~几 MB）。
+            //
+            // 不做解码、不降采样、不转 BMP。落盘的是原图，好处有三：
+            //   1. 捕获瞬间完成（写文件 ~几 ms，对比原来 495ms 的解码）
+            //   2. 省磁盘：JPEG 4.7MB vs 原方案 BMP 12MB
+            //   3. 画质更好：缩略图从原图生成，回贴也是原图
+            // 需要解码的地方（缩略图 / 回贴）各自按需解码，见 ensure_thumb、
+            // copy_back —— 那时的延迟用户感知不到（一个是懒加载，一个是点击后）。
+            item.kind = "image".into();
+            item.size = bytes.len() as u64;
+            item.preview = "[图片]".into();
+            let rel = format!("images/{}.{}", id, ext);
+            if fs::write(dir.join(&rel), &bytes).is_ok() {
+                item.img_path = Some(rel);
+            }
+        }
         RawClip::Image(bytes) => {
             item.kind = "image".into();
             item.size = bytes.len() as u64;
@@ -1281,7 +1418,7 @@ fn store_raw(raw: RawClip) -> HistoryItem {
             }
         }
         // ImageFile / ImageRaw 是「待处理」形态，经 resolve() 后会变成
-        // Image 或 Files 才到这儿；留空分支兜底，不走 panic。
+        // Image / ImageOriginal / Files 才到这儿；留空分支兜底，不走 panic。
         RawClip::ImageFile(_) | RawClip::ImageRaw(_) => {}
     }
 
