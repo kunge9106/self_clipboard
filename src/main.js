@@ -1023,9 +1023,15 @@ function placePreview(box, card) {
 }
 
 function bindImagePreview(card, item) {
+  // 悬浮多久才弹预览。
+  //
+  // 改动前是 120ms —— 鼠标扫过列表就接连弹框，扫十几行能弹十几次，
+  // 既晃眼又白白触发缩略图加载（每张都要走一次 IPC + 解码）。
+  // 改成 2s：只有「停在某张图上不动」这个明确意图才弹，扫过即忽略。
+  const HOVER_DELAY_MS = 2000;
   card.addEventListener("mouseenter", () => {
     if (previewTimer) clearTimeout(previewTimer);
-    previewTimer = setTimeout(() => showImagePreview(card, item), 120);
+    previewTimer = setTimeout(() => showImagePreview(card, item), HOVER_DELAY_MS);
   });
   card.addEventListener("mouseleave", hideImagePreview);
 }

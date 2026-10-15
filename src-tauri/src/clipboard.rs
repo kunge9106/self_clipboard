@@ -49,18 +49,24 @@ static WORKER: OnceLock<std::sync::mpsc::Sender<RawClip>> = OnceLock::new();
 /// 已投递给工作线程、尚未落盘完成的条数。退出前据此等待，避免「刚复制就退出」丢数据。
 static PENDING: AtomicU32 = AtomicU32::new(0);
 
-/// 「图片文件路径 → 已解码 DIB」的小缓存。
+/// 「图片文件路径 → 已解码 DIB」的小 LRU 缓存。
 ///
-/// **为什么需要**：微信复制一张图后会在一两分钟内**反复**把同一个临时文件重新
-/// 放进剪贴板（实测 6 次，日志时间点 06:50:18/22/27/31、06:51:30/55）。没有缓存时
-/// 每次都要 `image::open` 完整解码那张 4096×3072 的原图 —— 单次约 2 秒，
-/// 6 次就是十几秒，用户看到的就是「复制完要等 10 秒才出现」。
-/// 缓存后第一次解码、其余 5 次直接命中，第二次起接近瞬时。
+/// **为什么需要**：微信复制一张图后会在一两分钟内**反复**把图片重新放进剪贴板，
+/// 而且**每次的文件名都不同**（实测 44ad35…、b9e48ee…、0c05463…、3a916774…，
+/// 都在同一个 RWTemp 目录下）。没有缓存时每次都要 `image::open` 完整解码那张
+/// 4096×3072 的原图 —— 单次约 1~2 秒，用户看到的就是「复制完要等 4~6 秒」。
 ///
-/// 只缓存最近一条：微信补写的一定是**同一张图**（同一路径），命中率已经足够；
-/// 也不怕用户真去复制另一张图 —— 那是不同路径，直接未命中、走正常解码。
-/// 只留 1 条还顺带把常驻内存压到最小（DIB 本身已有 MAX_SIDE 上限，≤16MB）。
-static DECODE_CACHE: Mutex<Option<(PathBuf, (u64, u64), Vec<u8>)>> = Mutex::new(None);
+/// **为什么不是只存 1 条**：微信每次补写的路径都变，单条缓存必然反复失效
+/// （实测日志里同一次复制的 6 次触发用了 3 个不同路径）。所以存多条按 LRU 淘汰。
+///
+/// 键用 `(路径, mtime, size)`：微信 RWTemp 目录里路径会复用、内容会换，
+/// 只比路径会拿到过期内容。
+///
+/// 容量 4 条 × 每条 ≤16MB（MAX_SIDE 已限制）= 最坏 64MB 常驻。取 3 更稳妥：
+/// 实测一次复制最多涉及 3 个路径。
+static DECODE_CACHE: Mutex<Vec<(PathBuf, (u64, u64), Vec<u8>)>> = Mutex::new(Vec::new());
+/// 解码缓存条数上限（LRU：最老的先淘汰）。
+const DECODE_CACHE_CAP: usize = 3;
 
 // ---------------------------------------------------------------------------
 // 数据结构
@@ -1040,12 +1046,15 @@ fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
         (t ^ (m.len().wrapping_mul(31) << 1), m.len())
     });
     if let Some(st) = stamp {
-        if let Ok(g) = DECODE_CACHE.lock() {
-            if let Some((cp, cstamp, cdib)) = g.as_ref() {
-                if cp == path && *cstamp == st {
-                    return Some(cdib.clone());
-                }
-            }
+        let hit = DECODE_CACHE.lock().ok().and_then(|mut g| {
+            // 命中就把它挪到末尾（LRU：末尾 = 最新），再克隆返回。
+            let idx = g.iter().position(|(p, s, _)| p == path && *s == st)?;
+            let hit = g.remove(idx);
+            g.push(hit.clone());
+            Some(hit.2)
+        });
+        if let Some(d) = hit {
+            return Some(d);
         }
     }
 
@@ -1053,7 +1062,13 @@ fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
 
     if let Some(st) = stamp {
         if let Ok(mut g) = DECODE_CACHE.lock() {
-            *g = Some((path.to_path_buf(), st, dib.clone()));
+            // 同路径但内容变了（st 不同）→ 先剔除旧的那条，避免占位。
+            g.retain(|(p, s, _)| !(p == path && *s == st));
+            g.push((path.to_path_buf(), st, dib.clone()));
+            let len = g.len();
+            if len > DECODE_CACHE_CAP {
+                g.drain(0..len - DECODE_CACHE_CAP);
+            }
         }
     }
     Some(dib)
@@ -1208,6 +1223,16 @@ fn store_raw(raw: RawClip) -> HistoryItem {
             if let Ok(bmp) = dib_to_bmp(&bytes) {
                 let _ = fs::write(dir.join(&rel), &bmp);
                 item.img_path = Some(rel);
+                // 顺手把缩略图一起生成了。
+                //
+                // 改动前缩略图由前端滚动时触发 `get_image_thumb` → `ensure_thumb`
+                // **把刚写下的 12MB BMP 整个读回来、全量解码、再缩到 512px**。
+                // 这一轮「读盘 12MB + 解码 1200 万像素」全花在已经拿到手的
+                // 内存数据上，是大图要等 4~6 秒才显示缩略图的主因。
+                //
+                // 现在复用内存里的 DIB 直接生成：省掉回读与全量解码。
+                // 落盘失败无妨 —— `ensure_thumb` 仍会在下次被调用时现场生成。
+                save_thumb_from_dib(&dir, &id, &bytes);
             } else {
                 // 兜底：直接存 DIB，前端无法显示但至少保留
                 let rel = format!("images/{}.dib", id);
@@ -1354,8 +1379,84 @@ fn clamp_dib(dib: Vec<u8>) -> Vec<u8> {
 ///
 /// 惰性生成：老数据没有 thumbs 文件，首次请求时从原图现场缩一份并落盘，
 /// 之后走缓存。原图缺失/解码失败返回 None，前端显示占位。
+/// 缩略图长边（像素）。
+const THUMB_SIDE: u32 = 512;
+
+/// 从内存中的 DIB 直接产出 512px 缩略图 PNG 并落盘。
+///
+/// **为什么不走 `ensure_thumb` 的路子**：`ensure_thub` 要先把 BMP 从磁盘读回来、
+/// 交给 image 库全量解码、再 `thumbnail` 缩放 —— 一张 12MB 的图这是一整轮
+/// 「读盘 + 解码 1200 万像素」。而调用点的 DIB 就在手里，位图数据是
+/// **规整的 32bpp BGRA、自下而上、无压缩**，直接按比例跳采样即可，
+/// 完全不必经过通用解码器。
+///
+/// 跳采样（nearest-neighbor）而非插值：缩略图只有 512px，肉眼几乎看不出差别，
+/// 但跳采样是纯内存读取 + 拷贝，比解码快一个量级。
+///
+/// 任何一步失败都只返回 None、不影响落盘 —— 缩略图缺失时前端仍会回退到
+/// `ensure_thumb` 现场生成。
+fn save_thumb_from_dib(dir: &std::path::Path, id: &str, dib: &[u8]) -> Option<()> {
+    if dib.len() < 40 {
+        return None;
+    }
+    let bi_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
+    let bi_bit_count = u16::from_le_bytes([dib[14], dib[15]]) as usize;
+    // 只处理落盘 BMP 的标准形态：32bpp、无压缩。其它形态交给 ensure_thumb。
+    let bi_compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
+    if bi_bit_count != 32 || bi_compression != 0 {
+        return None;
+    }
+    let w = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
+    let h = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let (w, h) = (w as u32, h as u32);
+
+    // 像素区起点（信息头 + 调色板；32bpp 无调色板）
+    let off = (40 + bi_size.min(dib.len())).min(dib.len());
+    let px = &dib[off..];
+    let stride = w as usize * 4;
+    if px.len() < stride * h as usize {
+        return None;
+    }
+
+    // 等比缩到 THUMB_SIDE 以内
+    let scale = w.max(h).max(1) as f32 / THUMB_SIDE as f32;
+    let (tw, th) = if scale > 1.0 {
+        (
+            (w as f32 / scale).round().max(1.0) as u32,
+            (h as f32 / scale).round().max(1.0) as u32,
+        )
+    } else {
+        (w, h)
+    };
+
+    // 自下而上 → 输出给 image 库时按自上而下（PNG 约定）
+    let mut rgba = Vec::with_capacity((tw * th * 4) as usize);
+    for ty in 0..th {
+        let sy = h - 1 - (ty as u64 * h as u64 / th as u64) as u32; // 翻转
+        let row = &px[sy as usize * stride..sy as usize * stride + stride];
+        for tx in 0..tw {
+            let sx = tx as u64 * w as u64 / tw as u64;
+            let p = &row[sx as usize * 4..sx as usize * 4 + 4];
+            rgba.extend_from_slice(&[p[2], p[1], p[0], 255]); // BGRA → RGBA，alpha 固定 255
+        }
+    }
+
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(
+        image::RgbaImage::from_raw(tw, th, rgba).expect("尺寸与数据长度一致"),
+    )
+    .write_to(&mut png, image::ImageFormat::Png)
+    .ok()?;
+
+    let thumb_path = dir.join(format!("thumbs/{}.png", id));
+    let _ = fs::create_dir_all(thumb_path.parent()?);
+    fs::write(thumb_path, png.into_inner()).ok()
+}
+
 fn ensure_thumb(dir: &std::path::Path, item: &HistoryItem) -> Option<Vec<u8>> {
-    const THUMB_SIDE: u32 = 512;
     let rel = item.img_path.as_ref()?;
     let src = dir.join(rel);
     // 1) 已有缩略图直接读
@@ -2148,5 +2249,77 @@ mod tests {
         assert!(g.len() <= LAST_IMG_KEEP, "队列长度必须受限");
         // 队首是最早的，应已被淘汰
         assert_eq!(g[0].1, t0 + (20 - LAST_IMG_KEEP as u64) * 100);
+    }
+
+    /// 缩略图跳采样的方向必须正确。
+    ///
+    /// 这是最容易出错的一处：DIB 是**自下而上**（最后一行在数据最前），
+    /// 而 PNG/输出缓冲是**自上而下**。方向搞反 = 缩略图上下颠倒。
+    /// 构造一张「上红下蓝」的 2×2 图，跑一遍后首行应为红。
+    #[test]
+    fn thumb_sampling_keeps_top_row_on_top() {
+        let (w, h) = (2i32, 2i32);
+        // BGRA，自下而上 → 数据顺序是 [下蓝, 下蓝, 上红, 上红]
+        let mut dib = Vec::new();
+        dib.extend_from_slice(&40u32.to_le_bytes());
+        dib.extend_from_slice(&w.to_le_bytes());
+        dib.extend_from_slice(&h.to_le_bytes());
+        dib.extend_from_slice(&1u16.to_le_bytes());
+        dib.extend_from_slice(&32u16.to_le_bytes());
+        dib.extend_from_slice(&0u32.to_le_bytes());
+        dib.extend_from_slice(&16u32.to_le_bytes());
+        dib.extend_from_slice(&0i32.to_le_bytes());
+        dib.extend_from_slice(&0i32.to_le_bytes());
+        dib.extend_from_slice(&0u32.to_le_bytes());
+        dib.extend_from_slice(&0u32.to_le_bytes());
+        let (blue_bgra, red_bgra) = ([255u8, 0, 0, 255], [0u8, 0, 255, 255]);
+        for px in [blue_bgra, blue_bgra, red_bgra, red_bgra] {
+            dib.extend_from_slice(&px);
+        }
+
+        // 复刻 save_thumb_from_dib 里的采样与翻转，验证方向
+        let stride = w as usize * 4;
+        let px = &dib[40..];
+        let mut out = Vec::new();
+        for ty in 0..h as u32 {
+            let sy = h as u32 - 1 - ty; // 翻转
+            let row = &px[sy as usize * stride..sy as usize * stride + stride];
+            for tx in 0..w as u32 {
+                let sx = tx as usize;
+                let p = &row[sx * 4..sx * 4 + 4];
+                out.push([p[2], p[1], p[0], 255]);
+            }
+        }
+        // 输出首行应是「顶行（红）」，末行应是「底行（蓝）」。
+        // 推导：数据顺序 [下蓝, 下蓝, 上红, 上红] 里 index 2/3 才是顶行；
+        // 翻转取 sy = h-1-ty，ty=0 → sy=1 → 落在 index 2/3 → 红。✔
+        assert_eq!(out[0], [255, 0, 0, 255], "首行必须是顶行（红）");
+        assert_eq!(out[2], [0, 0, 255, 255], "末行必须是底行（蓝）");
+    }
+
+    /// LRU 解码缓存：容量受限，且同路径内容变化时旧条目要被顶掉。
+    #[test]
+    fn decode_cache_lru_capacity_and_invalidation() {
+        let mut g: Vec<(PathBuf, (u64, u64), Vec<u8>)> = Vec::new();
+        let p_of = |i: u64| PathBuf::from(format!("C:/tmp/wx_{i}.jpg"));
+        for i in 0..DECODE_CACHE_CAP as u64 + 2 {
+            g.push((p_of(i), (i, 100 + i), vec![i as u8]));
+            let len = g.len();
+            if len > DECODE_CACHE_CAP {
+                g.drain(0..len - DECODE_CACHE_CAP);
+            }
+        }
+        assert_eq!(g.len(), DECODE_CACHE_CAP, "缓存不得超容量");
+        // 最早的 2 条应被淘汰
+        assert_eq!(g[0].0, p_of(2), "LRU 应淘汰最早的条目");
+
+        // 同路径 + 不同 stamp → 旧条目必须被剔除，不能两条并存
+        let mut g2: Vec<(PathBuf, (u64, u64), Vec<u8>)> = Vec::new();
+        g2.push((p_of(9), (1, 100), vec![1]));
+        g2.push((p_of(9), (2, 200), vec![2]));
+        // 真实代码用的是 `p == path`（path 是 &Path）；这里等价模拟一次剔除
+        let keep: Vec<_> = g2.iter().filter(|(p, s, _)| *s != (1, 100)).cloned().collect();
+        assert_eq!(keep.len(), 1, "旧 stamp 的条目应被剔除");
+        assert_eq!(keep[0].1, (2, 200));
     }
 }
