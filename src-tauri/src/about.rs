@@ -595,6 +595,15 @@ fn changelog_section(v: &str) -> String {
 /// 统一的结果 payload（`check_update` 与 `update_state` 返回同一个形状）。
 fn payload(rel: &Release) -> serde_json::Value {
     let cur = env!("CARGO_PKG_VERSION");
+    // 已下载但未安装的安装包（用户上次在安装器上取消了）：有的话前端把
+    // 按钮切成「重新安装」。只认当前版本的资产名，旧版本包不算数。
+    let downloaded = crate::settings::get().update_cache.as_ref().and_then(|c| {
+        if c.asset_name.is_empty() {
+            return None;
+        }
+        let p = crate::clipboard::cache_dir().join("update").join(&c.asset_name);
+        p.is_file().then(|| p.to_string_lossy().to_string())
+    });
     json!({
         "hasUpdate": is_newer(&rel.latest, cur),
         "latest": rel.latest,
@@ -606,6 +615,7 @@ fn payload(rel: &Release) -> serde_json::Value {
         "assetUrl": rel.asset_url,
         "assetName": rel.asset_name,
         "assetSize": rel.asset_size,
+        "downloadedPath": downloaded,
         // 本机这版的说明（随包内置）。没有新版本时前端显示它，
         // 这样 beta / 未发布版本也能看到自己的更新日志。
         "localTag": cur,
@@ -653,16 +663,16 @@ pub fn auto_check(app: tauri::AppHandle) {
         let rel = match fetch_release() {
             Ok(r) => r,
             Err(e) => {
-                println!("[update] 启动自检未完成（静默）：{e}");
+                crate::log_print!("[update] 启动自检未完成（静默）：{e}");
                 return;
             }
         };
         save_cache(&rel);
         if !is_newer(&rel.latest, env!("CARGO_PKG_VERSION")) {
-            println!("[update] 启动自检：已是最新（远端 {}）", rel.latest);
+            crate::log_print!("[update] 启动自检：已是最新（远端 {}）", rel.latest);
             return;
         }
-        println!("[update] 启动自检：发现新版本 {}", rel.latest);
+        crate::log_print!("[update] 启动自检：发现新版本 {}", rel.latest);
         let _ = app.emit("update-available", payload(&rel));
     });
 }
@@ -778,7 +788,7 @@ fn download_inner(app: &tauri::AppHandle) -> Result<String, String> {
             rel
         }
         Err(e) => {
-            println!("[update] 下载前重新获取发布信息失败，改用缓存：{e}");
+            crate::log_print!("[update] 下载前重新获取发布信息失败，改用缓存：{e}");
             Release {
                 latest: cached.latest,
                 notes: cached.notes,
@@ -887,7 +897,7 @@ fn download_inner(app: &tauri::AppHandle) -> Result<String, String> {
                 "update-progress",
                 json!({ "got": got, "total": total, "percent": 100 }),
             );
-            println!("[update] 安装包已就绪：{}", final_path.display());
+            crate::log_print!("[update] 安装包已就绪：{}", final_path.display());
             return Ok(final_path.to_string_lossy().to_string());
         }
         if last_err.is_empty() {

@@ -61,9 +61,9 @@ pub fn create_tray(app: &AppHandle) {
     match built {
         Ok(t) => {
             *guard = Some(t);
-            println!("[tray] 托盘图标已常驻");
+            crate::log_print!("[tray] 托盘图标已常驻");
         }
-        Err(e) => eprintln!("[tray] 创建托盘失败：{e}"),
+        Err(e) => crate::log_warn!("[tray] 创建托盘失败：{e}"),
     }
 }
 
@@ -104,7 +104,7 @@ fn ensure_menu_window(app: &AppHandle) -> Option<WebviewWindow> {
     let win = match b.build() {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("[tray] 创建托盘菜单窗口失败：{e}");
+            crate::log_warn!("[tray] 创建托盘菜单窗口失败：{e}");
             return None;
         }
     };
@@ -220,7 +220,7 @@ pub fn tray_show_main(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn tray_quit(app: AppHandle) -> Result<(), String> {
-    println!("[tray] 用户从托盘菜单退出");
+    crate::log_print!("[tray] 用户从托盘菜单退出");
     crate::clipboard::on_app_exit();
     app.exit(0);
     Ok(())

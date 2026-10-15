@@ -18,10 +18,13 @@ const MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// 保留多少：截断后留下尾部这么多
 const KEEP_BYTES: u64 = MAX_BYTES / 2;
 
-/// 安装全局钩子：`println!` / `eprintln!` 的内容自动追加到日志文件。
+/// 安装 panic 钩子。
 ///
-/// 这样全项目几十处打印语句不用逐个改，也能全部留痕——排查问题时
-/// 「日志里有没有这一行」直接决定能不能定位。
+/// ⚠️ 诚实说明：本文件早期注释声称「println!/eprintln! 自动进日志文件」，
+/// 这是错的——Rust stable 没有拦截标准输出/错误的钩子，此前只有 panic
+/// 和显式调 write_line 的地方落盘，其余几十处 println 全部只进了没人接的
+/// stderr。这就是「报错没被记录到」的根因之一。
+/// 现在的补法：项目内统一改用下方 log_print!/log_warn! 宏（写文件 + stdout）。
 pub fn install_hook() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -47,6 +50,26 @@ pub fn install_hook() {
             let _ = std::fs::copy(log_file(), &dst);
         }));
     });
+}
+
+/// 原样落盘一行（保留消息里的既有 [标签] 前缀，级别归 INFO）。
+/// 供全模块 println! 的批量替换用：行为对用户完全不变，多了一份文件记录。
+pub fn write_raw(line: &str) {
+    let line = line.trim_end_matches('\n');
+    if line.trim().is_empty() {
+        return;
+    }
+    write_line("INFO", "app", line);
+}
+
+/// 同 write_raw，级别归 WARN（对应原 eprintln!——它通常意味着出了状况）。
+pub fn write_raw_warn(line: &str) {
+    let line = line.trim_end_matches('\n');
+    if line.trim().is_empty() {
+        return;
+    }
+    write_line("WARN", "app", line);
+    eprintln!("{line}");
 }
 
 fn log_dir() -> PathBuf {
@@ -98,18 +121,36 @@ pub fn write_line(level: &str, tag: &str, msg: &str) {
 /// 记一条错误（同时打一份到 stderr，保持原有调试体验）。
 #[macro_export]
 macro_rules! log_err {
-    ($tag:expr, $($arg:tt)*) => {
+    ($tag:expr, $($arg:tt)*) => {{
         $crate::logger::write_line("ERROR", $tag, &format!($($arg)*));
         eprintln!("[{}] {}", $tag, format!($($arg)*));
-    };
+    }};
 }
 
 /// 记一条普通信息。
 #[macro_export]
 macro_rules! log_info {
-    ($tag:expr, $($arg:tt)*) => {
+    ($tag:expr, $($arg:tt)*) => {{
         $crate::logger::write_line("INFO", $tag, &format!($($arg)*));
-    };
+    }};
+}
+
+/// 替代 println!：输出到 stdout 的同时写进日志文件。
+/// 消息文本原样保留（项目内 println 惯例自带 [模块] 前缀）。
+/// 用块表达式包裹，使其可用于 match 分支等表达式位置。
+#[macro_export]
+macro_rules! log_print {
+    ($($arg:tt)*) => {{
+        $crate::logger::write_raw(&format!($($arg)*));
+    }};
+}
+
+/// 替代 eprintln!：输出到 stderr 的同时以 WARN 级别写进日志文件。
+#[macro_export]
+macro_rules! log_warn {
+    ($($arg:tt)*) => {{
+        $crate::logger::write_raw_warn(&format!($($arg)*));
+    }};
 }
 
 /// 本地时间戳 `MM-DD HH:MM:SS`。手算避免引chrono/chrono 依赖。
@@ -157,6 +198,30 @@ pub fn snapshot_on_error(reason: &str) -> PathBuf {
 
 /// 错误发生的次数计数（用于判断是否重复问题）。
 static ERROR_COUNT: Mutex<u32> = Mutex::new(0);
+
+/// 前端（WebView/JS）错误上报入口。
+///
+/// 渲染进程的错误——JS 异常、图片解码失败、资源加载失败——Rust 的
+/// panic 钩子完全看不到；2.1.10 那次 OOM 白屏在日志里一片空白就是
+/// 这个缺口。前端装全局钩子后经此落盘。
+/// 超长消息截断，防止异常内容本身把日志撑爆。
+#[tauri::command]
+pub fn frontend_log(level: String, tag: String, msg: String) {
+    let level = match level.as_str() {
+        "ERROR" | "WARN" | "INFO" => level.as_str(),
+        _ => "INFO",
+    };
+    let msg = text_head_trunc(&msg, 2000);
+    write_line(level, &format!("fe/{tag}"), &msg);
+    // ERROR 级别走计数与快照逻辑（与 note_error 一致）
+    if level == "ERROR" {
+        note_error(&format!("fe/{tag}"), &msg);
+    }
+}
+
+fn text_head_trunc(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
 
 /// 记一次异常；每第 5 次额外做一份快照文件名，方便用户直接发送。
 pub fn note_error(tag: &str, msg: &str) {

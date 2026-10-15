@@ -131,7 +131,7 @@ pub fn repair_if_needed() {
     };
     match read_value() {
         Some(v) if v != expected => {
-            println!("[autostart] 自启项内容不是当前 exe 路径，重写修复");
+            crate::log_print!("[autostart] 自启项内容不是当前 exe 路径，重写修复");
             let _ = set_enabled(true);
         }
         _ => {}
@@ -181,7 +181,7 @@ pub fn set_enabled(enable: bool) -> Result<(), String> {
                 return Err(format!("写注册表失败（code {r}）"));
             }
         }
-        println!("[autostart] 已开启开机自启：{data}");
+        crate::log_print!("[autostart] 已开启开机自启：{data}");
     } else {
         unsafe {
             let mut hkey: isize = 0;
@@ -198,7 +198,7 @@ pub fn set_enabled(enable: bool) -> Result<(), String> {
                 return Err(format!("删除注册表值失败（code {r}）"));
             }
         }
-        println!("[autostart] 已关闭开机自启");
+        crate::log_print!("[autostart] 已关闭开机自启");
     }
     Ok(())
 }

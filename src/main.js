@@ -5,6 +5,50 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const appWindow = getCurrentWindow();
 
+// ---------------------------------------------------------------------------
+// 前端错误上报：JS 异常、未处理的 Promise 拒绝、console.error → Rust 日志。
+//
+// 2.1.10 的教训：WebView OOM 白屏后日志一片空白——渲染进程里发生的一切
+// Rust 的 panic 钩子根本看不到。这个上报通道是排查前端侧问题的唯一线索。
+//
+// 防递归：reportFrontend 自身绝不再调 console.error（内部全 try/catch 吞掉），
+// 否则上报失败→console.error→再上报→死循环。
+// ---------------------------------------------------------------------------
+function reportFrontend(level, tag, msg) {
+  try {
+    invoke("frontend_log", {
+      level,
+      tag,
+      msg: String(msg).slice(0, 2000),
+    }).catch(() => {});
+  } catch {
+    /* 上报失败就放弃，绝不能再抛 */
+  }
+}
+
+window.addEventListener("error", (e) => {
+  // 资源加载失败（img/script/link）与 JS 运行时错误都在这里
+  const what = e.target && e.target !== window
+    ? `资源加载失败: ${e.target.tagName || "?"} ${(e.target.src || e.target.href || "")}`
+    : `${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`;
+  reportFrontend("ERROR", "window.onerror", what);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const r = e.reason;
+  reportFrontend("ERROR", "unhandledrejection", r instanceof Error ? `${r.message}\n${r.stack || ""}` : String(r));
+});
+{
+  const origError = console.error.bind(console);
+  console.error = (...args) => {
+    origError(...args);
+    reportFrontend(
+      "ERROR",
+      "console.error",
+      args.map((a) => (a instanceof Error ? `${a.message}\n${a.stack || ""}` : String(a))).join(" ")
+    );
+  };
+}
+
 /** 材质档位 → 实际可用的圆角上限（由 Rust 端判定，前端不自行猜测） */
 const TIER_CLASS = {
   "system-backdrop": "tier-system-backdrop",
@@ -858,8 +902,14 @@ function shrinkImage(dataUrl, maxEdge, quality = 0.82) {
 async function loadImage(id) {
   const hit = imageCache.get(id);
   if (hit) return hit;
-  const raw = await invoke("get_image", { id: id }); // 原始 BMP（大）→ 用完即弃
-  const url = await shrinkImage(raw, IMAGE_MAX_EDGE);
+  // 2.1.10 灾难修复：这里原先走 get_image——整张未压缩 BMP（微信原图可达
+  // 上百 MB）base64 后经 IPC 进来，<img> 解码峰值直接打爆 WebView2（页面
+  // 「内存不足」白屏，且每次启动列表都会重演）。现改用 Rust 侧生成的缩略图
+  // （PNG 长边 ≤512，几十 KB），原图永远不进前端；回贴走 copy_back 在
+  // Rust 侧读文件，不受影响。
+  const raw = await invoke("get_image_thumb", { id: id });
+  // Rust 已保证 ≤512px；shrinkImage 保留为兜底（万一未来返回大图）
+  const url = await shrinkImage(raw, IMAGE_MAX_EDGE).catch(() => raw);
   imageCache.set(id, url);
   if (imageCache.size > IMAGE_CACHE_MAX) {
     imageCache.delete(imageCache.keys().next().value);
@@ -901,9 +951,17 @@ function observeImages(rootEl) {
               img.src = url;
               img.dataset.imgLoaded = "1";
             })
-            .catch(() => {
+            .catch((e) => {
               img.dataset.imgLoaded = "0";
-              img.remove(); // 文件缺失/损坏 → 不占位
+              // 失败两种可能：文件缺失/损坏（老行为，移除）；或图片超大被
+              // get_image 拒绝（2.1.10 灾难条目，需保留占位让用户能选中删除）
+              if (String(e).includes("过大")) {
+                img.removeAttribute("src");
+                img.textContent = "图片过大，无法显示\n可右键删除";
+                img.classList.add("is-oversize");
+              } else {
+                img.remove(); // 文件缺失/损坏 → 不占位
+              }
             });
         } else if (state === "1") {
           // 远离视野（>700px）→ 固化尺寸后释放解码位图
@@ -1512,7 +1570,12 @@ function renderUpdatePanels() {
     } else {
       btn.classList.remove("is-downloading");
       btn.disabled = false;
-      btn.textContent = has ? "下载最新版" : "检查更新";
+      // 优先级：已下载未装 →「重新安装」；有新版 →「下载最新版」；否则「检查更新」
+      btn.textContent = info?.downloadedPath
+        ? "重新安装"
+        : has
+          ? "下载最新版"
+          : "检查更新";
     }
   }
 
@@ -1525,6 +1588,10 @@ function renderUpdatePanels() {
   } else if (dlState.error) {
     tip.className = "about-state is-err";
     tip.textContent = "下载失败：" + dlState.error;
+  } else if (info?.downloadedPath) {
+    // 安装包已在本地：用户上次在 UAC/安装器上取消了，不必再下一次
+    tip.className = "about-state is-new";
+    tip.textContent = `安装包已下载，点击「重新安装」继续（v${info.latest}）`;
   } else if (has) {
     tip.className = "about-state is-new";
     tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，当前 v${esc(cur)}`;
@@ -1612,6 +1679,23 @@ async function startDownload() {
     };
     renderUpdatePanels();
     toast(downloaded ? "无法启动安装程序：" + e : "下载失败：" + e);
+  }
+}
+
+/**
+ * 「重新安装」：安装包已在本地（上次下载完成后用户取消了安装），
+ * 直接拉起，不再下载。装完 update_state 里的 downloadedPath 自然消失。
+ */
+async function installDownloaded() {
+  const path = updateInfo?.downloadedPath;
+  if (!path) return;
+  setDownloadDone("正在启动安装程序…");
+  try {
+    await invoke("install_downloaded", { path });
+  } catch (e) {
+    // UAC 点否 / 安装器起不来：文件还在，按钮保持「重新安装」
+    toast("无法启动安装程序：" + e);
+    renderUpdatePanels();
   }
 }
 
@@ -2026,9 +2110,14 @@ function bindSettings(view) {
   // 顺便在进入该页时就把版本号与运行环境拉出来。
   const btnCheck = view.querySelector("#btn-check-update");
   if (btnCheck) {
-    // 有新版时这颗按钮就是「下载最新版」，其余时候才是「检查更新」
+    // 已下载未装（用户在安装器上点过取消）→「重新安装」，直接拉起本地包；
+    // 有新版 →「下载最新版」；其余 →「检查更新」
     btnCheck.onclick = () =>
-      updateInfo?.hasUpdate ? startDownload() : aboutCheckUpdate();
+      updateInfo?.downloadedPath
+        ? installDownloaded()
+        : updateInfo?.hasUpdate
+          ? startDownload()
+          : aboutCheckUpdate();
     loadAbout();
   }
   const btnRepo = view.querySelector("#btn-repo");

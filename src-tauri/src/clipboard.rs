@@ -32,6 +32,8 @@ static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
 static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
 /// id 计数器，避免同毫秒碰撞
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 最近一条图片条目的 (宽, 高, 时间戳ms)：微信等应用同图双写的判重依据
+static LAST_IMG: Mutex<Option<(i32, i32, u64)>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // 数据结构
@@ -210,6 +212,12 @@ pub fn clear_all() -> Result<(), String> {
     Ok(())
 }
 
+/// get_image 的硬上限。正常流程前端只用缩略图（get_image_thumb），
+/// 原图走这里只剩历史遗留调用；超限直接拒绝——2.1.10 的 OOM 白屏就是
+/// 把上百 MB 的 BMP base64 进前端所致。拒绝后前端显示占位，页面仍可用
+/// （存量巨图条目因此不再拖垮整个窗口）。
+const MAX_IMAGE_BYTES: u64 = 96 * 1024 * 1024;
+
 #[tauri::command]
 pub fn get_image(id: String) -> Result<String, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
@@ -217,10 +225,36 @@ pub fn get_image(id: String) -> Result<String, String> {
     let item = hist.iter().find(|i| i.id == id).ok_or("条目不存在")?;
     let rel = item.img_path.as_ref().ok_or("该条目不是图片")?;
     let path = dir.join(rel);
+    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     drop(hist);
+    if size > MAX_IMAGE_BYTES {
+        crate::logger::note_error(
+            "clipboard",
+            &format!("get_image 拒绝 {}：{}MB 超上限（考虑删除该条目）", id, size / 1048576),
+        );
+        return Err(format!("图片过大（{}MB），无法在界面显示", size / 1048576));
+    }
     let bytes = fs::read(&path).map_err(|e| e.to_string())?;
     let b64 = base64_encode(&bytes);
     Ok(format!("data:image/bmp;base64,{}", b64))
+}
+
+/// 缩略图：列表与悬浮预览专用（PNG，长边 ≤512，单张几十 KB）。
+/// 返回 data URL；失败返回 Err，前端显示占位图。
+#[tauri::command]
+pub fn get_image_thumb(id: String) -> Result<String, String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let item = {
+        let hist = HISTORY.get().unwrap().lock().unwrap();
+        hist.iter().find(|i| i.id == id).cloned().ok_or("条目不存在")?
+    };
+    match ensure_thumb(&dir, &item) {
+        Some(png) => {
+            let b64 = base64_encode(&png);
+            Ok(format!("data:image/png;base64,{}", b64))
+        }
+        None => Err("缩略图不可用".into()),
+    }
 }
 
 /// 把历史条目内容写回系统剪贴板（文本 / 图片 / 文件列表）。
@@ -345,7 +379,7 @@ pub fn delete_items(ids: Vec<String>) -> Result<(), String> {
     });
     drop(hist);
     save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
-    println!("[clipboard] 批量删除 {removed} 条");
+    crate::log_print!("[clipboard] 批量删除 {removed} 条");
     Ok(())
 }
 
@@ -381,7 +415,7 @@ pub fn init(app: &AppHandle) {
     // 让历史文件条目在缓存目录里也有实体（返回补了几条）
     let backfilled = backfill_files(&dir, &mut hist);
     if backfilled > 0 {
-        println!("[clipboard] 已为 {backfilled} 条历史文件条目补写 files/ 清单");
+        crate::log_print!("[clipboard] 已为 {backfilled} 条历史文件条目补写 files/ 清单");
         save_index(&dir, &hist);
     }
 
@@ -394,13 +428,13 @@ pub fn init(app: &AppHandle) {
     // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
     unsafe {
         if AddClipboardFormatListener(MAIN_HWND.get().copied().unwrap_or(0)) == 0 {
-            eprintln!("[clipboard] AddClipboardFormatListener 失败");
+            crate::log_warn!("[clipboard] AddClipboardFormatListener 失败");
         } else {
-            println!("[clipboard] 已订阅 WM_CLIPBOARDUPDATE（事件驱动监听）");
+            crate::log_print!("[clipboard] 已订阅 WM_CLIPBOARDUPDATE（事件驱动监听）");
         }
     }
 
-    println!(
+    crate::log_print!(
         "[clipboard] 初始化完成，历史条目 {} 条，目录 {}",
         HISTORY.get().unwrap().lock().unwrap().len(),
         dir.display()
@@ -437,11 +471,40 @@ pub fn on_clipboard_update() {
     }
 
     let raw = unsafe { read_clipboard() };
-    if let Some(raw) = raw {
-        let item = store_raw(raw);
-        if let Some(app) = APP.get() {
-            let _ = app.emit("clipboard-update", item.clone());
+    let Some(raw) = raw else { return };
+
+    // 图片双写判重：微信复制一张图会**分两次**改写剪贴板（先放 CF_HDROP 的
+    // 临时图片文件，再放 CF_DIB 位图），每次序号都变，序号判重拦不住 →
+    // 同一张图出现两条。两次写的位图尺寸必然相同，且间隔在毫秒级 ——
+    // 用「宽高相同 + 间隔 <1s」判定为同图双写。人手在 1s 内连续复制两张
+    // 不同图且恰好同尺寸，实际不可能发生。
+    if let RawClip::Image(dib) = &raw {
+        if dib.len() >= 12 {
+            let w = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
+            let h = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
+            let now = now_ms();
+            if let Ok(g) = LAST_IMG.lock() {
+                if let Some((lw, lh, lt)) = *g {
+                    let gap = now - lt;
+                    if lw == w && lh == h && gap < 1000 {
+                        crate::logger::write_line(
+                            "INFO",
+                            "clipboard",
+                            &format!("同图双写拦截：{w}×{h} 距上次 {gap}ms"),
+                        );
+                        return;
+                    }
+                }
+            }
+            if let Ok(mut g) = LAST_IMG.lock() {
+                *g = Some((w, h, now));
+            }
         }
+    }
+
+    let item = store_raw(raw);
+    if let Some(app) = APP.get() {
+        let _ = app.emit("clipboard-update", item.clone());
     }
 }
 
@@ -539,7 +602,9 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                 if !p.is_null() && size > 0 {
                     let bytes = std::slice::from_raw_parts(p as *const u8, size as usize).to_vec();
                     GlobalUnlock(h);
-                    return Some(RawClip::Image(bytes));
+                    // 与 image_file_to_dib 同一上限：CF_DIB 也可能来自超大位图
+                    // （微信第二次写入、专业软件复制），超限降采样，防巨型 BMP 落盘
+                    return Some(RawClip::Image(clamp_dib(bytes)));
                 }
             }
         }
@@ -561,6 +626,13 @@ unsafe fn read_clipboard() -> Option<RawClip> {
 /// 这里统一：image 库解码 → 手工拼 32bpp BI_RGB 的 DIB —— 与 CF_DIB 读到的
 /// 字节形态完全一致，下游（落盘/缩略图/回贴）零改动。解码失败返回 None，
 /// 调用方退回按「文件」记录，不影响原行为。
+///
+/// ⚠️ 尺寸上限：手机原图/高清截图可达 8000×6000，DIB 未压缩即 190MB，
+/// 落盘 BMP 同量级，前端一旦读取（base64 后再放大 1.33 倍）直接打爆 WebView2
+/// —— 2.1.10 的「内存不足，无法打开此页面」即此因。超过上限按比例降采样，
+/// 屏幕上并看不出差别；上限取 4096 长边（≈16.7M 像素、BMP 67MB 封顶）。
+const MAX_SIDE: u32 = 4096;
+
 fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
     const EXTS: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
     let is_image = path
@@ -572,6 +644,18 @@ fn image_file_to_dib(path: &std::path::Path) -> Option<Vec<u8>> {
         return None;
     }
     let img = image::open(path).ok()?;
+    let (w0, h0) = (img.width(), img.height());
+    // thumbnail() 只缩不放：未超限的图原样通过
+    let img = if w0.max(h0) > MAX_SIDE {
+        crate::logger::write_line(
+            "INFO",
+            "clipboard",
+            &format!("图片 {} 超 {}px，降采样 {}×{} 存储", path.display(), MAX_SIDE, w0, h0),
+        );
+        img.thumbnail(MAX_SIDE, MAX_SIDE)
+    } else {
+        img
+    };
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     if w == 0 || h == 0 {
@@ -685,7 +769,7 @@ fn store_raw(raw: RawClip) -> HistoryItem {
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
     hist.insert(0, item.clone());
     save_index(&dir, &hist);
-    println!(
+    crate::log_print!(
         "[clipboard] 新增 {} 条目 kind={} preview={:?} size={}",
         id, item.kind, item.preview, item.size
     );
@@ -742,6 +826,111 @@ fn dib_to_bmp(dib: &[u8]) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+/// DIB 超上限时按比例降采样（见 MAX_SIDE 注释）。
+///
+/// 剪贴板里的 CF_DIB 形态多样（16/24/32bpp、可能有掩码），与其手写各bpp的
+/// 解析，不如借道 BMP：`dib_to_bmp` 已处理完这些变体，image 库可直接解码
+/// BMP → 缩放 → 重拼标准 32bpp DIB。失败则原样返回（不因降采样失败丢数据）。
+fn clamp_dib(dib: Vec<u8>) -> Vec<u8> {
+    // 头部宽高（i32，可负但剪贴板里正常为正）；负高（自顶向下）这里不处理，
+    // image 解码 BMP 同样不支持负高，会走 Err 分支原样保留
+    let dims = || {
+        if dib.len() < 40 {
+            return None;
+        }
+        let w = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
+        let h = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        Some((w as u32, h as u32))
+    };
+    let Some((w, h)) = dims() else {
+        return dib;
+    };
+    if w <= MAX_SIDE && h <= MAX_SIDE {
+        return dib;
+    }
+    crate::logger::write_line(
+        "INFO",
+        "clipboard",
+        &format!("剪贴板位图 {w}×{h} 超 {MAX_SIDE}px，降采样存储"),
+    );
+    let Ok(bmp) = dib_to_bmp(&dib) else {
+        return dib;
+    };
+    let Ok(img) = image::load_from_memory(&bmp) else {
+        return dib;
+    };
+    let small = img.thumbnail(MAX_SIDE, MAX_SIDE);
+    let rgba = small.to_rgba8();
+    let (nw, nh) = (rgba.width(), rgba.height());
+    let pixel_bytes = (nw as usize) * (nh as usize) * 4;
+    let mut out = Vec::with_capacity(40 + pixel_bytes);
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(nw as i32).to_le_bytes());
+    out.extend_from_slice(&(nh as i32).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&32u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for y in (0..nh).rev() {
+        for x in 0..nw {
+            let p = rgba.get_pixel(x, y);
+            out.push(p[2]);
+            out.push(p[1]);
+            out.push(p[0]);
+            out.push(255);
+        }
+    }
+    out
+}
+
+/// 生成/读取条目缩略图，返回 PNG 字节。
+///
+/// 列表与悬浮预览**必须**用缩略图而非原图：原图 BMP 未压缩（可达几十 MB），
+/// base64 后经 IPC 进前端再被 <img> 解码，峰值直接打爆 WebView2 ——
+/// 2.1.10 的 OOM 白屏即此因。缩略图长边 ≤ THUMB_SIDE，单张几十 KB。
+///
+/// 惰性生成：老数据没有 thumbs 文件，首次请求时从原图现场缩一份并落盘，
+/// 之后走缓存。原图缺失/解码失败返回 None，前端显示占位。
+fn ensure_thumb(dir: &std::path::Path, item: &HistoryItem) -> Option<Vec<u8>> {
+    const THUMB_SIDE: u32 = 512;
+    let rel = item.img_path.as_ref()?;
+    let src = dir.join(rel);
+    // 1) 已有缩略图直接读
+    let thumb_rel = format!("thumbs/{}.png", item.id);
+    let thumb_path = dir.join(&thumb_rel);
+    if let Ok(bytes) = fs::read(&thumb_path) {
+        return Some(bytes);
+    }
+    // 2) 从原图现场生成
+    let bytes = fs::read(&src).ok()?;
+    if bytes.len() > 256 * 1024 * 1024 {
+        crate::logger::write_line(
+            "ERROR",
+            "clipboard",
+            &format!("图片 {} 达 {}MB，超出处理能力，缩略图跳过", src.display(), bytes.len() / 1048576),
+        );
+        return None;
+    }
+    let img = image::load_from_memory(&bytes).ok()?;
+    let small = img.thumbnail(THUMB_SIDE, THUMB_SIDE);
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(small.to_rgba8())
+        .write_to(&mut png, image::ImageFormat::Png)
+        .ok()?;
+    let data = png.into_inner();
+    // 落盘失败不影响本次返回（下次再生成）
+    let _ = fs::create_dir_all(thumb_path.parent()?);
+    let _ = fs::write(&thumb_path, &data);
+    Some(data)
 }
 
 // ---------------------------------------------------------------------------
@@ -870,7 +1059,7 @@ fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     match fs::read_to_string(&path) {
         Ok(s) => {
             let mut v: Vec<HistoryItem> = serde_json::from_str(&s).unwrap_or_else(|e| {
-                eprintln!("[clipboard] index.json 解析失败：{e}，返回空");
+                crate::log_warn!("[clipboard] index.json 解析失败：{e}，返回空");
                 Vec::new()
             });
             // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
@@ -883,7 +1072,7 @@ fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
                 }
             }
             if migrated > 0 {
-                println!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
+                crate::log_print!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
             }
             v
         }
@@ -927,6 +1116,8 @@ fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
     }
     if let Some(rel) = &item.img_path {
         let _ = fs::remove_file(dir.join(rel));
+        // 缩略图与原图同生命周期，一并清掉
+        let _ = fs::remove_file(dir.join(format!("thumbs/{}.png", item.id)));
     }
     if let Some(rel) = &item.files_path {
         let _ = fs::remove_file(dir.join(rel));
@@ -959,7 +1150,7 @@ pub fn prune_retention(days: u32) {
         *hist = prune_history(hist.clone(), dir, days);
         let removed = before - hist.len();
         if removed > 0 {
-            println!("[clipboard] 保留策略清理 {removed} 条过期条目");
+            crate::log_print!("[clipboard] 保留策略清理 {removed} 条过期条目");
         }
     }
 }
@@ -1137,7 +1328,7 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
 
     let new_dir_str = strip_ext_prefix(&target_root.to_string_lossy());
     crate::settings::update(|c| c.cache_dir = Some(new_dir_str.clone()));
-    println!("[clipboard] 缓存目录已迁移至 {new_dir_str}，即将重启");
+    crate::log_print!("[clipboard] 缓存目录已迁移至 {new_dir_str}，即将重启");
 
     // DIR 是 OnceLock，运行期不可变：迁移完成后重启进程，让新目录在下次启动生效
     let handle = app.clone();
@@ -1252,7 +1443,7 @@ pub fn on_app_exit() {
         return;
     }
     let include_pinned = cfg.clean_include_pinned;
-    println!(
+    crate::log_print!(
         "[clipboard] 关闭时清理缓存（include_pinned={}）",
         include_pinned
     );

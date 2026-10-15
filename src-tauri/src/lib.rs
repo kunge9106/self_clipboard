@@ -85,12 +85,12 @@ fn set_material_alpha(app: tauri::AppHandle, value: u32) -> Result<(), String> {
 fn setup_effects(app: &tauri::AppHandle) {
     // —— 诊断：确认运行时配置与窗口实际状态是否一致 ——
     let cfg_win = &app.config().app.windows;
-    println!("[debug] config windows = {:?}", cfg_win);
+    crate::log_print!("[debug] config windows = {:?}", cfg_win);
 
     let window = match app.get_webview_window("main") {
         Some(w) => w,
         None => {
-            eprintln!("[effects] 找不到 main 窗口，跳过材质设置");
+            crate::log_warn!("[effects] 找不到 main 窗口，跳过材质设置");
             return;
         }
     };
@@ -98,7 +98,7 @@ fn setup_effects(app: &tauri::AppHandle) {
     let hwnd = match window.hwnd() {
         Ok(h) => h.0 as isize,
         Err(e) => {
-            eprintln!("[effects] 获取 hwnd 失败：{}，按 solid 处理", e);
+            crate::log_warn!("[effects] 获取 hwnd 失败：{}，按 solid 处理", e);
             return;
         }
     };
@@ -106,7 +106,7 @@ fn setup_effects(app: &tauri::AppHandle) {
     let dark = matches!(window.theme().unwrap_or(Theme::Light), Theme::Dark);
 
     // —— 诊断：窗口运行时状态 ——
-    println!(
+    crate::log_print!(
         "[debug] runtime: decorated={} resizable={} visible={} title={:?}",
         window.is_decorated().unwrap_or_default(),
         window.is_resizable().unwrap_or_default(),
@@ -124,7 +124,7 @@ fn setup_effects(app: &tauri::AppHandle) {
     window.on_window_event(move |event| {
         match event {
             tauri::WindowEvent::ThemeChanged(theme) => {
-                println!("[effects] 系统主题切换 → {:?}", theme);
+                crate::log_print!("[effects] 系统主题切换 → {:?}", theme);
                 effects::refresh_theme(hwnd, matches!(theme, Theme::Dark));
             }
             // SetWindowRgn 的区域不会随窗口缩放自动跟随，必须重设。
@@ -167,7 +167,7 @@ fn setup_effects(app: &tauri::AppHandle) {
                     api.prevent_close();
                     let _ = window_for_events.hide();
                     tray::create_tray(&app_for_events);
-                    println!("[tray] 窗口已隐藏到托盘");
+                    crate::log_print!("[tray] 窗口已隐藏到托盘");
                 }
                 // 未开启托盘模式 → 放行关闭，退出清理在 RunEvent::Exit 统一处理
             }
@@ -184,7 +184,7 @@ fn setup_effects(app: &tauri::AppHandle) {
             effects::apply_rounded_corners(hwnd);
             effects::nudge(hwnd);
         }
-        println!("[effects] 补涂流程结束，最终档位：{}", effects::current_tier().as_str());
+        crate::log_print!("[effects] 补涂流程结束，最终档位：{}", effects::current_tier().as_str());
     });
 }
 
@@ -234,6 +234,8 @@ pub fn run() {
             clipboard::toggle_favorite,
             clipboard::clear_all,
             clipboard::get_image,
+            clipboard::get_image_thumb,
+            logger::frontend_log,
             clipboard::copy_back,
             clipboard::check_files_alive,
             clipboard::cache_info,
