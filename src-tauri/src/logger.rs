@@ -44,7 +44,7 @@ pub fn install_hook() {
             // 崩溃是用户最需要反馈的场景：另存一份带时间戳的文件，
             // 用户把这个发过来就能看到崩溃前的完整上下文。
             let dst = log_dir().join(format!(
-                "轻贴-崩溃_{}.log",
+                "Clipboard-崩溃_{}.log",
                 stamp().replace(' ', "_").replace(':', "-")
             ));
             let _ = std::fs::copy(log_file(), &dst);
@@ -88,10 +88,13 @@ fn log_dir() -> PathBuf {
     d
 }
 
-/// 日志文件路径：正常是 `log/轻贴.log`；一旦出现异常就另存
-/// `轻贴-异常_<时间戳>.log`，用户把那个发过来即可。
+/// 日志文件路径：正常是 `log/Clipboard.log`；一旦出现异常就另存
+/// `Clipboard-异常_<时间戳>.log`，用户把那个发过来即可。
+///
+/// 文件名刻意用 ASCII 的 `Clipboard`：日志常常要发给别人看，
+/// 纯 ASCII 名在各类聊天工具、邮件、压缩包里都不会变成乱码。
 pub fn log_file() -> PathBuf {
-    log_dir().join("轻贴.log")
+    log_dir().join("Clipboard.log")
 }
 
 /// 追加一行。带级别与模块标签，便于按需grep。

@@ -1126,6 +1126,27 @@ function applyMissingMarks() {
 
 let ctxMenuEl = null;
 
+/** 右键菜单图标（16×16 描边风格，与侧栏 .nav-icon 同一套语言）。
+ *  颜色不写死 —— stroke 用 currentColor，于是危险项的红色图标自动跟着 `.danger` 走。 */
+const CTX_ICONS = {
+  // 眼睛 = 查看
+  view: '<svg viewBox="0 0 16 16"><path d="M1.6 8s2.4-4.6 6.4-4.6S14.4 8 14.4 8s-2.4 4.6-6.4 4.6S1.6 8 1.6 8z"/><circle cx="8" cy="8" r="2"/></svg>',
+  // 两张叠起来的纸 = 复制
+  copy: '<svg viewBox="0 0 16 16"><rect x="5.6" y="5.6" width="8.4" height="8.4" rx="1.6"/><path d="M10.4 5.6V3.6A1.6 1.6 0 008.8 2H3.6A1.6 1.6 0 002 3.6v5.2a1.6 1.6 0 001.6 1.6h2"/></svg>',
+  // 铅笔 = 编辑
+  edit: '<svg viewBox="0 0 16 16"><path d="M2.2 13.8l.9-3.3 7.2-7.2a1.5 1.5 0 012.4 0l1 1a1.5 1.5 0 010 2.4l-7.2 7.2z"/><path d="M9.4 4.1l2.5 2.5"/></svg>',
+  // 图钉 = 置顶
+  pin: '<svg viewBox="0 0 16 16"><path d="M9.6 1.6l4.8 4.8-1.3 1.2-.7-.2-2.3 2.3.3 2.5-1.5 1.5-2.2-2.2-3.2 3.2-.9-.9 3.2-3.2-2.2-2.2 1.5-1.5 2.5.3 2.3-2.3-.2-.7z"/></svg>',
+  // 星星 = 收藏
+  star: '<svg viewBox="0 0 16 16"><path d="M8 1.9l1.9 4.2 4.4.5-3.3 3 .9 4.5L8 11.9l-3.9 2.2.9-4.5-3.3-3 4.4-.5z"/></svg>',
+  // 方框打勾 = 批量选中
+  select:
+    '<svg viewBox="0 0 16 16"><rect x="2.2" y="2.2" width="11.6" height="11.6" rx="2.4"/><path d="M5.4 8.2l1.9 1.9 3.5-4"/></svg>',
+  // 垃圾桶 = 删除
+  trash:
+    '<svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>',
+};
+
 function closeContextMenu() {
   if (ctxMenuEl) {
     ctxMenuEl.remove();
@@ -1133,7 +1154,7 @@ function closeContextMenu() {
   }
 }
 
-/** 通用浮层菜单。entries = [{ label, act, danger?, disabled? } | { sep: true }] */
+/** 通用浮层菜单。entries = [{ label, act, icon?, danger?, disabled? } | { sep: true }] */
 function showMenu(x, y, entries) {
   closeContextMenu();
 
@@ -1149,7 +1170,17 @@ function showMenu(x, y, entries) {
     }
     const btn = document.createElement("button");
     btn.className = "ctx-item" + (entry.danger ? " danger" : "");
-    btn.textContent = entry.label;
+    if (entry.icon) {
+      const ic = document.createElement("span");
+      ic.className = "ctx-icon";
+      ic.innerHTML = entry.icon;
+      btn.appendChild(ic);
+    }
+    // 文字单独占一格（flex:1）：这样整行都是可点区域，长文案也不会把图标挤扁
+    const label = document.createElement("span");
+    label.className = "ctx-label";
+    label.textContent = entry.label;
+    btn.appendChild(label);
     btn.disabled = !!entry.disabled;
     btn.onclick = () => {
       closeContextMenu();
@@ -1396,29 +1427,37 @@ function openContextMenu(x, y, item) {
       ? "取消置顶"
       : "取消同步置顶"
     : (pinnedHere ? "取消置顶" : "置顶") + (settings?.pinGlobal ? "" : `（${viewName}）`);
-  // 长文本 / 长路径列表在卡片里只显示 preview，看不全 ——
-  // 所以给这两类补一个「看全文」入口，放在菜单最前（最常用的新增项）。
+  // 菜单分组（顺序按「使用频次 + 语义亲疏」排，见分组间的分隔线）：
+  //   一、阅读与复制：查看全文 → 复制 → 复制并编辑
+  //       「复制并编辑」是从「复制」派生出来的动作，必须紧挨着「复制」，
+  //       中间隔了别的项会让用户以为是另一类操作。
+  //   二、状态变更：置顶（改排序）→ 收藏（改归属）
+  //   三、危险操作：批量删除 → 删除
   const entries = [];
   if (item.kind === "text" || item.kind === "files") {
     entries.push({
       label: item.kind === "files" ? "查看全部路径" : "查看全文",
+      icon: CTX_ICONS.view,
       act: () => openDetail(item),
     });
   }
+  // 「复制」对所有类型都有意义，永远排在阅读项之后、置顶之前。
+  entries.push({ label: "复制", icon: CTX_ICONS.copy, act: () => copyBack(item) });
   // 「复制并编辑」只给文本条目。
   // 文件条目的内容是**路径清单**，编辑它再写回剪贴板会退化成一段纯文本
   // （文件语义丢失，粘贴出去不再是文件）—— 那不是用户要的。
   if (item.kind === "text") {
     entries.push({
       label: "复制并编辑",
+      icon: CTX_ICONS.edit,
       act: () => openDetail(item, { startEdit: true }),
     });
   }
-  if (entries.length) entries.push({ sep: true });
+  entries.push({ sep: true });
   entries.push(
-    { label: "复制", act: () => copyBack(item) },
     {
       label: pinLabel,
+      icon: CTX_ICONS.pin,
       act: async () => {
         // 新集合由后端按当前模式算好回传，前端不再重复实现一遍置顶规则
         item.pinnedViews = await invoke("toggle_pin", { id: item.id, view: currentView });
@@ -1427,19 +1466,26 @@ function openContextMenu(x, y, item) {
     },
     {
       label: item.favorite ? "取消收藏" : "收藏",
+      icon: CTX_ICONS.star,
       act: async () => {
         await invoke("toggle_favorite", { id: item.id });
         item.favorite = !item.favorite;
         render({ keepScroll: true });
       },
-    },
+    }
+  );
+  // 危险操作单独成组：低频，但一旦点错代价最大，分组能靠肌肉记忆避开
+  entries.push({ sep: true });
+  entries.push(
     {
       // 批量删除是个模式：进入后左键改为选中，再点一次同一项即取消选中
       label: selectMode ? "退出批量选中" : "批量删除",
+      icon: CTX_ICONS.select,
       act: () => (selectMode ? exitSelectMode() : enterSelectMode()),
     },
     {
       label: "删除",
+      icon: CTX_ICONS.trash,
       danger: true,
       act: async () => {
         await invoke("delete_item", { id: item.id });

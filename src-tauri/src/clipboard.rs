@@ -1,7 +1,8 @@
 //! 剪贴板监听 / 读取 / 存储 / 写回。
 //!
 //! 设计红线（DESIGN.md 6.1 / 6.3.1）：
-//!   - 事件驱动：仅响应 `WM_CLIPBOARDUPDATE`，绝不轮询
+//!   - 事件驱动：主路径只响应 `WM_CLIPBOARDUPDATE`；另有 1.5s 低频心跳兜底
+//!     （窗口消息在最小化/特殊 DWM 状态下不保证投递，见 spawn_clipboard_watchdog）
 //!   - 廉价去重：`GetClipboardSequenceNumber` 判重 + 上一条指纹
 //!   - 内容永不常驻内存：index 只存元数据，长文本/图片按 id 落盘分片
 
@@ -357,7 +358,7 @@ pub fn get_full_content(id: String) -> Result<FullContent, String> {
         .as_ref()
         .or(item.files_path.as_ref())
         .ok_or("该条目没有可查看的文本内容")?;
-    let raw = fs::read_to_string(dir.join(rel)).map_err(|e| e.to_string())?;
+    let raw = read_text_entity(&dir, rel)?;
     Ok(summarize_content(raw))
 }
 
@@ -473,7 +474,7 @@ pub fn copy_back(id: String) -> Result<Option<String>, String> {
         match kind.as_str() {
             "text" => {
                 let text = match &item.text_path {
-                    Some(rel) => fs::read_to_string(dir.join(rel)).map_err(|e| e.to_string())?,
+                    Some(rel) => read_text_entity(&dir, rel)?,
                     None => item.preview.clone(),
                 };
                 unsafe { write_text_to_clipboard(&text) }.map(|_| None)
@@ -482,8 +483,7 @@ pub fn copy_back(id: String) -> Result<Option<String>, String> {
                 // 以落盘清单为唯一数据源（与文本条目走 text_path 一致）；
                 // 旧版 index.json 把路径内联在 files 里、没有 files_path，回退到内存中的 files。
                 let files: Vec<String> = match &item.files_path {
-                    Some(rel) => fs::read_to_string(dir.join(rel))
-                        .map_err(|e| e.to_string())?
+                    Some(rel) => read_text_entity(&dir, rel)?
                         .lines()
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string())
@@ -586,7 +586,7 @@ pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
             continue;
         }
         let paths: Vec<String> = match &item.files_path {
-            Some(rel) => fs::read_to_string(dir.join(rel))
+            Some(rel) => read_text_entity(&dir, rel)
                 .unwrap_or_default()
                 .lines()
                 .filter(|s| !s.is_empty())
@@ -734,12 +734,18 @@ pub fn init(app: &AppHandle) {
     // 老版本 index.json 把文件路径内联在 files 里、没有落盘清单 → 补一份，
     // 让历史文件条目在缓存目录里也有实体（返回补了几条）
     let backfilled = backfill_files(&dir, &mut hist);
+    // 存储格式升级：把「加密落盘」上线之前写入的**明文**实体就地加密。
+    // 幂等（已加密的带 ENC_MAGIC 前缀，直接跳过），所以每次启动扫一遍也不会有副作用。
+    let encrypted = encrypt_legacy_entities(&dir);
     // 老条目的 preview 是在「只取首行」的旧规则下写入的 —— 首行短就只显示几个字。
-    // 规则改成「开头最多 3 行」后必须**重算存量**，否则用户看到的还是旧预览，
+    // 规则改成「开头最多 2 行」后必须**重算存量**，否则用户看到的还是旧预览，
     // 会以为修复没生效。
     let refreshed = refresh_text_previews(&dir, &mut hist);
     if backfilled > 0 {
         crate::log_print!("[clipboard] 已为 {backfilled} 条历史文件条目补写 files/ 清单");
+    }
+    if encrypted > 0 {
+        crate::log_print!("[clipboard] 已将 {encrypted} 个历史明文文本实体转为加密存储");
     }
     if refreshed > 0 {
         crate::log_print!("[clipboard] 已按新规则重算 {refreshed} 条文本条目的预览");
@@ -764,6 +770,19 @@ pub fn init(app: &AppHandle) {
             crate::log_warn!("[clipboard] AddClipboardFormatListener 失败");
         } else {
             crate::log_print!("[clipboard] 已订阅 WM_CLIPBOARDUPDATE（事件驱动监听）");
+        }
+    }
+
+    // 播种当前剪贴板序号。
+    //
+    // LAST_SEQ 的初值是 0，不播种的话兜底轮询的**第一个**心跳必然判定「序号变了」，
+    // 于是把「启动之前就已经在剪贴板里」的内容当成一次新复制，再记一条 ——
+    // 实测同一张图因此被重复记了 6 次（每次重启多一条）。
+    // 播种之后，轮询只在「运行期间真的漏掉了通知」时才触发，启动噪音随之消失。
+    unsafe {
+        let seq = GetClipboardSequenceNumber();
+        if seq != 0 {
+            LAST_SEQ.store(seq, Ordering::Relaxed);
         }
     }
 
@@ -1620,12 +1639,8 @@ fn make_text_preview(text: &str) -> String {
 /// 会以为修复没生效。
 ///
 /// 幂等：只有值确实变了才计数，所以跑过一次之后就不再写盘。
-/// 只读**文件头**而不是整个文件：preview 只用到开头的行，读几 MB 的日志纯属浪费。
 /// 返回值给调用方决定是否 `save_index`。
 fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usize {
-    /// 足够覆盖「开头 3 个非空行」；再长的前导空行不现实
-    const HEAD_BYTES: usize = 64 * 1024;
-
     let mut changed = 0usize;
     for item in hist.iter_mut() {
         // 只处理文本条目 —— 文件条目的 preview 是「名字 等 N 个文件」，另一套规则
@@ -1635,17 +1650,17 @@ fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usi
         let Some(rel) = item.text_path.as_ref() else {
             continue;
         };
-        let Ok(mut f) = fs::File::open(dir.join(rel)) else {
+        // 不再「只读文件头 64KB」：内容已加密（见 ENC_MAGIC），DPAPI 必须先拿到
+        // **完整密文**才能解出正文，读到一半的头没有任何意义。文本条目本身都不大，
+        // 整份读+解的代价可接受；解不开（换了账户/机器）就跳过，不让它拖垮启动。
+        let dir = dir.to_path_buf();
+        let Ok(text) = read_text_entity(&dir, rel) else {
             continue;
         };
-        let mut buf = vec![0u8; HEAD_BYTES];
-        let n = std::io::Read::read(&mut f, &mut buf).unwrap_or(0);
-        if n == 0 {
+        if text.is_empty() {
             continue;
         }
-        buf.truncate(n);
-        // 文件可能被从多字节字符中间截断 —— 用 lossy，不让编码问题拖垮整条迁移
-        let new_preview = make_text_preview(&String::from_utf8_lossy(&buf));
+        let new_preview = make_text_preview(&text);
         if new_preview != item.preview {
             item.preview = new_preview;
             changed += 1;
@@ -1681,9 +1696,7 @@ fn store_raw(raw: RawClip) -> HistoryItem {
             // 无论长短都落盘全文：内存只保留截断后的 preview 摘要，
             // 这样既遵守「内容不走内存」红线，复制回去时也不会被截断。
             let rel = format!("data/{}.txt", id);
-            if let Err(e) = fs::write(dir.join(&rel), text.as_bytes()) {
-                crate::log_err!("clipboard", "文本条目落盘失败 {rel}：{e}");
-            }
+            write_text_entity(&dir, &rel, &text);
             item.text_path = Some(rel);
         }
         RawClip::Files(files) => {
@@ -1706,9 +1719,7 @@ fn store_raw(raw: RawClip) -> HistoryItem {
             // 否则「文件」条目的数据在缓存目录里完全看不到。
             let rel = format!("files/{}.txt", id);
             let body = files.join("\r\n");
-            if let Err(e) = fs::write(dir.join(&rel), body.as_bytes()) {
-                crate::log_err!("clipboard", "文件清单落盘失败 {rel}：{e}");
-            }
+            write_text_entity(&dir, &rel, &body);
             item.files_path = Some(rel);
             item.files = Some(files);
         }
@@ -2159,6 +2170,196 @@ unsafe fn write_dib_to_clipboard(dib: &[u8]) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // 存储辅助
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 内容加密（Windows DPAPI）
+//
+// 为什么必须加密：`data/<id>.txt` 里装的是剪贴板正文，`files/<id>.txt` 里装的是
+// 完整路径 —— 这两样都是**用户数据**。落成明文意味着任何进程、任何在本机登录的
+// 账户（只要有权进那个目录）都能直接读走用户复制过的密码、密钥、聊天记录。
+// 缓存目录还能被改到 U 盘/网盘上，明文就等于随手带走一份。
+//
+// 为什么选 DPAPI 而不是自己管密钥：
+//   - `CryptProtectData` 的主密钥由 Windows 按**当前用户**保管，不需要我们生成、
+//     存储、传输密钥，也就没有「密钥跟着数据一起落盘」的自欺欺人；
+//   - 无需用户设口令，符合本工具「安静常驻、零交互」的定位；
+//   - 别的账户/别的机器拿到文件也解不开。
+// 代价（必须让用户知道）：换 Windows 账户或换机器后，**旧数据读不出来**。
+// 因此这是一次性的、不可逆的存储格式变更，且与「缓存目录可迁移」并存时
+// 只保证同机同账户可读。
+//
+// 图片（`images/*`）暂不加密：它是二进制图源，且缩略图/回贴要频繁整段读写，
+// 加密收益低、开销与外溢风险都更大。用户在意的「文本明文」问题本文件已解决。
+// ---------------------------------------------------------------------------
+
+/// 密文前缀（魔数）。
+///
+/// 开头放一个 `\0`：正常文本文件几乎不可能以 NUL 开头，所以这个标记既能
+/// 100% 区分「已加密」与「历史明文」，又不会把恰好以 "QTE1" 开头的用户文本误判。
+/// 第二个用途是排障：一眼能看出文件是加密态，而不是「损坏」。
+const ENC_MAGIC: &[u8] = b"\x00QTE1\x01";
+
+/// DPAPI 的附加熵（optional entropy）。
+///
+/// 熵不是密钥 —— 它只是让「同账户下的别的程序」即便调用 `CryptUnprotectData`
+/// 也解不开我们的数据（不传熵就对不上）。真正的主密钥仍由 Windows 保管，
+/// 所以这个常量直接写在代码里是安全的，也保证重装后仍能解开自己的数据。
+const ENC_ENTROPY: &[u8] = b"qingtie.clipboard.v1";
+
+/// Win32 `DATA_BLOB`
+#[repr(C)]
+struct DataBlob {
+    cb_data: u32,
+    pb_data: *mut u8,
+}
+
+#[link(name = "crypt32")]
+extern "system" {
+    fn CryptProtectData(
+        p_data_in: *const DataBlob,
+        sz_data_descr: *const u16,
+        p_optional_entropy: *const DataBlob,
+        pv_reserved: *mut std::ffi::c_void,
+        p_prompt_struct: *mut std::ffi::c_void,
+        dw_flags: u32,
+        p_data_out: *mut DataBlob,
+    ) -> i32;
+    fn CryptUnprotectData(
+        p_data_in: *const DataBlob,
+        ppsz_data_descr: *mut *mut u16,
+        p_optional_entropy: *const DataBlob,
+        pv_reserved: *mut std::ffi::c_void,
+        p_prompt_struct: *mut std::ffi::c_void,
+        dw_flags: u32,
+        p_data_out: *mut DataBlob,
+    ) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn LocalFree(h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+/// 禁止 DPAPI 弹任何 UI。我们是常驻后台程序，弹窗会卡死在无人值守的场景。
+const CRYPTPROTECT_UI_FORBIDDEN: u32 = 0x01;
+
+fn blob_of(bytes: &[u8]) -> DataBlob {
+    DataBlob {
+        cb_data: bytes.len() as u32,
+        // DPAPI 只读入参，但 Win32 签名是非 const 指针
+        pb_data: bytes.as_ptr() as *mut u8,
+    }
+}
+
+/// 调 DPAPI 并把输出 blob 拷成 `Vec`（顺手 `LocalFree`，避免每次调用漏一块内存）。
+fn dpapi(input: &[u8], protect: bool) -> Option<Vec<u8>> {
+    unsafe {
+        let in_blob = blob_of(input);
+        let ent = blob_of(ENC_ENTROPY);
+        let mut out = DataBlob {
+            cb_data: 0,
+            pb_data: std::ptr::null_mut(),
+        };
+        let ok = if protect {
+            CryptProtectData(
+                &in_blob,
+                std::ptr::null(),
+                &ent,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        } else {
+            CryptUnprotectData(
+                &in_blob,
+                std::ptr::null_mut(),
+                &ent,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        };
+        if ok == 0 || out.pb_data.is_null() {
+            return None;
+        }
+        let v = std::slice::from_raw_parts(out.pb_data, out.cb_data as usize).to_vec();
+        LocalFree(out.pb_data as *mut std::ffi::c_void);
+        Some(v)
+    }
+}
+
+/// 把一段文本加密成落盘字节（带魔数前缀）。
+///
+/// 加密失败时**退回明文**而不是报错：宁可少一层保护，也不能因为 DPAPI 异常
+/// 把用户刚复制的内容弄丢 —— 剪贴板历史的首要职责是「记得住」。
+fn encrypt_text(plain: &str) -> Vec<u8> {
+    match dpapi(plain.as_bytes(), true) {
+        Some(blob) => {
+            let mut out = Vec::with_capacity(ENC_MAGIC.len() + blob.len());
+            out.extend_from_slice(ENC_MAGIC);
+            out.extend_from_slice(&blob);
+            out
+        }
+        None => {
+            crate::log_warn!("[clipboard] DPAPI 加密失败，本条按明文落盘（内容不会丢）");
+            plain.as_bytes().to_vec()
+        }
+    }
+}
+
+/// 把落盘字节还原成文本，**同时兼容历史明文文件**（没有魔数前缀的就是老数据）。
+fn decode_text_bytes(raw: &[u8]) -> Option<String> {
+    if raw.starts_with(ENC_MAGIC) {
+        let plain = dpapi(&raw[ENC_MAGIC.len()..], false)?;
+        // 密文解出来一定是当初写进去的 UTF-8；非法字节说明 blob 被破坏
+        String::from_utf8(plain).ok()
+    } else {
+        Some(String::from_utf8_lossy(raw).to_string())
+    }
+}
+
+/// 读一个「文本类」实体（`data/*.txt`、`files/*.txt`），自动解密。
+fn read_text_entity(dir: &PathBuf, rel: &str) -> Result<String, String> {
+    let bytes = fs::read(dir.join(rel)).map_err(|e| e.to_string())?;
+    decode_text_bytes(&bytes).ok_or_else(|| "内容解密失败（可能换了 Windows 账户或机器）".to_string())
+}
+
+/// 写一个「文本类」实体，自动加密。
+fn write_text_entity(dir: &PathBuf, rel: &str, text: &str) {
+    if let Err(e) = fs::write(dir.join(rel), encrypt_text(text)) {
+        crate::log_err!("clipboard", "文本实体落盘失败 {rel}：{e}");
+    }
+}
+
+/// 把历史遗留的**明文**实体就地加密，返回处理条数。
+///
+/// 只在升级后的首次启动生效：加密过的文件带 `ENC_MAGIC` 前缀，直接跳过，
+/// 所以这个函数是幂等的，之后每次启动都是「扫一遍、什么都不做」。
+fn encrypt_legacy_entities(dir: &PathBuf) -> usize {
+    let mut n = 0usize;
+    for sub in ["data", "files"] {
+        let Ok(rd) = fs::read_dir(dir.join(sub)) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("txt") {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else { continue };
+            if bytes.is_empty() || bytes.starts_with(ENC_MAGIC) {
+                continue;
+            }
+            let enc = encrypt_text(&String::from_utf8_lossy(&bytes));
+            if enc.starts_with(ENC_MAGIC) && fs::write(&path, &enc).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
+}
 
 fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     let path = dir.join("index.json");
@@ -2708,6 +2909,52 @@ mod tests {
             v.extend_from_slice(&color);
         }
         v
+    }
+
+    /// 加密往返：同一账户下解回来必须与原文逐字一致。
+    /// 同时断言密文里**找不到明文** —— 这才是「不落明文」这条要求的真正验收点，
+    /// 只验证能解密的话，一个「加密函数直接返回原文」的实现也能通过。
+    #[test]
+    fn encrypt_roundtrip_hides_plaintext() {
+        let plain = "密码 hunter2 —— 这串不能出现在落盘字节里";
+        let enc = encrypt_text(plain);
+
+        assert!(enc.starts_with(ENC_MAGIC), "密文必须带魔数前缀");
+        assert_ne!(enc, plain.as_bytes(), "落盘字节不能等于明文");
+
+        let needle = plain.as_bytes();
+        let leaked = enc.windows(needle.len()).any(|w| w == needle);
+        assert!(!leaked, "密文里不应出现明文原文");
+
+        assert_eq!(decode_text_bytes(&enc).as_deref(), Some(plain));
+    }
+
+    /// 兼容性：加密功能上线**之前**写入的明文文件没有魔数，读取时必须原样返回，
+    /// 否则老用户升级后所有历史文本条目会集体读不出来。
+    #[test]
+    fn decode_accepts_legacy_plaintext() {
+        let legacy = "旧版本留下的明文内容".as_bytes();
+        assert_eq!(
+            decode_text_bytes(legacy).as_deref(),
+            Some("旧版本留下的明文内容")
+        );
+    }
+
+    /// 带魔数但内容被破坏 → 返回 None（而不是把垃圾当文本显示出来）。
+    /// 典型触发场景：换了 Windows 账户或换了机器，DPAPI 解不开。
+    #[test]
+    fn decode_rejects_broken_ciphertext() {
+        let mut bad = ENC_MAGIC.to_vec();
+        bad.extend_from_slice(b"not a real dpapi blob");
+        assert!(decode_text_bytes(&bad).is_none());
+    }
+
+    /// 空文本也能正常往返（用户复制了空格/空行的情况）。
+    #[test]
+    fn encrypt_roundtrip_empty() {
+        let enc = encrypt_text("");
+        assert!(enc.starts_with(ENC_MAGIC));
+        assert_eq!(decode_text_bytes(&enc).as_deref(), Some(""));
     }
 
     /// 用户反馈的核心场景：相近位置反复截图，尺寸一样但画面不同 —— 必须放行。

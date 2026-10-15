@@ -898,11 +898,43 @@ body.dark .ctx-menu {
   color: var(--text);
   font-family: var(--font);
   font-size: 13px;
+  /* 图标 + 文字：整行横向排列，文字那格 flex:1 吃掉剩余宽度，
+     于是整行都是可点区域，鼠标落在图标上也能点中。 */
+  display: flex;
+  align-items: center;
+  gap: 9px;
   text-align: left;
   padding: 7px 12px;
   border-radius: 5px;
   cursor: default;
   transition: background 0.1s ease;
+}
+
+/* 菜单项左侧图标。
+   颜色刻意不写死：stroke 用 currentColor，危险项（.danger）的图标会自动变红，
+   悬浮反白时也自动跟着变白，不用为每种状态各写一条规则。 */
+.ctx-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ctx-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ctx-label {
+  flex: 1 1 auto;
+  white-space: nowrap;
 }
 
 html:not(.hovers-off) .ctx-item:hover {
@@ -1309,8 +1341,10 @@ body.dark .modal {
   background: rgba(0, 0, 0, 0.04);
   font-family: ui-monospace, "Cascadia Mono", Consolas, "Microsoft YaHei UI",
     monospace;
-  font-size: 14px;
-  line-height: 1.7;
+  /* 15px：比列表正文（13px）明显大一档，长文本连读不费眼。
+     查看态与编辑态共用这个类，所以两边字号永远一致。 */
+  font-size: 15px;
+  line-height: 1.75;
   color: var(--text);
   /* 保留换行与缩进（正文原样呈现）；同时超长无空格串（URL/base64）必须能折行，
      否则会把弹窗横向撑出滚动条。 */
