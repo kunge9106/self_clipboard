@@ -2510,8 +2510,11 @@ async function main() {
     console.error("load settings failed", e);
   }
   try {
+    const rawVer = await getVersion();
+    // 预发布版（版本号含「-」如 2.2.1-beta.1）在尾部标 Beta，一眼可辨。
+    const isPre = rawVer.includes("-");
     document.getElementById("status-version").textContent =
-      `Version：${(await getVersion())}-ikun`;
+      `Version：${rawVer}${isPre ? "（Beta）" : ""}`;
   } catch (e) {
     // 版本号不在前端写死：它由 tauri.conf.json 引用 package.json 得到，
     // 写死会在下次发版后与真实版本不一致。取不到时留一个占位符。
