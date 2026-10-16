@@ -49,6 +49,9 @@ const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
 static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip)>> = OnceLock::new();
+/// 缩略图生成线程的投递端。与捕获线程分开：捕获线程只做「落盘 + 通知前端」必须快，
+/// 缩略图解码慢、且不影响条目出现，所以单独排队，避免拖慢快速连续复制。
+static THUMB_TX: OnceLock<std::sync::mpsc::Sender<HistoryItem>> = OnceLock::new();
 /// 已投递给工作线程、尚未落盘完成的条数。退出前据此等待，避免「刚复制就退出」丢数据。
 static PENDING: AtomicU32 = AtomicU32::new(0);
 
@@ -700,6 +703,29 @@ fn spawn_worker() {
     let _ = WORKER.set(tx);
 }
 
+/// 缩略图线程：串行消费「需要生成缩略图」的条目。
+///
+/// 与捕获线程分开的理由：捕获线程的关键路径是「落盘 + emit」，必须尽可能快，
+/// 否则快速连续复制会排队、条目迟迟不出现。解码一张大图要上百毫秒到数秒，
+/// 放在捕获线程里就会成为瓶颈。本线程只负责生成缩略图，慢一点无妨 ——
+/// 前端按需读取时会命中已备好的文件，读不到再走 get_image_thumb 现场生成兜底。
+fn spawn_thumb_worker() {
+    let (tx, rx) = std::sync::mpsc::channel::<HistoryItem>();
+    let _ = std::thread::Builder::new()
+        .name("clipboard-thumb".into())
+        .spawn(move || {
+            while let Ok(item) = rx.recv() {
+                if let Some(dir) = DIR.get() {
+                    // ensure_thumb 内部：已有则跳过；否则解码原图生成；失败则写占位图。
+                    let _ = ensure_thumb(dir, &item);
+                }
+            }
+        })
+        .map_err(|e| crate::log_warn!("[clipboard] 缩略图线程启动失败：{e}"))
+        .ok();
+    let _ = THUMB_TX.set(tx);
+}
+
 pub fn init(app: &AppHandle) {
     let _ = APP.set(app.clone());
     if let Some(w) = app.get_webview_window("main") {
@@ -721,6 +747,15 @@ pub fn init(app: &AppHandle) {
     let _ = fs::create_dir_all(dir.join("data"));
     let _ = fs::create_dir_all(dir.join("images"));
     let _ = fs::create_dir_all(dir.join("files"));
+    // 缩略图目录从旧的顶层 `thumbs/` 迁到 `images/thumbs/`（与图片放一起）。
+    // 一次性、幂等：老目录在、新目录不在时才搬；搬不动也不影响后续按需生成。
+    let old_thumbs = dir.join("thumbs");
+    let new_thumbs = dir.join("images").join("thumbs");
+    if old_thumbs.is_dir() && !new_thumbs.exists() {
+        if fs::rename(&old_thumbs, &new_thumbs).is_err() {
+            crate::log_warn!("[clipboard] 旧缩略图目录迁移失败（不影响使用，将按需重新生成）");
+        }
+    }
     let _ = DIR.set(dir.clone());
 
     let mut hist = load_index(&dir);
@@ -756,6 +791,7 @@ pub fn init(app: &AppHandle) {
     // 工作线程必须在订阅监听**之前**就位：否则第一批 WM_CLIPBOARDUPDATE
     // 到达时 WORKER 还没初始化，会退化成主线程同步落盘。
     spawn_worker();
+    spawn_thumb_worker();
 
     // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
     unsafe {
@@ -969,7 +1005,16 @@ fn handle_clip(captured_ms: u64, raw: RawClip) {
 
     let item = store_raw(raw);
     if let Some(app) = APP.get() {
-        let _ = app.emit("clipboard-update", item);
+        let _ = app.emit("clipboard-update", item.clone());
+    }
+    // 缩略图：**所有来源的图片都走这一条通道**（ensure_thumb 读落盘原图 → 解码 → 落缩略图；
+    // 解不了一律回退到通用占位图）。两个要点：
+    //   1. 放在 emit 之后 —— 保证「复制 → 出现」无感，再大的图也不挡列表显示；
+    //   2. 交给独立的缩略图线程 —— 不占用捕获线程，快速连续复制时不会因为解码而排队。
+    if item.kind == "image" {
+        if let Some(tx) = THUMB_TX.get() {
+            let _ = tx.send(item.clone());
+        }
     }
 }
 
@@ -1875,21 +1920,6 @@ fn store_raw(raw: RawClip) -> HistoryItem {
                     crate::log_err!("clipboard", "位图落盘失败 {rel}：{e}");
                 }
                 item.img_path = Some(rel);
-                // 顺手把缩略图一起生成了。
-                //
-                // 改动前缩略图由前端滚动时触发 `get_image_thumb` → `ensure_thumb`
-                // **把刚写下的 12MB BMP 整个读回来、全量解码、再缩到 512px**。
-                // 这一轮「读盘 12MB + 解码 1200 万像素」全花在已经拿到手的
-                // 内存数据上，是大图要等 4~6 秒才显示缩略图的主因。
-                //
-                // 现在复用内存里的 DIB 直接生成：省掉回读与全量解码。
-                // 落盘失败无妨 —— `ensure_thumb` 仍会在下次被调用时现场生成。
-                match save_thumb_from_dib(&dir, &id, &bytes) {
-                    Ok(()) => {}
-                    Err(reason) =>                     crate::log_warn!(
-                        "[clipboard] 内存缩略图生成失败 id={id} 原因={reason}，将由 ensure_thumb 兜底"
-                    ),
-                }
             } else {
                 // 兜底：直接存 DIB，前端无法显示但至少保留
                 let rel = format!("images/{}.dib", id);
@@ -2066,114 +2096,122 @@ const THUMB_SIDE: u32 = 512;
 ///
 /// 任何一步失败都只返回 None、不影响落盘 —— 缩略图缺失时前端仍会回退到
 /// `ensure_thumb` 现场生成。
-fn save_thumb_from_dib(dir: &std::path::Path, id: &str, dib: &[u8]) -> Result<(), &'static str> {
-    if dib.len() < 40 {
-        return Err("DIB 长度不足 40 字节（信息头残缺）");
-    }
-    let bi_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
-    let bi_bit_count = u16::from_le_bytes([dib[14], dib[15]]) as usize;
-    // 只处理落盘 BMP 的标准形态：32bpp、无压缩。其它形态交给 ensure_thumb。
-    let bi_compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
-    if bi_bit_count != 32 || bi_compression != 0 {
-        return Err("非 32bpp 或未压缩（交由 ensure_thumb 现场生成）");
-    }
-    let w = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
-    let h = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
-    if w <= 0 || h <= 0 {
-        return Err("宽高无效（<=0）");
-    }
-    let (w, h) = (w as u32, h as u32);
+/// 缩略图的统一存放路径：**图片目录下的子文件夹** `images/thumbs/`。
+/// 与图片原图（`images/`）放一起，便于整体迁移与清理。
+fn thumb_rel(id: &str) -> String {
+    format!("images/thumbs/{id}.png")
+}
 
-    // 像素区起点（信息头 + 调色板；32bpp 无调色板）
-    let off = (40 + bi_size.min(dib.len())).min(dib.len());
-    let px = &dib[off..];
-    let stride = w as usize * 4;
-    if px.len() < stride * h as usize {
-        return Err("像素区长度不足（数据被截断）");
+/// 写缩略图（自动建目录）。失败返回原因，由调用方决定是否记日志。
+fn write_thumb(dir: &std::path::Path, id: &str, png: &[u8]) -> Result<(), &'static str> {
+    let path = dir.join(thumb_rel(id));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|_| "缩略图目录创建失败")?;
     }
+    fs::write(&path, png).map_err(|_| "缩略图写盘失败")
+}
 
-    // 等比缩到 THUMB_SIDE 以内
-    let scale = w.max(h).max(1) as f32 / THUMB_SIDE as f32;
-    let (tw, th) = if scale > 1.0 {
-        (
-            (w as f32 / scale).round().max(1.0) as u32,
-            (h as f32 / scale).round().max(1.0) as u32,
-        )
-    } else {
-        (w, h)
+/// 通用占位图：**解码不了也必须显示成功**，所以给一张中性底 + 简单「图片」图形，
+/// 而不是留空白或让前端显示破图。只在确实解不出内容时使用。
+fn placeholder_png(side: u32) -> Vec<u8> {
+    let side = side.max(64);
+    let bg = image::Rgba([241, 241, 244, 255]);
+    let line = image::Rgba([205, 205, 211, 255]);
+    let mark = image::Rgba([178, 178, 186, 255]);
+    let mut img = image::RgbaImage::from_pixel(side, side, bg);
+
+    let border = ((side as f32) * 0.05).max(2.0) as u32;
+    for x in 0..side {
+        for t in 0..border {
+            img.put_pixel(x, t, line);
+            img.put_pixel(x, side - 1 - t, line);
+        }
+    }
+    for y in 0..side {
+        for t in 0..border {
+            img.put_pixel(t, y, line);
+            img.put_pixel(side - 1 - t, y, line);
+        }
+    }
+    let mut put = |x: i32, y: i32, c: image::Rgba<u8>| {
+        if x >= 0 && y >= 0 && (x as u32) < side && (y as u32) < side {
+            img.put_pixel(x as u32, y as u32, c);
+        }
     };
-
-    // 自下而上 → 输出给 image 库时按自上而下（PNG 约定）
-    let mut rgba = Vec::with_capacity((tw * th * 4) as usize);
-    for ty in 0..th {
-        let sy = h - 1 - (ty as u64 * h as u64 / th as u64) as u32; // 翻转
-        let row = &px[sy as usize * stride..sy as usize * stride + stride];
-        for tx in 0..tw {
-            let sx = tx as u64 * w as u64 / tw as u64;
-            let p = &row[sx as usize * 4..sx as usize * 4 + 4];
-            rgba.extend_from_slice(&[p[2], p[1], p[0], 255]); // BGRA → RGBA，alpha 固定 255
+    // 「山」：底边在 0.72 高度，顶点在 0.42，底宽 0.44
+    let cx = (side as f32 / 2.0) as i32;
+    let base = (side as f32 * 0.72) as i32;
+    let peak = (side as f32 * 0.42) as i32;
+    let half = (side as f32 * 0.22) as i32;
+    for y in peak..=base {
+        let prog = (base - y) as f32 / (base - peak).max(1) as f32;
+        let w = (half as f32 * (1.0 - prog)) as i32;
+        for dx in -w..=w {
+            put(cx + dx, y, mark);
+        }
+    }
+    // 「太阳」：左上 0.32/0.34，半径 0.07
+    let r = ((side as f32) * 0.07).max(2.0) as i32;
+    let sx = (side as f32 * 0.32) as i32;
+    let sy = (side as f32 * 0.34) as i32;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                put(sx + dx, sy + dy, mark);
+            }
         }
     }
 
-    let mut png = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(
-        image::RgbaImage::from_raw(tw, th, rgba).expect("尺寸与数据长度一致"),
-    )
-    .write_to(&mut png, image::ImageFormat::Png)
-    .ok()
-    .ok_or("PNG 编码失败")?;
-
-    let thumb_path = dir.join(format!("thumbs/{}.png", id));
-    let _ = fs::create_dir_all(thumb_path.parent().ok_or("缩略图路径无父目录")?);
-    fs::write(thumb_path, png.into_inner()).map_err(|_| "缩略图写盘失败")?;
-    Ok(())
+    let mut cur = std::io::Cursor::new(Vec::new());
+    let _ = image::DynamicImage::ImageRgba8(img).write_to(&mut cur, image::ImageFormat::Png);
+    cur.into_inner()
 }
 
 fn ensure_thumb(dir: &std::path::Path, item: &HistoryItem) -> Option<Vec<u8>> {
     let rel = item.img_path.as_ref()?;
     let src = dir.join(rel);
     // 1) 已有缩略图直接读
-    let thumb_rel = format!("thumbs/{}.png", item.id);
-    let thumb_path = dir.join(&thumb_rel);
+    let thumb_path = dir.join(thumb_rel(&item.id));
     if let Ok(bytes) = fs::read(&thumb_path) {
         return Some(bytes);
     }
-    // 2) 从原图现场生成
-    let bytes = match fs::read(&src) {
-        Ok(b) => b,
-        Err(e) => {
-            crate::log_err!("clipboard", "缩略图：读取原图失败 {}：{e}", src.display());
+    // 2) 现场生成；**任何失败都退回通用占位图** —— 缩略图必须显示成功，
+    //    不留空白或破图（SVG/PSD/缺解码器、超限、原图丢失都会走到这里）。
+    let generated = (|| -> Option<Vec<u8>> {
+        let bytes = match fs::read(&src) {
+            Ok(b) => b,
+            Err(e) => {
+                crate::log_warn!("[clipboard] 缩略图：读取原图失败 {}：{e}", src.display());
+                return None;
+            }
+        };
+        if bytes.len() > 256 * 1024 * 1024 {
+            crate::log_warn!(
+                "[clipboard] 图片 {} 达 {}MB，超出处理能力，改用占位图",
+                src.display(),
+                bytes.len() / 1048576
+            );
             return None;
         }
-    };
-    if bytes.len() > 256 * 1024 * 1024 {
-        crate::log_err!(
-            "clipboard",
-            "图片 {} 达 {}MB，超出处理能力，缩略图跳过",
-            src.display(),
-            bytes.len() / 1048576
-        );
-        return None;
-    }
-    let img = match image::load_from_memory(&bytes) {
-        Ok(i) => i,
-        Err(e) => {
-            // 这就是「图片条目一直显示占位图」的原因所在（SVG/PSD/缺解码器的格式）。
-            // 记下具体格式错误，比前端只显示一个灰块有用得多。
-            crate::log_warn!("[clipboard] 缩略图：图片无法解码 {}：{e}", src.display());
-            return None;
-        }
-    };
-    let small = img.thumbnail(THUMB_SIDE, THUMB_SIDE);
-    let mut png = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(small.to_rgba8())
-        .write_to(&mut png, image::ImageFormat::Png)
-        .ok()?;
-    let data = png.into_inner();
+        let img = match image::load_from_memory(&bytes) {
+            Ok(i) => i,
+            Err(e) => {
+                // 记下具体格式错误，比前端只显示一个灰块有用得多。
+                crate::log_warn!("[clipboard] 缩略图：图片无法解码 {}：{e}", src.display());
+                return None;
+            }
+        };
+        let small = img.thumbnail(THUMB_SIDE, THUMB_SIDE);
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(small.to_rgba8())
+            .write_to(&mut png, image::ImageFormat::Png)
+            .ok()?;
+        Some(png.into_inner())
+    })()
+    .unwrap_or_else(|| placeholder_png(THUMB_SIDE));
     // 落盘失败不影响本次返回（下次再生成）
-    let _ = fs::create_dir_all(thumb_path.parent()?);
-    let _ = fs::write(&thumb_path, &data);
-    Some(data)
+    let _ = write_thumb(dir, &item.id, &generated);
+    Some(generated)
 }
 
 // ---------------------------------------------------------------------------
@@ -2565,7 +2603,7 @@ fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
     if let Some(rel) = &item.img_path {
         let _ = fs::remove_file(dir.join(rel));
         // 缩略图与原图同生命周期，一并清掉
-        let _ = fs::remove_file(dir.join(format!("thumbs/{}.png", item.id)));
+        let _ = fs::remove_file(dir.join(thumb_rel(&item.id)));
     }
     if let Some(rel) = &item.files_path {
         let _ = fs::remove_file(dir.join(rel));
