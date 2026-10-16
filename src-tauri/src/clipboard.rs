@@ -31,9 +31,8 @@ static HISTORY: OnceLock<Mutex<Vec<HistoryItem>>> = OnceLock::new();
 static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
 /// 本程序写回剪贴板后产生的序列号（应被忽略，避免自读）
 static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
-/// 「延迟渲染还没交货、已交回看门狗下一拍重读」的序列号。
-/// 只补读一次：看门狗再失败就正常标记为已处理，免得每拍都重试、刷屏日志。
-static RETRY_SEQ: AtomicU32 = AtomicU32::new(0);
+/// 「未识别」日志的去重序号：同一个序号只报一次，避免轮询期间每 100ms 刷一条。
+static LAST_LOGGED_SEQ: AtomicU32 = AtomicU32::new(0);
 /// id 计数器，避免同毫秒碰撞
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// 最近若干条图片条目的 (内容指纹, 时间戳ms)：图片判重依据。
@@ -663,28 +662,17 @@ fn spawn_clipboard_watchdog() {
     std::thread::Builder::new()
         .name("clipboard-watchdog".into())
         .spawn(|| {
-            // 1.5s 间隔：兼顾「后台不丢」与「几乎不耗 CPU」。
-            // 本线程只负责补上窗口消息漏掉的那部分（后台/最小化/锁屏时
-            // WM_CLIPBOARDUPDATE 不保证投递）。延迟渲染那类「取不到数据」已交给
-            // 一次性补读线程（RETRY_DELAY_MS），所以这里维持原频率即可。
-            // 开销是每 1.5s 一次整数读取，可忽略。
-            const INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+            // 100ms 轮询。它不是「事件驱动的补充」，而是**保证成功的那一环**：
+            // on_clipboard_update 只在读成功时才推进 LAST_SEQ，所以任何没成功的
+            // 序号都会被下一拍自动重试，直到读到、或剪贴板被下一次复制替换。
+            // 于是「拿不到锁 / 延迟渲染没交货 / 窗口隐藏导致消息漏投递」全部自动兜住。
+            //
+            // 间隔取 100ms：既是兜底也是补读，复制后最迟 100ms 内被处理，用户无感。
+            // 开销：每 100ms 一次 GetClipboardSequenceNumber（纯整数读取，不开锁不拷数据），
+            // 序号没变时 on_clipboard_update 立即返回，可忽略。
+            const INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
             loop {
                 std::thread::sleep(INTERVAL);
-                let seq = unsafe { GetClipboardSequenceNumber() };
-                if seq == 0 {
-                    continue;
-                }
-                // 只有「有变化且主线程尚未处理过」才补刀。
-                // seq == LAST_SEQ 说明消息通道已经处理过了（绝大多数情况）。
-                if seq == LAST_SEQ.load(Ordering::Relaxed) {
-                    continue;
-                }
-                crate::logger::write_line(
-                    "INFO",
-                    "clipboard",
-                    "兜底轮询捕获到漏掉的剪贴板变化（窗口消息未送达）",
-                );
                 on_clipboard_update();
             }
         })
@@ -819,20 +807,22 @@ pub fn init(app: &AppHandle) {
 // 被钩子调用：剪贴板变化入口
 // ---------------------------------------------------------------------------
 
-/// 由 WndProc 子类在收到 WM_CLIPBOARDUPDATE 时调用。
-/// 延迟渲染「一次性补读」的等待时间（ms）。想调成 300ms 只需改这一个常量。
-/// 快速重试（15/30/60ms，累计 ~105ms）已兜住绝大多数；这里再补一拍，
-/// 兜住「对方渲染特别慢」的少数情况。
-const RETRY_DELAY_MS: u64 = 300;
-
+/// 由 WndProc 子类在收到 WM_CLIPBOARDUPDATE 时调用；轮询线程也调用它。
+///
+/// **唯一入口、唯一规则**：读一次剪贴板；**只有读成功才把该序号标记为已处理**。
+/// 失败（拿不到锁 / 延迟渲染还没交货 / 对方只写了私有格式）就什么都不做 ——
+/// 序号仍是「未处理」，轮询线程下一拍（100ms 后）自动再读一次。
+///
+/// 所有失败情形都由这一条机制兜底，不需要任何特例、重试链或全局计数器：
+///   - 正常复制：事件即时处理，0ms；
+///   - 拿不到锁：下一拍补上；
+///   - 延迟渲染（微信登记格式、数据稍后才补）：下一拍补上，直到读到为止；
+///   - 窗口隐藏/最小化导致消息没投递：轮询本身就是兜底。
 pub fn on_clipboard_update() {
     let seq = unsafe { GetClipboardSequenceNumber() };
     if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
         return;
     }
-    // 记下「上一个」序号。只有延迟渲染没交货时才用得上：那时要把 LAST_SEQ 退回这个值，
-    // 好让看门狗线程下一拍认定「序号变了」并重读一次。
-    let prev_seq = LAST_SEQ.load(Ordering::Relaxed);
     unsafe {
         // 剪贴板 owner 就是我们自己窗口 → 这是「点击条目复制回去」写下的内容，不能再当成
         // 一次新的系统复制回灌成重复条目。
@@ -849,80 +839,45 @@ pub fn on_clipboard_update() {
             LAST_SEQ.store(seq, Ordering::Relaxed);
             return;
         }
-        LAST_SEQ.store(seq, Ordering::Relaxed);
     }
 
-    let (raw, diag, render_pending) = unsafe { read_clipboard() };
-    let Some(raw) = raw else {
-        // 剪贴板序号确实变了（真有一次外部复制），但没读出可记录的内容。
-        // 常见于：关闭「文件复制」时复制单个非图片文件、对方只写了私有格式。
-        //
-        // 记一条是有价值的：用户反馈「复制了却没进软件」时，
-        // 有这条 = 「事件到了、是识别环节没捞到」；没这条 = 「事件根本没到」
-        // （查监听是否订阅成功、窗口是否最小化导致消息不投递）。
-        // 两者的排查方向完全不同。
-        //
-        // 2.2.1 起把「当时剪贴板里有哪些格式、每种为什么被拒」一并打进日志（diag），
-        // 这样朋友回传的日志就能直接看出是 CF_UNICODETEXT 根本没出现、还是出现了
-        // 但 GetClipboardData 取不到句柄（延迟渲染竞态）等，无需再来回猜。
-
-        // 延迟渲染还没交货（格式登记了、句柄一直拿不到）：这次**不能**算处理过。
-        // 把序号退回上一个值，让已有的看门狗线程下一拍重读一次。
-        //
-        // 这正是 V1（Electron）从不出这个问题的原因：它每秒 readText/readImage 轮询一次
-        // （POLL_INTERVAL = 1000），撞上延迟渲染那一拍取不到，下一拍自然补上，
-        // 压根不依赖「只发一次」的通知。V2 改成事件驱动后 WM_CLIPBOARDUPDATE 只发一次、
-        // 不重发，所以必须有这条回退，否则这一次复制就永久丢了。
-        if render_pending && RETRY_SEQ.load(Ordering::Relaxed) != seq {
-            RETRY_SEQ.store(seq, Ordering::Relaxed);
-            LAST_SEQ.store(prev_seq, Ordering::Relaxed);
-            crate::logger::write_line(
-                "INFO",
-                "clipboard",
-                &format!("延迟渲染未交货，{}ms 后一次性补读 | {}", RETRY_DELAY_MS, diag),
-            );
-            // 一次性补读线程：等渲染窗口过去再读一次，读完立刻退出。
-            // 它只在这一次「确实读失败」时才存在，平时零开销 ——
-            // 常驻的仍然只有看门狗那一个线程（负责后台/最小化时消息不投递的兜底）。
-            //
-            // 上面已把 LAST_SEQ 退回 prev_seq，所以这次调用才会被判定为「序号变了」
-            // 而真正重读；否则会被去重逻辑直接跳过。
-            std::thread::Builder::new()
-                .name("clipboard-retry".into())
-                .spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
-                    on_clipboard_update();
-                })
-                .ok();
-            return;
+    let (raw, diag) = unsafe { read_clipboard() };
+    match raw {
+        Some(raw) => {
+            // ✅ **只有成功才推进序号**（上面 owner/skip 两个分支也各自推进）。
+            // 推进后，轮询看到 seq == LAST_SEQ 会立刻返回，零开销。
+            LAST_SEQ.store(seq, Ordering::Relaxed);
+            LAST_LOGGED_SEQ.store(seq, Ordering::Relaxed);
+            dispatch_raw(raw);
         }
+        None => {
+            // ❌ **不推进 LAST_SEQ** → 轮询下一拍自动重试，直到读到、或剪贴板被新复制替换。
+            // 这一条覆盖了所有失败：拿不到锁、延迟渲染没交货、对方只写私有格式、
+            // 窗口隐藏导致消息漏投递…… 不需要任何特例。
+            //
+            // 日志按序号去重（同一序号只报一次），否则轮询期间每 100ms 会刷一条。
+            // diag 里含「当时有哪些格式、每种为什么被拒」，便于回传排查。
+            if LAST_LOGGED_SEQ.swap(seq, Ordering::Relaxed) != seq {
+                crate::logger::write_line(
+                    "INFO",
+                    "clipboard",
+                    &format!("剪贴板已变化但暂未读到内容（会自动重试）| {}", diag),
+                );
+            }
+        }
+    }
+}
 
-        crate::logger::write_line(
-            "INFO",
-            "clipboard",
-            &format!("剪贴板已更新，但未识别出可记录内容 | {}", diag),
-        );
-        return;
-    };
-    // 读到了（或已放弃补读）：清掉补读标记。
-    RETRY_SEQ.store(0, Ordering::Relaxed);
-
-    // 交给后台线程：解码（慢）+ 同图去重 + 落盘 + 通知前端。
-    //
-    // 为什么必须在后台：解码一张 8000×6000 的原图要展开近 200MB 像素再缩放，
-    // 耗时可达数秒。而 WM_CLIPBOARDUPDATE 是在 **WndProc 主线程**上处理的，
-    // 在这里同步解码等于把整个界面（含窗口拖动、按钮响应）冻住 —— 这就是
-    // 2.1.10「微信复制大图后软件卡死等待」的成因。
-    //
-    // 主线程现在只做一次 memcpy（把剪贴板里的字节拷出来），立刻返回；
-    // 解码、缩略图、写盘、emit 全在工作线程完成。单工作线程串行消费，
-    // 历史顺序与复制顺序保持一致。
-    //
-    // ⚠️ **时间戳必须在这里打**（捕获时刻），不能到 worker 里再取当前时间。
-    // worker 是单线程串行的，前面压着一张大图的解码时，本条要排队几秒才轮到；
-    // 那时再取时间，判重窗口算出来的「间隔」就是「排队时长 + 真实间隔」，
-    // 完全失真 —— 实测日志里出现过「同一秒、同一指纹、却记了两条」，
-    // 根因就在这里。
+/// 把读到的内容交给后台工作线程（解码 + 同图去重 + 落盘 + 通知前端）。
+///
+/// 为什么必须在后台：解码一张 8000×6000 的原图要展开近 200MB 像素再缩放，耗时可达数秒。
+/// 而本函数由 WndProc 主线程调用，同步解码等于把整个界面冻住 —— 这正是 2.1.10
+/// 「微信复制大图后软件卡死等待」的成因。主线程只做一次 memcpy，其余交给工作线程。
+///
+/// ⚠️ **时间戳必须在这里打**（捕获时刻），不能到 worker 里再取当前时间：worker 单线程串行，
+/// 前面压着一张大图的解码时本条要排队几秒才轮到，那时再取时间，判重窗口算出的「间隔」
+/// 会包含排队时长 —— 实测出现过「同一秒、同一指纹、却记了两条」，根因就在这里。
+fn dispatch_raw(raw: RawClip) {
     let captured_ms = now_ms();
     if let Some(tx) = WORKER.get() {
         if tx.send((captured_ms, raw)).is_ok() {
@@ -1340,98 +1295,28 @@ unsafe fn clipboard_owner_exe() -> String {
     name
 }
 
-/// 读取剪贴板内容；同时返回一份「诊断串」，在「未识别」时由调用方打印，
-/// 说明当时剪贴板里到底有哪些格式、每种为什么被拒（owner / 格式清单 / 文本句柄是否为空等）。
-/// 这是为定位「微信复制不进软件」这类偶发问题加的可观测性，平时不影响主流程。
+/// 读一次剪贴板；同时返回一份「诊断串」，在读不到时由调用方打印，
+/// 说明当时剪贴板里有哪些格式、每种为什么被拒（owner / 格式清单 / 句柄是否为空等）。
 ///
-/// ⚠️ 2.2.1 修复「小图复制丢失」：**格式登记 ≠ 数据已就位**。
+/// **只读一次，失败不做任何重试** —— 这是刻意的：
+/// 「拿不到锁 / 延迟渲染还没交货」这类失败统一交给 100ms 轮询兜底
+/// （见 `on_clipboard_update`：读不到就不推进序号，下一拍自动再读）。
+/// 把重试集中在一个地方，比在每条路径上各写一套要可靠得多。
 ///
-/// 微信/QQ 复制图片时常以「延迟渲染」登记 CF_HDROP（`SetClipboardData(CF_HDROP, NULL)`）：
-/// 格式立刻可见（`IsClipboardFormatAvailable` 为真），真正的数据要等有人索取时，
-/// 由 owner 在 WM_RENDERFORMAT 里补交。而 WM_CLIPBOARDUPDATE 是在**登记**的瞬间就
-/// 发出的，所以我们第一次去读的时候数据往往还没补上 → `GetClipboardData` 返回 NULL。
-///
-/// 更要命的是：延迟渲染需要 owner 重新 OpenClipboard + SetClipboardData 才能补数据，
-/// 而剪贴板是全局独占锁 —— **我们持锁期间 owner 根本补不进来**。所以持锁重试毫无意义，
-/// 必须先 CloseClipboard 松锁、退避片刻让 owner 补完，再重新开锁读。
-///
-/// 这正是「大图正常、小图丢失」的原因：大图微信得先把临时文件写好（耗时），等我们
-/// （含 open_clipboard_retry 的退避）拿到锁时数据早已提交，一次读到；小图登记几乎瞬时
-/// 但走延迟渲染，第一次读正好撞在补交完成之前。旧实现只读一次就把这次复制永久丢了
-/// （WM_CLIPBOARDUPDATE 不会重发）。
-/// 第三个返回值：是否是「格式登记了、但句柄一直拿不到」（延迟渲染没交货）。
-/// 为 true 时调用方不应把它当成已处理，应交回看门狗下一拍重读。
-unsafe fn read_clipboard() -> (Option<RawClip>, String, bool) {
-    // 最多读几轮。只有「格式在、句柄为 NULL」这种可疑情况才用得上第 2 轮起，
-    // 正常复制第一轮就返回，不会有任何额外延迟。
-    const MAX_ATTEMPTS: u32 = 4;
-
+/// 这里只保留 `open_clipboard_retry`：那是「拿不到全局锁」的微退避（~30ms），
+/// 属于同一次读取内的必要礼让，不是重试链。
+unsafe fn read_clipboard() -> (Option<RawClip>, String) {
     // 「文件复制」开关（设置页，默认关闭）：关掉后完全不看 CF_HDROP。
     // 在 OpenClipboard 之前读取，避免持有剪贴板锁时再去碰 settings 的互斥锁。
     let file_copy = crate::settings::get().file_copy;
 
-    let mut diag = String::new();
-    for attempt in 0..MAX_ATTEMPTS {
-        // ⚠️ 剪贴板是**全局独占锁**，任何进程持锁期间别人都拿不到。
-        //
-        // 微信/QQ/浏览器复制图片时会**分多次**改写剪贴板（先写位图，再补文件列表
-        // 或反之），而 WM_CLIPBOARDUPDATE 是在每次改写后立刻发给订阅方的 —— 也就是
-        // 说我们极可能在它还持着锁的时候就被叫醒。此时 OpenClipboard 直接失败。
-        //
-        // 改动前这里是一个 `if OpenClipboard(0) == 0 { return None }`：拿不到锁就
-        // 当作「这次没有内容」，可 WM_CLIPBOARDUPDATE 只有一次通知，不会重发 →
-        // 这一次复制就**永久丢失**。用户看到的就是「微信复制图片有时候完全没反应」
-        // （2.1.11 反馈的新问题）。
-        //
-        // 正确做法是重试：拿不到锁不代表剪贴板是空的，只是对方还没写完。短暂退避
-        // 后重试，覆盖住整个写入窗口。
-        if !open_clipboard_retry() {
-            return (
-                None,
-                "OpenClipboard 重试耗尽，放弃本次(对方应用长时间持锁)".into(),
-                false,
-            );
-        }
-
-        let (raw, attempt_diag, suspicious) = read_clipboard_once(file_copy);
-        // 必须立刻松锁：延迟渲染要靠 owner 重新拿到锁才能把数据补进来，
-        // 我们一直攥着锁的话它永远补不进来，后面的重试也就全白搭了。
-        CloseClipboard();
-
-        if raw.is_some() {
-            if attempt > 0 {
-                // 救回来了。记一条，回传日志时能看出「这次是被重试捞到的」，
-                // 也能据此判断对方应用的延迟渲染窗口到底有多长。
-                crate::logger::write_line(
-                    "INFO",
-                    "clipboard",
-                    &format!(
-                        "延迟渲染竞态：首轮未取到数据，第 {} 轮重试成功 | {}",
-                        attempt + 1,
-                        attempt_diag
-                    ),
-                );
-            }
-            return (raw, attempt_diag, false);
-        }
-
-        diag = attempt_diag;
-        if !suspicious {
-            // 剪贴板里压根没有目标格式（或按 file_copy 开关主动跳过）：
-            // 再等多久也不会有，没必要白等。
-            return (None, diag, false);
-        }
-
-        if attempt + 1 < MAX_ATTEMPTS {
-            // 15 / 30 / 60ms 退避，累计 ≤105ms。只有可疑时才付这点代价。
-            std::thread::sleep(std::time::Duration::from_millis(15u64 << attempt));
-        }
+    if !open_clipboard_retry() {
+        return (None, "OpenClipboard 重试耗尽(对方应用长时间持锁)".into());
     }
-    (
-        None,
-        format!("[延迟渲染重试 {} 轮仍取不到数据] {}", MAX_ATTEMPTS, diag),
-        true, // 仍卡在「格式在、句柄拿不到」→ 交回看门狗下一拍重读
-    )
+    // 延迟渲染需要 owner 重新拿到锁才能把数据补进来，所以读完必须立刻松锁。
+    let (raw, diag, _suspicious) = read_clipboard_once(file_copy);
+    CloseClipboard();
+    (raw, diag)
 }
 
 /// 单次读剪贴板。**调用方须保证已 OpenClipboard 成功**，本函数不负责开关剪贴板。
