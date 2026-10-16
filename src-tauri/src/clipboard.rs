@@ -835,7 +835,7 @@ pub fn on_clipboard_update() {
         LAST_SEQ.store(seq, Ordering::Relaxed);
     }
 
-    let raw = unsafe { read_clipboard() };
+    let (raw, diag) = unsafe { read_clipboard() };
     let Some(raw) = raw else {
         // 剪贴板序号确实变了（真有一次外部复制），但没读出可记录的内容。
         // 常见于：关闭「文件复制」时复制单个非图片文件、对方只写了私有格式。
@@ -844,7 +844,15 @@ pub fn on_clipboard_update() {
         // 有这条 = 「事件到了、是识别环节没捞到」；没这条 = 「事件根本没到」
         // （查监听是否订阅成功、窗口是否最小化导致消息不投递）。
         // 两者的排查方向完全不同。
-        crate::logger::write_line("INFO", "clipboard", "剪贴板已更新，但未识别出可记录内容");
+        //
+        // 2.2.1 起把「当时剪贴板里有哪些格式、每种为什么被拒」一并打进日志（diag），
+        // 这样朋友回传的日志就能直接看出是 CF_UNICODETEXT 根本没出现、还是出现了
+        // 但 GetClipboardData 取不到句柄（延迟渲染竞态）等，无需再来回猜。
+        crate::logger::write_line(
+            "INFO",
+            "clipboard",
+            &format!("剪贴板已更新，但未识别出可记录内容 | {}", diag),
+        );
         return;
     };
 
@@ -1193,7 +1201,98 @@ fn open_clipboard_retry() -> bool {
     false
 }
 
-unsafe fn read_clipboard() -> Option<RawClip> {
+/// 标准剪贴板格式值 → 可读名（>= 0xC000 的私有格式不在这里，交给 GetClipboardFormatNameW）。
+fn std_cf_name(fmt: u32) -> Option<&'static str> {
+    Some(match fmt {
+        1 => "CF_TEXT",
+        2 => "CF_BITMAP",
+        3 => "CF_METAFILEPICT",
+        4 => "CF_SYLK",
+        5 => "CF_DIF",
+        6 => "CF_TIFF",
+        7 => "CF_OEMTEXT",
+        8 => "CF_DIB",
+        9 => "CF_PALETTE",
+        10 => "CF_PENDATA",
+        11 => "CF_RIFF",
+        12 => "CF_WAVE",
+        13 => "CF_UNICODETEXT",
+        14 => "CF_ENHMETAFILE",
+        15 => "CF_HDROP",
+        16 => "CF_LOCALE",
+        17 => "CF_DIBV5",
+        0x80 => "CF_OWNERDISPLAY",
+        0x81 => "CF_DSPTEXT",
+        0x82 => "CF_DSPBITMAP",
+        0x83 => "CF_DSPMETAFILEPICT",
+        0x84 => "CF_DSPENHMETAFILE",
+        _ => return None,
+    })
+}
+
+/// 枚举当前剪贴板上的所有格式（须 OpenClipboard 之后调用）。
+/// 标准格式给可读名；私有格式用 GetClipboardFormatNameW 取注册名，取不到则标 <priv:N>。
+unsafe fn enum_clipboard_formats() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut fmt = 0u32;
+    loop {
+        fmt = EnumClipboardFormats(fmt);
+        if fmt == 0 {
+            break;
+        }
+        let name = std_cf_name(fmt)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                let mut buf = vec![0u16; 256];
+                let n = GetClipboardFormatNameW(fmt, buf.as_mut_ptr(), buf.len() as i32);
+                if n > 0 {
+                    format!("\"{}\"", String::from_utf16_lossy(&buf[..n as usize]))
+                } else {
+                    format!("<priv:{}>", fmt)
+                }
+            });
+        out.push(name);
+    }
+    out
+}
+
+/// 尽力拿到当前剪贴板 owner 的进程名（如 WeChat.exe）。任何一步失败都返回空串，
+/// 绝不影响主流程——这只是一个诊断线索，用来确认「这次复制是谁写进剪贴板的」。
+unsafe fn clipboard_owner_exe() -> String {
+    let owner = GetClipboardOwner();
+    if owner == 0 {
+        return String::new();
+    }
+    let mut pid: u32 = 0;
+    GetWindowThreadProcessId(owner, &mut pid);
+    if pid == 0 {
+        return String::new();
+    }
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    const PROCESS_VM_READ: u32 = 0x0010;
+    let h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+    if h == 0 {
+        return String::new();
+    }
+    let mut buf = vec![0u16; 260];
+    let mut size: u32 = buf.len() as u32;
+    let name = if QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut size) != 0 {
+        let s = String::from_utf16_lossy(&buf[..size as usize]);
+        std::path::Path::new(&s)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or(s)
+    } else {
+        String::new()
+    };
+    CloseHandle(h);
+    name
+}
+
+/// 读取剪贴板内容；同时返回一份「诊断串」，在「未识别」时由调用方打印，
+/// 说明当时剪贴板里到底有哪些格式、每种为什么被拒（owner / 格式清单 / 文本句柄是否为空等）。
+/// 这是为定位「微信复制不进软件」这类偶发问题加的可观测性，平时不影响主流程。
+unsafe fn read_clipboard() -> (Option<RawClip>, String) {
     const CF_UNICODETEXT: u32 = 13;
     const CF_DIB: u32 = 8;
     const CF_HDROP: u32 = 15;
@@ -1216,20 +1315,30 @@ unsafe fn read_clipboard() -> Option<RawClip> {
     // 正确做法是重试：拿不到锁不代表剪贴板是空的，只是对方还没写完。短暂退避
     // 后重试，覆盖住整个写入窗口。
     if !open_clipboard_retry() {
-        crate::logger::write_line(
-            "WARN",
-            "clipboard",
-            "OpenClipboard 重试耗尽，放弃本次剪贴板内容（对方应用长时间持锁）",
+        return (
+            None,
+            "OpenClipboard 重试耗尽，放弃本次(对方应用长时间持锁)".into(),
         );
-        return None;
     }
+
+    // 诊断：先枚举当前剪贴板上的所有格式（含私有格式注册名），再尽力拿到 owner 进程名。
+    // 两者都必须在 OpenClipboard 成功之后、CloseClipboard 之前调用。
+    let mut diag = String::new();
+    let owner = clipboard_owner_exe();
+    if !owner.is_empty() {
+        diag.push_str(&format!("[owner={}] ", owner));
+    }
+    let fmts = enum_clipboard_formats();
+    diag.push_str(&format!("formats=[{}] ", fmts.join(", ")));
 
     let result = (|| {
         // 优先级：文本 > 文件 > 图片
         if IsClipboardFormatAvailable(CF_UNICODETEXT) != 0 {
+            diag.push_str("text:avail=true ");
             if let Some(h) = non_null(GetClipboardData(CF_UNICODETEXT)) {
                 let p = GlobalLock(h) as *const u16;
                 if p.is_null() {
+                    diag.push_str("GlobalLock=NULL ");
                     return None;
                 }
                 let mut v = Vec::new();
@@ -1243,11 +1352,20 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                     i += 1;
                 }
                 GlobalUnlock(h);
+                diag.push_str(&format!("len={} ", v.len()));
                 return Some(RawClip::Text(String::from_utf16_lossy(&v)));
+            } else {
+                // 格式存在但取不到句柄：典型「延迟渲染未就绪」——owner 还没通过
+                // WM_RENDERFORMAT 把数据交出来，或 owner 拒绝渲染。这是微信等应用
+                // 复制偶发丢失的高频嫌疑点，配合上方的 formats 清单可一眼确认。
+                diag.push_str("GetClipboardData=NULL(可能延迟渲染未就绪) ");
             }
+        } else {
+            diag.push_str("text:avail=false ");
         }
 
         if IsClipboardFormatAvailable(CF_HDROP) != 0 {
+            diag.push_str("hdrop:avail=true ");
             if let Some(h) = non_null(GetClipboardData(CF_HDROP)) {
                 const ALL: u32 = 0xFFFFFFFF;
                 let count = DragQueryFileW(h, ALL, std::ptr::null_mut(), 0);
@@ -1258,45 +1376,32 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                     DragQueryFileW(h, i, buf.as_mut_ptr(), len);
                     files.push(String::from_utf16_lossy(&buf[..buf.len() - 1]));
                 }
-                // ⚠️ 这里**绝对不能**调用 DragFinish(h)。
-                //
-                // h 来自 GetClipboardData(CF_HDROP)，它的内存归**剪贴板**所有（不是
-                // WM_DROPFILES 里那个临时 HDROP）。DragFinish 会把它 GlobalFree 掉，而剪贴板
-                // 仍然持有同一个句柄，于是下一次 OpenClipboard()/EmptyClipboard() 会二次释放
-                // → 堆损坏 → 进程直接崩溃且无任何 Rust 层报错。
-                //
-                // 实证（症状逐字吻合）：
-                //   Appeon 社区 “Clipboard and DragQueryFile - Need DragFinish?”：
-                //   “Calling DragFinish() will cause the application to crash on the next
-                //    OpenClipboard() call … I ended up just calling EmptyClipboard() with no
-                //    DragFinish() and then the crash went away.”
-                //   zabkat shellFAQ 亦建议剪贴板 HDROP 不要调用 DragFinish（只适用于
-                //   WM_DROPFILES 处理）。
-                // 对应到轻贴的现象：复制文件（读一次）→ 之后点击文件条目（写回 → OpenClipboard）
-                // → 崩溃。这正是本次上报的 bug。
-                // 内存无需手动释放：CloseClipboard 后由剪贴板自身管理。
-                //
-                // ⚠️ 单文件图片的判定**不能**被「文件复制」开关挡住（2.1.11 反馈：
-                // 「微信复制图片都有可能识别不到」）。微信/QQ 复制图片给的往往就是
-                // CF_HDROP（一个临时图片文件路径）而不是 CF_DIB，而 file_copy 默认
-                // 关闭 —— 改动前这里整段挂在 `file_copy &&` 后面，于是微信复制图片
-                // 整条路径被跳过，什么都读不到。图片和文件是两回事：开关管的是
-                // 「要不要记录文件条目」，不该决定「要不要记录图片」。
+                // ⚠️ 这里**绝对不能**调用 DragFinish(h)（剪贴板 HDROP 二次释放会崩溃，
+                // 详见文件下方 extern 块说明）。内存由 CloseClipboard 后剪贴板自身管理。
                 if files.len() == 1 {
                     // 只记住路径，解码推迟到后台线程 —— 主线程（WndProc）不能
                     // 被解码大图拖住，否则界面直接冻住。
+                    // 单图/单文件图片识别**不受** file_copy 开关影响（2.1.11 反馈）。
+                    diag.push_str("单图/单文件(图片识别不受 file_copy 影响) ");
                     return Some(RawClip::ImageFile(PathBuf::from(&files[0])));
                 }
                 // 多张 / 非图片：属于「文件复制」范畴，听开关的。
                 if file_copy {
+                    diag.push_str(&format!("多文件({})且file_copy=on ", files.len()));
                     return Some(RawClip::Files(files));
                 }
                 // 单个非图片文件且开关关闭：不记录。
+                diag.push_str(&format!("多文件({})但file_copy=off→跳过 ", files.len()));
                 return None;
+            } else {
+                diag.push_str("GetClipboardData=NULL ");
             }
+        } else {
+            diag.push_str("hdrop:avail=false ");
         }
 
         if IsClipboardFormatAvailable(CF_DIB) != 0 {
+            diag.push_str("dib:avail=true ");
             if let Some(h) = non_null(GetClipboardData(CF_DIB)) {
                 let size = GlobalSize(h);
                 let p = GlobalLock(h);
@@ -1306,15 +1411,21 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                     // 与 image_file_to_dib 同一上限：CF_DIB 也可能来自超大位图
                     // （微信第二次写入、专业软件复制），超限降采样，防巨型 BMP 落盘。
                     // 降采样推迟到后台线程，主线程只做完这次 memcpy 就返回。
+                    diag.push_str(&format!("size={} ", size));
                     return Some(RawClip::ImageRaw(bytes));
                 }
+                diag.push_str("GlobalLock=NULL或size=0 ");
+            } else {
+                diag.push_str("GetClipboardData=NULL ");
             }
+        } else {
+            diag.push_str("dib:avail=false ");
         }
         None
     })();
 
     CloseClipboard();
-    result
+    (result, diag)
 }
 
 // ---------------------------------------------------------------------------
@@ -2867,8 +2978,19 @@ extern "system" {
     fn GetClipboardData(format: u32) -> isize;
     fn SetClipboardData(format: u32, handle: isize) -> isize;
     fn IsClipboardFormatAvailable(format: u32) -> i32;
+    fn EnumClipboardFormats(format: u32) -> u32;
+    fn GetClipboardFormatNameW(format: u32, lpszFormatName: *mut u16, cchMaxCount: i32) -> i32;
     fn GetClipboardSequenceNumber() -> u32;
     fn GetClipboardOwner() -> isize;
+    fn GetWindowThreadProcessId(hwnd: isize, lpdwProcessId: *mut u32) -> u32;
+    fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
+    fn QueryFullProcessImageNameW(
+        hProcess: isize,
+        dwFlags: u32,
+        lpExeName: *mut u16,
+        lpdwSize: *mut u32,
+    ) -> i32;
+    fn CloseHandle(hObject: isize) -> i32;
     fn GetLastInputInfo(pli: *mut LastInputInfo) -> i32;
     fn GetTickCount() -> u32;
 
