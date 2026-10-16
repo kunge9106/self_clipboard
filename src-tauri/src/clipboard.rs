@@ -43,6 +43,15 @@ static LAST_LOGGED_SEQ: AtomicU32 = AtomicU32::new(0);
 /// 用一次 CAS 把「读内容」这段串起来：抢不到的通道直接返回，下一拍（≤20ms）再试，
 /// 不会丢内容 —— 因为「只在成功时推进序号」的规则保证了没读到就会被重试。
 static READING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 「等 CF_HDROP 交货」的起始时刻，按序号记录。
+///
+/// 用途：同一次复制里 CF_HDROP（文件/图片）与 CF_DIB（位图）会先后就位，且两者
+/// 指纹算法不同（文件哈希 vs 像素指纹）→ 判重认不出 → 一次复制记两条。
+/// 只要 CF_HDROP 已登记就暂缓用 DIB，等它就位；但要有个上限，
+/// 否则「HDROP 永远不渲染」时这张图就丢了。这一对原子量就是那个上限的计时器。
+static DIB_FALLBACK_SEQ: AtomicU32 = AtomicU32::new(0);
+static DIB_FALLBACK_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// id 计数器，避免同毫秒碰撞
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// 最近若干条图片条目的 (内容指纹, 时间戳ms)：图片判重依据。
@@ -928,13 +937,21 @@ pub fn on_clipboard_update() {
         return;
     }
     let (raw, diag) = unsafe { read_clipboard() };
+    if raw.is_some() {
+        // ✅ 读成功：**必须在放开 READING 之前**推进序号。
+        //
+        // 否则存在一个极窄但真实的窗口：本线程已读完内容、放开了 READING，却还没推进
+        // LAST_SEQ —— 此刻另一条通道（20ms 轮询）恰好进来，看到「这个序号仍未处理」，
+        // 就会把**同一份内容再读一遍、再入库一次**，表现为「复制一次出现两条」。
+        // 放到闸门内推进只要一个原子写，两条通道就永远不可能同时处理同一个序号。
+        //
+        // 「只有成功才推进」的规则不变：下面 None 分支依旧不推进，让下一拍重试。
+        LAST_SEQ.store(seq, Ordering::Relaxed);
+        LAST_LOGGED_SEQ.store(seq, Ordering::Relaxed);
+    }
     READING.store(false, Ordering::Release);
     match raw {
         Some(raw) => {
-            // ✅ **只有成功才推进序号**（上面 owner/skip 两个分支也各自推进）。
-            // 推进后，轮询看到 seq == LAST_SEQ 会立刻返回，零开销。
-            LAST_SEQ.store(seq, Ordering::Relaxed);
-            LAST_LOGGED_SEQ.store(seq, Ordering::Relaxed);
             dispatch_raw(raw);
         }
         None => {
@@ -1507,6 +1524,38 @@ unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool
             }
         } else {
             diag.push_str("hdrop:avail=false ");
+        }
+
+        // ---- 防止「同一次复制记两条」----
+        //
+        // 复制图片时，CF_HDROP（文件路径）与 CF_DIB（位图）会先后就位，而两者的判重
+        // 指纹算法**不同**：HDROP 走文件内容哈希，DIB 走像素量化指纹 —— 同一张图也
+        // 算不出同一个值，判重据此认不出是同一张 → 一次复制出现两条。
+        //
+        // 实测微信总是**先登记 CF_HDROP**（延迟渲染，数据稍后补），随后才补上 DIB。
+        // 于是中间态是「HDROP 格式在、取不到数据」+「DIB 已可取」，旧逻辑会先用 DIB
+        // 记一条位图，等 HDROP 数据就位后再记一条文件 —— 重复由此产生。
+        //
+        // 所以：只要 CF_HDROP 已登记，本次就**不用 DIB 兜底**，等下一拍（≤20ms）拿到
+        // 文件路径再记。那一条是原始文件（质量最好），且只会有一条。
+        // 仅当 HDROP 迟迟不交货（超过下面这个宽限期）才回退接受 DIB —— 保证绝不丢图。
+        const HDROP_GRACE_MS: u64 = 400;
+        if IsClipboardFormatAvailable(CF_HDROP) != 0 {
+            let cur = GetClipboardSequenceNumber();
+            let first = if DIB_FALLBACK_SEQ.load(Ordering::Relaxed) == cur {
+                DIB_FALLBACK_AT.load(Ordering::Relaxed)
+            } else {
+                let t = now_ms();
+                DIB_FALLBACK_SEQ.store(cur, Ordering::Relaxed);
+                DIB_FALLBACK_AT.store(t, Ordering::Relaxed);
+                t
+            };
+            if now_ms().saturating_sub(first) < HDROP_GRACE_MS {
+                diag.push_str("HDROP 已登记→暂缓读 DIB(等文件路径就位，避免同次复制记两条) ");
+                suspicious = true;
+                return None;
+            }
+            diag.push_str("HDROP 迟迟未交货→回退读 DIB ");
         }
 
         if IsClipboardFormatAvailable(CF_DIB) != 0 {
