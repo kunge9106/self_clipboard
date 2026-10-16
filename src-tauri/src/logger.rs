@@ -125,8 +125,9 @@ pub fn write_line(level: &str, tag: &str, msg: &str) {
 #[macro_export]
 macro_rules! log_err {
     ($tag:expr, $($arg:tt)*) => {{
-        $crate::logger::write_line("ERROR", $tag, &format!($($arg)*));
-        eprintln!("[{}] {}", $tag, format!($($arg)*));
+        let msg = format!("[{}:{}] {}", file!(), line!(), format!($($arg)*));
+        $crate::logger::write_line("ERROR", $tag, &msg);
+        eprintln!("[{}] {}", $tag, msg);
     }};
 }
 
@@ -152,7 +153,7 @@ macro_rules! log_print {
 #[macro_export]
 macro_rules! log_warn {
     ($($arg:tt)*) => {{
-        $crate::logger::write_raw_warn(&format!($($arg)*));
+        $crate::logger::write_raw_warn(&format!("[{}:{}] {}", file!(), line!(), format!($($arg)*)));
     }};
 }
 

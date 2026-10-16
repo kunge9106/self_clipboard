@@ -150,7 +150,7 @@ pub fn delete_item(id: String) -> Result<(), String> {
         crate::log_print!("[clipboard] 删除条目 {id} kind={kind}");
     } else {
         // 前端理论上不会删不存在的条目；真出现说明前后端状态不同步，值得记一笔。
-        crate::log_warn!("[clipboard] 删除失败：条目不存在 {id}");
+        crate::log_warn!("[clipboard] 删除失败：条目不存在 {id}（前后端状态不同步）");
     }
     Ok(())
 }
@@ -766,8 +766,12 @@ pub fn init(app: &AppHandle) {
 
     // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
     unsafe {
-        if AddClipboardFormatListener(MAIN_HWND.get().copied().unwrap_or(0)) == 0 {
-            crate::log_warn!("[clipboard] AddClipboardFormatListener 失败");
+        let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+        if AddClipboardFormatListener(hwnd) == 0 {
+            crate::log_warn!(
+                "[clipboard] AddClipboardFormatListener 失败 hwnd={hwnd} last_err={}",
+                GetLastError()
+            );
         } else {
             crate::log_print!("[clipboard] 已订阅 WM_CLIPBOARDUPDATE（事件驱动监听）");
         }
@@ -891,9 +895,9 @@ pub fn flush_pending(timeout: std::time::Duration) {
     let start = std::time::Instant::now();
     while PENDING.load(Ordering::Relaxed) > 0 {
         if start.elapsed() >= timeout {
+            let n = PENDING.load(Ordering::Relaxed);
             crate::log_warn!(
-                "[clipboard] 退出等待超时，仍有 {} 条未落盘",
-                PENDING.load(Ordering::Relaxed)
+                "[clipboard] 退出等待超时，仍有 {n} 条未落盘，强制退出（可能丢失未保存记录）"
             );
             return;
         }
@@ -1871,8 +1875,11 @@ fn store_raw(raw: RawClip) -> HistoryItem {
                 //
                 // 现在复用内存里的 DIB 直接生成：省掉回读与全量解码。
                 // 落盘失败无妨 —— `ensure_thumb` 仍会在下次被调用时现场生成。
-                if save_thumb_from_dib(&dir, &id, &bytes).is_none() {
-                    crate::log_warn!("[clipboard] 内存缩略图生成失败 {id}，将由 ensure_thumb 兜底");
+                match save_thumb_from_dib(&dir, &id, &bytes) {
+                    Ok(()) => {}
+                    Err(reason) =>                     crate::log_warn!(
+                        "[clipboard] 内存缩略图生成失败 id={id} 原因={reason}，将由 ensure_thumb 兜底"
+                    ),
                 }
             } else {
                 // 兜底：直接存 DIB，前端无法显示但至少保留
@@ -2050,21 +2057,21 @@ const THUMB_SIDE: u32 = 512;
 ///
 /// 任何一步失败都只返回 None、不影响落盘 —— 缩略图缺失时前端仍会回退到
 /// `ensure_thumb` 现场生成。
-fn save_thumb_from_dib(dir: &std::path::Path, id: &str, dib: &[u8]) -> Option<()> {
+fn save_thumb_from_dib(dir: &std::path::Path, id: &str, dib: &[u8]) -> Result<(), &'static str> {
     if dib.len() < 40 {
-        return None;
+        return Err("DIB 长度不足 40 字节（信息头残缺）");
     }
     let bi_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
     let bi_bit_count = u16::from_le_bytes([dib[14], dib[15]]) as usize;
     // 只处理落盘 BMP 的标准形态：32bpp、无压缩。其它形态交给 ensure_thumb。
     let bi_compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
     if bi_bit_count != 32 || bi_compression != 0 {
-        return None;
+        return Err("非 32bpp 或未压缩（交由 ensure_thumb 现场生成）");
     }
     let w = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
     let h = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
     if w <= 0 || h <= 0 {
-        return None;
+        return Err("宽高无效（<=0）");
     }
     let (w, h) = (w as u32, h as u32);
 
@@ -2073,7 +2080,7 @@ fn save_thumb_from_dib(dir: &std::path::Path, id: &str, dib: &[u8]) -> Option<()
     let px = &dib[off..];
     let stride = w as usize * 4;
     if px.len() < stride * h as usize {
-        return None;
+        return Err("像素区长度不足（数据被截断）");
     }
 
     // 等比缩到 THUMB_SIDE 以内
@@ -2104,11 +2111,13 @@ fn save_thumb_from_dib(dir: &std::path::Path, id: &str, dib: &[u8]) -> Option<()
         image::RgbaImage::from_raw(tw, th, rgba).expect("尺寸与数据长度一致"),
     )
     .write_to(&mut png, image::ImageFormat::Png)
-    .ok()?;
+    .ok()
+    .ok_or("PNG 编码失败")?;
 
     let thumb_path = dir.join(format!("thumbs/{}.png", id));
-    let _ = fs::create_dir_all(thumb_path.parent()?);
-    fs::write(thumb_path, png.into_inner()).ok()
+    let _ = fs::create_dir_all(thumb_path.parent().ok_or("缩略图路径无父目录")?);
+    fs::write(thumb_path, png.into_inner()).map_err(|_| "缩略图写盘失败")?;
+    Ok(())
 }
 
 fn ensure_thumb(dir: &std::path::Path, item: &HistoryItem) -> Option<Vec<u8>> {
@@ -2129,14 +2138,11 @@ fn ensure_thumb(dir: &std::path::Path, item: &HistoryItem) -> Option<Vec<u8>> {
         }
     };
     if bytes.len() > 256 * 1024 * 1024 {
-        crate::logger::write_line(
-            "ERROR",
+        crate::log_err!(
             "clipboard",
-            &format!(
-                "图片 {} 达 {}MB，超出处理能力，缩略图跳过",
-                src.display(),
-                bytes.len() / 1048576
-            ),
+            "图片 {} 达 {}MB，超出处理能力，缩略图跳过",
+            src.display(),
+            bytes.len() / 1048576
         );
         return None;
     }
@@ -2393,6 +2399,12 @@ fn dpapi(input: &[u8], protect: bool) -> Option<Vec<u8>> {
             )
         };
         if ok == 0 || out.pb_data.is_null() {
+            crate::log_err!(
+                "clipboard",
+                "DPAPI {} 失败 last_err={}",
+                if protect { "加密" } else { "解密" },
+                GetLastError()
+            );
             return None;
         }
         let v = std::slice::from_raw_parts(out.pb_data, out.cb_data as usize).to_vec();
@@ -2414,7 +2426,9 @@ fn encrypt_text(plain: &str) -> Vec<u8> {
             out
         }
         None => {
-            crate::log_warn!("[clipboard] DPAPI 加密失败，本条按明文落盘（内容不会丢）");
+            crate::log_warn!(
+                "[clipboard] DPAPI 加密失败，本条按明文落盘（内容不丢）；失败码见上方 DPAPI 加密错误"
+            );
             plain.as_bytes().to_vec()
         }
     }
@@ -2477,7 +2491,7 @@ fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     match fs::read_to_string(&path) {
         Ok(s) => {
             let mut v: Vec<HistoryItem> = serde_json::from_str(&s).unwrap_or_else(|e| {
-                crate::log_warn!("[clipboard] index.json 解析失败：{e}，返回空");
+                crate::log_warn!("[clipboard] index.json 解析失败：{e}，返回空（历史清空）");
                 Vec::new()
             });
             // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
@@ -2973,6 +2987,7 @@ const GMEM_MOVEABLE: u32 = 0x0002;
 extern "system" {
     fn OpenClipboard(hwnd: isize) -> i32;
     fn AddClipboardFormatListener(hwnd: isize) -> i32;
+    fn GetLastError() -> u32;
     fn CloseClipboard() -> i32;
     fn EmptyClipboard() -> i32;
     fn GetClipboardData(format: u32) -> isize;
