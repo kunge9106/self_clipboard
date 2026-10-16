@@ -1296,34 +1296,103 @@ unsafe fn clipboard_owner_exe() -> String {
 /// 读取剪贴板内容；同时返回一份「诊断串」，在「未识别」时由调用方打印，
 /// 说明当时剪贴板里到底有哪些格式、每种为什么被拒（owner / 格式清单 / 文本句柄是否为空等）。
 /// 这是为定位「微信复制不进软件」这类偶发问题加的可观测性，平时不影响主流程。
+///
+/// ⚠️ 2.2.1 修复「小图复制丢失」：**格式登记 ≠ 数据已就位**。
+///
+/// 微信/QQ 复制图片时常以「延迟渲染」登记 CF_HDROP（`SetClipboardData(CF_HDROP, NULL)`）：
+/// 格式立刻可见（`IsClipboardFormatAvailable` 为真），真正的数据要等有人索取时，
+/// 由 owner 在 WM_RENDERFORMAT 里补交。而 WM_CLIPBOARDUPDATE 是在**登记**的瞬间就
+/// 发出的，所以我们第一次去读的时候数据往往还没补上 → `GetClipboardData` 返回 NULL。
+///
+/// 更要命的是：延迟渲染需要 owner 重新 OpenClipboard + SetClipboardData 才能补数据，
+/// 而剪贴板是全局独占锁 —— **我们持锁期间 owner 根本补不进来**。所以持锁重试毫无意义，
+/// 必须先 CloseClipboard 松锁、退避片刻让 owner 补完，再重新开锁读。
+///
+/// 这正是「大图正常、小图丢失」的原因：大图微信得先把临时文件写好（耗时），等我们
+/// （含 open_clipboard_retry 的退避）拿到锁时数据早已提交，一次读到；小图登记几乎瞬时
+/// 但走延迟渲染，第一次读正好撞在补交完成之前。旧实现只读一次就把这次复制永久丢了
+/// （WM_CLIPBOARDUPDATE 不会重发）。
 unsafe fn read_clipboard() -> (Option<RawClip>, String) {
-    const CF_UNICODETEXT: u32 = 13;
-    const CF_DIB: u32 = 8;
-    const CF_HDROP: u32 = 15;
+    // 最多读几轮。只有「格式在、句柄为 NULL」这种可疑情况才用得上第 2 轮起，
+    // 正常复制第一轮就返回，不会有任何额外延迟。
+    const MAX_ATTEMPTS: u32 = 4;
 
     // 「文件复制」开关（设置页，默认关闭）：关掉后完全不看 CF_HDROP。
     // 在 OpenClipboard 之前读取，避免持有剪贴板锁时再去碰 settings 的互斥锁。
     let file_copy = crate::settings::get().file_copy;
 
-    // ⚠️ 剪贴板是**全局独占锁**，任何进程持锁期间别人都拿不到。
-    //
-    // 微信/QQ/浏览器复制图片时会**分多次**改写剪贴板（先写位图，再补文件列表
-    // 或反之），而 WM_CLIPBOARDUPDATE 是在每次改写后立刻发给订阅方的 —— 也就是
-    // 说我们极可能在它还持着锁的时候就被叫醒。此时 OpenClipboard 直接失败。
-    //
-    // 改动前这里是一个 `if OpenClipboard(0) == 0 { return None }`：拿不到锁就
-    // 当作「这次没有内容」，可 WM_CLIPBOARDUPDATE 只有一次通知，不会重发 →
-    // 这一次复制就**永久丢失**。用户看到的就是「微信复制图片有时候完全没反应」
-    // （2.1.11 反馈的新问题）。
-    //
-    // 正确做法是重试：拿不到锁不代表剪贴板是空的，只是对方还没写完。短暂退避
-    // 后重试，覆盖住整个写入窗口。
-    if !open_clipboard_retry() {
-        return (
-            None,
-            "OpenClipboard 重试耗尽，放弃本次(对方应用长时间持锁)".into(),
-        );
+    let mut diag = String::new();
+    for attempt in 0..MAX_ATTEMPTS {
+        // ⚠️ 剪贴板是**全局独占锁**，任何进程持锁期间别人都拿不到。
+        //
+        // 微信/QQ/浏览器复制图片时会**分多次**改写剪贴板（先写位图，再补文件列表
+        // 或反之），而 WM_CLIPBOARDUPDATE 是在每次改写后立刻发给订阅方的 —— 也就是
+        // 说我们极可能在它还持着锁的时候就被叫醒。此时 OpenClipboard 直接失败。
+        //
+        // 改动前这里是一个 `if OpenClipboard(0) == 0 { return None }`：拿不到锁就
+        // 当作「这次没有内容」，可 WM_CLIPBOARDUPDATE 只有一次通知，不会重发 →
+        // 这一次复制就**永久丢失**。用户看到的就是「微信复制图片有时候完全没反应」
+        // （2.1.11 反馈的新问题）。
+        //
+        // 正确做法是重试：拿不到锁不代表剪贴板是空的，只是对方还没写完。短暂退避
+        // 后重试，覆盖住整个写入窗口。
+        if !open_clipboard_retry() {
+            return (
+                None,
+                "OpenClipboard 重试耗尽，放弃本次(对方应用长时间持锁)".into(),
+            );
+        }
+
+        let (raw, attempt_diag, suspicious) = read_clipboard_once(file_copy);
+        // 必须立刻松锁：延迟渲染要靠 owner 重新拿到锁才能把数据补进来，
+        // 我们一直攥着锁的话它永远补不进来，后面的重试也就全白搭了。
+        CloseClipboard();
+
+        if raw.is_some() {
+            if attempt > 0 {
+                // 救回来了。记一条，回传日志时能看出「这次是被重试捞到的」，
+                // 也能据此判断对方应用的延迟渲染窗口到底有多长。
+                crate::logger::write_line(
+                    "INFO",
+                    "clipboard",
+                    &format!(
+                        "延迟渲染竞态：首轮未取到数据，第 {} 轮重试成功 | {}",
+                        attempt + 1,
+                        attempt_diag
+                    ),
+                );
+            }
+            return (raw, attempt_diag);
+        }
+
+        diag = attempt_diag;
+        if !suspicious {
+            // 剪贴板里压根没有目标格式（或按 file_copy 开关主动跳过）：
+            // 再等多久也不会有，没必要白等。
+            return (None, diag);
+        }
+
+        if attempt + 1 < MAX_ATTEMPTS {
+            // 15 / 30 / 60ms 退避，累计 ≤105ms。只有可疑时才付这点代价。
+            std::thread::sleep(std::time::Duration::from_millis(15u64 << attempt));
+        }
     }
+    (
+        None,
+        format!("[延迟渲染重试 {} 轮仍取不到数据] {}", MAX_ATTEMPTS, diag),
+    )
+}
+
+/// 单次读剪贴板。**调用方须保证已 OpenClipboard 成功**，本函数不负责开关剪贴板。
+///
+/// 返回 `(内容, 诊断串, 是否可疑)`：
+/// 「可疑」= 至少一种目标格式 `IsClipboardFormatAvailable` 为真、但 `GetClipboardData`
+/// 拿到 NULL —— 这是延迟渲染 / 分次写入的典型症状，值得松锁退避后重读；
+/// 若压根没有目标格式，说明这次真没有可记录的东西，重读没有意义。
+unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool) {
+    const CF_UNICODETEXT: u32 = 13;
+    const CF_DIB: u32 = 8;
+    const CF_HDROP: u32 = 15;
 
     // 诊断：先枚举当前剪贴板上的所有格式（含私有格式注册名），再尽力拿到 owner 进程名。
     // 两者都必须在 OpenClipboard 成功之后、CloseClipboard 之前调用。
@@ -1334,6 +1403,8 @@ unsafe fn read_clipboard() -> (Option<RawClip>, String) {
     }
     let fmts = enum_clipboard_formats();
     diag.push_str(&format!("formats=[{}] ", fmts.join(", ")));
+
+    let mut suspicious = false;
 
     let result = (|| {
         // 优先级：文本 > 文件 > 图片
@@ -1362,7 +1433,8 @@ unsafe fn read_clipboard() -> (Option<RawClip>, String) {
                 // 格式存在但取不到句柄：典型「延迟渲染未就绪」——owner 还没通过
                 // WM_RENDERFORMAT 把数据交出来，或 owner 拒绝渲染。这是微信等应用
                 // 复制偶发丢失的高频嫌疑点，配合上方的 formats 清单可一眼确认。
-                diag.push_str("GetClipboardData=NULL(可能延迟渲染未就绪) ");
+                suspicious = true;
+                diag.push_str("GetClipboardData=NULL(延迟渲染未就绪) ");
             }
         } else {
             diag.push_str("text:avail=false ");
@@ -1398,7 +1470,8 @@ unsafe fn read_clipboard() -> (Option<RawClip>, String) {
                 diag.push_str(&format!("多文件({})但file_copy=off→跳过 ", files.len()));
                 return None;
             } else {
-                diag.push_str("GetClipboardData=NULL ");
+                suspicious = true;
+                diag.push_str("GetClipboardData=NULL(延迟渲染未就绪) ");
             }
         } else {
             diag.push_str("hdrop:avail=false ");
@@ -1420,7 +1493,8 @@ unsafe fn read_clipboard() -> (Option<RawClip>, String) {
                 }
                 diag.push_str("GlobalLock=NULL或size=0 ");
             } else {
-                diag.push_str("GetClipboardData=NULL ");
+                suspicious = true;
+                diag.push_str("GetClipboardData=NULL(延迟渲染未就绪) ");
             }
         } else {
             diag.push_str("dib:avail=false ");
@@ -1428,8 +1502,7 @@ unsafe fn read_clipboard() -> (Option<RawClip>, String) {
         None
     })();
 
-    CloseClipboard();
-    (result, diag)
+    (result, diag, suspicious)
 }
 
 // ---------------------------------------------------------------------------
