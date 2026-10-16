@@ -31,8 +31,18 @@ static HISTORY: OnceLock<Mutex<Vec<HistoryItem>>> = OnceLock::new();
 static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
 /// 本程序写回剪贴板后产生的序列号（应被忽略，避免自读）
 static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
-/// 「未识别」日志的去重序号：同一个序号只报一次，避免轮询期间每 100ms 刷一条。
+/// 「未识别」日志的去重序号：同一个序号只报一次，避免轮询期间每拍刷一条。
 static LAST_LOGGED_SEQ: AtomicU32 = AtomicU32::new(0);
+/// 「正在读剪贴板」互斥标记。
+///
+/// 事件路径（WndProc 主线程）与兜底轮询（watchdog）是两条独立通道，都会调用
+/// `on_clipboard_update`。轮询提到 ms 级后两者撞车的概率显著上升：两条同时进入
+/// 「序号变了 → 去读内容」就会重复走一遍 OpenClipboard + 诊断串（读同一份数据），
+/// 白费开销还可能拿到不一致的结果。
+///
+/// 用一次 CAS 把「读内容」这段串起来：抢不到的通道直接返回，下一拍（≤20ms）再试，
+/// 不会丢内容 —— 因为「只在成功时推进序号」的规则保证了没读到就会被重试。
+static READING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// id 计数器，避免同毫秒碰撞
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// 最近若干条图片条目的 (内容指纹, 时间戳ms)：图片判重依据。
@@ -665,17 +675,51 @@ fn spawn_clipboard_watchdog() {
     std::thread::Builder::new()
         .name("clipboard-watchdog".into())
         .spawn(|| {
-            // 100ms 轮询。它不是「事件驱动的补充」，而是**保证成功的那一环**：
+            // **ms 级轮询**。它不是「事件驱动的补充」，而是**保证成功的那一环**：
             // on_clipboard_update 只在读成功时才推进 LAST_SEQ，所以任何没成功的
             // 序号都会被下一拍自动重试，直到读到、或剪贴板被下一次复制替换。
             // 于是「拿不到锁 / 延迟渲染没交货 / 窗口隐藏导致消息漏投递」全部自动兜住。
             //
-            // 间隔取 100ms：既是兜底也是补读，复制后最迟 100ms 内被处理，用户无感。
-            // 开销：每 100ms 一次 GetClipboardSequenceNumber（纯整数读取，不开锁不拷数据），
-            // 序号没变时 on_clipboard_update 立即返回，可忽略。
-            const INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+            // 为什么是 20ms（而不是原来的 100ms）：延迟渲染的补交窗口（微信登记格式
+            // → 真正写入数据）在毫秒到几百毫秒之间浮动，间隔越短越能贴着窗口把内容捞回来。
+            // 20ms 意味着任何「事件漏投递 / 首次没读到」最多 20ms 内就被补上，
+            // 对「极端快速连续复制」这种最坏场景，命中率也接近事件驱动本身。
+            //
+            // 开销：每拍只做一次 `GetClipboardSequenceNumber()` —— 纯整数读取，
+            // **不开剪贴板锁、不拷任何数据**，约亚微秒级；序号没变时立即返回。
+            // 即 50 次/秒的空转 ≈ 可以忽略（对比 WebView 自身常驻开销）。
+            const POLL: std::time::Duration = std::time::Duration::from_millis(20);
+            // 同一个序号最多「真正去读」多少次。20ms × 100 ≈ 2 秒的密集补读窗口，
+            // 足够覆盖任何正常的延迟渲染；超过就放弃这个序号，等下次复制换序号再管。
+            //
+            // 这一条是给「剪贴板长期停在我们不认识的格式上」兜底的（例如用户复制了
+            // 某个只含私有格式的内容就一直放着不动）：没有它的话，轮询会永远每 20ms
+            // 去做一次完整读取（OpenClipboard + 枚举全部格式 + 查 owner 进程名），
+            // 白耗 CPU 还刷屏。有了它，2 秒后自动降级为「只读序号」，依旧零成本。
+            const MAX_TRIES_PER_SEQ: u32 = 100;
+
+            let mut trying_seq = 0u32;
+            let mut tries = 0u32;
+
             loop {
-                std::thread::sleep(INTERVAL);
+                std::thread::sleep(POLL);
+                let seq = unsafe { GetClipboardSequenceNumber() };
+                if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
+                    // 序号没变（或已被事件路径处理过）：本次只花了一次整数读取。
+                    trying_seq = 0;
+                    tries = 0;
+                    continue;
+                }
+                if seq != trying_seq {
+                    // 换了一个新序号（新的复制）：重新开始计数。
+                    trying_seq = seq;
+                    tries = 0;
+                }
+                if tries >= MAX_TRIES_PER_SEQ {
+                    // 这个序号已经密集试过 2 秒仍读不到 → 放弃，等序号变化。
+                    continue;
+                }
+                tries += 1;
                 on_clipboard_update();
             }
         })
@@ -877,7 +921,14 @@ pub fn on_clipboard_update() {
         }
     }
 
+    // 两条通道（WndProc 主线程 / 20ms 兜底轮询）可能同时走到这里。
+    // 用 CAS 把「真正去读剪贴板」这一段串起来：抢不到的直接返回，下一拍（≤20ms）再试。
+    // 不会因此丢内容 —— 「只在成功时推进序号」保证了没读到的序号一定会被重试。
+    if READING.swap(true, Ordering::AcqRel) {
+        return;
+    }
     let (raw, diag) = unsafe { read_clipboard() };
+    READING.store(false, Ordering::Release);
     match raw {
         Some(raw) => {
             // ✅ **只有成功才推进序号**（上面 owner/skip 两个分支也各自推进）。
