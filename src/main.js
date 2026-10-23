@@ -1994,9 +1994,6 @@ function settingsGeneralHtml(s) {
     <div class="row"><label>　└ 关闭时取消同步置顶</label>
       <input type="checkbox" id="set-pin-cancel" ${s.pinCancelOnDisable ? "checked" : ""} />
       <span class="hint">勾选则关掉互通时连同它产生的同步置顶一起取消（置顶回到当初的分类）；不勾选则同步置顶永久保留</span></div>
-    <div class="row"><label>不跟随系统缩放</label>
-      <input type="checkbox" id="set-ignore-dpi" ${s.ignoreDpiScale ? "checked" : ""} />
-      <span class="hint">界面固定按 100% 显示，Windows 调缩放后窗口与布局不再跟着变（含托盘菜单）。关掉则恢复正常跟随</span></div>
     <div class="row"><label>外观主题</label>
       <div class="seg" id="set-theme">
         <button type="button" data-theme="light" ${s.themeMode === "light" ? 'class="on"' : ""}>浅色</button>
@@ -2016,7 +2013,10 @@ function settingsAppearanceHtml(s) {
       <span class="hint" id="material-val">${s.materialAlpha ?? 50}%（越高越厚实 · 越低越通透）</span></div>
     <div class="row"><label>圆角模式</label>
       <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
-      <span class="hint">圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感</span></div>`;
+      <span class="hint">圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感</span></div>
+    <div class="row"><label>不跟随系统缩放</label>
+      <input type="checkbox" id="set-ignore-dpi" ${s.ignoreDpiScale ? "checked" : ""} />
+      <span class="hint">界面固定按 100% 显示，Windows 调缩放后窗口与布局不再跟着变（含托盘菜单）。关掉则恢复正常跟随</span></div>`;
 }
 
 // 「保留 N 天 / 永久保存」的展示文案。0 在语义上是「永久保留」，
