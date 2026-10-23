@@ -846,8 +846,15 @@ function emptyHtml() {
     files: ["暂无文件", "复制的文件会出现在这里"],
   };
   const [title, sub] = titles[currentView] || titles.history;
+  // 历史视图补第三条操作提示：巡览是「事先讲」，这里是「当场讲」——
+  // 用户第一次真正需要知道「还能右键」的时刻，就是他盯着这张空列表的时候。
+  // 其余分类不加：那里已经在讲自己的事了，再堆一句反而乱。
+  const tip =
+    !query && currentView === "history"
+      ? `<div class="empty-tip">右键卡片有更多操作 · 悬停 1 秒看更多内容</div>`
+      : "";
   return `<div class="empty"><div class="empty-title">${title}</div>
-    <div class="empty-sub">${sub || ""}</div></div>`;
+    <div class="empty-sub">${sub || ""}</div>${tip}</div>`;
 }
 
 function cardEl(item) {
@@ -1821,7 +1828,12 @@ document.addEventListener(
 );
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    // 详情弹窗优先：编辑态是否直接关，由 requestCloseDetail 按「怎么进来的」决定
+    // 功能导览是最上层的阻断式遮罩，优先级最高；Esc 等同于「跳过」
+    if (!document.getElementById("feature-tour")?.hidden) {
+      closeFeatureTour();
+      return;
+    }
+    // 详情弹窗次之：编辑态是否直接关，由 requestCloseDetail 按「怎么进来的」决定
     if (!document.getElementById("detail-modal")?.hidden) {
       requestCloseDetail();
       return;
@@ -1914,7 +1926,10 @@ function settingsGeneralHtml(s) {
       <span class="hint">任一分类置顶或取消，其它分类同步；关闭后各分类独立记录</span></div>
     <div class="row"><label>　└ 关闭时取消同步置顶</label>
       <input type="checkbox" id="set-pin-cancel" ${s.pinCancelOnDisable ? "checked" : ""} />
-      <span class="hint">勾选则关掉互通时连同它产生的同步置顶一起取消（置顶回到当初的分类）；不勾选则同步置顶永久保留</span></div>`;
+      <span class="hint">勾选则关掉互通时连同它产生的同步置顶一起取消（置顶回到当初的分类）；不勾选则同步置顶永久保留</span></div>
+    <div class="btn-row">
+      <button class="btn-ghost" id="replay-tour">重新查看功能引导</button>
+    </div>`;
 }
 
 function settingsAppearanceHtml(s) {
@@ -2466,6 +2481,130 @@ function openAutostartAsk() {
   if (modal) modal.hidden = false;
 }
 
+/** 重新拉一次设置，同步内存里的 settings。
+ *
+ * 改完「问过了 / 看过导览」这类开关后必须刷一次，否则同一会话里后续判断
+ * （比如关闭窗口时读 askedTrayOnClose）还在用旧值。失败就保持旧值，不打断流程。 */
+async function reloadSettings() {
+  try {
+    settings = await invoke("get_settings");
+  } catch {
+    /* 拿不到就保持旧值，不影响当前流程 */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 首次运行功能导览（7 步卡片式巡览，文案见 ONBOARDING.md）
+//
+// 为什么是卡片而不是聚光灯指引：窗口只有 1060×690，遮罩挖洞很容易连要指的
+// 控件一起盖住；而且控件位置随视图、分栏、窗口尺寸变化，定位逻辑必然错位。
+//
+// 关键约定：**任何退出方式都算「看过了」**（完成 / 跳过 / Esc / 点遮罩），
+// 否则每次启动都弹，比不弹更烦。
+// ---------------------------------------------------------------------------
+
+let tourStep = 0;
+
+/** 一次性取出导览需要的节点，避免每个函数里反复 getElementById */
+function tourEls() {
+  const mask = document.getElementById("feature-tour");
+  if (!mask) return null;
+  return {
+    mask,
+    body: mask.querySelector(".tour-body"),
+    steps: [...mask.querySelectorAll(".tour-step")],
+    dots: document.getElementById("tour-dots"),
+    prev: document.getElementById("tour-prev"),
+    next: document.getElementById("tour-next"),
+    skip: document.getElementById("tour-skip"),
+    autostart: document.getElementById("tour-autostart"),
+  };
+}
+
+function renderTourStep(t) {
+  const last = t.steps.length - 1;
+  t.steps.forEach((s, i) => (s.hidden = i !== tourStep));
+  // 正文区回到顶部：上一步可能是长内容（设置那步），滚到底再翻页会停在半截
+  if (t.body) t.body.scrollTop = 0;
+  // 进度点按步数生成，步数改了这里不用动
+  if (t.dots && t.dots.childElementCount !== t.steps.length) {
+    t.dots.replaceChildren(
+      ...t.steps.map(() => {
+        const d = document.createElement("span");
+        d.className = "tour-dot";
+        return d;
+      })
+    );
+  }
+  if (t.dots) {
+    [...t.dots.children].forEach((d, i) => d.classList.toggle("is-on", i === tourStep));
+  }
+  t.prev.hidden = tourStep === 0;
+  t.next.textContent = tourStep === last ? "开始使用" : "下一步";
+}
+
+function openFeatureTour() {
+  const t = tourEls();
+  if (!t) return;
+  tourStep = 0;
+  if (t.autostart) t.autostart.checked = false;
+  renderTourStep(t);
+  t.mask.hidden = false;
+}
+
+/**
+ * 关闭导览并记下「已看过」。
+ *
+ * 第 7 步的「开机自动启动」勾选项在这里落地 —— 无论用户是点「开始使用」、
+ * 「跳过」、按 Esc 还是点遮罩退出，勾了就是勾了。
+ *
+ * 顺带把 `asked_autostart` 也标上：导览里已经问过，不标记的话下次启动会再弹一次
+ * 自启询问，等于问了两次。
+ */
+async function closeFeatureTour() {
+  const t = tourEls();
+  if (!t) return;
+  const wantAutostart = !!t.autostart?.checked;
+  t.mask.hidden = true;
+  if (wantAutostart) {
+    try {
+      await invoke("set_autostart", { value: true });
+      toast("已开启开机自启");
+    } catch (e) {
+      toast("开启失败：" + e);
+    }
+  }
+  await invoke("dismiss_onboarding", { kind: "tour" }).catch(() => {});
+  await invoke("dismiss_onboarding", { kind: "autostart" }).catch(() => {});
+  await reloadSettings();
+  // 从设置页「重新查看」进来、又顺带打开了自启时，设置页那个勾选框要跟着更新
+  if (currentView === "settings") render();
+}
+
+/** 导览的翻页与退出绑定（常驻元素，只绑一次） */
+function bindFeatureTour() {
+  const t = tourEls();
+  if (!t) return;
+  t.next.onclick = () => {
+    if (tourStep >= t.steps.length - 1) {
+      closeFeatureTour();
+    } else {
+      tourStep += 1;
+      renderTourStep(t);
+    }
+  };
+  t.prev.onclick = () => {
+    if (tourStep === 0) return;
+    tourStep -= 1;
+    renderTourStep(t);
+  };
+  // 跳过与点遮罩都算看过
+  t.skip.onclick = () => closeFeatureTour();
+  t.mask.onclick = (e) => {
+    if (e.target === t.mask) closeFeatureTour();
+  };
+}
+
 /**
  * 首次运行引导的两个弹窗（常驻元素，绑一次）。
  *
@@ -2475,13 +2614,7 @@ function openAutostartAsk() {
 function bindFirstRunModals() {
   // 记下「已经问过」，失败也不阻塞流程（顶多是下次再问一遍）
   const dismiss = (kind) => invoke("dismiss_onboarding", { kind }).catch(() => {});
-  const refresh = async () => {
-    try {
-      settings = await invoke("get_settings");
-    } catch (e) {
-      /* 拿不到就保持旧值，不影响关闭流程 */
-    }
-  };
+  const refresh = reloadSettings;
 
   const auto = document.getElementById("firstrun-autostart");
   const autoEnable = document.getElementById("fra-enable");
@@ -2609,6 +2742,10 @@ function bindSettings(view) {
   bindCheck("set-clean-confirm", "set_clean_confirm_exit");
 
   bindCheck("set-pin-cancel", "set_pin_cancel_on_disable");
+
+  // 重看功能导览：只打开，不写「已看过」标记 —— 看多少次都不影响首次判断
+  const replayTour = view.querySelector("#replay-tour");
+  if (replayTour) replayTour.onclick = () => openFeatureTour();
 
   // 置顶互通不能走 bindCheck：这个开关会把已有置顶记录归一到新表示，
   // 必须顺带把本地缓存的 items 拉新的，否则列表里的置顶徽章/排序还是旧的。
@@ -2791,6 +2928,7 @@ async function main() {
   bindExitModal();
   bindClearAllModal();
   bindClearMissingModal();
+  bindFeatureTour();
   bindClearView();
   bindSelectBar();
   bindClearViewModal();
@@ -2843,9 +2981,15 @@ async function main() {
 
   render();
 
-  // 首次运行引导（只在全新安装后的第一次启动出现）：先问开机自启。
-  // 「首次关闭时问后台运行」在 bindWindowControls 的关闭按钮里触发。
-  if (settings && !settings.askedAutostart) openAutostartAsk();
+  // 首次运行引导（只在全新安装后的第一次启动出现）。
+  // 顺序：功能导览 → 开机自启 →（首次点关闭时）后台运行询问。
+  // 导览放最前：先让用户知道这软件能干什么，再决定要不要让它开机就跑。
+  // 自启询问并进了导览最后一步，所以「看过导览」这条路上不再单独弹一次。
+  if (settings && settings.tourSeenVersion < settings.tourVersion) {
+    openFeatureTour();
+  } else if (settings && !settings.askedAutostart) {
+    openAutostartAsk();
+  }
 
   // ── 更新状态 ──────────────────────────────────────────────────────────
   // Rust 启动时已在后台自检过一次（失败或没有新版都静默）。这里先读缓存把红点

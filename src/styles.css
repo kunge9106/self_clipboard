@@ -749,6 +749,14 @@ html:not(.hovers-off) .btn-primary:hover {
   opacity: 0.8;
 }
 
+/* 空状态第三条：操作提示（只有历史视图有）。比 .empty-sub 更轻，
+   因为它是「顺手提一句」而不是主体文案。 */
+.empty-tip {
+  font-size: 12px;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
 /* ---------------------------------------------------------------- */
 /* 历史列表                                                          */
 /* ---------------------------------------------------------------- */
@@ -1413,6 +1421,95 @@ body.dark .modal {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+   首次运行功能导览（7 步卡片式巡览）
+   与下面「全文详情弹窗」同一个思路：普通 .modal 的 320px 不够用，单独放宽。
+   正文区给**上限**并滚动，而不是让它撑开 —— 翻页时弹窗不忽高忽低；
+   第 6 步「设置全解」最长，不给滚动会顶出窗口。
+--------------------------------------------------------------------------- */
+.modal.is-tour {
+  min-width: 400px;
+  max-width: 460px;
+}
+
+.tour-body {
+  max-height: 320px;
+  overflow-y: auto;
+  /* 滚动条别贴着文字 */
+  padding-right: 4px;
+}
+
+.tour-step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 同上：hidden 依赖 UA 的 display:none，会被上面的 display:flex 盖掉，
+   不显式声明的话 7 个步骤会全部堆在弹窗里。 */
+.tour-step[hidden] {
+  display: none;
+}
+
+.tour-lines {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.tour-lines li::marker {
+  color: var(--text-dim);
+}
+
+.tour-lines b {
+  font-weight: 600;
+}
+
+/* 行内代码（搜索那步的 image）：与 .detail-body 同一套等宽字体 */
+.tour-lines code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--track-bg);
+}
+
+/* 小字补丁：比正文再压一档，读作「补充说明」而不是第二条正文 */
+.modal-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.tour-dots {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+}
+
+.tour-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--track-bg);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.tour-dot.is-on {
+  background: var(--accent);
+  transform: scale(1.15);
+}
+
+/* 底部按钮行：.modal-actions 是右对齐，这里用弹性占位把「跳过」推到最左 */
+.tour-spacer {
+  flex: 1 1 auto;
 }
 
 /* ---------------------------------------------------------------------------

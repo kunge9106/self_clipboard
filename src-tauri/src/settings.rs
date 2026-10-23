@@ -99,6 +99,26 @@ pub struct Config {
     /// 检查失败时保持原值不动 —— 离线重启不该把已知的新版本信息抹掉。
     #[serde(default)]
     pub update_cache: Option<UpdateCache>,
+    /// 功能导览看到第几版了。与 `TOUR_VERSION` 比较，小于就等于没看过。
+    ///
+    /// **为什么用版本号而不是布尔**：以后加了新功能，把 `TOUR_VERSION` 提到 2，
+    /// 老用户就会再看到一次「新功能导览」；布尔值只能二选一，要么永久不再提示，
+    /// 要么得手动重置。
+    ///
+    /// **默认值刻意分两处**，用来区分「全新安装」与「老配置升级」：
+    ///   - 走 `impl Default`（没有 config.json）→ 0 → 会弹；
+    ///   - 走 serde 缺字段默认（有 config.json 但没这个字段）→ 当前版本 → 不弹。
+    /// 老用户升级时被弹一次功能导览是纯打扰，他们早就摸索过了。
+    #[serde(default = "tour_version_now")]
+    pub tour_seen_version: u32,
+}
+
+/// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次增量。
+pub const TOUR_VERSION: u32 = 1;
+
+/// serde 缺字段时用当前版本 —— 等价于「老用户视为已看过」。
+fn tour_version_now() -> u32 {
+    TOUR_VERSION
 }
 
 /// 一次成功的 `releases/latest` 查询结果。
@@ -211,6 +231,8 @@ impl Default for Config {
             pin_cancel_on_disable: true, // 默认开启：关掉互通即撤销它铺开的置顶
             cache_dir: None,
             update_cache: None,
+            // 全新安装（没有 config.json）才走这里 → 0 → 会弹功能导览
+            tour_seen_version: 0,
         }
     }
 }
@@ -305,12 +327,17 @@ pub fn get_settings() -> serde_json::Value {
         "autoStart": autostart::is_enabled(),
         "askedAutostart": cfg.asked_autostart,
         "askedTrayOnClose": cfg.asked_tray_on_close,
+        // 两个一起下发：前端只做 `tourSeenVersion < tourVersion` 比较，
+        // 不自己再存一份版本号常量 —— 那样改后端时前端会静默不跟着变。
+        "tourSeenVersion": cfg.tour_seen_version,
+        "tourVersion": TOUR_VERSION,
     })
 }
 
 /// 记下「首次运行引导」的某一项已经问过，之后不再打扰。
 ///
-/// kind：`autostart`（首次运行问开机自启）/ `tray`（首次点关闭问后台运行）。
+/// kind：`autostart`（首次运行问开机自启）/ `tray`（首次点关闭问后台运行）
+/// / `tour`（功能导览看完或跳过）。
 /// 用户选什么都算问过——选了关掉也不该每次启动都再问一遍；
 /// 真正的开关随时可以在「设置」里改。
 #[tauri::command]
@@ -321,6 +348,11 @@ pub fn dismiss_onboarding(kind: String) -> Result<(), String> {
         }
         "tray" => {
             update(|c| c.asked_tray_on_close = true);
+        }
+        // 导览的「跳过」「Esc」「点遮罩」也走这里 —— 任何退出方式都算看过，
+        // 否则每次启动都弹，比不弹更烦。
+        "tour" => {
+            update(|c| c.tour_seen_version = TOUR_VERSION);
         }
         other => return Err(format!("未知的引导项：{other}")),
     }
@@ -402,3 +434,28 @@ pub fn set_retention_days(days: u32) -> Result<(), String> {
 pub fn set_autostart(value: bool) -> Result<(), String> {
     autostart::set_enabled(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 功能导览的「新装弹、升级不弹」全靠两处默认值分开，这里把它钉住。
+    ///
+    /// 判错的两种后果都很糟：默认值写反 → 所有老用户升级后被弹一次导览；
+    /// 或者新装也不弹 → 这个功能等于没做。
+    #[test]
+    fn tour_version_defaults_split_new_install_and_upgrade() {
+        // 全新安装（没有 config.json）走 impl Default → 0 → 小于当前版本 → 会弹
+        assert_eq!(Config::default().tour_seen_version, 0);
+
+        // 老配置：文件在、但没这个字段 → serde 缺字段默认给当前版本 → 不弹
+        let upgraded: Config = serde_json::from_str("{}").expect("老 config.json 必须能解析");
+        assert_eq!(upgraded.tour_seen_version, TOUR_VERSION);
+
+        // 已经记过的值原样保留（将来 TOUR_VERSION 提升后，小于新值就会再弹一次）
+        let seen = format!(r#"{{"tour_seen_version":{}}}"#, TOUR_VERSION);
+        let cfg: Config = serde_json::from_str(&seen).unwrap();
+        assert_eq!(cfg.tour_seen_version, TOUR_VERSION);
+    }
+}
+
