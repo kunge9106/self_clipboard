@@ -1301,7 +1301,7 @@ async function openDetail(item, { startEdit = false } = {}) {
   window.getSelection()?.removeAllRanges();
   $detail("detail-select").textContent = "全选";
 
-  // 右键「复制并编辑」→ 打开即进入编辑态，省一次点击
+  // 右键「编辑」→ 打开即进入编辑态，省一次点击
   if (startEdit) enterDetailEdit();
 }
 
@@ -1355,7 +1355,7 @@ function bindDetailModal() {
       const changed = text !== detailOriginal;
       await invoke("set_clipboard_text", { text, changed });
       // 一个字没改就保存 ≡ 复制原文：只写剪贴板，不记历史，避免多出一模一样的一条。
-      toast(changed ? "已保存并记入历史" : "已保存到剪贴板");
+      toast(changed ? "已保存并记入历史" : "已保存");
       closeDetail();
     } catch (err) {
       toast("保存失败：" + err);
@@ -1433,27 +1433,29 @@ function openContextMenu(x, y, item) {
       : "取消同步置顶"
     : (pinnedHere ? "取消置顶" : "置顶") + (settings?.pinGlobal ? "" : `（${viewName}）`);
   // 菜单分组（顺序按「使用频次 + 语义亲疏」排，见分组间的分隔线）：
-  //   一、阅读与复制：查看全文 → 复制 → 复制并编辑
-  //       「复制并编辑」是从「复制」派生出来的动作，必须紧挨着「复制」，
+  //   一、阅读与复制：查看 → 复制 → 编辑
+  //       「编辑」是从「复制」派生出来的动作，必须紧挨着「复制」，
   //       中间隔了别的项会让用户以为是另一类操作。
   //   二、状态变更：置顶（改排序）→ 收藏（改归属）
   //   三、危险操作：批量删除 → 删除
+  // 文案只留动词：「查看」「编辑」本身就够清楚，加「全文」「全部路径」「并复制」
+  // 只是把同一件事说得更长，菜单位宽反而被撑开（2026-10-23 用户要求精简）。
   const entries = [];
   if (item.kind === "text" || item.kind === "files") {
     entries.push({
-      label: item.kind === "files" ? "查看全部路径" : "查看全文",
+      label: "查看",
       icon: CTX_ICONS.view,
       act: () => openDetail(item),
     });
   }
   // 「复制」对所有类型都有意义，永远排在阅读项之后、置顶之前。
   entries.push({ label: "复制", icon: CTX_ICONS.copy, act: () => copyBack(item) });
-  // 「复制并编辑」只给文本条目。
+  // 「编辑」只给文本条目。
   // 文件条目的内容是**路径清单**，编辑它再写回剪贴板会退化成一段纯文本
   // （文件语义丢失，粘贴出去不再是文件）—— 那不是用户要的。
   if (item.kind === "text") {
     entries.push({
-      label: "复制并编辑",
+      label: "编辑",
       icon: CTX_ICONS.edit,
       act: () => openDetail(item, { startEdit: true }),
     });
