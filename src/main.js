@@ -1218,6 +1218,12 @@ let detailOriginal = "";
 /// 后端是否因过长而截断了正文。截断时**禁止编辑** —— 否则保存会把
 /// 截断后的内容写回剪贴板，等于静默丢数据。
 let detailTruncated = false;
+/// 弹窗是不是**直接以编辑态打开的**（右键「编辑」进来）。
+///
+/// 决定「取消编辑」落到哪里：从查看态点「编辑」进来的，取消应当退回查看态
+/// （刚才还在读，退回去才顺）；一进来就是编辑态的，压根没有「刚才读到的画面」
+/// 可回，再退回查看态等于凭空多出一屏用户没要的内容 —— 所以取消直接关窗。
+let detailEnteredInEdit = false;
 
 const $detail = (id) => document.getElementById(id);
 
@@ -1303,16 +1309,36 @@ async function openDetail(item, { startEdit = false } = {}) {
 
   // 右键「编辑」→ 打开即进入编辑态，省一次点击
   if (startEdit) enterDetailEdit();
+  // 以**实际结果**为准：内容超长时 enterDetailEdit 会拒绝并停在查看态，
+  // 那种情况不能算「以编辑态打开」，否则取消编辑会把窗口直接关掉。
+  detailEnteredInEdit = isDetailEditing();
 }
 
 /**
- * 「请求关闭」：编辑态下**先退回查看态**，不直接关闭。
+ * 取消编辑：回到「进来时的样子」。
  *
- * 渐进式退出的用意：编辑缓冲里可能有用户敲了一半的内容，直接关窗等于静默丢弃。
- * 第一次 Esc/点遮罩只退出编辑，第二次才关弹窗 —— 与常见编辑弹窗的直觉一致。
+ * 从查看态点「编辑」进来的 → 退回查看态（用户刚才在阅读，退回去是连续的）；
+ * 右键「编辑」直接进来的 → 关窗（没有阅读上下文可回，凭空显示一屏查看界面
+ * 反而像多走了一步）。
+ */
+function cancelDetailEdit() {
+  if (detailEnteredInEdit) {
+    closeDetail();
+    return;
+  }
+  setDetailMode("view");
+}
+
+/**
+ * 「请求关闭」：查看态下直接关；编辑态下要看是怎么进来的。
+ *
+ * - 从查看态进入编辑 → **先退回查看态**，第二次才关。编辑缓冲里可能有敲了一半的
+ *   内容，直接关等于静默丢弃；多一道确认比丢内容好。
+ * - 右键「编辑」直接进来 → 直接关。用户本来就没在看，关掉才是他要的，
+ *   此时「先退回查看态」会平白多出一屏他没要的内容。
  */
 function requestCloseDetail() {
-  if (isDetailEditing()) {
+  if (isDetailEditing() && !detailEnteredInEdit) {
     setDetailMode("view");
     return;
   }
@@ -1326,6 +1352,7 @@ function closeDetail() {
     detailItem = null;
     detailOriginal = "";
     detailTruncated = false;
+    detailEnteredInEdit = false;
   }
 }
 
@@ -1338,13 +1365,13 @@ function bindDetailModal() {
   document.getElementById("detail-close").onclick = requestCloseDetail;
 
   // 点遮罩关闭（点弹窗本体不关）——这是「查看类」弹窗的通用预期。
-  // 编辑态下先退回查看态，不直接关：避免「手一滑改动全没了」。
+  // 编辑态下是否直接关，交给 requestCloseDetail 按「怎么进来的」判断。
   mask.addEventListener("mousedown", (e) => {
     if (e.target === mask) requestCloseDetail();
   });
 
   document.getElementById("detail-edit").onclick = enterDetailEdit;
-  document.getElementById("detail-revert").onclick = () => setDetailMode("view");
+  document.getElementById("detail-revert").onclick = cancelDetailEdit;
 
   document.getElementById("detail-save").onclick = async () => {
     const text = $detail("detail-editor").value;
@@ -1516,7 +1543,7 @@ document.addEventListener(
 );
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    // 详情弹窗优先：编辑态先退出编辑，否则关闭弹窗（见 requestCloseDetail）
+    // 详情弹窗优先：编辑态是否直接关，由 requestCloseDetail 按「怎么进来的」决定
     if (!document.getElementById("detail-modal")?.hidden) {
       requestCloseDetail();
       return;
