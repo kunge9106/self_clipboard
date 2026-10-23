@@ -98,6 +98,12 @@ const DECODE_CACHE_CAP: usize = 3;
 // 数据结构
 // ---------------------------------------------------------------------------
 
+/// 缺字段时的兜底值：见 `HistoryItem::preview_truncated`（老索引没有这个字段，
+/// 按「可能还有更多内容」处理，宁可可弹一次多余浮层，也不要老条目彻底失去预览）。
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryItem {
     pub id: String,
@@ -140,6 +146,16 @@ pub struct HistoryItem {
     pub edited: bool,
     /// 文本前若干字符 / "[图片]" / "N 个文件"
     pub preview: String,
+    /// 文本预览是否**被截断过**（即卡片那 2 行没把正文显示完）。
+    ///
+    /// 前端据此决定要不要给悬浮预览：卡片上已经显示全的内容再弹一层浮层毫无意义，
+    /// 只是把同样的字重复一遍。图片与文件条目恒为 false（不参与这个判断）。
+    ///
+    /// `default = true` 是给老 index.json 用的：缺字段时假设「还有更多内容」，
+    /// 老条目至少不会因此永久失去悬浮预览；真实值由启动时的
+    /// `refresh_text_previews` 重算并落盘。
+    #[serde(default = "default_true")]
+    pub preview_truncated: bool,
     pub size: u64,
     /// 长文本落盘路径（相对 DIR/data/）
     pub text_path: Option<String>,
@@ -1874,14 +1890,18 @@ fn decode_image_file(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
 ///
 /// **为什么不能只取首行**（更早的做法）：用户实测反馈「第一段只有两个字，
 /// 条目里就只露出两个字」—— 而正文其实很长。只取首行等于把整条内容藏起来。
-fn make_text_preview(text: &str) -> String {
+///
+/// 返回 `(预览串, 是否截断)`。第二个值不是顺手加的：前端要靠它判断
+/// 「卡片已经显示全了就别再弹悬浮浮层」，而这个判断必须与截断规则**同源** ——
+/// 前端照抄一份「2 行 / 140 字」的规则，日后改了一边就必然漂移。
+fn text_preview_parts(text: &str) -> (String, bool) {
     /// 与 CSS `.card-preview { -webkit-line-clamp }` 一致
     const MAX_LINES: usize = 2;
     /// 与 2 行大致匹配的字符预算（按中文字符保守估计）
     const MAX_CHARS: usize = 140;
 
     if text.trim().is_empty() {
-        return "[空白文本]".into();
+        return ("[空白文本]".into(), false);
     }
 
     let mut out = String::new();
@@ -1925,7 +1945,14 @@ fn make_text_preview(text: &str) -> String {
     if truncated {
         out.push('…');
     }
-    out
+    (out, truncated)
+}
+
+/// 只要预览串的便捷包装：测试里大多只关心显示出来的那两行，不关心截断标记。
+/// 生产代码一律直接用 `text_preview_parts`（它要同时拿到标记）。
+#[cfg(test)]
+fn make_text_preview(text: &str) -> String {
+    text_preview_parts(text).0
 }
 
 /// 按当前规则重算文本条目的 preview，返回**真正发生变化**的条数。
@@ -1956,9 +1983,12 @@ fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usi
         if text.is_empty() {
             continue;
         }
-        let new_preview = make_text_preview(&text);
-        if new_preview != item.preview {
+        let (new_preview, new_truncated) = text_preview_parts(&text);
+        // 两个字段一起比对：老索引里只有 preview、没有 preview_truncated，
+        // 若只比 preview，这类条目永远进不了分支，每次启动都要重读全部正文。
+        if new_preview != item.preview || new_truncated != item.preview_truncated {
             item.preview = new_preview;
+            item.preview_truncated = new_truncated;
             changed += 1;
         }
     }
@@ -1978,6 +2008,7 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
         favorite: false,
         edited,
         preview: String::new(),
+        preview_truncated: false,
         size: 0,
         text_path: None,
         img_path: None,
@@ -1989,7 +2020,9 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
         RawClip::Text(text) => {
             item.kind = "text".into();
             item.size = text.len() as u64;
-            item.preview = make_text_preview(&text);
+            let (preview, truncated) = text_preview_parts(&text);
+            item.preview = preview;
+            item.preview_truncated = truncated;
             // 无论长短都落盘全文：内存只保留截断后的 preview 摘要，
             // 这样既遵守「内容不走内存」红线，复制回去时也不会被截断。
             let rel = format!("data/{}.txt", id);
@@ -3675,5 +3708,22 @@ mod tests {
     #[test]
     fn preview_short_text_has_no_ellipsis() {
         assert_eq!(make_text_preview("就两个字"), "就两个字");
+    }
+
+    /// `preview_truncated` 必须与「省略号」严格同义：它是前端判断
+    /// 「卡片已经显示全了、别再弹悬浮浮层」的唯一依据，判松了会对短文本弹空浮层，
+    /// 判严了会让长文本失去悬浮预览。
+    #[test]
+    fn preview_truncated_flag_matches_ellipsis() {
+        // 卡片显示得全 → false
+        assert!(!text_preview_parts("就两个字").1);
+        assert!(!text_preview_parts("第一行\n第二行").1, "正好 2 行不算截断");
+        assert!(!text_preview_parts("\n\n正文第一行\n正文第二行").1, "空行被跳过，不算截断");
+        assert!(!text_preview_parts("   \n\t\n").1, "空白文本没有丢弃内容");
+
+        // 有内容被丢掉 → true
+        assert!(text_preview_parts("一\n二\n三").1, "第 3 行被丢掉");
+        assert!(text_preview_parts(&"x".repeat(500)).1, "超出字符预算");
+        assert!(text_preview_parts(&format!("{}\n下一行", "y".repeat(200))).1);
     }
 }

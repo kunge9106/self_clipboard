@@ -1071,7 +1071,23 @@ function placePreview(box, card) {
   box.style.top = `${y}px`;
 }
 
+/**
+ * 卡片上已经显示全的内容不给浮层 —— 再弹一次同样的字只是噪音。
+ *
+ * 「是不是还有更多」一律问后端，前端不照抄一份判断规则：
+ *   文本 → `preview_truncated`，就是后端 `text_preview_parts` 在生成卡片摘要时
+ *          得出的「有没有丢弃内容」。照抄「2 行 / 140 字」到前端，日后改一边必漂移。
+ *   文件 → 只有 1 个时卡片已经写着文件名了，浮层给不出任何新信息。
+ *   图片 → 缩略图必然是缩过的，大图永远有增量。
+ */
+function hasMoreToPreview(item) {
+  if (item.kind === "text") return !!item.preview_truncated;
+  if (item.kind === "files") return (item.files || []).length > 1;
+  return true;
+}
+
 function bindHoverPreview(card, item) {
+  if (!hasMoreToPreview(item)) return;
   // 悬浮多久才弹浮层。
   //
   // 演进：120ms（一碰就弹，扫过列表连弹十几次，晃眼且白触发缩略图加载）
