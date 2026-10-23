@@ -1055,20 +1055,52 @@ function hideHoverPreview() {
   }
 }
 
-/** 优先放卡片右侧；右侧空间不足改左侧；最后夹回视口内 */
+/** 浮层与卡片之间的间距 / 与窗口边缘的安全距离 */
+const PREVIEW_GAP = 12;
+const PREVIEW_EDGE = 8;
+
+/**
+ * 给浮层找位置：**四个方向挨个试，谁放得下就用谁**。
+ *
+ * 为什么不只做「右 → 左 → 夹回视口」：窗口只有 1060×690，卡片常常贴在列表底部。
+ * 这时卡片右侧垂直方向根本放不下（`y + h` 会超出窗口），旧逻辑的做法是算出坐标
+ * 再硬夹回视口 —— 结果是浮层压在卡片自己身上，用户正看着的那条被盖住了。
+ *
+ * 顺序按「离鼠标近、又不挡内容」排：
+ *   右 → 左（与卡片垂直居中对齐，视线不用上下跳）
+ *   → 下 → 上（横向与卡片左对齐；上下方向通常离鼠标更远，但至少不挡卡片）
+ *   → 最后兜底：居中并夹进视口（宁可盖住一点也不跑到窗口外）
+ *
+ * 判定用「完整放得下」而不是「部分可见」：这个浮层是纯展示层，被裁掉一角就等于
+ * 内容丢了，不像提示气泡那样可以容忍。
+ */
 function placePreview(box, card) {
   const r = card.getBoundingClientRect();
   const w = box.offsetWidth;
   const h = box.offsetHeight;
-  const gap = 12;
-  let x = r.right + gap;
-  if (x + w > window.innerWidth - 8) x = r.left - gap - w;
-  let y = r.top + r.height / 2 - h / 2;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const midY = r.top + r.height / 2 - h / 2;
+  const midX = r.left + r.width / 2 - w / 2;
+
+  const candidates = [
+    { x: r.right + PREVIEW_GAP, y: midY }, // 右
+    { x: r.left - PREVIEW_GAP - w, y: midY }, // 左
+    { x: r.left, y: r.bottom + PREVIEW_GAP }, // 下
+    { x: r.left, y: r.top - PREVIEW_GAP - h }, // 上
+    { x: midX, y: midY }, // 兜底
+  ];
+
+  const fits = ({ x, y }) =>
+    x >= PREVIEW_EDGE &&
+    y >= PREVIEW_EDGE &&
+    x + w <= vw - PREVIEW_EDGE &&
+    y + h <= vh - PREVIEW_EDGE;
+
+  const pick = candidates.find(fits) || candidates[candidates.length - 1];
   const clamp = (v, min, max) => Math.max(min, Math.min(v, max));
-  x = clamp(x, 8, Math.max(8, window.innerWidth - w - 8));
-  y = clamp(y, 8, Math.max(8, window.innerHeight - h - 8));
-  box.style.left = `${x}px`;
-  box.style.top = `${y}px`;
+  box.style.left = `${clamp(pick.x, PREVIEW_EDGE, Math.max(PREVIEW_EDGE, vw - w - PREVIEW_EDGE))}px`;
+  box.style.top = `${clamp(pick.y, PREVIEW_EDGE, Math.max(PREVIEW_EDGE, vh - h - PREVIEW_EDGE))}px`;
 }
 
 /**
