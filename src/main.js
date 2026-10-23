@@ -2517,7 +2517,6 @@ function tourEls() {
     prev: document.getElementById("tour-prev"),
     next: document.getElementById("tour-next"),
     skip: document.getElementById("tour-skip"),
-    autostart: document.getElementById("tour-autostart"),
   };
 }
 
@@ -2543,11 +2542,15 @@ function renderTourStep(t) {
   t.next.textContent = tourStep === last ? "开始使用" : "下一步";
 }
 
-function openFeatureTour() {
+/** 本次导览是不是「首次运行」那条链路打开的 —— 决定关闭后要不要接着问开机自启。
+ *  从设置页「重新查看」进来的不算：那种情形下用户早就过了首次引导。 */
+let tourFromFirstRun = false;
+
+function openFeatureTour(fromFirstRun = false) {
   const t = tourEls();
   if (!t) return;
+  tourFromFirstRun = fromFirstRun;
   tourStep = 0;
-  if (t.autostart) t.autostart.checked = false;
   renderTourStep(t);
   t.mask.hidden = false;
 }
@@ -2555,30 +2558,18 @@ function openFeatureTour() {
 /**
  * 关闭导览并记下「已看过」。
  *
- * 第 7 步的「开机自动启动」勾选项在这里落地 —— 无论用户是点「开始使用」、
- * 「跳过」、按 Esc 还是点遮罩退出，勾了就是勾了。
- *
- * 顺带把 `asked_autostart` 也标上：导览里已经问过，不标记的话下次启动会再弹一次
- * 自启询问，等于问了两次。
+ * 导览是**纯讲解卡片**，不夹带任何设置动作 —— 它只负责讲「这里能干什么」，
+ * 开关留给用户自己去设置页点。所以这里只写记忆标记，然后接着走首次引导的下一步。
  */
 async function closeFeatureTour() {
   const t = tourEls();
   if (!t) return;
-  const wantAutostart = !!t.autostart?.checked;
   t.mask.hidden = true;
-  if (wantAutostart) {
-    try {
-      await invoke("set_autostart", { value: true });
-      toast("已开启开机自启");
-    } catch (e) {
-      toast("开启失败：" + e);
-    }
-  }
   await invoke("dismiss_onboarding", { kind: "tour" }).catch(() => {});
-  await invoke("dismiss_onboarding", { kind: "autostart" }).catch(() => {});
   await reloadSettings();
-  // 从设置页「重新查看」进来、又顺带打开了自启时，设置页那个勾选框要跟着更新
-  if (currentView === "settings") render();
+  // 首次运行这条链路上，导览看完接着问「开机自启」（导览本身不问）。
+  // 从设置页重看的不接这一步 —— 那种情形下用户早过了首次引导。
+  if (tourFromFirstRun && settings && !settings.askedAutostart) openAutostartAsk();
 }
 
 /** 导览的翻页与退出绑定（常驻元素，只绑一次） */
@@ -2983,10 +2974,9 @@ async function main() {
 
   // 首次运行引导（只在全新安装后的第一次启动出现）。
   // 顺序：功能导览 → 开机自启 →（首次点关闭时）后台运行询问。
-  // 导览放最前：先让用户知道这软件能干什么，再决定要不要让它开机就跑。
-  // 自启询问并进了导览最后一步，所以「看过导览」这条路上不再单独弹一次。
+  // 导览是纯讲解卡片，不问自启；自启询问在导览关闭后由 closeFeatureTour 接上。
   if (settings && settings.tourSeenVersion < settings.tourVersion) {
-    openFeatureTour();
+    openFeatureTour(true);
   } else if (settings && !settings.askedAutostart) {
     openAutostartAsk();
   }
