@@ -326,6 +326,74 @@ function bindClearAllModal() {
 }
 
 // ---------------------------------------------------------------------------
+// 清空「已失效」的文件条目
+//
+// 失效 = 条目里引用的原文件被移动 / 改名 / 删除，这条记录**永远贴不出来**，
+// 属于净负资产：留着占地方，每次渲染还多查一次存在性。
+//
+// 为什么不给「手动改路径」：那条路要文件选择器、多路径编辑、路径校验，还要覆盖
+// 加密的 files_path 并刷新 preview —— 成本很高，而收益只有一个：文件挪了位置还想
+// 复用这条历史。可用户重新复制一次那批文件只要两三秒，比走完这套流程快得多，
+// 而且「改完指向另一批文件」本质上已经是新条目了，留着旧的时间戳反而是误导。
+// 真正需要的是「把死的清掉」，不是「把死的救活」。
+//
+// 判定完全复用 check_files_alive（给一批 id、返回失效的那些），只是把 id 的来源
+// 从「当前视图」换成「全部文件条目」，不为这件事新增后端命令。
+// ---------------------------------------------------------------------------
+
+let clearMissingIds = [];
+
+async function openClearMissingModal() {
+  const ids = items.filter((i) => i.kind === "files").map((i) => i.id);
+  if (ids.length === 0) {
+    toast("没有文件条目");
+    return;
+  }
+  let dead;
+  try {
+    // 只做 exists()，不读内容 —— 几百条也是毫秒级
+    dead = await invoke("check_files_alive", { ids });
+  } catch (e) {
+    toast("检测失败：" + e);
+    return;
+  }
+  if (dead.length === 0) {
+    toast("没有已失效的条目");
+    return;
+  }
+  clearMissingIds = dead;
+  document.getElementById("clear-missing-modal-text").textContent =
+    `共 ${dead.length} 条文件条目的原文件已不存在（被移动、改名或删除），无法再粘贴。此操作不可撤销。`;
+  document.getElementById("clear-missing-modal").hidden = false;
+}
+
+// 与清空全部历史弹窗同理：常驻元素，只绑一次，切分类重绘不会丢绑定
+function bindClearMissingModal() {
+  const modal = document.getElementById("clear-missing-modal");
+  document.getElementById("clear-missing-cancel").onclick = () => {
+    modal.hidden = true;
+    clearMissingIds = [];
+  };
+  document.getElementById("clear-missing-confirm").onclick = async () => {
+    modal.hidden = true;
+    const ids = clearMissingIds;
+    clearMissingIds = [];
+    if (ids.length === 0) return;
+    try {
+      await invoke("delete_items", { ids });
+      const drop = new Set(ids);
+      items = items.filter((i) => !drop.has(i.id));
+      // 失效集合整体作废，让下次渲染重新检测，避免残留已删除条目的 id
+      missingFiles = new Set();
+      render({ keepScroll: true });
+      toast(`已清空 ${ids.length} 条失效条目`);
+    } catch (e) {
+      toast("清空失败：" + e);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 工具栏垃圾桶：搜索时只清搜索结果，否则清当前视图（需求 #3）
 // ---------------------------------------------------------------------------
 
@@ -627,7 +695,7 @@ const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
  * 容器一换，scrollTop 必然归零。所以必须在重建**之前**把位置记下来。
  */
 function render({ keepScroll = false } = {}) {
-  hideImagePreview(); // 重绘后旧卡片已销毁，避免浮层残留
+  hideHoverPreview(); // 重绘后旧卡片已销毁，避免浮层残留
   const prevTop = keepScroll && wrapEl ? wrapEl.scrollTop : 0;
   const view = document.getElementById("view");
   const toolbar = document.querySelector(".toolbar");
@@ -806,16 +874,19 @@ function cardEl(item) {
   meta.innerHTML =
     (hideKind
       ? ""
-      : `<span class="tag tag-kind">${KIND_LABEL[item.kind] || item.kind}</span>`) +
+      : `<span class="tag tag-kind tag-kind-${item.kind}">${KIND_LABEL[item.kind] || item.kind}</span>`) +
     (pinned ? '<span class="tag tag-pinned">已置顶</span>' : "") +
     (item.favorite && !hideFav ? '<span class="tag tag-fav">已收藏</span>' : "") +
+    // 「已编辑」= 在全文编辑里改过并保存后落成的新条目。原文条目始终保留不动，
+    // 两条内容相近、挨在一起，靠这个徽章才能一眼分清哪条是自己改过的。
+    (item.edited ? '<span class="tag tag-edited">已编辑</span>' : "") +
     // 时间放最后，靠 CSS 的 margin-left:auto 推到最右
     `<span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>`;
   body.appendChild(meta);
 
   if (item.kind === "image") {
     // 图片条目：内容区放小缩略图（不显示「[图片]」占位字），
-    // 大图仍由鼠标悬浮时的浮层给出（见 bindImagePreview）
+    // 大图仍由鼠标悬浮时的浮层给出（见 bindHoverPreview）
     const img = document.createElement("img");
     img.className = "card-image";
     img.alt = "图片";
@@ -823,7 +894,6 @@ function cardEl(item) {
     // 否则一次渲染几十张图会同时产生几十个大 BMP 字符串（内存峰值飙升）
     img.dataset.imgId = item.id;
     body.appendChild(img);
-    bindImagePreview(card, item);
   } else {
     const preview = document.createElement("div");
     preview.className = "card-preview";
@@ -831,6 +901,10 @@ function cardEl(item) {
     body.appendChild(preview);
   }
   card.appendChild(body);
+
+  // 悬浮 1s 弹补充内容：图片给大图、文本给更多行、文件给路径清单。
+  // 三种类型共用同一个浮层 —— 定位 / 显隐 / 延迟这套逻辑与类型无关，只该有一份。
+  bindHoverPreview(card, item);
 
   // 左键 → 复制回剪贴板；批量选中模式下改为切换选中
   card.addEventListener("click", () => {
@@ -849,10 +923,15 @@ function cardEl(item) {
 }
 
 // ---------------------------------------------------------------------------
-// 图片悬浮预览
-// 卡片布局与其它类型完全一致（图片条目只显示「[图片]」一行），
-// 鼠标移入后再在卡片旁弹出大图。效率取舍：按需读取 + 内存缓存，
-// 同一张图第二次悬浮不再走 IPC / 磁盘。
+// 悬浮补充信息浮层（图片 / 文本 / 文件 共用一份）
+//
+// 卡片本体只能放一张小缩略图或 2 行摘要，鼠标停留 1s 后按类型补更多内容：
+//   图片 → 卡片旁弹大图
+//   文本 → 比卡片预览多几行，超出截断
+//   文件 → 前 5 条路径，其余折叠成「…另有 N 个」
+//
+// 只做**一个**浮层盒子：定位、显隐、延迟这套逻辑跟内容类型无关。
+// 若按类型各造一个浮层，这份逻辑就会变成三份，日后改延迟 / 改边界必然不同步。
 // ---------------------------------------------------------------------------
 
 /**
@@ -982,80 +1061,241 @@ function observeImages(rootEl) {
     .forEach((el) => imgObserver.observe(el));
 }
 
+// 浮层里三个内容槽常驻，按类型显示其中一个（切换时把另外两个清空，
+// 避免上一次的文本 / 清单在 DOM 里留着）。
+//
+// 定位是**预告片**，不是替代「查看」：
+//   文本只给 4 行、文件只给 3 个文件名 —— 够判断「是不是这条」就停，
+//   想读全、想看完整路径就走右键「查看」。浮层把内容全摊开的话，
+//   「查看」这个入口就白做了。
+//
+// 这两个数值只是**载荷护栏**，不是显示行数：正文真正被截到 4 行靠 CSS 的
+// `-webkit-line-clamp`（见 .hp-text），否则一条长行折行后会变成十几行。
+const PREVIEW_TEXT_GUARD_LINES = 40;
+const PREVIEW_TEXT_GUARD_CHARS = 1200;
+const PREVIEW_FILES_MAX = 3;
+
 function ensurePreviewBox() {
   if (previewBox) return previewBox;
   const box = document.createElement("div");
-  box.className = "img-preview";
+  box.className = "hover-preview";
   box.hidden = true;
   const img = document.createElement("img");
   img.alt = "预览";
-  box.appendChild(img);
+  const text = document.createElement("div");
+  text.className = "hp-text";
+  const files = document.createElement("ul");
+  files.className = "hp-files";
+  box.append(img, text, files);
   document.body.appendChild(box);
   previewBox = box;
   return box;
 }
 
-function hideImagePreview() {
+/**
+ * 只留 kind 对应的内容槽，其余清空。
+ *
+ * 清空而不是只隐藏：图片槽留着上一次的 src 会一直占着解码后的位图内存，
+ * 文本 / 清单留着也无意义。浮层是纯展示层，每次重建内容的成本可以忽略。
+ */
+function pickPreviewSlot(box, kind) {
+  const img = box.querySelector("img");
+  const text = box.querySelector(".hp-text");
+  const files = box.querySelector(".hp-files");
+  img.hidden = kind !== "image";
+  text.hidden = kind !== "text";
+  files.hidden = kind !== "files";
+  if (kind !== "image") img.removeAttribute("src");
+  if (kind !== "text") text.textContent = "";
+  if (kind !== "files") files.replaceChildren();
+  return { img, text, files };
+}
+
+function hideHoverPreview() {
   if (previewTimer) {
     clearTimeout(previewTimer);
     previewTimer = null;
   }
   if (previewBox && !previewBox.hidden) {
     previewBox.hidden = true;
-    previewBox.firstChild.removeAttribute("src");
+    // 大图的 dataURL 松开引用，别让它在浮层里常驻
+    previewBox.querySelector("img").removeAttribute("src");
   }
 }
 
-/** 优先放卡片右侧；右侧空间不足改左侧；最后夹回视口内 */
+/** 浮层与卡片之间的间距 / 与窗口边缘的安全距离 */
+const PREVIEW_GAP = 12;
+const PREVIEW_EDGE = 8;
+
+/**
+ * 给浮层找位置：**四个方向挨个试，谁放得下就用谁**。
+ *
+ * 为什么不只做「右 → 左 → 夹回视口」：窗口只有 1060×690，卡片常常贴在列表底部。
+ * 这时卡片右侧垂直方向根本放不下（`y + h` 会超出窗口），旧逻辑的做法是算出坐标
+ * 再硬夹回视口 —— 结果是浮层压在卡片自己身上，用户正看着的那条被盖住了。
+ *
+ * 顺序按「离鼠标近、又不挡内容」排：
+ *   右 → 左（与卡片垂直居中对齐，视线不用上下跳）
+ *   → 下 → 上（横向与卡片左对齐；上下方向通常离鼠标更远，但至少不挡卡片）
+ *   → 最后兜底：居中并夹进视口（宁可盖住一点也不跑到窗口外）
+ *
+ * 判定用「完整放得下」而不是「部分可见」：这个浮层是纯展示层，被裁掉一角就等于
+ * 内容丢了，不像提示气泡那样可以容忍。
+ */
 function placePreview(box, card) {
   const r = card.getBoundingClientRect();
   const w = box.offsetWidth;
   const h = box.offsetHeight;
-  const gap = 12;
-  let x = r.right + gap;
-  if (x + w > window.innerWidth - 8) x = r.left - gap - w;
-  let y = r.top + r.height / 2 - h / 2;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const midY = r.top + r.height / 2 - h / 2;
+  const midX = r.left + r.width / 2 - w / 2;
+
+  const candidates = [
+    { x: r.right + PREVIEW_GAP, y: midY }, // 右
+    { x: r.left - PREVIEW_GAP - w, y: midY }, // 左
+    { x: r.left, y: r.bottom + PREVIEW_GAP }, // 下
+    { x: r.left, y: r.top - PREVIEW_GAP - h }, // 上
+    { x: midX, y: midY }, // 兜底
+  ];
+
+  const fits = ({ x, y }) =>
+    x >= PREVIEW_EDGE &&
+    y >= PREVIEW_EDGE &&
+    x + w <= vw - PREVIEW_EDGE &&
+    y + h <= vh - PREVIEW_EDGE;
+
+  const pick = candidates.find(fits) || candidates[candidates.length - 1];
   const clamp = (v, min, max) => Math.max(min, Math.min(v, max));
-  x = clamp(x, 8, Math.max(8, window.innerWidth - w - 8));
-  y = clamp(y, 8, Math.max(8, window.innerHeight - h - 8));
-  box.style.left = `${x}px`;
-  box.style.top = `${y}px`;
+  box.style.left = `${clamp(pick.x, PREVIEW_EDGE, Math.max(PREVIEW_EDGE, vw - w - PREVIEW_EDGE))}px`;
+  box.style.top = `${clamp(pick.y, PREVIEW_EDGE, Math.max(PREVIEW_EDGE, vh - h - PREVIEW_EDGE))}px`;
 }
 
-function bindImagePreview(card, item) {
-  // 悬浮多久才弹预览。
+/**
+ * 卡片上已经显示全的内容不给浮层 —— 再弹一次同样的字只是噪音。
+ *
+ * 「是不是还有更多」一律问后端，前端不照抄一份判断规则：
+ *   文本 → `preview_truncated`，就是后端 `text_preview_parts` 在生成卡片摘要时
+ *          得出的「有没有丢弃内容」。照抄「2 行 / 140 字」到前端，日后改一边必漂移。
+ *   文件 → 只有 1 个时卡片已经写着文件名了，浮层给不出任何新信息。
+ *   图片 → 缩略图必然是缩过的，大图永远有增量。
+ */
+function hasMoreToPreview(item) {
+  if (item.kind === "text") return !!item.preview_truncated;
+  if (item.kind === "files") return (item.files || []).length > 1;
+  return true;
+}
+
+function bindHoverPreview(card, item) {
+  if (!hasMoreToPreview(item)) return;
+  // 悬浮多久才弹浮层。
   //
   // 演进：120ms（一碰就弹，扫过列表连弹十几次，晃眼且白触发缩略图加载）
   //   → 2000ms（用户嫌长）→ 1000ms。
   // 1s 是个平衡点：快速扫过列表不会触发，停下来看一眼时也不觉得迟。
+  // 图片 / 文本 / 文件统一 1s，同一份列表里弹得快慢不一会显得很随意。
   const HOVER_DELAY_MS = 1000;
   card.addEventListener("mouseenter", () => {
     if (previewTimer) clearTimeout(previewTimer);
-    previewTimer = setTimeout(() => showImagePreview(card, item), HOVER_DELAY_MS);
+    previewTimer = setTimeout(() => showHoverPreview(card, item), HOVER_DELAY_MS);
   });
-  card.addEventListener("mouseleave", hideImagePreview);
+  card.addEventListener("mouseleave", hideHoverPreview);
 }
 
-async function showImagePreview(card, item) {
+/**
+ * 文本载荷护栏（**不是**显示截断）。
+ *
+ * 显示层面的「4 行 + 省略号」交给 CSS 的 `-webkit-line-clamp`：
+ * 只有浏览器知道自己把一行折成了几个视觉行，JS 按 `\n` 数行数是数不准的
+ * （一行十万字符的日志流会被算成「1 行」，照样撑爆浮层）。
+ * 这里只做一件事 —— 别把几万字塞进 DOM 让排版计算变慢。
+ */
+function guardPreviewText(text) {
+  let s = text;
+  const lines = s.split("\n");
+  if (lines.length > PREVIEW_TEXT_GUARD_LINES) {
+    s = lines.slice(0, PREVIEW_TEXT_GUARD_LINES).join("\n");
+  }
+  if (s.length > PREVIEW_TEXT_GUARD_CHARS) {
+    s = s.slice(0, PREVIEW_TEXT_GUARD_CHARS);
+  }
+  return s;
+}
+
+/** 取文件名：浮层只给名字，完整路径留给右键「查看」 */
+function baseName(path) {
+  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
+/** 文件清单：前 N 条**文件名**，其余折叠成一行「…另有 N 个」 */
+function fillFilePreview(ul, item) {
+  const all = Array.isArray(item.files) ? item.files : [];
+  const lis = all.slice(0, PREVIEW_FILES_MAX).map((p) => {
+    const li = document.createElement("li");
+    li.textContent = baseName(p);
+    return li;
+  });
+  if (all.length > PREVIEW_FILES_MAX) {
+    const li = document.createElement("li");
+    li.className = "hp-more";
+    li.textContent = `…另有 ${all.length - PREVIEW_FILES_MAX} 个`;
+    lis.push(li);
+  }
+  // 极老的条目可能没有 files 字段 → 退回卡片上那条摘要，至少不是个空浮层
+  if (lis.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = item.preview || "";
+    lis.push(li);
+  }
+  ul.replaceChildren(...lis);
+}
+
+async function showHoverPreview(card, item) {
   previewTimer = null;
   if (!card.isConnected || !card.matches(":hover")) return;
 
-  let url;
-  try {
-    url = await loadImage(item.id);
-  } catch {
-    return; // 图片文件缺失/损坏 → 不弹预览
-  }
-  // 读取期间鼠标可能已移开
-  if (!card.isConnected || !card.matches(":hover")) return;
-
   const box = ensurePreviewBox();
-  const img = box.firstChild;
-  // 图片尺寸只有加载完才准，加载后重新定位一次
-  img.onload = () => {
-    if (!box.hidden) placePreview(box, card);
-  };
-  img.src = url;
+
+  if (item.kind === "image") {
+    let url;
+    try {
+      url = await loadImage(item.id);
+    } catch {
+      return; // 图片文件缺失/损坏 → 不弹预览
+    }
+    // 读取期间鼠标可能已移开
+    if (!card.isConnected || !card.matches(":hover")) return;
+    const { img } = pickPreviewSlot(box, "image");
+    // 图片尺寸只有加载完才准，加载后重新定位一次
+    img.onload = () => {
+      if (!box.hidden) placePreview(box, card);
+    };
+    img.src = url;
+    box.hidden = false;
+    placePreview(box, card);
+    return;
+  }
+
+  if (item.kind === "files") {
+    const { files } = pickPreviewSlot(box, "files");
+    fillFilePreview(files, item);
+    box.hidden = false;
+    placePreview(box, card);
+    return;
+  }
+
+  // 文本：卡片上只有 2 行摘要，这里多给几行。
+  // 必须读全文 —— `item.preview` 本身就是截断过的摘要，拿它渲染等于把卡片内容重复一遍。
+  let data;
+  try {
+    data = await invoke("get_full_content", { id: item.id });
+  } catch {
+    return;
+  }
+  if (!card.isConnected || !card.matches(":hover")) return;
+  const { text } = pickPreviewSlot(box, "text");
+  text.textContent = guardPreviewText(data.text || "");
   box.hidden = false;
   placePreview(box, card);
 }
@@ -1068,6 +1308,11 @@ async function copyBack(item) {
   } catch (e) {
     toast("复制失败：" + e);
   }
+  // 复制完立刻重查这一条：原文件可能刚被删或挪走，而列表上的「已失效」是**渲染时**
+  // 算出来的 —— 不在这里补一刀，用户看到的就是「提示已经不存在，但卡片上没有任何标记」，
+  // 两个信息互相打架，还得手动触发重绘才一致。
+  // 部分失效（只跳过其中一个）同样要标，因为失效的判定本来就是「有一个不存在就算」。
+  if (item.kind === "files") await recheckMissing([item.id]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,6 +1338,31 @@ async function refreshMissing(list) {
     missingFiles = new Set(await invoke("check_files_alive", { ids }));
   } catch {
     return; // 查询失败就不标记，不能因此打断列表渲染
+  }
+  applyMissingMarks();
+}
+
+/**
+ * 只重查这几个 id，把结论并进 missingFiles 并**增量**刷新徽章。
+ *
+ * 与 `refreshMissing` 的分工：那个是「整屏重算」，只在渲染之后跑一次；
+ * 这个是「事后补一刀」，用于复制失败这类**刚刚才知道**状态变了的情形。
+ *
+ * 走增量而不是整屏重渲：用户正看着列表，不能因为一次复制失败就把滚动位置顶掉 ——
+ * 这也正是「无感」的含义，标记自己浮出来，画面不动。
+ */
+async function recheckMissing(ids) {
+  if (ids.length === 0) return;
+  let dead;
+  try {
+    dead = await invoke("check_files_alive", { ids });
+  } catch {
+    return; // 查询失败就不动标记，不能因此打断复制流程
+  }
+  const deadSet = new Set(dead);
+  for (const id of ids) {
+    if (deadSet.has(id)) missingFiles.add(id);
+    else missingFiles.delete(id); // 文件又回来了（撤销删除/移回来）也要能恢复
   }
   applyMissingMarks();
 }
@@ -1215,8 +1485,24 @@ let detailOriginal = "";
 /// 后端是否因过长而截断了正文。截断时**禁止编辑** —— 否则保存会把
 /// 截断后的内容写回剪贴板，等于静默丢数据。
 let detailTruncated = false;
+/// 弹窗是不是**直接以编辑态打开的**（右键「编辑」进来）。
+///
+/// 决定「取消编辑」落到哪里：从查看态点「编辑」进来的，取消应当退回查看态
+/// （刚才还在读，退回去才顺）；一进来就是编辑态的，压根没有「刚才读到的画面」
+/// 可回，再退回查看态等于凭空多出一屏用户没要的内容 —— 所以取消直接关窗。
+let detailEnteredInEdit = false;
 
 const $detail = (id) => document.getElementById(id);
+
+/** 当前详情条目能否编辑：只有文本可以。
+ *
+ * 与右键菜单同一条规则，两处必须一致 —— 菜单里不给「编辑」的文件条目，
+ * 若在「查看」弹窗里又冒出个编辑按钮，等于留了条小路绕过规则。
+ * 根因：文件条目存的是路径清单，编辑后写回剪贴板会退化成一段纯文本，
+ * 粘出去不再是一批文件，语义整个丢了。 */
+function canEditDetail() {
+  return detailItem?.kind === "text";
+}
 
 /** 查看态 / 编辑态互斥切换 */
 function setDetailMode(mode) {
@@ -1224,7 +1510,8 @@ function setDetailMode(mode) {
   $detail("detail-body").hidden = editing;
   $detail("detail-editor").hidden = !editing;
   $detail("detail-select").hidden = editing;
-  $detail("detail-edit").hidden = editing;
+  // 不可编辑的条目连「编辑」按钮都不给，且**退出编辑态时也不能重新冒出来**
+  $detail("detail-edit").hidden = editing || !canEditDetail();
   $detail("detail-copy").hidden = editing;
   $detail("detail-close").hidden = editing;
   $detail("detail-revert").hidden = !editing;
@@ -1246,7 +1533,7 @@ function isDetailEditing() {
 }
 
 function enterDetailEdit() {
-  if (!detailItem) return;
+  if (!detailItem || !canEditDetail()) return;
   // 截断的内容不能编辑：保存会把截断结果写回去 → 静默丢数据
   if (detailTruncated) {
     toast("内容过长，不便在此编辑；可先「复制全文」到别处处理");
@@ -1298,18 +1585,38 @@ async function openDetail(item, { startEdit = false } = {}) {
   window.getSelection()?.removeAllRanges();
   $detail("detail-select").textContent = "全选";
 
-  // 右键「复制并编辑」→ 打开即进入编辑态，省一次点击
+  // 右键「编辑」→ 打开即进入编辑态，省一次点击
   if (startEdit) enterDetailEdit();
+  // 以**实际结果**为准：内容超长时 enterDetailEdit 会拒绝并停在查看态，
+  // 那种情况不能算「以编辑态打开」，否则取消编辑会把窗口直接关掉。
+  detailEnteredInEdit = isDetailEditing();
 }
 
 /**
- * 「请求关闭」：编辑态下**先退回查看态**，不直接关闭。
+ * 取消编辑：回到「进来时的样子」。
  *
- * 渐进式退出的用意：编辑缓冲里可能有用户敲了一半的内容，直接关窗等于静默丢弃。
- * 第一次 Esc/点遮罩只退出编辑，第二次才关弹窗 —— 与常见编辑弹窗的直觉一致。
+ * 从查看态点「编辑」进来的 → 退回查看态（用户刚才在阅读，退回去是连续的）；
+ * 右键「编辑」直接进来的 → 关窗（没有阅读上下文可回，凭空显示一屏查看界面
+ * 反而像多走了一步）。
+ */
+function cancelDetailEdit() {
+  if (detailEnteredInEdit) {
+    closeDetail();
+    return;
+  }
+  setDetailMode("view");
+}
+
+/**
+ * 「请求关闭」：查看态下直接关；编辑态下要看是怎么进来的。
+ *
+ * - 从查看态进入编辑 → **先退回查看态**，第二次才关。编辑缓冲里可能有敲了一半的
+ *   内容，直接关等于静默丢弃；多一道确认比丢内容好。
+ * - 右键「编辑」直接进来 → 直接关。用户本来就没在看，关掉才是他要的，
+ *   此时「先退回查看态」会平白多出一屏他没要的内容。
  */
 function requestCloseDetail() {
-  if (isDetailEditing()) {
+  if (isDetailEditing() && !detailEnteredInEdit) {
     setDetailMode("view");
     return;
   }
@@ -1323,6 +1630,7 @@ function closeDetail() {
     detailItem = null;
     detailOriginal = "";
     detailTruncated = false;
+    detailEnteredInEdit = false;
   }
 }
 
@@ -1335,22 +1643,24 @@ function bindDetailModal() {
   document.getElementById("detail-close").onclick = requestCloseDetail;
 
   // 点遮罩关闭（点弹窗本体不关）——这是「查看类」弹窗的通用预期。
-  // 编辑态下先退回查看态，不直接关：避免「手一滑改动全没了」。
+  // 编辑态下是否直接关，交给 requestCloseDetail 按「怎么进来的」判断。
   mask.addEventListener("mousedown", (e) => {
     if (e.target === mask) requestCloseDetail();
   });
 
   document.getElementById("detail-edit").onclick = enterDetailEdit;
-  document.getElementById("detail-revert").onclick = () => setDetailMode("view");
+  document.getElementById("detail-revert").onclick = cancelDetailEdit;
 
   document.getElementById("detail-save").onclick = async () => {
     const text = $detail("detail-editor").value;
     try {
-      // ⚠️ 保存 = 写剪贴板，**不改历史那条记录**（用户选定的「编辑副本」方案）。
-      // 历史上必须忠实反映「当初复制了什么」；而且这个动作不产生新条目
-      // （Rust 侧会 mark_skip，与「点击条目复制」一致）。
-      await invoke("set_clipboard_text", { text });
-      toast("已保存到剪贴板");
+      // 保存 = 写剪贴板 + **改过的内容记一条新条目**，原条目原样不动（编辑副本原则）。
+      // 历史必须忠实反映「当初复制了什么」，所以不允许原地改原条目；
+      // 但编辑后的内容若在历史里找不到就等于白改，因此落成新条目并带「已编辑」徽章。
+      const changed = text !== detailOriginal;
+      await invoke("set_clipboard_text", { text, changed });
+      // 一个字没改就保存 ≡ 复制原文：只写剪贴板，不记历史，避免多出一模一样的一条。
+      toast(changed ? "已保存并记入历史" : "已保存");
       closeDetail();
     } catch (err) {
       toast("保存失败：" + err);
@@ -1428,27 +1738,29 @@ function openContextMenu(x, y, item) {
       : "取消同步置顶"
     : (pinnedHere ? "取消置顶" : "置顶") + (settings?.pinGlobal ? "" : `（${viewName}）`);
   // 菜单分组（顺序按「使用频次 + 语义亲疏」排，见分组间的分隔线）：
-  //   一、阅读与复制：查看全文 → 复制 → 复制并编辑
-  //       「复制并编辑」是从「复制」派生出来的动作，必须紧挨着「复制」，
+  //   一、阅读与复制：查看 → 复制 → 编辑
+  //       「编辑」是从「复制」派生出来的动作，必须紧挨着「复制」，
   //       中间隔了别的项会让用户以为是另一类操作。
   //   二、状态变更：置顶（改排序）→ 收藏（改归属）
   //   三、危险操作：批量删除 → 删除
+  // 文案只留动词：「查看」「编辑」本身就够清楚，加「全文」「全部路径」「并复制」
+  // 只是把同一件事说得更长，菜单位宽反而被撑开（2026-10-23 用户要求精简）。
   const entries = [];
   if (item.kind === "text" || item.kind === "files") {
     entries.push({
-      label: item.kind === "files" ? "查看全部路径" : "查看全文",
+      label: "查看",
       icon: CTX_ICONS.view,
       act: () => openDetail(item),
     });
   }
   // 「复制」对所有类型都有意义，永远排在阅读项之后、置顶之前。
   entries.push({ label: "复制", icon: CTX_ICONS.copy, act: () => copyBack(item) });
-  // 「复制并编辑」只给文本条目。
+  // 「编辑」只给文本条目。
   // 文件条目的内容是**路径清单**，编辑它再写回剪贴板会退化成一段纯文本
   // （文件语义丢失，粘贴出去不再是文件）—— 那不是用户要的。
   if (item.kind === "text") {
     entries.push({
-      label: "复制并编辑",
+      label: "编辑",
       icon: CTX_ICONS.edit,
       act: () => openDetail(item, { startEdit: true }),
     });
@@ -1503,19 +1815,19 @@ document.addEventListener(
   "scroll",
   () => {
     closeContextMenu();
-    hideImagePreview();
+    hideHoverPreview();
   },
   true
 );
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    // 详情弹窗优先：编辑态先退出编辑，否则关闭弹窗（见 requestCloseDetail）
+    // 详情弹窗优先：编辑态是否直接关，由 requestCloseDetail 按「怎么进来的」决定
     if (!document.getElementById("detail-modal")?.hidden) {
       requestCloseDetail();
       return;
     }
     closeContextMenu();
-    hideImagePreview();
+    hideHoverPreview();
     exitSelectMode();
   }
 });
@@ -1636,7 +1948,7 @@ function settingsDataHtml(s) {
       <div class="cache-title">缓存目录 <span class="hint">${retentionLabel(s.retentionDays)}</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
       <div class="cache-stats" id="cache-stats"></div>
-      <div class="cache-actions">
+      <div class="btn-row">
         <button class="btn-ghost" id="btn-pick-dir">更改目录</button>
         <button class="btn-ghost" id="btn-open-dir">打开目录</button>
         <button class="btn-ghost" id="btn-open-log">日志目录</button>
@@ -1652,7 +1964,10 @@ function settingsDataHtml(s) {
     <div class="row"><label>　└ 退出前弹窗提醒</label>
       <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
       <span class="hint">退出前弹窗确认</span></div>
-    <button class="btn-danger" id="clear-all">清空全部历史</button>`;
+    <div class="btn-row">
+      <button class="btn-ghost" id="clear-missing">清空已失效条目</button>
+      <button class="btn-danger" id="clear-all">清空全部历史</button>
+    </div>`;
 }
 
 // ── 关于页 ────────────────────────────────────────────────────────────────
@@ -2456,6 +2771,9 @@ function bindSettings(view) {
   const clear = view.querySelector("#clear-all");
   if (clear) clear.onclick = () => openClearAllModal();
 
+  const clearMissing = view.querySelector("#clear-missing");
+  if (clearMissing) clearMissing.onclick = () => openClearMissingModal();
+
   // 同理：只有缓存块在页面上时才去查缓存信息，别在别的分类里白发一次 IPC
   if (view.querySelector("#cache-path")) refreshCacheInfo();
 }
@@ -2472,6 +2790,7 @@ async function main() {
   bindResize();
   bindExitModal();
   bindClearAllModal();
+  bindClearMissingModal();
   bindClearView();
   bindSelectBar();
   bindClearViewModal();

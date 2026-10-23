@@ -67,7 +67,8 @@ static LAST_IMG: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
-static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip)>> = OnceLock::new();
+/// 元组第三项 = 是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
+static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip, bool)>> = OnceLock::new();
 /// 缩略图生成线程的投递端。与捕获线程分开：捕获线程只做「落盘 + 通知前端」必须快，
 /// 缩略图解码慢、且不影响条目出现，所以单独排队，避免拖慢快速连续复制。
 static THUMB_TX: OnceLock<std::sync::mpsc::Sender<HistoryItem>> = OnceLock::new();
@@ -96,6 +97,12 @@ const DECODE_CACHE_CAP: usize = 3;
 // ---------------------------------------------------------------------------
 // 数据结构
 // ---------------------------------------------------------------------------
+
+/// 缺字段时的兜底值：见 `HistoryItem::preview_truncated`（老索引没有这个字段，
+/// 按「可能还有更多内容」处理，宁可可弹一次多余浮层，也不要老条目彻底失去预览）。
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryItem {
@@ -127,8 +134,28 @@ pub struct HistoryItem {
     #[serde(default, skip_serializing)]
     pub pinned: bool,
     pub favorite: bool,
+    /// 本条是否由「复制并编辑」的保存动作产生（即编辑后的副本）。
+    ///
+    /// 为什么需要这个标记：编辑保存的内容写进了剪贴板，用户的预期就是「它该像
+    /// 一次复制那样被记住」。可它和原文高度相似，历史里两条挨着很难分清哪条是
+    /// 改过的 —— 所以给这类条目一个「已编辑」徽章。
+    ///
+    /// `#[serde(default)]` 是**必需的**：老 index.json 里没有这个字段，
+    /// 缺了它整个索引会解析失败、历史全部丢失。
+    #[serde(default)]
+    pub edited: bool,
     /// 文本前若干字符 / "[图片]" / "N 个文件"
     pub preview: String,
+    /// 文本预览是否**被截断过**（即卡片那 2 行没把正文显示完）。
+    ///
+    /// 前端据此决定要不要给悬浮预览：卡片上已经显示全的内容再弹一层浮层毫无意义，
+    /// 只是把同样的字重复一遍。图片与文件条目恒为 false（不参与这个判断）。
+    ///
+    /// `default = true` 是给老 index.json 用的：缺字段时假设「还有更多内容」，
+    /// 老条目至少不会因此永久失去悬浮预览；真实值由启动时的
+    /// `refresh_text_previews` 重算并落盘。
+    #[serde(default = "default_true")]
+    pub preview_truncated: bool,
     pub size: u64,
     /// 长文本落盘路径（相对 DIR/data/）
     pub text_path: Option<String>,
@@ -412,16 +439,20 @@ fn summarize_content(raw: String) -> FullContent {
 
 /// 把任意文本写入系统剪贴板（供「复制并编辑」的保存动作使用）。
 ///
-/// **为什么是「编辑副本」而不是「直接改历史」**：历史必须忠实反映「当初复制了
-/// 什么」。若能原地改，用户会怀疑「我明明复制的是 A，怎么变成 B 了」；而且剪贴板
-/// 历史常被当安全网（删了还在），改动它却不可逆是件危险的事。
-/// 所以保存动作 = **写剪贴板**，不碰 index.json、不改原文。
+/// **原条目始终不动**（编辑副本原则，不变）：历史要忠实反映「当初复制了什么」。
+/// 若能原地改，用户会怀疑「我明明复制的是 A，怎么变成 B 了」；而剪贴板历史常被当
+/// 安全网（删了还在），改动它却不可逆是件危险的事。
 ///
-/// **不会产生新条目**：内部走 `write_text_to_clipboard`，它会 `mark_skip()`，
-/// 于是这次自写不会被当成一次外部复制回灌成新记录 —— 与「点击条目复制回剪贴板」
-/// 的行为保持一致（历史只由**外部**复制产生）。
+/// **改过的内容要记一条**（2026-10-23 调整）：此前保存只写剪贴板、不入历史
+/// （`mark_skip` 把自读拦掉了）。但实测用下来，编辑后的内容在历史里找不到就等于
+/// 白改 —— 它已经进了剪贴板，用户的预期是「它该像一次复制那样被记住」。
+/// 所以现在：内容确实被改过时，额外落成**一条新条目**（带「已编辑」标记，
+/// 见 `HistoryItem::edited`），原条目原样保留。
+///
+/// `changed = false`（进了编辑态但一个字没改就保存）时维持旧行为：只写剪贴板、
+/// 不记历史 —— 那种情况等同于「复制原文」，再记一条只会多出一份一模一样的记录。
 #[tauri::command]
-pub fn set_clipboard_text(text: String) -> Result<(), String> {
+pub fn set_clipboard_text(text: String, changed: bool) -> Result<(), String> {
     if text.is_empty() {
         return Err("内容为空，未写入剪贴板".into());
     }
@@ -429,9 +460,16 @@ pub fn set_clipboard_text(text: String) -> Result<(), String> {
         Ok(()) => {
             // 只记字符数，绝不记内容本身（编辑后的正文同样是用户数据）。
             crate::log_print!(
-                "[clipboard] 编辑保存：写回剪贴板 {} 字符",
-                text.chars().count()
+                "[clipboard] 编辑保存：写回剪贴板 {} 字符（changed={}）",
+                text.chars().count(),
+                changed
             );
+            // 这里会且只会产生一条：`write_text_to_clipboard` 内部做了 `mark_skip()`，
+            // 本次自写在「事件」与「兜底轮询」两条通道上都会被认出并跳过，
+            // 所以不会出现「系统自读一条 + 手动入库一条」变成两条。
+            if changed {
+                dispatch_raw(RawClip::Text(text), true);
+            }
             Ok(())
         }
         Err(e) => {
@@ -738,17 +776,18 @@ fn spawn_clipboard_watchdog() {
 fn spawn_worker() {
     // app 走全局 APP（OnceLock，在 init 首行写入）；worker 在订阅监听之前
     // 启动，所以取用时必定已就绪。
-    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip)>();
+    // 元组第三项：这条是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip, bool)>();
     std::thread::Builder::new()
         .name("clipboard-store".into())
         .spawn(move || {
-            while let Ok((captured_ms, raw)) = rx.recv() {
+            while let Ok((captured_ms, raw, edited)) = rx.recv() {
                 // guard 保证 PENDING 一定减回去 —— handle_clip 里判重拦截会
                 // 提前 return，手写 fetch_sub 迟早漏掉一次。
                 let _guard = PendingGuard;
                 // handle_clip 内部完成：解码 → 同图判重 → 落盘 → emit。
                 // 这里只负责串行投递，保证与复制顺序一致。
-                handle_clip(captured_ms, raw);
+                handle_clip(captured_ms, raw, edited);
             }
         })
         .map_err(|e| crate::log_warn!("[clipboard] 落盘工作线程启动失败：{e}"))
@@ -952,7 +991,7 @@ pub fn on_clipboard_update() {
     READING.store(false, Ordering::Release);
     match raw {
         Some(raw) => {
-            dispatch_raw(raw);
+            dispatch_raw(raw, false);
         }
         None => {
             // ❌ **不推进 LAST_SEQ** → 轮询下一拍自动重试，直到读到、或剪贴板被新复制替换。
@@ -981,15 +1020,18 @@ pub fn on_clipboard_update() {
 /// ⚠️ **时间戳必须在这里打**（捕获时刻），不能到 worker 里再取当前时间：worker 单线程串行，
 /// 前面压着一张大图的解码时本条要排队几秒才轮到，那时再取时间，判重窗口算出的「间隔」
 /// 会包含排队时长 —— 实测出现过「同一秒、同一指纹、却记了两条」，根因就在这里。
-fn dispatch_raw(raw: RawClip) {
+///
+/// `edited`：true 表示这条来自「复制并编辑」的保存动作，落成条目后带
+/// 「已编辑」标记；**外部复制**一律传 false。
+fn dispatch_raw(raw: RawClip, edited: bool) {
     let captured_ms = now_ms();
     if let Some(tx) = WORKER.get() {
-        if tx.send((captured_ms, raw)).is_ok() {
+        if tx.send((captured_ms, raw, edited)).is_ok() {
             PENDING.fetch_add(1, Ordering::Relaxed);
         }
     } else {
         // 工作线程还没起来（正常不会发生——init 里先启线程再订阅监听）
-        handle_clip(captured_ms, raw);
+        handle_clip(captured_ms, raw, edited);
     }
 }
 
@@ -1015,7 +1057,8 @@ pub fn flush_pending(timeout: std::time::Duration) {
 ///
 /// 顺序很重要：先 `resolve`（解码），再做图片指纹判重 —— 指纹要基于像素
 /// 内容算，未解码前拿不到。
-fn handle_clip(captured_ms: u64, raw: RawClip) {
+/// `edited` 透传给 `store_raw`：为 true 时新条目带「已编辑」标记。
+fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
     let Some(raw) = resolve(raw) else {
         // resolve 只在「临时文件读不出」或「不是图片」且「文件复制」关闭时返回 None，
         // 即按用户设置主动跳过。记一条，便于区分「被设置跳过」与「识别失败」。
@@ -1071,7 +1114,7 @@ fn handle_clip(captured_ms: u64, raw: RawClip) {
         }
     }
 
-    let item = store_raw(raw);
+    let item = store_raw(raw, edited);
     if let Some(app) = APP.get() {
         let _ = app.emit("clipboard-update", item.clone());
     }
@@ -1847,14 +1890,18 @@ fn decode_image_file(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
 ///
 /// **为什么不能只取首行**（更早的做法）：用户实测反馈「第一段只有两个字，
 /// 条目里就只露出两个字」—— 而正文其实很长。只取首行等于把整条内容藏起来。
-fn make_text_preview(text: &str) -> String {
+///
+/// 返回 `(预览串, 是否截断)`。第二个值不是顺手加的：前端要靠它判断
+/// 「卡片已经显示全了就别再弹悬浮浮层」，而这个判断必须与截断规则**同源** ——
+/// 前端照抄一份「2 行 / 140 字」的规则，日后改了一边就必然漂移。
+fn text_preview_parts(text: &str) -> (String, bool) {
     /// 与 CSS `.card-preview { -webkit-line-clamp }` 一致
     const MAX_LINES: usize = 2;
     /// 与 2 行大致匹配的字符预算（按中文字符保守估计）
     const MAX_CHARS: usize = 140;
 
     if text.trim().is_empty() {
-        return "[空白文本]".into();
+        return ("[空白文本]".into(), false);
     }
 
     let mut out = String::new();
@@ -1898,7 +1945,14 @@ fn make_text_preview(text: &str) -> String {
     if truncated {
         out.push('…');
     }
-    out
+    (out, truncated)
+}
+
+/// 只要预览串的便捷包装：测试里大多只关心显示出来的那两行，不关心截断标记。
+/// 生产代码一律直接用 `text_preview_parts`（它要同时拿到标记）。
+#[cfg(test)]
+fn make_text_preview(text: &str) -> String {
+    text_preview_parts(text).0
 }
 
 /// 按当前规则重算文本条目的 preview，返回**真正发生变化**的条数。
@@ -1929,16 +1983,19 @@ fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usi
         if text.is_empty() {
             continue;
         }
-        let new_preview = make_text_preview(&text);
-        if new_preview != item.preview {
+        let (new_preview, new_truncated) = text_preview_parts(&text);
+        // 两个字段一起比对：老索引里只有 preview、没有 preview_truncated，
+        // 若只比 preview，这类条目永远进不了分支，每次启动都要重读全部正文。
+        if new_preview != item.preview || new_truncated != item.preview_truncated {
             item.preview = new_preview;
+            item.preview_truncated = new_truncated;
             changed += 1;
         }
     }
     changed
 }
 
-fn store_raw(raw: RawClip) -> HistoryItem {
+fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
     let dir = DIR.get().unwrap().clone();
     let ts = now_ms();
     let id = make_id(ts);
@@ -1949,7 +2006,9 @@ fn store_raw(raw: RawClip) -> HistoryItem {
         pinned: false,
         pinned_views: Vec::new(),
         favorite: false,
+        edited,
         preview: String::new(),
+        preview_truncated: false,
         size: 0,
         text_path: None,
         img_path: None,
@@ -1961,7 +2020,9 @@ fn store_raw(raw: RawClip) -> HistoryItem {
         RawClip::Text(text) => {
             item.kind = "text".into();
             item.size = text.len() as u64;
-            item.preview = make_text_preview(&text);
+            let (preview, truncated) = text_preview_parts(&text);
+            item.preview = preview;
+            item.preview_truncated = truncated;
             // 无论长短都落盘全文：内存只保留截断后的 preview 摘要，
             // 这样既遵守「内容不走内存」红线，复制回去时也不会被截断。
             let rel = format!("data/{}.txt", id);
@@ -3647,5 +3708,22 @@ mod tests {
     #[test]
     fn preview_short_text_has_no_ellipsis() {
         assert_eq!(make_text_preview("就两个字"), "就两个字");
+    }
+
+    /// `preview_truncated` 必须与「省略号」严格同义：它是前端判断
+    /// 「卡片已经显示全了、别再弹悬浮浮层」的唯一依据，判松了会对短文本弹空浮层，
+    /// 判严了会让长文本失去悬浮预览。
+    #[test]
+    fn preview_truncated_flag_matches_ellipsis() {
+        // 卡片显示得全 → false
+        assert!(!text_preview_parts("就两个字").1);
+        assert!(!text_preview_parts("第一行\n第二行").1, "正好 2 行不算截断");
+        assert!(!text_preview_parts("\n\n正文第一行\n正文第二行").1, "空行被跳过，不算截断");
+        assert!(!text_preview_parts("   \n\t\n").1, "空白文本没有丢弃内容");
+
+        // 有内容被丢掉 → true
+        assert!(text_preview_parts("一\n二\n三").1, "第 3 行被丢掉");
+        assert!(text_preview_parts(&"x".repeat(500)).1, "超出字符预算");
+        assert!(text_preview_parts(&format!("{}\n下一行", "y".repeat(200))).1);
     }
 }

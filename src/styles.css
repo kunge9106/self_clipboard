@@ -21,6 +21,27 @@
   --glass: rgba(255, 255, 255, 0.16);
   --glass-strong: rgba(255, 255, 255, 0.28);
   --glass-hover: rgba(255, 255, 255, 0.24);
+  /* 悬浮浮层**自己的**材质，与窗口那套（--glass / --material-rgb / 设置里的
+     材质浓度）完全解耦 —— 那套是给整窗调的，浮层跟着变只会越调越难对齐。
+
+     为什么不能靠「透」做出毛玻璃：浮层被摆在卡片旁边的空处，它背后是窗口背景，
+     没有内容可供 backdrop-filter 模糊 —— 半透明结果就是「一层透明的白」。
+     所以毛玻璃只能靠**质地**堆出来：
+       奶白渐变（上浅下深 = 玻璃有厚度，平涂会显得像塑料片）
+       + 一圈极细的深色发丝边（浅底上靠它定边界）
+       + 顶部 1px 内高光（玻璃的边缘反光，这是「像材质」的关键）
+       + 大而软的外阴影（把它从背景上「托起来」）
+     backdrop-filter 仍保留：万一浮层压到了卡片上（窗口窄时可能），
+     那一块会真的糊开，比纯色块自然。
+
+     渐变分三档而不是两档：两档时上下只差十几个色阶，实际尺寸下看不出来，
+     像一张糊掉的白纸；三档拉开到 30 级左右才看得出「玻璃有厚度」。 */
+  --hp-grad-top: #ffffff;
+  --hp-grad-mid: #f6f8fc;
+  --hp-grad-bottom: #e3e8f1;
+  --hp-border: rgba(0, 0, 0, 0.08);
+  --hp-rim: rgba(255, 255, 255, 0.95);
+  --hp-shadow: 0 12px 30px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
   --stroke: rgba(255, 255, 255, 0.35);
   /* 进度条空轨：玻璃白在浅色底上等于隐形，必须用「比底深一点」的中性色 */
   --track-bg: rgba(0, 0, 0, 0.08);
@@ -37,10 +58,24 @@
   --select: #d9b95c;
   /* 卡片徽章底色。文字色：置顶直接用 --accent，收藏用固定琥珀 400（#ba7517），
      两者在浅色/深色的徽章底上都能读；底色则按主题各调一档浓度。
-     类型徽章用「文字反色」的中性 tint：玻璃变量叠在同色系卡片底上会隐形。 */
-  --tag-kind-bg: rgba(0, 0, 0, 0.06);
+     类型徽章按 kind 分色相 —— 三者原先共用同一个中性 tint，扫列表时分不清。
+       文本 = 黄绿（lime-600）
+       图片 = 紫（violet-600）
+       文件 = 青绿（teal-600）
+     色位是**按色板挑空位**定的，不是随手取：置顶占宝蓝、收藏占琥珀、已编辑占绿、
+     失效占红、图片紫、文件青绿。剩下能用的高饱和位只有黄绿（lime）——
+     粉已经试过，和「失效」红挨太近（用户实测「跟已失效太相近了」），弃。
+     黄绿对「已编辑」绿是黄 vs 绿、对「收藏」琥珀是绿 vs 橙，都隔得开；
+     唯一要留意的是它在浅底上对比偏低，所以取 lime-600 而不是更亮的 500。 */
+  --tag-kind-text-fg: #65a30d;
+  --tag-kind-text-bg: rgba(101, 163, 13, 0.14);
+  --tag-kind-image-fg: #7c3aed;
+  --tag-kind-image-bg: rgba(124, 58, 237, 0.12);
+  --tag-kind-files-fg: #0d9488;
+  --tag-kind-files-bg: rgba(13, 148, 136, 0.13);
   --tag-pinned-bg: rgba(47, 107, 255, 0.12);
   --tag-fav-bg: rgba(186, 117, 23, 0.15);
+  --tag-edited-bg: rgba(26, 127, 55, 0.14);
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
   /* 卡片阴影：材质浓度拉高时（窗口接近不透明）卡片底色与窗口几乎同色，
      1px 描边会糊在里面看不见，靠这层阴影把卡片「托起来」以便识别。 */
@@ -52,6 +87,14 @@ body.dark {
   --glass: rgba(28, 28, 30, 0.24);
   --glass-strong: rgba(40, 40, 44, 0.38);
   --glass-hover: rgba(255, 255, 255, 0.1);
+  /* 深色浮层：同样不跟窗口浓度走。上端比下端亮一档才浮得起来，
+     发丝边换成浅色（深底上白边才看得见），内高光压到很低否则发灰。 */
+  --hp-grad-top: #4a4a52;
+  --hp-grad-mid: #3f3f46;
+  --hp-grad-bottom: #34343a;
+  --hp-border: rgba(255, 255, 255, 0.13);
+  --hp-rim: rgba(255, 255, 255, 0.13);
+  --hp-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.28);
   --stroke: rgba(255, 255, 255, 0.12);
   --track-bg: rgba(255, 255, 255, 0.14);
   --material-rgb: 22 22 24;
@@ -60,9 +103,15 @@ body.dark {
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
   --select: #e9d189;
-  --tag-kind-bg: rgba(255, 255, 255, 0.12);
+  --tag-kind-text-fg: #a3e635;
+  --tag-kind-text-bg: rgba(163, 230, 53, 0.16);
+  --tag-kind-image-fg: #bda6ff;
+  --tag-kind-image-bg: rgba(160, 130, 255, 0.2);
+  --tag-kind-files-fg: #5fd6c8;
+  --tag-kind-files-bg: rgba(95, 214, 200, 0.2);
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
+  --tag-edited-bg: rgba(74, 194, 107, 0.2);
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3),
     0 2px 8px -2px rgba(0, 0, 0, 0.36);
@@ -798,12 +847,23 @@ body.dark .tag-missing {
   color: var(--text-dim);
 }
 
-/* 类型徽章：中性，不抢状态徽章（置顶/收藏/失效）的注意力。
+/* 类型徽章：三个类型要能一眼分开，且不能和任何状态徽章撞色。
+   文本黄绿、图片紫、文件青绿 —— 三个色相间距都在 60° 以上，11px 小字不会糊。
    不能用 --glass-strong —— 那是半透明白（深色为半透明深灰），叠在本就同色系的
-   卡片底上几乎隐形，看起来就像纯文字。改用文字反色的中性 tint：
-   浅色加深 6%、深色提亮 12%，能看出是个徽章、又不喧宾夺主。 */
-.tag-kind {
-  background: var(--tag-kind-bg);
+   卡片底上几乎隐形，看起来就像纯文字。 */
+.tag-kind-text {
+  color: var(--tag-kind-text-fg);
+  background: var(--tag-kind-text-bg);
+}
+
+.tag-kind-image {
+  color: var(--tag-kind-image-fg);
+  background: var(--tag-kind-image-bg);
+}
+
+.tag-kind-files {
+  color: var(--tag-kind-files-fg);
+  background: var(--tag-kind-files-bg);
 }
 
 .tag-pinned {
@@ -816,20 +876,23 @@ body.dark .tag-missing {
   background: var(--tag-fav-bg);
 }
 
-/* 圆角模式：材质不走系统模糊、卡片底接近实色，半透明的中性徽章底会糊进卡片里，
-   看起来就跟纯文字一样 → 底色加实、文字改用正文色并提高字重，一眼能看出是徽章。 */
+/* 已编辑：绿色系 —— 与置顶蓝、收藏琥珀、失效红都不撞色，语义上是「这条被我动过」
+   的中性提示，不需要像失效那样抢注意力。 */
+.tag-edited {
+  color: #1a7f37;
+  background: var(--tag-edited-bg);
+}
+
+body.dark .tag-edited {
+  color: #6ddb8e;
+}
+
+/* 圆角模式：材质不走系统模糊、卡片底接近实色，半透明的徽章底会糊进卡片里，
+   看起来就跟纯文字一样 → 提高字重，让人一眼看出是徽章。
+   原先这里还会把中性徽章刷成「加实底色 + 正文色文字」，那是为了救**灰色**徽章的
+   辨识度；现在三个类型各有色相，再刷成正文色等于把刚分开的类型又抹平，所以去掉。 */
 body.round .tag {
   font-weight: 500;
-}
-
-body.round .tag-kind {
-  background: rgba(0, 0, 0, 0.1);
-  color: var(--text);
-}
-
-body.dark.round .tag-kind {
-  background: rgba(255, 255, 255, 0.16);
-  color: var(--text);
 }
 
 /* 时间推到最右：左边是状态徽章组，右边自成一列，
@@ -845,7 +908,8 @@ body.dark.round .tag-kind {
   word-break: break-all;
   display: -webkit-box;
   /* 2 行：列表是「扫一眼找哪条」的视图，不是用来读正文的 ——
-     想细看有右键「查看全文」。2 行让卡片高度更整齐、同屏条数更多。
+     想细看可以右键「查看」，或鼠标停留 1s 看悬浮浮层（.hover-preview）。
+     2 行让卡片高度更整齐、同屏条数更多。
      （后端 make_text_preview 也按 2 行生成，两边必须一致，否则会出现
       「内容够 3 行但被这里截成 2 行」的错位感。） */
   -webkit-line-clamp: 2;
@@ -854,7 +918,7 @@ body.dark.round .tag-kind {
   user-select: text;
 }
 
-/* 图片条目小缩略图（按原宽高比缩到 160×60 内，左对齐；大图见 .img-preview） */
+/* 图片条目小缩略图（按原宽高比缩到 160×60 内，左对齐；大图见 .hover-preview） */
 .card-image {
   display: block;
   max-width: 160px;
@@ -1135,7 +1199,9 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   color: var(--text-dim);
 }
 
-.cache-actions {
+/* 设置页里并排的一组按钮（缓存操作 / 清空类危险操作共用）。
+   原先是 .cache-actions，第二处用到时改成通用名 —— 同一套布局不该有两份定义。 */
+.btn-row {
   display: flex;
   gap: 8px;
 }
@@ -1208,33 +1274,96 @@ html:not(.hovers-off) .statusbar-clear:hover {
   color: var(--text);
 }
 
-/* 图片悬浮预览浮层（卡片布局保持统一，大图在悬浮时弹出） */
-.img-preview {
+/* 悬浮补充信息浮层（图片 / 文本 / 文件 共用一份）。
+   卡片本体只能放一张小缩略图或 2 行摘要，鼠标停 1s 后在这里补更多内容。
+
+   材质见文件顶部 --hp-* 变量的注释：奶白渐变 + 发丝边 + 顶部内高光 + 大阴影，
+   一套固定配方，不随窗口浓度 / 材质档位变化。 */
+.hover-preview {
   position: fixed;
   z-index: 1500;
-  padding: 6px;
+  /* 与 .card 相同的 10px 内边距：浮层是从卡片里「长出来」的一块，留白要接得上 */
+  padding: 10px;
   border-radius: var(--radius-sm);
-  background: rgba(252, 252, 252, 0.96);
-  border: 1px solid var(--stroke);
-  box-shadow: var(--shadow);
+  background: linear-gradient(
+    168deg,
+    var(--hp-grad-top) 0%,
+    var(--hp-grad-mid) 42%,
+    var(--hp-grad-bottom) 100%
+  );
+  /* 浮层通常浮在空处，这一步大多没有内容可糊；留着是为了压到卡片上时能糊开 */
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid var(--hp-border);
+  box-shadow: var(--hp-shadow), inset 0 1px 0 var(--hp-rim);
+  max-width: 460px;
+  color: var(--text);
+  font-family: var(--font);
   /* 纯展示层：不吃鼠标事件，避免遮挡卡片自身的 hover/click */
   pointer-events: none;
 }
 
-/* hidden 属性依赖 UA 的 display:none，作者样式会覆盖，需显式声明 */
-.img-preview[hidden] {
+/* hidden 属性依赖 UA 的 display:none，作者样式会覆盖，需显式声明
+   （三个内容槽也各自 hidden，所以用子元素通配统一声明一次） */
+.hover-preview[hidden],
+.hover-preview > [hidden] {
   display: none;
 }
 
-.img-preview img {
+.hover-preview img {
   display: block;
   max-width: 340px;
   max-height: 260px;
+  /* 内圆角比外框小一档，避免「内框圆角顶到外框」的错位感 */
   border-radius: 4px;
 }
 
-body.dark .img-preview {
-  background: rgba(40, 40, 44, 0.96);
+/* 文本：保留换行与缩进，长单词 / 长 URL 强制断行。
+   13px 与 .card-preview 一致 —— 浮层是同一段文字的延续，字号跳档会让人以为换了东西。
+   固定 4 行后省略：折行由浏览器排版决定，只有 line-clamp 能准确卡「视觉行数」，
+   JS 按 \n 数行数学不准（一行十万字会被算成 1 行）。 */
+.hp-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  max-width: 420px;
+  font-size: 13px;
+  line-height: 1.62;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 文件清单：一条一行，**只给文件名**（完整路径留给右键「查看」）。
+   同样 13px，与文本浮层保持同一档字号 —— 两种内容在同一个位置上出现，
+   字号不同会显得像两个不同层级的控件。
+   单条最长占 2 行后省略：文件名本身很少这么长，留 2 行是给超长名字兜底。 */
+.hp-files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-width: 420px;
+  font-size: 13px;
+  line-height: 1.62;
+  color: var(--text);
+}
+
+.hp-files li {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  word-break: break-all;
+}
+
+.hp-files li + li {
+  margin-top: 3px;
+}
+
+/* 折叠行是「还有更多」的提示，压一档色 —— 与卡片 meta 的次要信息同一处理 */
+.hp-files .hp-more {
+  color: var(--text-dim);
 }
 
 /* 退出确认弹窗 */

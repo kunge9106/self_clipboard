@@ -140,6 +140,19 @@
       </div>
     </div>
 
+    <!-- 清空「已失效」文件条目：条目还在，但原文件已被移动/改名/删除，永远贴不出来。
+         同样不可撤销，所以也走二次确认；没有失效条目时根本不会弹（前端先查一遍）。 -->
+    <div class="modal-mask" id="clear-missing-modal" hidden>
+      <div class="modal">
+        <div class="modal-title">清空已失效</div>
+        <div class="modal-text" id="clear-missing-modal-text"></div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="clear-missing-cancel">取消</button>
+          <button class="btn-danger" id="clear-missing-confirm">清空</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 工具栏垃圾桶弹窗：只有范围内存在置顶或收藏时才弹，由勾选框决定是否连它们
          一起清；一件都没有时不弹窗、直接清。两组勾选行按实际存在与否显示/隐藏。 -->
     <div class="modal-mask" id="clear-view-modal" hidden>
@@ -208,7 +221,7 @@
           <!-- 编辑态：只留「取消 / 保存」，没有第三个出口 —— 与常见编辑弹窗一致，
                避免「手一滑把改动丢了」 -->
           <button class="btn-ghost" id="detail-revert" hidden>取消编辑</button>
-          <button class="btn-primary" id="detail-save" hidden>保存到剪贴板</button>
+          <button class="btn-primary" id="detail-save" hidden>保存</button>
         </div>
       </div>
     </div>
