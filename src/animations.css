@@ -1,0 +1,103 @@
+/* ===========================================================================
+   动效系统
+   ---------------------------------------------------------------------------
+   全项目唯一的动画定义处。业务代码只加具名效果的 class（.fx-*），
+   不写裸 @keyframes、不硬编码时长与缓动 —— 否则同一种「淡入」会在十个地方
+   各写一遍，改一次要翻十个文件。
+
+   用法：
+     <div class="fx-fade-up">…</div>
+     需要重播 → 先 classList.remove，强制回流后再 add（见 main.js 的 replayFx）。
+   =========================================================================== */
+
+:root {
+  /* 时长：三档够用。fast 给微交互（hover），base 给内容进场，slow 给容器出现 */
+  --dur-fast: 0.12s;
+  --dur-base: 0.22s;
+  --dur-slow: 0.34s;
+
+  /* 缓动：out 用于「进场后停住」，spring 带一点回弹（只给缩放用） */
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.32, 0.64, 1);
+
+  /* 逐条错开的间隔：列表类内容一条一条浮上来，比整体一起淡入有层次 */
+  --fx-step: 45ms;
+}
+
+@keyframes fx-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fx-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fx-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ── 具名效果 ──────────────────────────────────────────────────────────────
+   `both` 让起始态在动画开始前就生效，避免第一帧闪一下「已显示」的样子 */
+.fx-fade-in {
+  animation: fx-fade-in var(--dur-base) var(--ease-out) both;
+}
+
+.fx-fade-up {
+  animation: fx-fade-up var(--dur-base) var(--ease-out) both;
+}
+
+.fx-pop-in {
+  animation: fx-pop-in var(--dur-slow) var(--ease-spring) both;
+}
+
+/* 级联进场：直接子元素一条条错开上浮。
+   只覆盖到前 6 个 —— 再多的话最后几条延迟会拖得太久，反而像卡住了。 */
+.fx-stagger > * {
+  animation: fx-fade-up var(--dur-base) var(--ease-out) both;
+}
+
+.fx-stagger > *:nth-child(2) {
+  animation-delay: calc(var(--fx-step) * 1);
+}
+.fx-stagger > *:nth-child(3) {
+  animation-delay: calc(var(--fx-step) * 2);
+}
+.fx-stagger > *:nth-child(4) {
+  animation-delay: calc(var(--fx-step) * 3);
+}
+.fx-stagger > *:nth-child(5) {
+  animation-delay: calc(var(--fx-step) * 4);
+}
+.fx-stagger > *:nth-child(n + 6) {
+  animation-delay: calc(var(--fx-step) * 5);
+}
+
+/* 系统层面关掉动效时（Windows 设置 → 辅助功能 → 视觉效果 → 动画效果，
+   或前台的「减少动态效果」），一律不做动画。这是无障碍基线，不是可选项。 */
+@media (prefers-reduced-motion: reduce) {
+  .fx-fade-in,
+  .fx-fade-up,
+  .fx-pop-in,
+  .fx-stagger > * {
+    animation: none;
+  }
+}

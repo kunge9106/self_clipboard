@@ -31,6 +31,27 @@ static HISTORY: OnceLock<Mutex<Vec<HistoryItem>>> = OnceLock::new();
 static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
 /// 本程序写回剪贴板后产生的序列号（应被忽略，避免自读）
 static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
+/// 「未识别」日志的去重序号：同一个序号只报一次，避免轮询期间每拍刷一条。
+static LAST_LOGGED_SEQ: AtomicU32 = AtomicU32::new(0);
+/// 「正在读剪贴板」互斥标记。
+///
+/// 事件路径（WndProc 主线程）与兜底轮询（watchdog）是两条独立通道，都会调用
+/// `on_clipboard_update`。轮询提到 ms 级后两者撞车的概率显著上升：两条同时进入
+/// 「序号变了 → 去读内容」就会重复走一遍 OpenClipboard + 诊断串（读同一份数据），
+/// 白费开销还可能拿到不一致的结果。
+///
+/// 用一次 CAS 把「读内容」这段串起来：抢不到的通道直接返回，下一拍（≤20ms）再试，
+/// 不会丢内容 —— 因为「只在成功时推进序号」的规则保证了没读到就会被重试。
+static READING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 「等 CF_HDROP 交货」的起始时刻，按序号记录。
+///
+/// 用途：同一次复制里 CF_HDROP（文件/图片）与 CF_DIB（位图）会先后就位，且两者
+/// 指纹算法不同（文件哈希 vs 像素指纹）→ 判重认不出 → 一次复制记两条。
+/// 只要 CF_HDROP 已登记就暂缓用 DIB，等它就位；但要有个上限，
+/// 否则「HDROP 永远不渲染」时这张图就丢了。这一对原子量就是那个上限的计时器。
+static DIB_FALLBACK_SEQ: AtomicU32 = AtomicU32::new(0);
+static DIB_FALLBACK_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// id 计数器，避免同毫秒碰撞
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// 最近若干条图片条目的 (内容指纹, 时间戳ms)：图片判重依据。
@@ -46,7 +67,11 @@ static LAST_IMG: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
-static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip)>> = OnceLock::new();
+/// 元组第三项 = 是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
+static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip, bool)>> = OnceLock::new();
+/// 缩略图生成线程的投递端。与捕获线程分开：捕获线程只做「落盘 + 通知前端」必须快，
+/// 缩略图解码慢、且不影响条目出现，所以单独排队，避免拖慢快速连续复制。
+static THUMB_TX: OnceLock<std::sync::mpsc::Sender<HistoryItem>> = OnceLock::new();
 /// 已投递给工作线程、尚未落盘完成的条数。退出前据此等待，避免「刚复制就退出」丢数据。
 static PENDING: AtomicU32 = AtomicU32::new(0);
 
@@ -72,6 +97,12 @@ const DECODE_CACHE_CAP: usize = 3;
 // ---------------------------------------------------------------------------
 // 数据结构
 // ---------------------------------------------------------------------------
+
+/// 缺字段时的兜底值：见 `HistoryItem::preview_truncated`（老索引没有这个字段，
+/// 按「可能还有更多内容」处理，宁可可弹一次多余浮层，也不要老条目彻底失去预览）。
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryItem {
@@ -103,8 +134,28 @@ pub struct HistoryItem {
     #[serde(default, skip_serializing)]
     pub pinned: bool,
     pub favorite: bool,
+    /// 本条是否由「复制并编辑」的保存动作产生（即编辑后的副本）。
+    ///
+    /// 为什么需要这个标记：编辑保存的内容写进了剪贴板，用户的预期就是「它该像
+    /// 一次复制那样被记住」。可它和原文高度相似，历史里两条挨着很难分清哪条是
+    /// 改过的 —— 所以给这类条目一个「已编辑」徽章。
+    ///
+    /// `#[serde(default)]` 是**必需的**：老 index.json 里没有这个字段，
+    /// 缺了它整个索引会解析失败、历史全部丢失。
+    #[serde(default)]
+    pub edited: bool,
     /// 文本前若干字符 / "[图片]" / "N 个文件"
     pub preview: String,
+    /// 文本预览是否**被截断过**（即卡片那 2 行没把正文显示完）。
+    ///
+    /// 前端据此决定要不要给悬浮预览：卡片上已经显示全的内容再弹一层浮层毫无意义，
+    /// 只是把同样的字重复一遍。图片与文件条目恒为 false（不参与这个判断）。
+    ///
+    /// `default = true` 是给老 index.json 用的：缺字段时假设「还有更多内容」，
+    /// 老条目至少不会因此永久失去悬浮预览；真实值由启动时的
+    /// `refresh_text_previews` 重算并落盘。
+    #[serde(default = "default_true")]
+    pub preview_truncated: bool,
     pub size: u64,
     /// 长文本落盘路径（相对 DIR/data/）
     pub text_path: Option<String>,
@@ -150,7 +201,7 @@ pub fn delete_item(id: String) -> Result<(), String> {
         crate::log_print!("[clipboard] 删除条目 {id} kind={kind}");
     } else {
         // 前端理论上不会删不存在的条目；真出现说明前后端状态不同步，值得记一笔。
-        crate::log_warn!("[clipboard] 删除失败：条目不存在 {id}");
+        crate::log_warn!("[clipboard] 删除失败：条目不存在 {id}（前后端状态不同步）");
     }
     Ok(())
 }
@@ -388,16 +439,20 @@ fn summarize_content(raw: String) -> FullContent {
 
 /// 把任意文本写入系统剪贴板（供「复制并编辑」的保存动作使用）。
 ///
-/// **为什么是「编辑副本」而不是「直接改历史」**：历史必须忠实反映「当初复制了
-/// 什么」。若能原地改，用户会怀疑「我明明复制的是 A，怎么变成 B 了」；而且剪贴板
-/// 历史常被当安全网（删了还在），改动它却不可逆是件危险的事。
-/// 所以保存动作 = **写剪贴板**，不碰 index.json、不改原文。
+/// **原条目始终不动**（编辑副本原则，不变）：历史要忠实反映「当初复制了什么」。
+/// 若能原地改，用户会怀疑「我明明复制的是 A，怎么变成 B 了」；而剪贴板历史常被当
+/// 安全网（删了还在），改动它却不可逆是件危险的事。
 ///
-/// **不会产生新条目**：内部走 `write_text_to_clipboard`，它会 `mark_skip()`，
-/// 于是这次自写不会被当成一次外部复制回灌成新记录 —— 与「点击条目复制回剪贴板」
-/// 的行为保持一致（历史只由**外部**复制产生）。
+/// **改过的内容要记一条**（2026-10-23 调整）：此前保存只写剪贴板、不入历史
+/// （`mark_skip` 把自读拦掉了）。但实测用下来，编辑后的内容在历史里找不到就等于
+/// 白改 —— 它已经进了剪贴板，用户的预期是「它该像一次复制那样被记住」。
+/// 所以现在：内容确实被改过时，额外落成**一条新条目**（带「已编辑」标记，
+/// 见 `HistoryItem::edited`），原条目原样保留。
+///
+/// `changed = false`（进了编辑态但一个字没改就保存）时维持旧行为：只写剪贴板、
+/// 不记历史 —— 那种情况等同于「复制原文」，再记一条只会多出一份一模一样的记录。
 #[tauri::command]
-pub fn set_clipboard_text(text: String) -> Result<(), String> {
+pub fn set_clipboard_text(text: String, changed: bool) -> Result<(), String> {
     if text.is_empty() {
         return Err("内容为空，未写入剪贴板".into());
     }
@@ -405,9 +460,16 @@ pub fn set_clipboard_text(text: String) -> Result<(), String> {
         Ok(()) => {
             // 只记字符数，绝不记内容本身（编辑后的正文同样是用户数据）。
             crate::log_print!(
-                "[clipboard] 编辑保存：写回剪贴板 {} 字符",
-                text.chars().count()
+                "[clipboard] 编辑保存：写回剪贴板 {} 字符（changed={}）",
+                text.chars().count(),
+                changed
             );
+            // 这里会且只会产生一条：`write_text_to_clipboard` 内部做了 `mark_skip()`，
+            // 本次自写在「事件」与「兜底轮询」两条通道上都会被认出并跳过，
+            // 所以不会出现「系统自读一条 + 手动入库一条」变成两条。
+            if changed {
+                dispatch_raw(RawClip::Text(text), true);
+            }
             Ok(())
         }
         Err(e) => {
@@ -660,26 +722,51 @@ fn spawn_clipboard_watchdog() {
     std::thread::Builder::new()
         .name("clipboard-watchdog".into())
         .spawn(|| {
-            // 1.5s 间隔：兼顾「后台不丢」与「几乎不耗 CPU」。
-            // 相比原先纯事件驱动的方案，多出的开销是每 1.5s 一次整数读取，
-            // 可忽略；而相比秒级轮询，复制后最多 1.5s 就被捕获。
-            const INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+            // **ms 级轮询**。它不是「事件驱动的补充」，而是**保证成功的那一环**：
+            // on_clipboard_update 只在读成功时才推进 LAST_SEQ，所以任何没成功的
+            // 序号都会被下一拍自动重试，直到读到、或剪贴板被下一次复制替换。
+            // 于是「拿不到锁 / 延迟渲染没交货 / 窗口隐藏导致消息漏投递」全部自动兜住。
+            //
+            // 为什么是 20ms（而不是原来的 100ms）：延迟渲染的补交窗口（微信登记格式
+            // → 真正写入数据）在毫秒到几百毫秒之间浮动，间隔越短越能贴着窗口把内容捞回来。
+            // 20ms 意味着任何「事件漏投递 / 首次没读到」最多 20ms 内就被补上，
+            // 对「极端快速连续复制」这种最坏场景，命中率也接近事件驱动本身。
+            //
+            // 开销：每拍只做一次 `GetClipboardSequenceNumber()` —— 纯整数读取，
+            // **不开剪贴板锁、不拷任何数据**，约亚微秒级；序号没变时立即返回。
+            // 即 50 次/秒的空转 ≈ 可以忽略（对比 WebView 自身常驻开销）。
+            const POLL: std::time::Duration = std::time::Duration::from_millis(20);
+            // 同一个序号最多「真正去读」多少次。20ms × 100 ≈ 2 秒的密集补读窗口，
+            // 足够覆盖任何正常的延迟渲染；超过就放弃这个序号，等下次复制换序号再管。
+            //
+            // 这一条是给「剪贴板长期停在我们不认识的格式上」兜底的（例如用户复制了
+            // 某个只含私有格式的内容就一直放着不动）：没有它的话，轮询会永远每 20ms
+            // 去做一次完整读取（OpenClipboard + 枚举全部格式 + 查 owner 进程名），
+            // 白耗 CPU 还刷屏。有了它，2 秒后自动降级为「只读序号」，依旧零成本。
+            const MAX_TRIES_PER_SEQ: u32 = 100;
+
+            let mut trying_seq = 0u32;
+            let mut tries = 0u32;
+
             loop {
-                std::thread::sleep(INTERVAL);
+                std::thread::sleep(POLL);
                 let seq = unsafe { GetClipboardSequenceNumber() };
-                if seq == 0 {
+                if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
+                    // 序号没变（或已被事件路径处理过）：本次只花了一次整数读取。
+                    trying_seq = 0;
+                    tries = 0;
                     continue;
                 }
-                // 只有「有变化且主线程尚未处理过」才补刀。
-                // seq == LAST_SEQ 说明消息通道已经处理过了（绝大多数情况）。
-                if seq == LAST_SEQ.load(Ordering::Relaxed) {
+                if seq != trying_seq {
+                    // 换了一个新序号（新的复制）：重新开始计数。
+                    trying_seq = seq;
+                    tries = 0;
+                }
+                if tries >= MAX_TRIES_PER_SEQ {
+                    // 这个序号已经密集试过 2 秒仍读不到 → 放弃，等序号变化。
                     continue;
                 }
-                crate::logger::write_line(
-                    "INFO",
-                    "clipboard",
-                    "兜底轮询捕获到漏掉的剪贴板变化（窗口消息未送达）",
-                );
+                tries += 1;
                 on_clipboard_update();
             }
         })
@@ -689,22 +776,46 @@ fn spawn_clipboard_watchdog() {
 fn spawn_worker() {
     // app 走全局 APP（OnceLock，在 init 首行写入）；worker 在订阅监听之前
     // 启动，所以取用时必定已就绪。
-    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip)>();
+    // 元组第三项：这条是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip, bool)>();
     std::thread::Builder::new()
         .name("clipboard-store".into())
         .spawn(move || {
-            while let Ok((captured_ms, raw)) = rx.recv() {
+            while let Ok((captured_ms, raw, edited)) = rx.recv() {
                 // guard 保证 PENDING 一定减回去 —— handle_clip 里判重拦截会
                 // 提前 return，手写 fetch_sub 迟早漏掉一次。
                 let _guard = PendingGuard;
                 // handle_clip 内部完成：解码 → 同图判重 → 落盘 → emit。
                 // 这里只负责串行投递，保证与复制顺序一致。
-                handle_clip(captured_ms, raw);
+                handle_clip(captured_ms, raw, edited);
             }
         })
         .map_err(|e| crate::log_warn!("[clipboard] 落盘工作线程启动失败：{e}"))
         .ok();
     let _ = WORKER.set(tx);
+}
+
+/// 缩略图线程：串行消费「需要生成缩略图」的条目。
+///
+/// 与捕获线程分开的理由：捕获线程的关键路径是「落盘 + emit」，必须尽可能快，
+/// 否则快速连续复制会排队、条目迟迟不出现。解码一张大图要上百毫秒到数秒，
+/// 放在捕获线程里就会成为瓶颈。本线程只负责生成缩略图，慢一点无妨 ——
+/// 前端按需读取时会命中已备好的文件，读不到再走 get_image_thumb 现场生成兜底。
+fn spawn_thumb_worker() {
+    let (tx, rx) = std::sync::mpsc::channel::<HistoryItem>();
+    let _ = std::thread::Builder::new()
+        .name("clipboard-thumb".into())
+        .spawn(move || {
+            while let Ok(item) = rx.recv() {
+                if let Some(dir) = DIR.get() {
+                    // ensure_thumb 内部：已有则跳过；否则解码原图生成；失败则写占位图。
+                    let _ = ensure_thumb(dir, &item);
+                }
+            }
+        })
+        .map_err(|e| crate::log_warn!("[clipboard] 缩略图线程启动失败：{e}"))
+        .ok();
+    let _ = THUMB_TX.set(tx);
 }
 
 pub fn init(app: &AppHandle) {
@@ -728,6 +839,15 @@ pub fn init(app: &AppHandle) {
     let _ = fs::create_dir_all(dir.join("data"));
     let _ = fs::create_dir_all(dir.join("images"));
     let _ = fs::create_dir_all(dir.join("files"));
+    // 缩略图目录从旧的顶层 `thumbs/` 迁到 `images/thumbs/`（与图片放一起）。
+    // 一次性、幂等：老目录在、新目录不在时才搬；搬不动也不影响后续按需生成。
+    let old_thumbs = dir.join("thumbs");
+    let new_thumbs = dir.join("images").join("thumbs");
+    if old_thumbs.is_dir() && !new_thumbs.exists() {
+        if fs::rename(&old_thumbs, &new_thumbs).is_err() {
+            crate::log_warn!("[clipboard] 旧缩略图目录迁移失败（不影响使用，将按需重新生成）");
+        }
+    }
     let _ = DIR.set(dir.clone());
 
     let mut hist = load_index(&dir);
@@ -763,11 +883,16 @@ pub fn init(app: &AppHandle) {
     // 工作线程必须在订阅监听**之前**就位：否则第一批 WM_CLIPBOARDUPDATE
     // 到达时 WORKER 还没初始化，会退化成主线程同步落盘。
     spawn_worker();
+    spawn_thumb_worker();
 
     // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
     unsafe {
-        if AddClipboardFormatListener(MAIN_HWND.get().copied().unwrap_or(0)) == 0 {
-            crate::log_warn!("[clipboard] AddClipboardFormatListener 失败");
+        let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+        if AddClipboardFormatListener(hwnd) == 0 {
+            crate::log_warn!(
+                "[clipboard] AddClipboardFormatListener 失败 hwnd={hwnd} last_err={}",
+                GetLastError()
+            );
         } else {
             crate::log_print!("[clipboard] 已订阅 WM_CLIPBOARDUPDATE（事件驱动监听）");
         }
@@ -810,13 +935,23 @@ pub fn init(app: &AppHandle) {
 // 被钩子调用：剪贴板变化入口
 // ---------------------------------------------------------------------------
 
-/// 由 WndProc 子类在收到 WM_CLIPBOARDUPDATE 时调用。
+/// 由 WndProc 子类在收到 WM_CLIPBOARDUPDATE 时调用；轮询线程也调用它。
+///
+/// **唯一入口、唯一规则**：读一次剪贴板；**只有读成功才把该序号标记为已处理**。
+/// 失败（拿不到锁 / 延迟渲染还没交货 / 对方只写了私有格式）就什么都不做 ——
+/// 序号仍是「未处理」，轮询线程下一拍（100ms 后）自动再读一次。
+///
+/// 所有失败情形都由这一条机制兜底，不需要任何特例、重试链或全局计数器：
+///   - 正常复制：事件即时处理，0ms；
+///   - 拿不到锁：下一拍补上；
+///   - 延迟渲染（微信登记格式、数据稍后才补）：下一拍补上，直到读到为止；
+///   - 窗口隐藏/最小化导致消息没投递：轮询本身就是兜底。
 pub fn on_clipboard_update() {
+    let seq = unsafe { GetClipboardSequenceNumber() };
+    if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
+        return;
+    }
     unsafe {
-        let seq = GetClipboardSequenceNumber();
-        if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
-            return;
-        }
         // 剪贴板 owner 就是我们自己窗口 → 这是「点击条目复制回去」写下的内容，不能再当成
         // 一次新的系统复制回灌成重复条目。
         // 为什么不能只靠 mark_skip() 的序号比对：copy_back 跑在 Tauri 的工作线程上，
@@ -832,46 +967,71 @@ pub fn on_clipboard_update() {
             LAST_SEQ.store(seq, Ordering::Relaxed);
             return;
         }
-        LAST_SEQ.store(seq, Ordering::Relaxed);
     }
 
-    let raw = unsafe { read_clipboard() };
-    let Some(raw) = raw else {
-        // 剪贴板序号确实变了（真有一次外部复制），但没读出可记录的内容。
-        // 常见于：关闭「文件复制」时复制单个非图片文件、对方只写了私有格式。
-        //
-        // 记一条是有价值的：用户反馈「复制了却没进软件」时，
-        // 有这条 = 「事件到了、是识别环节没捞到」；没这条 = 「事件根本没到」
-        // （查监听是否订阅成功、窗口是否最小化导致消息不投递）。
-        // 两者的排查方向完全不同。
-        crate::logger::write_line("INFO", "clipboard", "剪贴板已更新，但未识别出可记录内容");
+    // 两条通道（WndProc 主线程 / 20ms 兜底轮询）可能同时走到这里。
+    // 用 CAS 把「真正去读剪贴板」这一段串起来：抢不到的直接返回，下一拍（≤20ms）再试。
+    // 不会因此丢内容 —— 「只在成功时推进序号」保证了没读到的序号一定会被重试。
+    if READING.swap(true, Ordering::AcqRel) {
         return;
-    };
+    }
+    let (raw, diag) = unsafe { read_clipboard() };
+    if raw.is_some() {
+        // ✅ 读成功：**必须在放开 READING 之前**推进序号。
+        //
+        // 否则存在一个极窄但真实的窗口：本线程已读完内容、放开了 READING，却还没推进
+        // LAST_SEQ —— 此刻另一条通道（20ms 轮询）恰好进来，看到「这个序号仍未处理」，
+        // 就会把**同一份内容再读一遍、再入库一次**，表现为「复制一次出现两条」。
+        // 放到闸门内推进只要一个原子写，两条通道就永远不可能同时处理同一个序号。
+        //
+        // 「只有成功才推进」的规则不变：下面 None 分支依旧不推进，让下一拍重试。
+        LAST_SEQ.store(seq, Ordering::Relaxed);
+        LAST_LOGGED_SEQ.store(seq, Ordering::Relaxed);
+    }
+    READING.store(false, Ordering::Release);
+    match raw {
+        Some(raw) => {
+            dispatch_raw(raw, false);
+        }
+        None => {
+            // ❌ **不推进 LAST_SEQ** → 轮询下一拍自动重试，直到读到、或剪贴板被新复制替换。
+            // 这一条覆盖了所有失败：拿不到锁、延迟渲染没交货、对方只写私有格式、
+            // 窗口隐藏导致消息漏投递…… 不需要任何特例。
+            //
+            // 日志按序号去重（同一序号只报一次），否则轮询期间每 100ms 会刷一条。
+            // diag 里含「当时有哪些格式、每种为什么被拒」，便于回传排查。
+            if LAST_LOGGED_SEQ.swap(seq, Ordering::Relaxed) != seq {
+                crate::logger::write_line(
+                    "INFO",
+                    "clipboard",
+                    &format!("剪贴板已变化但暂未读到内容（会自动重试）| {}", diag),
+                );
+            }
+        }
+    }
+}
 
-    // 交给后台线程：解码（慢）+ 同图去重 + 落盘 + 通知前端。
-    //
-    // 为什么必须在后台：解码一张 8000×6000 的原图要展开近 200MB 像素再缩放，
-    // 耗时可达数秒。而 WM_CLIPBOARDUPDATE 是在 **WndProc 主线程**上处理的，
-    // 在这里同步解码等于把整个界面（含窗口拖动、按钮响应）冻住 —— 这就是
-    // 2.1.10「微信复制大图后软件卡死等待」的成因。
-    //
-    // 主线程现在只做一次 memcpy（把剪贴板里的字节拷出来），立刻返回；
-    // 解码、缩略图、写盘、emit 全在工作线程完成。单工作线程串行消费，
-    // 历史顺序与复制顺序保持一致。
-    //
-    // ⚠️ **时间戳必须在这里打**（捕获时刻），不能到 worker 里再取当前时间。
-    // worker 是单线程串行的，前面压着一张大图的解码时，本条要排队几秒才轮到；
-    // 那时再取时间，判重窗口算出来的「间隔」就是「排队时长 + 真实间隔」，
-    // 完全失真 —— 实测日志里出现过「同一秒、同一指纹、却记了两条」，
-    // 根因就在这里。
+/// 把读到的内容交给后台工作线程（解码 + 同图去重 + 落盘 + 通知前端）。
+///
+/// 为什么必须在后台：解码一张 8000×6000 的原图要展开近 200MB 像素再缩放，耗时可达数秒。
+/// 而本函数由 WndProc 主线程调用，同步解码等于把整个界面冻住 —— 这正是 2.1.10
+/// 「微信复制大图后软件卡死等待」的成因。主线程只做一次 memcpy，其余交给工作线程。
+///
+/// ⚠️ **时间戳必须在这里打**（捕获时刻），不能到 worker 里再取当前时间：worker 单线程串行，
+/// 前面压着一张大图的解码时本条要排队几秒才轮到，那时再取时间，判重窗口算出的「间隔」
+/// 会包含排队时长 —— 实测出现过「同一秒、同一指纹、却记了两条」，根因就在这里。
+///
+/// `edited`：true 表示这条来自「复制并编辑」的保存动作，落成条目后带
+/// 「已编辑」标记；**外部复制**一律传 false。
+fn dispatch_raw(raw: RawClip, edited: bool) {
     let captured_ms = now_ms();
     if let Some(tx) = WORKER.get() {
-        if tx.send((captured_ms, raw)).is_ok() {
+        if tx.send((captured_ms, raw, edited)).is_ok() {
             PENDING.fetch_add(1, Ordering::Relaxed);
         }
     } else {
         // 工作线程还没起来（正常不会发生——init 里先启线程再订阅监听）
-        handle_clip(captured_ms, raw);
+        handle_clip(captured_ms, raw, edited);
     }
 }
 
@@ -883,9 +1043,9 @@ pub fn flush_pending(timeout: std::time::Duration) {
     let start = std::time::Instant::now();
     while PENDING.load(Ordering::Relaxed) > 0 {
         if start.elapsed() >= timeout {
+            let n = PENDING.load(Ordering::Relaxed);
             crate::log_warn!(
-                "[clipboard] 退出等待超时，仍有 {} 条未落盘",
-                PENDING.load(Ordering::Relaxed)
+                "[clipboard] 退出等待超时，仍有 {n} 条未落盘，强制退出（可能丢失未保存记录）"
             );
             return;
         }
@@ -897,7 +1057,8 @@ pub fn flush_pending(timeout: std::time::Duration) {
 ///
 /// 顺序很重要：先 `resolve`（解码），再做图片指纹判重 —— 指纹要基于像素
 /// 内容算，未解码前拿不到。
-fn handle_clip(captured_ms: u64, raw: RawClip) {
+/// `edited` 透传给 `store_raw`：为 true 时新条目带「已编辑」标记。
+fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
     let Some(raw) = resolve(raw) else {
         // resolve 只在「临时文件读不出」或「不是图片」且「文件复制」关闭时返回 None，
         // 即按用户设置主动跳过。记一条，便于区分「被设置跳过」与「识别失败」。
@@ -953,9 +1114,18 @@ fn handle_clip(captured_ms: u64, raw: RawClip) {
         }
     }
 
-    let item = store_raw(raw);
+    let item = store_raw(raw, edited);
     if let Some(app) = APP.get() {
-        let _ = app.emit("clipboard-update", item);
+        let _ = app.emit("clipboard-update", item.clone());
+    }
+    // 缩略图：**所有来源的图片都走这一条通道**（ensure_thumb 读落盘原图 → 解码 → 落缩略图；
+    // 解不了一律回退到通用占位图）。两个要点：
+    //   1. 放在 emit 之后 —— 保证「复制 → 出现」无感，再大的图也不挡列表显示；
+    //   2. 交给独立的缩略图线程 —— 不占用捕获线程，快速连续复制时不会因为解码而排队。
+    if item.kind == "image" {
+        if let Some(tx) = THUMB_TX.get() {
+            let _ = tx.send(item.clone());
+        }
     }
 }
 
@@ -1193,43 +1363,149 @@ fn open_clipboard_retry() -> bool {
     false
 }
 
-unsafe fn read_clipboard() -> Option<RawClip> {
-    const CF_UNICODETEXT: u32 = 13;
-    const CF_DIB: u32 = 8;
-    const CF_HDROP: u32 = 15;
+/// 标准剪贴板格式值 → 可读名（>= 0xC000 的私有格式不在这里，交给 GetClipboardFormatNameW）。
+fn std_cf_name(fmt: u32) -> Option<&'static str> {
+    Some(match fmt {
+        1 => "CF_TEXT",
+        2 => "CF_BITMAP",
+        3 => "CF_METAFILEPICT",
+        4 => "CF_SYLK",
+        5 => "CF_DIF",
+        6 => "CF_TIFF",
+        7 => "CF_OEMTEXT",
+        8 => "CF_DIB",
+        9 => "CF_PALETTE",
+        10 => "CF_PENDATA",
+        11 => "CF_RIFF",
+        12 => "CF_WAVE",
+        13 => "CF_UNICODETEXT",
+        14 => "CF_ENHMETAFILE",
+        15 => "CF_HDROP",
+        16 => "CF_LOCALE",
+        17 => "CF_DIBV5",
+        0x80 => "CF_OWNERDISPLAY",
+        0x81 => "CF_DSPTEXT",
+        0x82 => "CF_DSPBITMAP",
+        0x83 => "CF_DSPMETAFILEPICT",
+        0x84 => "CF_DSPENHMETAFILE",
+        _ => return None,
+    })
+}
 
+/// 枚举当前剪贴板上的所有格式（须 OpenClipboard 之后调用）。
+/// 标准格式给可读名；私有格式用 GetClipboardFormatNameW 取注册名，取不到则标 <priv:N>。
+unsafe fn enum_clipboard_formats() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut fmt = 0u32;
+    loop {
+        fmt = EnumClipboardFormats(fmt);
+        if fmt == 0 {
+            break;
+        }
+        let name = std_cf_name(fmt)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                let mut buf = vec![0u16; 256];
+                let n = GetClipboardFormatNameW(fmt, buf.as_mut_ptr(), buf.len() as i32);
+                if n > 0 {
+                    format!("\"{}\"", String::from_utf16_lossy(&buf[..n as usize]))
+                } else {
+                    format!("<priv:{}>", fmt)
+                }
+            });
+        out.push(name);
+    }
+    out
+}
+
+/// 尽力拿到当前剪贴板 owner 的进程名（如 WeChat.exe）。任何一步失败都返回空串，
+/// 绝不影响主流程——这只是一个诊断线索，用来确认「这次复制是谁写进剪贴板的」。
+unsafe fn clipboard_owner_exe() -> String {
+    let owner = GetClipboardOwner();
+    if owner == 0 {
+        return String::new();
+    }
+    let mut pid: u32 = 0;
+    GetWindowThreadProcessId(owner, &mut pid);
+    if pid == 0 {
+        return String::new();
+    }
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    const PROCESS_VM_READ: u32 = 0x0010;
+    let h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+    if h == 0 {
+        return String::new();
+    }
+    let mut buf = vec![0u16; 260];
+    let mut size: u32 = buf.len() as u32;
+    let name = if QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut size) != 0 {
+        let s = String::from_utf16_lossy(&buf[..size as usize]);
+        std::path::Path::new(&s)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or(s)
+    } else {
+        String::new()
+    };
+    CloseHandle(h);
+    name
+}
+
+/// 读一次剪贴板；同时返回一份「诊断串」，在读不到时由调用方打印，
+/// 说明当时剪贴板里有哪些格式、每种为什么被拒（owner / 格式清单 / 句柄是否为空等）。
+///
+/// **只读一次，失败不做任何重试** —— 这是刻意的：
+/// 「拿不到锁 / 延迟渲染还没交货」这类失败统一交给 100ms 轮询兜底
+/// （见 `on_clipboard_update`：读不到就不推进序号，下一拍自动再读）。
+/// 把重试集中在一个地方，比在每条路径上各写一套要可靠得多。
+///
+/// 这里只保留 `open_clipboard_retry`：那是「拿不到全局锁」的微退避（~30ms），
+/// 属于同一次读取内的必要礼让，不是重试链。
+unsafe fn read_clipboard() -> (Option<RawClip>, String) {
     // 「文件复制」开关（设置页，默认关闭）：关掉后完全不看 CF_HDROP。
     // 在 OpenClipboard 之前读取，避免持有剪贴板锁时再去碰 settings 的互斥锁。
     let file_copy = crate::settings::get().file_copy;
 
-    // ⚠️ 剪贴板是**全局独占锁**，任何进程持锁期间别人都拿不到。
-    //
-    // 微信/QQ/浏览器复制图片时会**分多次**改写剪贴板（先写位图，再补文件列表
-    // 或反之），而 WM_CLIPBOARDUPDATE 是在每次改写后立刻发给订阅方的 —— 也就是
-    // 说我们极可能在它还持着锁的时候就被叫醒。此时 OpenClipboard 直接失败。
-    //
-    // 改动前这里是一个 `if OpenClipboard(0) == 0 { return None }`：拿不到锁就
-    // 当作「这次没有内容」，可 WM_CLIPBOARDUPDATE 只有一次通知，不会重发 →
-    // 这一次复制就**永久丢失**。用户看到的就是「微信复制图片有时候完全没反应」
-    // （2.1.11 反馈的新问题）。
-    //
-    // 正确做法是重试：拿不到锁不代表剪贴板是空的，只是对方还没写完。短暂退避
-    // 后重试，覆盖住整个写入窗口。
     if !open_clipboard_retry() {
-        crate::logger::write_line(
-            "WARN",
-            "clipboard",
-            "OpenClipboard 重试耗尽，放弃本次剪贴板内容（对方应用长时间持锁）",
-        );
-        return None;
+        return (None, "OpenClipboard 重试耗尽(对方应用长时间持锁)".into());
     }
+    // 延迟渲染需要 owner 重新拿到锁才能把数据补进来，所以读完必须立刻松锁。
+    let (raw, diag, _suspicious) = read_clipboard_once(file_copy);
+    CloseClipboard();
+    (raw, diag)
+}
+
+/// 单次读剪贴板。**调用方须保证已 OpenClipboard 成功**，本函数不负责开关剪贴板。
+///
+/// 返回 `(内容, 诊断串, 是否可疑)`：
+/// 「可疑」= 至少一种目标格式 `IsClipboardFormatAvailable` 为真、但 `GetClipboardData`
+/// 拿到 NULL —— 这是延迟渲染 / 分次写入的典型症状，值得松锁退避后重读；
+/// 若压根没有目标格式，说明这次真没有可记录的东西，重读没有意义。
+unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool) {
+    const CF_UNICODETEXT: u32 = 13;
+    const CF_DIB: u32 = 8;
+    const CF_HDROP: u32 = 15;
+
+    // 诊断：先枚举当前剪贴板上的所有格式（含私有格式注册名），再尽力拿到 owner 进程名。
+    // 两者都必须在 OpenClipboard 成功之后、CloseClipboard 之前调用。
+    let mut diag = String::new();
+    let owner = clipboard_owner_exe();
+    if !owner.is_empty() {
+        diag.push_str(&format!("[owner={}] ", owner));
+    }
+    let fmts = enum_clipboard_formats();
+    diag.push_str(&format!("formats=[{}] ", fmts.join(", ")));
+
+    let mut suspicious = false;
 
     let result = (|| {
         // 优先级：文本 > 文件 > 图片
         if IsClipboardFormatAvailable(CF_UNICODETEXT) != 0 {
+            diag.push_str("text:avail=true ");
             if let Some(h) = non_null(GetClipboardData(CF_UNICODETEXT)) {
                 let p = GlobalLock(h) as *const u16;
                 if p.is_null() {
+                    diag.push_str("GlobalLock=NULL ");
                     return None;
                 }
                 let mut v = Vec::new();
@@ -1243,11 +1519,21 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                     i += 1;
                 }
                 GlobalUnlock(h);
+                diag.push_str(&format!("len={} ", v.len()));
                 return Some(RawClip::Text(String::from_utf16_lossy(&v)));
+            } else {
+                // 格式存在但取不到句柄：典型「延迟渲染未就绪」——owner 还没通过
+                // WM_RENDERFORMAT 把数据交出来，或 owner 拒绝渲染。这是微信等应用
+                // 复制偶发丢失的高频嫌疑点，配合上方的 formats 清单可一眼确认。
+                suspicious = true;
+                diag.push_str("GetClipboardData=NULL(延迟渲染未就绪) ");
             }
+        } else {
+            diag.push_str("text:avail=false ");
         }
 
         if IsClipboardFormatAvailable(CF_HDROP) != 0 {
+            diag.push_str("hdrop:avail=true ");
             if let Some(h) = non_null(GetClipboardData(CF_HDROP)) {
                 const ALL: u32 = 0xFFFFFFFF;
                 let count = DragQueryFileW(h, ALL, std::ptr::null_mut(), 0);
@@ -1258,45 +1544,65 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                     DragQueryFileW(h, i, buf.as_mut_ptr(), len);
                     files.push(String::from_utf16_lossy(&buf[..buf.len() - 1]));
                 }
-                // ⚠️ 这里**绝对不能**调用 DragFinish(h)。
-                //
-                // h 来自 GetClipboardData(CF_HDROP)，它的内存归**剪贴板**所有（不是
-                // WM_DROPFILES 里那个临时 HDROP）。DragFinish 会把它 GlobalFree 掉，而剪贴板
-                // 仍然持有同一个句柄，于是下一次 OpenClipboard()/EmptyClipboard() 会二次释放
-                // → 堆损坏 → 进程直接崩溃且无任何 Rust 层报错。
-                //
-                // 实证（症状逐字吻合）：
-                //   Appeon 社区 “Clipboard and DragQueryFile - Need DragFinish?”：
-                //   “Calling DragFinish() will cause the application to crash on the next
-                //    OpenClipboard() call … I ended up just calling EmptyClipboard() with no
-                //    DragFinish() and then the crash went away.”
-                //   zabkat shellFAQ 亦建议剪贴板 HDROP 不要调用 DragFinish（只适用于
-                //   WM_DROPFILES 处理）。
-                // 对应到轻贴的现象：复制文件（读一次）→ 之后点击文件条目（写回 → OpenClipboard）
-                // → 崩溃。这正是本次上报的 bug。
-                // 内存无需手动释放：CloseClipboard 后由剪贴板自身管理。
-                //
-                // ⚠️ 单文件图片的判定**不能**被「文件复制」开关挡住（2.1.11 反馈：
-                // 「微信复制图片都有可能识别不到」）。微信/QQ 复制图片给的往往就是
-                // CF_HDROP（一个临时图片文件路径）而不是 CF_DIB，而 file_copy 默认
-                // 关闭 —— 改动前这里整段挂在 `file_copy &&` 后面，于是微信复制图片
-                // 整条路径被跳过，什么都读不到。图片和文件是两回事：开关管的是
-                // 「要不要记录文件条目」，不该决定「要不要记录图片」。
+                // ⚠️ 这里**绝对不能**调用 DragFinish(h)（剪贴板 HDROP 二次释放会崩溃，
+                // 详见文件下方 extern 块说明）。内存由 CloseClipboard 后剪贴板自身管理。
                 if files.len() == 1 {
                     // 只记住路径，解码推迟到后台线程 —— 主线程（WndProc）不能
                     // 被解码大图拖住，否则界面直接冻住。
+                    // 单图/单文件图片识别**不受** file_copy 开关影响（2.1.11 反馈）。
+                    diag.push_str("单图/单文件(图片识别不受 file_copy 影响) ");
                     return Some(RawClip::ImageFile(PathBuf::from(&files[0])));
                 }
                 // 多张 / 非图片：属于「文件复制」范畴，听开关的。
                 if file_copy {
+                    diag.push_str(&format!("多文件({})且file_copy=on ", files.len()));
                     return Some(RawClip::Files(files));
                 }
                 // 单个非图片文件且开关关闭：不记录。
+                diag.push_str(&format!("多文件({})但file_copy=off→跳过 ", files.len()));
+                return None;
+            } else {
+                suspicious = true;
+                diag.push_str("GetClipboardData=NULL(延迟渲染未就绪) ");
+            }
+        } else {
+            diag.push_str("hdrop:avail=false ");
+        }
+
+        // ---- 防止「同一次复制记两条」----
+        //
+        // 复制图片时，CF_HDROP（文件路径）与 CF_DIB（位图）会先后就位，而两者的判重
+        // 指纹算法**不同**：HDROP 走文件内容哈希，DIB 走像素量化指纹 —— 同一张图也
+        // 算不出同一个值，判重据此认不出是同一张 → 一次复制出现两条。
+        //
+        // 实测微信总是**先登记 CF_HDROP**（延迟渲染，数据稍后补），随后才补上 DIB。
+        // 于是中间态是「HDROP 格式在、取不到数据」+「DIB 已可取」，旧逻辑会先用 DIB
+        // 记一条位图，等 HDROP 数据就位后再记一条文件 —— 重复由此产生。
+        //
+        // 所以：只要 CF_HDROP 已登记，本次就**不用 DIB 兜底**，等下一拍（≤20ms）拿到
+        // 文件路径再记。那一条是原始文件（质量最好），且只会有一条。
+        // 仅当 HDROP 迟迟不交货（超过下面这个宽限期）才回退接受 DIB —— 保证绝不丢图。
+        const HDROP_GRACE_MS: u64 = 400;
+        if IsClipboardFormatAvailable(CF_HDROP) != 0 {
+            let cur = GetClipboardSequenceNumber();
+            let first = if DIB_FALLBACK_SEQ.load(Ordering::Relaxed) == cur {
+                DIB_FALLBACK_AT.load(Ordering::Relaxed)
+            } else {
+                let t = now_ms();
+                DIB_FALLBACK_SEQ.store(cur, Ordering::Relaxed);
+                DIB_FALLBACK_AT.store(t, Ordering::Relaxed);
+                t
+            };
+            if now_ms().saturating_sub(first) < HDROP_GRACE_MS {
+                diag.push_str("HDROP 已登记→暂缓读 DIB(等文件路径就位，避免同次复制记两条) ");
+                suspicious = true;
                 return None;
             }
+            diag.push_str("HDROP 迟迟未交货→回退读 DIB ");
         }
 
         if IsClipboardFormatAvailable(CF_DIB) != 0 {
+            diag.push_str("dib:avail=true ");
             if let Some(h) = non_null(GetClipboardData(CF_DIB)) {
                 let size = GlobalSize(h);
                 let p = GlobalLock(h);
@@ -1306,15 +1612,21 @@ unsafe fn read_clipboard() -> Option<RawClip> {
                     // 与 image_file_to_dib 同一上限：CF_DIB 也可能来自超大位图
                     // （微信第二次写入、专业软件复制），超限降采样，防巨型 BMP 落盘。
                     // 降采样推迟到后台线程，主线程只做完这次 memcpy 就返回。
+                    diag.push_str(&format!("size={} ", size));
                     return Some(RawClip::ImageRaw(bytes));
                 }
+                diag.push_str("GlobalLock=NULL或size=0 ");
+            } else {
+                suspicious = true;
+                diag.push_str("GetClipboardData=NULL(延迟渲染未就绪) ");
             }
+        } else {
+            diag.push_str("dib:avail=false ");
         }
         None
     })();
 
-    CloseClipboard();
-    result
+    (result, diag, suspicious)
 }
 
 // ---------------------------------------------------------------------------
@@ -1578,14 +1890,18 @@ fn decode_image_file(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
 ///
 /// **为什么不能只取首行**（更早的做法）：用户实测反馈「第一段只有两个字，
 /// 条目里就只露出两个字」—— 而正文其实很长。只取首行等于把整条内容藏起来。
-fn make_text_preview(text: &str) -> String {
+///
+/// 返回 `(预览串, 是否截断)`。第二个值不是顺手加的：前端要靠它判断
+/// 「卡片已经显示全了就别再弹悬浮浮层」，而这个判断必须与截断规则**同源** ——
+/// 前端照抄一份「2 行 / 140 字」的规则，日后改了一边就必然漂移。
+fn text_preview_parts(text: &str) -> (String, bool) {
     /// 与 CSS `.card-preview { -webkit-line-clamp }` 一致
     const MAX_LINES: usize = 2;
     /// 与 2 行大致匹配的字符预算（按中文字符保守估计）
     const MAX_CHARS: usize = 140;
 
     if text.trim().is_empty() {
-        return "[空白文本]".into();
+        return ("[空白文本]".into(), false);
     }
 
     let mut out = String::new();
@@ -1629,7 +1945,14 @@ fn make_text_preview(text: &str) -> String {
     if truncated {
         out.push('…');
     }
-    out
+    (out, truncated)
+}
+
+/// 只要预览串的便捷包装：测试里大多只关心显示出来的那两行，不关心截断标记。
+/// 生产代码一律直接用 `text_preview_parts`（它要同时拿到标记）。
+#[cfg(test)]
+fn make_text_preview(text: &str) -> String {
+    text_preview_parts(text).0
 }
 
 /// 按当前规则重算文本条目的 preview，返回**真正发生变化**的条数。
@@ -1660,16 +1983,19 @@ fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usi
         if text.is_empty() {
             continue;
         }
-        let new_preview = make_text_preview(&text);
-        if new_preview != item.preview {
+        let (new_preview, new_truncated) = text_preview_parts(&text);
+        // 两个字段一起比对：老索引里只有 preview、没有 preview_truncated，
+        // 若只比 preview，这类条目永远进不了分支，每次启动都要重读全部正文。
+        if new_preview != item.preview || new_truncated != item.preview_truncated {
             item.preview = new_preview;
+            item.preview_truncated = new_truncated;
             changed += 1;
         }
     }
     changed
 }
 
-fn store_raw(raw: RawClip) -> HistoryItem {
+fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
     let dir = DIR.get().unwrap().clone();
     let ts = now_ms();
     let id = make_id(ts);
@@ -1680,7 +2006,9 @@ fn store_raw(raw: RawClip) -> HistoryItem {
         pinned: false,
         pinned_views: Vec::new(),
         favorite: false,
+        edited,
         preview: String::new(),
+        preview_truncated: false,
         size: 0,
         text_path: None,
         img_path: None,
@@ -1692,7 +2020,9 @@ fn store_raw(raw: RawClip) -> HistoryItem {
         RawClip::Text(text) => {
             item.kind = "text".into();
             item.size = text.len() as u64;
-            item.preview = make_text_preview(&text);
+            let (preview, truncated) = text_preview_parts(&text);
+            item.preview = preview;
+            item.preview_truncated = truncated;
             // 无论长短都落盘全文：内存只保留截断后的 preview 摘要，
             // 这样既遵守「内容不走内存」红线，复制回去时也不会被截断。
             let rel = format!("data/{}.txt", id);
@@ -1751,18 +2081,6 @@ fn store_raw(raw: RawClip) -> HistoryItem {
                     crate::log_err!("clipboard", "位图落盘失败 {rel}：{e}");
                 }
                 item.img_path = Some(rel);
-                // 顺手把缩略图一起生成了。
-                //
-                // 改动前缩略图由前端滚动时触发 `get_image_thumb` → `ensure_thumb`
-                // **把刚写下的 12MB BMP 整个读回来、全量解码、再缩到 512px**。
-                // 这一轮「读盘 12MB + 解码 1200 万像素」全花在已经拿到手的
-                // 内存数据上，是大图要等 4~6 秒才显示缩略图的主因。
-                //
-                // 现在复用内存里的 DIB 直接生成：省掉回读与全量解码。
-                // 落盘失败无妨 —— `ensure_thumb` 仍会在下次被调用时现场生成。
-                if save_thumb_from_dib(&dir, &id, &bytes).is_none() {
-                    crate::log_warn!("[clipboard] 内存缩略图生成失败 {id}，将由 ensure_thumb 兜底");
-                }
             } else {
                 // 兜底：直接存 DIB，前端无法显示但至少保留
                 let rel = format!("images/{}.dib", id);
@@ -1939,115 +2257,122 @@ const THUMB_SIDE: u32 = 512;
 ///
 /// 任何一步失败都只返回 None、不影响落盘 —— 缩略图缺失时前端仍会回退到
 /// `ensure_thumb` 现场生成。
-fn save_thumb_from_dib(dir: &std::path::Path, id: &str, dib: &[u8]) -> Option<()> {
-    if dib.len() < 40 {
-        return None;
-    }
-    let bi_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
-    let bi_bit_count = u16::from_le_bytes([dib[14], dib[15]]) as usize;
-    // 只处理落盘 BMP 的标准形态：32bpp、无压缩。其它形态交给 ensure_thumb。
-    let bi_compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
-    if bi_bit_count != 32 || bi_compression != 0 {
-        return None;
-    }
-    let w = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
-    let h = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
-    if w <= 0 || h <= 0 {
-        return None;
-    }
-    let (w, h) = (w as u32, h as u32);
+/// 缩略图的统一存放路径：**图片目录下的子文件夹** `images/thumbs/`。
+/// 与图片原图（`images/`）放一起，便于整体迁移与清理。
+fn thumb_rel(id: &str) -> String {
+    format!("images/thumbs/{id}.png")
+}
 
-    // 像素区起点（信息头 + 调色板；32bpp 无调色板）
-    let off = (40 + bi_size.min(dib.len())).min(dib.len());
-    let px = &dib[off..];
-    let stride = w as usize * 4;
-    if px.len() < stride * h as usize {
-        return None;
+/// 写缩略图（自动建目录）。失败返回原因，由调用方决定是否记日志。
+fn write_thumb(dir: &std::path::Path, id: &str, png: &[u8]) -> Result<(), &'static str> {
+    let path = dir.join(thumb_rel(id));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|_| "缩略图目录创建失败")?;
     }
+    fs::write(&path, png).map_err(|_| "缩略图写盘失败")
+}
 
-    // 等比缩到 THUMB_SIDE 以内
-    let scale = w.max(h).max(1) as f32 / THUMB_SIDE as f32;
-    let (tw, th) = if scale > 1.0 {
-        (
-            (w as f32 / scale).round().max(1.0) as u32,
-            (h as f32 / scale).round().max(1.0) as u32,
-        )
-    } else {
-        (w, h)
+/// 通用占位图：**解码不了也必须显示成功**，所以给一张中性底 + 简单「图片」图形，
+/// 而不是留空白或让前端显示破图。只在确实解不出内容时使用。
+fn placeholder_png(side: u32) -> Vec<u8> {
+    let side = side.max(64);
+    let bg = image::Rgba([241, 241, 244, 255]);
+    let line = image::Rgba([205, 205, 211, 255]);
+    let mark = image::Rgba([178, 178, 186, 255]);
+    let mut img = image::RgbaImage::from_pixel(side, side, bg);
+
+    let border = ((side as f32) * 0.05).max(2.0) as u32;
+    for x in 0..side {
+        for t in 0..border {
+            img.put_pixel(x, t, line);
+            img.put_pixel(x, side - 1 - t, line);
+        }
+    }
+    for y in 0..side {
+        for t in 0..border {
+            img.put_pixel(t, y, line);
+            img.put_pixel(side - 1 - t, y, line);
+        }
+    }
+    let mut put = |x: i32, y: i32, c: image::Rgba<u8>| {
+        if x >= 0 && y >= 0 && (x as u32) < side && (y as u32) < side {
+            img.put_pixel(x as u32, y as u32, c);
+        }
     };
-
-    // 自下而上 → 输出给 image 库时按自上而下（PNG 约定）
-    let mut rgba = Vec::with_capacity((tw * th * 4) as usize);
-    for ty in 0..th {
-        let sy = h - 1 - (ty as u64 * h as u64 / th as u64) as u32; // 翻转
-        let row = &px[sy as usize * stride..sy as usize * stride + stride];
-        for tx in 0..tw {
-            let sx = tx as u64 * w as u64 / tw as u64;
-            let p = &row[sx as usize * 4..sx as usize * 4 + 4];
-            rgba.extend_from_slice(&[p[2], p[1], p[0], 255]); // BGRA → RGBA，alpha 固定 255
+    // 「山」：底边在 0.72 高度，顶点在 0.42，底宽 0.44
+    let cx = (side as f32 / 2.0) as i32;
+    let base = (side as f32 * 0.72) as i32;
+    let peak = (side as f32 * 0.42) as i32;
+    let half = (side as f32 * 0.22) as i32;
+    for y in peak..=base {
+        let prog = (base - y) as f32 / (base - peak).max(1) as f32;
+        let w = (half as f32 * (1.0 - prog)) as i32;
+        for dx in -w..=w {
+            put(cx + dx, y, mark);
+        }
+    }
+    // 「太阳」：左上 0.32/0.34，半径 0.07
+    let r = ((side as f32) * 0.07).max(2.0) as i32;
+    let sx = (side as f32 * 0.32) as i32;
+    let sy = (side as f32 * 0.34) as i32;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                put(sx + dx, sy + dy, mark);
+            }
         }
     }
 
-    let mut png = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(
-        image::RgbaImage::from_raw(tw, th, rgba).expect("尺寸与数据长度一致"),
-    )
-    .write_to(&mut png, image::ImageFormat::Png)
-    .ok()?;
-
-    let thumb_path = dir.join(format!("thumbs/{}.png", id));
-    let _ = fs::create_dir_all(thumb_path.parent()?);
-    fs::write(thumb_path, png.into_inner()).ok()
+    let mut cur = std::io::Cursor::new(Vec::new());
+    let _ = image::DynamicImage::ImageRgba8(img).write_to(&mut cur, image::ImageFormat::Png);
+    cur.into_inner()
 }
 
 fn ensure_thumb(dir: &std::path::Path, item: &HistoryItem) -> Option<Vec<u8>> {
     let rel = item.img_path.as_ref()?;
     let src = dir.join(rel);
     // 1) 已有缩略图直接读
-    let thumb_rel = format!("thumbs/{}.png", item.id);
-    let thumb_path = dir.join(&thumb_rel);
+    let thumb_path = dir.join(thumb_rel(&item.id));
     if let Ok(bytes) = fs::read(&thumb_path) {
         return Some(bytes);
     }
-    // 2) 从原图现场生成
-    let bytes = match fs::read(&src) {
-        Ok(b) => b,
-        Err(e) => {
-            crate::log_err!("clipboard", "缩略图：读取原图失败 {}：{e}", src.display());
-            return None;
-        }
-    };
-    if bytes.len() > 256 * 1024 * 1024 {
-        crate::logger::write_line(
-            "ERROR",
-            "clipboard",
-            &format!(
-                "图片 {} 达 {}MB，超出处理能力，缩略图跳过",
+    // 2) 现场生成；**任何失败都退回通用占位图** —— 缩略图必须显示成功，
+    //    不留空白或破图（SVG/PSD/缺解码器、超限、原图丢失都会走到这里）。
+    let generated = (|| -> Option<Vec<u8>> {
+        let bytes = match fs::read(&src) {
+            Ok(b) => b,
+            Err(e) => {
+                crate::log_warn!("[clipboard] 缩略图：读取原图失败 {}：{e}", src.display());
+                return None;
+            }
+        };
+        if bytes.len() > 256 * 1024 * 1024 {
+            crate::log_warn!(
+                "[clipboard] 图片 {} 达 {}MB，超出处理能力，改用占位图",
                 src.display(),
                 bytes.len() / 1048576
-            ),
-        );
-        return None;
-    }
-    let img = match image::load_from_memory(&bytes) {
-        Ok(i) => i,
-        Err(e) => {
-            // 这就是「图片条目一直显示占位图」的原因所在（SVG/PSD/缺解码器的格式）。
-            // 记下具体格式错误，比前端只显示一个灰块有用得多。
-            crate::log_warn!("[clipboard] 缩略图：图片无法解码 {}：{e}", src.display());
+            );
             return None;
         }
-    };
-    let small = img.thumbnail(THUMB_SIDE, THUMB_SIDE);
-    let mut png = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(small.to_rgba8())
-        .write_to(&mut png, image::ImageFormat::Png)
-        .ok()?;
-    let data = png.into_inner();
+        let img = match image::load_from_memory(&bytes) {
+            Ok(i) => i,
+            Err(e) => {
+                // 记下具体格式错误，比前端只显示一个灰块有用得多。
+                crate::log_warn!("[clipboard] 缩略图：图片无法解码 {}：{e}", src.display());
+                return None;
+            }
+        };
+        let small = img.thumbnail(THUMB_SIDE, THUMB_SIDE);
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(small.to_rgba8())
+            .write_to(&mut png, image::ImageFormat::Png)
+            .ok()?;
+        Some(png.into_inner())
+    })()
+    .unwrap_or_else(|| placeholder_png(THUMB_SIDE));
     // 落盘失败不影响本次返回（下次再生成）
-    let _ = fs::create_dir_all(thumb_path.parent()?);
-    let _ = fs::write(&thumb_path, &data);
-    Some(data)
+    let _ = write_thumb(dir, &item.id, &generated);
+    Some(generated)
 }
 
 // ---------------------------------------------------------------------------
@@ -2282,6 +2607,12 @@ fn dpapi(input: &[u8], protect: bool) -> Option<Vec<u8>> {
             )
         };
         if ok == 0 || out.pb_data.is_null() {
+            crate::log_err!(
+                "clipboard",
+                "DPAPI {} 失败 last_err={}",
+                if protect { "加密" } else { "解密" },
+                GetLastError()
+            );
             return None;
         }
         let v = std::slice::from_raw_parts(out.pb_data, out.cb_data as usize).to_vec();
@@ -2303,7 +2634,9 @@ fn encrypt_text(plain: &str) -> Vec<u8> {
             out
         }
         None => {
-            crate::log_warn!("[clipboard] DPAPI 加密失败，本条按明文落盘（内容不会丢）");
+            crate::log_warn!(
+                "[clipboard] DPAPI 加密失败，本条按明文落盘（内容不丢）；失败码见上方 DPAPI 加密错误"
+            );
             plain.as_bytes().to_vec()
         }
     }
@@ -2363,37 +2696,59 @@ fn encrypt_legacy_entities(dir: &PathBuf) -> usize {
 
 fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     let path = dir.join("index.json");
-    match fs::read_to_string(&path) {
-        Ok(s) => {
-            let mut v: Vec<HistoryItem> = serde_json::from_str(&s).unwrap_or_else(|e| {
-                crate::log_warn!("[clipboard] index.json 解析失败：{e}，返回空");
-                Vec::new()
-            });
-            // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
-            // 历史是默认视图，用户当初置顶的内容在历史里仍然浮顶，行为不变。
-            let mut migrated = 0usize;
-            for i in v.iter_mut() {
-                if i.pinned && !i.pinned_views.iter().any(|x| x == "history") {
-                    i.pinned_views.push("history".to_string());
-                    migrated += 1;
-                }
-            }
-            if migrated > 0 {
-                crate::log_print!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
-            }
-            v
+    // 按**字节**读，不按字符串：新格式是 DPAPI 密文（带 ENC_MAGIC），不是 UTF-8 JSON。
+    let Ok(raw) = fs::read(&path) else {
+        return Vec::new();
+    };
+    // decode_text_bytes 同时兼容老版本的明文 JSON（没有魔数 → 原样返回），
+    // 老用户升级后历史不会因为格式切换而清空。
+    let Some(json) = decode_text_bytes(&raw) else {
+        crate::log_err!(
+            "clipboard",
+            "index.json 解密失败（可能换了 Windows 账户或机器），历史列表读不出来"
+        );
+        return Vec::new();
+    };
+    let mut v: Vec<HistoryItem> = serde_json::from_str(&json).unwrap_or_else(|e| {
+        crate::log_warn!("[clipboard] index.json 解析失败：{e}，返回空（历史清空）");
+        Vec::new()
+    });
+    // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
+    // 历史是默认视图，用户当初置顶的内容在历史里仍然浮顶，行为不变。
+    let mut migrated = 0usize;
+    for i in v.iter_mut() {
+        if i.pinned && !i.pinned_views.iter().any(|x| x == "history") {
+            i.pinned_views.push("history".to_string());
+            migrated += 1;
         }
-        Err(_) => Vec::new(),
     }
+    if migrated > 0 {
+        crate::log_print!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
+    }
+    v
 }
 
+/// 落盘索引：**整份 DPAPI 加密**，落盘的不是明文 JSON。
+///
+/// 为什么必须加密：`index.json` 里有 `preview`（正文前 2 行）和 `files`（完整
+/// 路径列表）—— 前者可能直接是密码、密钥、聊天记录，后者暴露目录结构与项目名。
+/// 内容实体（`data/` `files/`）早就加密了，索引却是明文，等于把同一份内容
+/// 抄了个不加密的副本放在旁边，加密就白做了。
+///
+/// 为什么整份加密而不是逐字段：`save_index` 每次捕获都会跑，逐字段要对上千条
+/// 各调一次 `CryptProtectData`，一次复制能卡上百毫秒；整份只调一次。
+/// 代价是 index.json 不再是人眼可读的 JSON —— 但它本来就是程序独占的索引，
+/// 需要排查时看日志就够了。
+///
+/// 加密失败时 `encrypt_text` 会退回明文（与内容实体同一策略）：
+/// 宁可少一层保护，也不能因为 DPAPI 异常把整份历史弄丢。读出时靠魔数区分。
 fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
     let path = dir.join("index.json");
     match serde_json::to_string_pretty(hist) {
         Ok(s) => {
             // 写失败要记：index.json 是重启后恢复历史/置顶/收藏的唯一依据，
             // 静默失败会表现为「重启后记录全没了」却查无实据。
-            if let Err(e) = fs::write(&path, s) {
+            if let Err(e) = fs::write(&path, encrypt_text(&s)) {
                 crate::log_err!("clipboard", "index.json 写入失败：{e}");
             }
         }
@@ -2416,10 +2771,11 @@ fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
             continue;
         }
         let rel = format!("files/{}.txt", item.id);
-        if fs::write(dir.join(&rel), files.join("\r\n").as_bytes()).is_ok() {
-            item.files_path = Some(rel);
-            n += 1;
-        }
+        // 必须走 write_text_entity（会自动 DPAPI 加密）—— 这里原先是裸 fs::write 明文，
+        // 与「内容落盘一律加密」自相矛盾，等于给老条目补了一份明文副本。
+        write_text_entity(dir, &rel, &files.join("\r\n"));
+        item.files_path = Some(rel);
+        n += 1;
     }
     n
 }
@@ -2431,7 +2787,7 @@ fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
     if let Some(rel) = &item.img_path {
         let _ = fs::remove_file(dir.join(rel));
         // 缩略图与原图同生命周期，一并清掉
-        let _ = fs::remove_file(dir.join(format!("thumbs/{}.png", item.id)));
+        let _ = fs::remove_file(dir.join(thumb_rel(&item.id)));
     }
     if let Some(rel) = &item.files_path {
         let _ = fs::remove_file(dir.join(rel));
@@ -2862,13 +3218,25 @@ const GMEM_MOVEABLE: u32 = 0x0002;
 extern "system" {
     fn OpenClipboard(hwnd: isize) -> i32;
     fn AddClipboardFormatListener(hwnd: isize) -> i32;
+    fn GetLastError() -> u32;
     fn CloseClipboard() -> i32;
     fn EmptyClipboard() -> i32;
     fn GetClipboardData(format: u32) -> isize;
     fn SetClipboardData(format: u32, handle: isize) -> isize;
     fn IsClipboardFormatAvailable(format: u32) -> i32;
+    fn EnumClipboardFormats(format: u32) -> u32;
+    fn GetClipboardFormatNameW(format: u32, lpszFormatName: *mut u16, cchMaxCount: i32) -> i32;
     fn GetClipboardSequenceNumber() -> u32;
     fn GetClipboardOwner() -> isize;
+    fn GetWindowThreadProcessId(hwnd: isize, lpdwProcessId: *mut u32) -> u32;
+    fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
+    fn QueryFullProcessImageNameW(
+        hProcess: isize,
+        dwFlags: u32,
+        lpExeName: *mut u16,
+        lpdwSize: *mut u32,
+    ) -> i32;
+    fn CloseHandle(hObject: isize) -> i32;
     fn GetLastInputInfo(pli: *mut LastInputInfo) -> i32;
     fn GetTickCount() -> u32;
 
@@ -2938,6 +3306,74 @@ mod tests {
             decode_text_bytes(legacy).as_deref(),
             Some("旧版本留下的明文内容")
         );
+    }
+
+    /// 造一份最小可用的条目，供索引相关用例复用。
+    fn sample_item(id: &str, preview: &str) -> HistoryItem {
+        HistoryItem {
+            id: id.to_string(),
+            kind: "text".into(),
+            ts: 1,
+            pinned: false,
+            pinned_views: Vec::new(),
+            favorite: false,
+            edited: false,
+            preview: preview.to_string(),
+            preview_truncated: false,
+            size: 1,
+            text_path: None,
+            img_path: None,
+            files_path: None,
+            files: None,
+        }
+    }
+
+    /// 索引必须**整份加密**落盘。
+    ///
+    /// 这条是真需求而不是洁癖：`index.json` 里有 `preview`（正文前 2 行）和
+    /// `files`（完整路径）。内容实体已经加密了，索引若还是明文，等于给同一份
+    /// 内容留了个不加密的副本，前面的加密全白做。
+    #[test]
+    fn index_saved_encrypted_and_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("qingtie-idx-enc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let secret = "密码 hunter2 不能出现在索引里";
+        save_index(&dir, &vec![sample_item("t1", secret)]);
+
+        let raw = fs::read(dir.join("index.json")).unwrap();
+        assert!(raw.starts_with(ENC_MAGIC), "索引必须带加密魔数");
+        let needle = "hunter2".as_bytes();
+        assert!(
+            !raw.windows(needle.len()).any(|w| w == needle),
+            "index.json 里不能出现明文正文"
+        );
+
+        // 解回来必须逐字一致，否则加密就成了丢数据
+        let back = load_index(&dir);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].preview, secret);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 兼容性：老版本 index.json 是明文 JSON，读取时必须照常解析（靠魔数区分），
+    /// 否则升级后所有人的历史会被当成「解析失败」清空。
+    #[test]
+    fn index_accepts_legacy_plaintext() {
+        let dir = std::env::temp_dir().join(format!("qingtie-idx-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let json = serde_json::to_string_pretty(&vec![sample_item("t2", "旧版明文索引")]).unwrap();
+        fs::write(dir.join("index.json"), json.as_bytes()).unwrap();
+
+        let back = load_index(&dir);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].preview, "旧版明文索引");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 带魔数但内容被破坏 → 返回 None（而不是把垃圾当文本显示出来）。
@@ -3363,5 +3799,22 @@ mod tests {
     #[test]
     fn preview_short_text_has_no_ellipsis() {
         assert_eq!(make_text_preview("就两个字"), "就两个字");
+    }
+
+    /// `preview_truncated` 必须与「省略号」严格同义：它是前端判断
+    /// 「卡片已经显示全了、别再弹悬浮浮层」的唯一依据，判松了会对短文本弹空浮层，
+    /// 判严了会让长文本失去悬浮预览。
+    #[test]
+    fn preview_truncated_flag_matches_ellipsis() {
+        // 卡片显示得全 → false
+        assert!(!text_preview_parts("就两个字").1);
+        assert!(!text_preview_parts("第一行\n第二行").1, "正好 2 行不算截断");
+        assert!(!text_preview_parts("\n\n正文第一行\n正文第二行").1, "空行被跳过，不算截断");
+        assert!(!text_preview_parts("   \n\t\n").1, "空白文本没有丢弃内容");
+
+        // 有内容被丢掉 → true
+        assert!(text_preview_parts("一\n二\n三").1, "第 3 行被丢掉");
+        assert!(text_preview_parts(&"x".repeat(500)).1, "超出字符预算");
+        assert!(text_preview_parts(&format!("{}\n下一行", "y".repeat(200))).1);
     }
 }
