@@ -37,8 +37,15 @@
   --select: #d9b95c;
   /* 卡片徽章底色。文字色：置顶直接用 --accent，收藏用固定琥珀 400（#ba7517），
      两者在浅色/深色的徽章底上都能读；底色则按主题各调一档浓度。
-     类型徽章用「文字反色」的中性 tint：玻璃变量叠在同色系卡片底上会隐形。 */
+     类型徽章原先统一用「文字反色」的中性 tint（玻璃变量叠在同色系卡片底上会隐形），
+     但文本/图片/文件三个徽章于是长得一模一样，扫列表时分不清 —— 现在按类型分色相：
+     文本是绝对多数，保持中性不抢眼；图片走紫、文件走青，都与置顶蓝/收藏琥珀/
+     失效红/已编辑绿错开，一列里既分得清又不吵。 */
   --tag-kind-bg: rgba(0, 0, 0, 0.06);
+  --tag-kind-image-fg: #6d4aff;
+  --tag-kind-image-bg: rgba(109, 74, 255, 0.12);
+  --tag-kind-files-fg: #0d7d8a;
+  --tag-kind-files-bg: rgba(13, 125, 138, 0.13);
   --tag-pinned-bg: rgba(47, 107, 255, 0.12);
   --tag-fav-bg: rgba(186, 117, 23, 0.15);
   --tag-edited-bg: rgba(26, 127, 55, 0.14);
@@ -62,6 +69,10 @@ body.dark {
   --accent: #5b8cff;
   --select: #e9d189;
   --tag-kind-bg: rgba(255, 255, 255, 0.12);
+  --tag-kind-image-fg: #ad9dff;
+  --tag-kind-image-bg: rgba(139, 116, 255, 0.22);
+  --tag-kind-files-fg: #5ec8d6;
+  --tag-kind-files-bg: rgba(94, 200, 214, 0.2);
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
   --tag-edited-bg: rgba(74, 194, 107, 0.2);
@@ -800,12 +811,23 @@ body.dark .tag-missing {
   color: var(--text-dim);
 }
 
-/* 类型徽章：中性，不抢状态徽章（置顶/收藏/失效）的注意力。
+/* 类型徽章：三个类型各一个色相，扫列表时靠颜色就能分出「文本 / 图片 / 文件」。
+   文本是绝对多数，保持中性 —— 给多数派上色会让整列都在抢注意力；
+   图片与文件用色相区分，与置顶蓝、收藏琥珀、失效红、已编辑绿都错开。
    不能用 --glass-strong —— 那是半透明白（深色为半透明深灰），叠在本就同色系的
-   卡片底上几乎隐形，看起来就像纯文字。改用文字反色的中性 tint：
-   浅色加深 6%、深色提亮 12%，能看出是个徽章、又不喧宾夺主。 */
-.tag-kind {
+   卡片底上几乎隐形，看起来就像纯文字。 */
+.tag-kind-text {
   background: var(--tag-kind-bg);
+}
+
+.tag-kind-image {
+  color: var(--tag-kind-image-fg);
+  background: var(--tag-kind-image-bg);
+}
+
+.tag-kind-files {
+  color: var(--tag-kind-files-fg);
+  background: var(--tag-kind-files-bg);
 }
 
 .tag-pinned {
@@ -830,17 +852,19 @@ body.dark .tag-edited {
 }
 
 /* 圆角模式：材质不走系统模糊、卡片底接近实色，半透明的中性徽章底会糊进卡片里，
-   看起来就跟纯文字一样 → 底色加实、文字改用正文色并提高字重，一眼能看出是徽章。 */
+   看起来就跟纯文字一样 → 底色加实、文字改用正文色并提高字重，一眼能看出是徽章。
+   只对**中性**的文本徽章这么处理：图片/文件徽章的色相本身就足以撑起辨识度，
+   若一并改成正文色反而把刚分好的类型又抹平了（且它们的底色浓度已足够）。 */
 body.round .tag {
   font-weight: 500;
 }
 
-body.round .tag-kind {
+body.round .tag-kind-text {
   background: rgba(0, 0, 0, 0.1);
   color: var(--text);
 }
 
-body.dark.round .tag-kind {
+body.dark.round .tag-kind-text {
   background: rgba(255, 255, 255, 0.16);
   color: var(--text);
 }
@@ -1149,7 +1173,9 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   color: var(--text-dim);
 }
 
-.cache-actions {
+/* 设置页里并排的一组按钮（缓存操作 / 清空类危险操作共用）。
+   原先是 .cache-actions，第二处用到时改成通用名 —— 同一套布局不该有两份定义。 */
+.btn-row {
   display: flex;
   gap: 8px;
 }

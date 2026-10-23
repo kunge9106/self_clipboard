@@ -326,6 +326,74 @@ function bindClearAllModal() {
 }
 
 // ---------------------------------------------------------------------------
+// 清空「已失效」的文件条目
+//
+// 失效 = 条目里引用的原文件被移动 / 改名 / 删除，这条记录**永远贴不出来**，
+// 属于净负资产：留着占地方，每次渲染还多查一次存在性。
+//
+// 为什么不给「手动改路径」：那条路要文件选择器、多路径编辑、路径校验，还要覆盖
+// 加密的 files_path 并刷新 preview —— 成本很高，而收益只有一个：文件挪了位置还想
+// 复用这条历史。可用户重新复制一次那批文件只要两三秒，比走完这套流程快得多，
+// 而且「改完指向另一批文件」本质上已经是新条目了，留着旧的时间戳反而是误导。
+// 真正需要的是「把死的清掉」，不是「把死的救活」。
+//
+// 判定完全复用 check_files_alive（给一批 id、返回失效的那些），只是把 id 的来源
+// 从「当前视图」换成「全部文件条目」，不为这件事新增后端命令。
+// ---------------------------------------------------------------------------
+
+let clearMissingIds = [];
+
+async function openClearMissingModal() {
+  const ids = items.filter((i) => i.kind === "files").map((i) => i.id);
+  if (ids.length === 0) {
+    toast("没有文件条目");
+    return;
+  }
+  let dead;
+  try {
+    // 只做 exists()，不读内容 —— 几百条也是毫秒级
+    dead = await invoke("check_files_alive", { ids });
+  } catch (e) {
+    toast("检测失败：" + e);
+    return;
+  }
+  if (dead.length === 0) {
+    toast("没有已失效的条目");
+    return;
+  }
+  clearMissingIds = dead;
+  document.getElementById("clear-missing-modal-text").textContent =
+    `共 ${dead.length} 条文件条目的原文件已不存在（被移动、改名或删除），无法再粘贴。此操作不可撤销。`;
+  document.getElementById("clear-missing-modal").hidden = false;
+}
+
+// 与清空全部历史弹窗同理：常驻元素，只绑一次，切分类重绘不会丢绑定
+function bindClearMissingModal() {
+  const modal = document.getElementById("clear-missing-modal");
+  document.getElementById("clear-missing-cancel").onclick = () => {
+    modal.hidden = true;
+    clearMissingIds = [];
+  };
+  document.getElementById("clear-missing-confirm").onclick = async () => {
+    modal.hidden = true;
+    const ids = clearMissingIds;
+    clearMissingIds = [];
+    if (ids.length === 0) return;
+    try {
+      await invoke("delete_items", { ids });
+      const drop = new Set(ids);
+      items = items.filter((i) => !drop.has(i.id));
+      // 失效集合整体作废，让下次渲染重新检测，避免残留已删除条目的 id
+      missingFiles = new Set();
+      render({ keepScroll: true });
+      toast(`已清空 ${ids.length} 条失效条目`);
+    } catch (e) {
+      toast("清空失败：" + e);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 工具栏垃圾桶：搜索时只清搜索结果，否则清当前视图（需求 #3）
 // ---------------------------------------------------------------------------
 
@@ -806,7 +874,7 @@ function cardEl(item) {
   meta.innerHTML =
     (hideKind
       ? ""
-      : `<span class="tag tag-kind">${KIND_LABEL[item.kind] || item.kind}</span>`) +
+      : `<span class="tag tag-kind tag-kind-${item.kind}">${KIND_LABEL[item.kind] || item.kind}</span>`) +
     (pinned ? '<span class="tag tag-pinned">已置顶</span>' : "") +
     (item.favorite && !hideFav ? '<span class="tag tag-fav">已收藏</span>' : "") +
     // 「已编辑」= 在全文编辑里改过并保存后落成的新条目。原文条目始终保留不动，
@@ -1396,13 +1464,24 @@ let detailEnteredInEdit = false;
 
 const $detail = (id) => document.getElementById(id);
 
+/** 当前详情条目能否编辑：只有文本可以。
+ *
+ * 与右键菜单同一条规则，两处必须一致 —— 菜单里不给「编辑」的文件条目，
+ * 若在「查看」弹窗里又冒出个编辑按钮，等于留了条小路绕过规则。
+ * 根因：文件条目存的是路径清单，编辑后写回剪贴板会退化成一段纯文本，
+ * 粘出去不再是一批文件，语义整个丢了。 */
+function canEditDetail() {
+  return detailItem?.kind === "text";
+}
+
 /** 查看态 / 编辑态互斥切换 */
 function setDetailMode(mode) {
   const editing = mode === "edit";
   $detail("detail-body").hidden = editing;
   $detail("detail-editor").hidden = !editing;
   $detail("detail-select").hidden = editing;
-  $detail("detail-edit").hidden = editing;
+  // 不可编辑的条目连「编辑」按钮都不给，且**退出编辑态时也不能重新冒出来**
+  $detail("detail-edit").hidden = editing || !canEditDetail();
   $detail("detail-copy").hidden = editing;
   $detail("detail-close").hidden = editing;
   $detail("detail-revert").hidden = !editing;
@@ -1424,7 +1503,7 @@ function isDetailEditing() {
 }
 
 function enterDetailEdit() {
-  if (!detailItem) return;
+  if (!detailItem || !canEditDetail()) return;
   // 截断的内容不能编辑：保存会把截断结果写回去 → 静默丢数据
   if (detailTruncated) {
     toast("内容过长，不便在此编辑；可先「复制全文」到别处处理");
@@ -1839,7 +1918,7 @@ function settingsDataHtml(s) {
       <div class="cache-title">缓存目录 <span class="hint">${retentionLabel(s.retentionDays)}</span></div>
       <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
       <div class="cache-stats" id="cache-stats"></div>
-      <div class="cache-actions">
+      <div class="btn-row">
         <button class="btn-ghost" id="btn-pick-dir">更改目录</button>
         <button class="btn-ghost" id="btn-open-dir">打开目录</button>
         <button class="btn-ghost" id="btn-open-log">日志目录</button>
@@ -1855,7 +1934,10 @@ function settingsDataHtml(s) {
     <div class="row"><label>　└ 退出前弹窗提醒</label>
       <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
       <span class="hint">退出前弹窗确认</span></div>
-    <button class="btn-danger" id="clear-all">清空全部历史</button>`;
+    <div class="btn-row">
+      <button class="btn-ghost" id="clear-missing">清空已失效条目</button>
+      <button class="btn-danger" id="clear-all">清空全部历史</button>
+    </div>`;
 }
 
 // ── 关于页 ────────────────────────────────────────────────────────────────
@@ -2659,6 +2741,9 @@ function bindSettings(view) {
   const clear = view.querySelector("#clear-all");
   if (clear) clear.onclick = () => openClearAllModal();
 
+  const clearMissing = view.querySelector("#clear-missing");
+  if (clearMissing) clearMissing.onclick = () => openClearMissingModal();
+
   // 同理：只有缓存块在页面上时才去查缓存信息，别在别的分类里白发一次 IPC
   if (view.querySelector("#cache-path")) refreshCacheInfo();
 }
@@ -2675,6 +2760,7 @@ async function main() {
   bindResize();
   bindExitModal();
   bindClearAllModal();
+  bindClearMissingModal();
   bindClearView();
   bindSelectBar();
   bindClearViewModal();
