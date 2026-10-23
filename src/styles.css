@@ -1251,8 +1251,14 @@ html:not(.hovers-off) .statusbar-clear:hover {
   border-radius: 4px;
 }
 
-/* 文本：保留换行与缩进（与详情弹窗观感一致），长单词 / 长 URL 强制断行 */
+/* 文本：保留换行与缩进（与详情弹窗观感一致），长单词 / 长 URL 强制断行。
+   固定 4 行后省略 —— 折行由浏览器排版决定，只有 line-clamp 能准确卡「视觉行数」，
+   JS 按 \n 数行数学不准（一行十万字会被算成 1 行）。 */
 .hp-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
   max-width: 420px;
   font-size: 12px;
   line-height: 1.6;
@@ -1261,8 +1267,9 @@ html:not(.hovers-off) .statusbar-clear:hover {
   word-break: break-all;
 }
 
-/* 文件清单：一条一行；单条最长占 2 行后省略 ——
-   完全不截断会让 5 条深路径把浮层拉到屏幕外，只截 1 行又看不到文件名 */
+/* 文件清单：一条一行，**只给文件名**（完整路径留给右键「查看」）。
+   单条最长占 2 行后省略 —— 文件名本身很少这么长，留 2 行是给超长名字兜底，
+   完全不限会让浮层高度失控。 */
 .hp-files {
   margin: 0;
   padding: 0;

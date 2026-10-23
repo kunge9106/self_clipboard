@@ -995,9 +995,17 @@ function observeImages(rootEl) {
 
 // 浮层里三个内容槽常驻，按类型显示其中一个（切换时把另外两个清空，
 // 避免上一次的文本 / 清单在 DOM 里留着）。
-const PREVIEW_TEXT_MAX_LINES = 12;
-const PREVIEW_TEXT_MAX_CHARS = 520;
-const PREVIEW_FILES_MAX = 5;
+//
+// 定位是**预告片**，不是替代「查看」：
+//   文本只给 4 行、文件只给 3 个文件名 —— 够判断「是不是这条」就停，
+//   想读全、想看完整路径就走右键「查看」。浮层把内容全摊开的话，
+//   「查看」这个入口就白做了。
+//
+// 这两个数值只是**载荷护栏**，不是显示行数：正文真正被截到 4 行靠 CSS 的
+// `-webkit-line-clamp`（见 .hp-text），否则一条长行折行后会变成十几行。
+const PREVIEW_TEXT_GUARD_LINES = 40;
+const PREVIEW_TEXT_GUARD_CHARS = 1200;
+const PREVIEW_FILES_MAX = 3;
 
 function ensurePreviewBox() {
   if (previewBox) return previewBox;
@@ -1079,32 +1087,37 @@ function bindHoverPreview(card, item) {
 }
 
 /**
- * 文本截断：**行数与字符数两道上限都要**。
+ * 文本载荷护栏（**不是**显示截断）。
  *
- * 只有行数上限时，单行几万字的文本（压缩过的 JSON、日志一行流）照样能把浮层撑爆；
- * 只有字符上限时，短行多的文本会挤成一大坨没有结构的字。
+ * 显示层面的「4 行 + 省略号」交给 CSS 的 `-webkit-line-clamp`：
+ * 只有浏览器知道自己把一行折成了几个视觉行，JS 按 `\n` 数行数是数不准的
+ * （一行十万字符的日志流会被算成「1 行」，照样撑爆浮层）。
+ * 这里只做一件事 —— 别把几万字塞进 DOM 让排版计算变慢。
  */
-function clampPreviewText(text) {
+function guardPreviewText(text) {
   let s = text;
-  let cut = false;
   const lines = s.split("\n");
-  if (lines.length > PREVIEW_TEXT_MAX_LINES) {
-    s = lines.slice(0, PREVIEW_TEXT_MAX_LINES).join("\n");
-    cut = true;
+  if (lines.length > PREVIEW_TEXT_GUARD_LINES) {
+    s = lines.slice(0, PREVIEW_TEXT_GUARD_LINES).join("\n");
   }
-  if (s.length > PREVIEW_TEXT_MAX_CHARS) {
-    s = s.slice(0, PREVIEW_TEXT_MAX_CHARS);
-    cut = true;
+  if (s.length > PREVIEW_TEXT_GUARD_CHARS) {
+    s = s.slice(0, PREVIEW_TEXT_GUARD_CHARS);
   }
-  return cut ? `${s}…` : s;
+  return s;
 }
 
-/** 文件清单：前 N 条，其余折叠成一行「…另有 N 个」 */
+/** 取文件名：浮层只给名字，完整路径留给右键「查看」 */
+function baseName(path) {
+  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
+/** 文件清单：前 N 条**文件名**，其余折叠成一行「…另有 N 个」 */
 function fillFilePreview(ul, item) {
   const all = Array.isArray(item.files) ? item.files : [];
   const lis = all.slice(0, PREVIEW_FILES_MAX).map((p) => {
     const li = document.createElement("li");
-    li.textContent = p;
+    li.textContent = baseName(p);
     return li;
   });
   if (all.length > PREVIEW_FILES_MAX) {
@@ -1166,7 +1179,7 @@ async function showHoverPreview(card, item) {
   }
   if (!card.isConnected || !card.matches(":hover")) return;
   const { text } = pickPreviewSlot(box, "text");
-  text.textContent = clampPreviewText(data.text || "");
+  text.textContent = guardPreviewText(data.text || "");
   box.hidden = false;
   placePreview(box, card);
 }
