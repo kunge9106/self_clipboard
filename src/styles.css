@@ -21,13 +21,23 @@
   --glass: rgba(255, 255, 255, 0.16);
   --glass-strong: rgba(255, 255, 255, 0.28);
   --glass-hover: rgba(255, 255, 255, 0.24);
-  /* 悬浮浮层的玻璃：底色只压一层淡 tint 保证文字可读，真正的「毛」由
-     backdrop-filter 实时模糊浮层背后的页面内容给出（见 .hover-preview）。
-     --hover-glass-rim 是顶部 1px 内高光 —— 玻璃的「边缘反光」才是它看起来
-     像实体材质的关键，少了这条就只是个半透明色块。 */
-  --hover-glass-bg: rgba(252, 252, 252, 0.62);
-  --hover-glass-blur: blur(22px) saturate(150%);
-  --hover-glass-rim: rgba(255, 255, 255, 0.55);
+  /* 悬浮浮层**自己的**材质，与窗口那套（--glass / --material-rgb / 设置里的
+     材质浓度）完全解耦 —— 那套是给整窗调的，浮层跟着变只会越调越难对齐。
+
+     为什么不能靠「透」做出毛玻璃：浮层被摆在卡片旁边的空处，它背后是窗口背景，
+     没有内容可供 backdrop-filter 模糊 —— 半透明结果就是「一层透明的白」。
+     所以毛玻璃只能靠**质地**堆出来：
+       奶白渐变（上浅下深 = 玻璃有厚度，平涂会显得像塑料片）
+       + 一圈极细的深色发丝边（浅底上靠它定边界）
+       + 顶部 1px 内高光（玻璃的边缘反光，这是「像材质」的关键）
+       + 大而软的外阴影（把它从背景上「托起来」）
+     backdrop-filter 仍保留：万一浮层压到了卡片上（窗口窄时可能），
+     那一块会真的糊开，比纯色块自然。 */
+  --hp-bg-top: rgba(255, 255, 255, 0.95);
+  --hp-bg-bottom: rgba(242, 244, 248, 0.93);
+  --hp-border: rgba(0, 0, 0, 0.07);
+  --hp-rim: rgba(255, 255, 255, 0.95);
+  --hp-shadow: 0 12px 30px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
   --stroke: rgba(255, 255, 255, 0.35);
   /* 进度条空轨：玻璃白在浅色底上等于隐形，必须用「比底深一点」的中性色 */
   --track-bg: rgba(0, 0, 0, 0.08);
@@ -45,16 +55,17 @@
   /* 卡片徽章底色。文字色：置顶直接用 --accent，收藏用固定琥珀 400（#ba7517），
      两者在浅色/深色的徽章底上都能读；底色则按主题各调一档浓度。
      类型徽章按 kind 分色相 —— 三者原先共用同一个中性 tint，扫列表时分不清：
-       文本 = 石板蓝（去饱和，压得住，因为它是绝对多数）
+       文本 = 明蓝（多数派，用最中性、最亮的蓝）
        图片 = 紫
-       文件 = 青
-     都与置顶蓝/收藏琥珀/已编辑绿/失效红错开。 */
-  --tag-kind-text-fg: #55698a;
-  --tag-kind-text-bg: rgba(85, 105, 138, 0.13);
-  --tag-kind-image-fg: #6d4aff;
-  --tag-kind-image-bg: rgba(109, 74, 255, 0.12);
-  --tag-kind-files-fg: #0d7d8a;
-  --tag-kind-files-bg: rgba(13, 125, 138, 0.13);
+       文件 = 青绿
+     三个色相间隔够大，11px 小字也不会糊成一片（前一版文本用去饱和石板蓝、
+     文件用深青，两个都偏暗，反而更容易看混）。 */
+  --tag-kind-text-fg: #3b82f6;
+  --tag-kind-text-bg: rgba(59, 130, 246, 0.12);
+  --tag-kind-image-fg: #7c3aed;
+  --tag-kind-image-bg: rgba(124, 58, 237, 0.12);
+  --tag-kind-files-fg: #0d9488;
+  --tag-kind-files-bg: rgba(13, 148, 136, 0.13);
   --tag-pinned-bg: rgba(47, 107, 255, 0.12);
   --tag-fav-bg: rgba(186, 117, 23, 0.15);
   --tag-edited-bg: rgba(26, 127, 55, 0.14);
@@ -69,10 +80,13 @@ body.dark {
   --glass: rgba(28, 28, 30, 0.24);
   --glass-strong: rgba(40, 40, 44, 0.38);
   --glass-hover: rgba(255, 255, 255, 0.1);
-  /* 深色下 tint 要更浓一点才压得住：模糊会把背后的浅色内容「晕」上来，
-     太通透会让 13px 的正文发飘。顶点高光也随之压到很低。 */
-  --hover-glass-bg: rgba(38, 38, 42, 0.66);
-  --hover-glass-rim: rgba(255, 255, 255, 0.08);
+  /* 深色浮层：同样不跟窗口浓度走。底色比卡片亮一档才浮得起来，
+     发丝边换成浅色（深底上白边才看得见），内高光压到很低否则发灰。 */
+  --hp-bg-top: rgba(60, 60, 67, 0.95);
+  --hp-bg-bottom: rgba(40, 40, 46, 0.94);
+  --hp-border: rgba(255, 255, 255, 0.13);
+  --hp-rim: rgba(255, 255, 255, 0.13);
+  --hp-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.28);
   --stroke: rgba(255, 255, 255, 0.12);
   --track-bg: rgba(255, 255, 255, 0.14);
   --material-rgb: 22 22 24;
@@ -81,12 +95,12 @@ body.dark {
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
   --select: #e9d189;
-  --tag-kind-text-fg: #a9bcd6;
-  --tag-kind-text-bg: rgba(150, 175, 210, 0.2);
-  --tag-kind-image-fg: #ad9dff;
-  --tag-kind-image-bg: rgba(139, 116, 255, 0.22);
-  --tag-kind-files-fg: #5ec8d6;
-  --tag-kind-files-bg: rgba(94, 200, 214, 0.2);
+  --tag-kind-text-fg: #93c0ff;
+  --tag-kind-text-bg: rgba(120, 170, 255, 0.2);
+  --tag-kind-image-fg: #bda6ff;
+  --tag-kind-image-bg: rgba(160, 130, 255, 0.2);
+  --tag-kind-files-fg: #5fd6c8;
+  --tag-kind-files-bg: rgba(95, 214, 200, 0.2);
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
   --tag-edited-bg: rgba(74, 194, 107, 0.2);
@@ -826,8 +840,8 @@ body.dark .tag-missing {
 }
 
 /* 类型徽章：三个类型各一个色相，扫列表时靠颜色就能分出「文本 / 图片 / 文件」。
-   文本用**去饱和**的石板蓝：它是绝对多数，正蓝色会被误当成置顶（--accent 就是蓝），
-   去饱和后既与置顶区分开，又不会让整列都在喊。图片走紫、文件走青。
+   统一取**高亮度 + 中高饱和**的三档，任何一档在 11px 下都读得清 ——
+   前一版把文本和文件都压成了暗色（石板蓝 / 深青），小字上容易看混。
    不能用 --glass-strong —— 那是半透明白（深色为半透明深灰），叠在本就同色系的
    卡片底上几乎隐形，看起来就像纯文字。 */
 .tag-kind-text {
@@ -1256,46 +1270,25 @@ html:not(.hovers-off) .statusbar-clear:hover {
 /* 悬浮补充信息浮层（图片 / 文本 / 文件 共用一份）。
    卡片本体只能放一张小缩略图或 2 行摘要，鼠标停 1s 后在这里补更多内容。
 
-   材质：真毛玻璃。底色只压一层淡 tint，真正的「毛」由 backdrop-filter 实时模糊
-   浮层背后的页面内容给出，再叠一条顶部 1px 内高光当玻璃边缘反光。
-
-   ⚠️ 能力边界（写下来免得日后又试一遍）：系统级 acrylic/mica 只能**整窗**套用
-   （SetWindowCompositionAttribute / DwmSetWindowAttribute 都作用于 HWND），
-   没法只给窗口里的一块 DOM 生效。所以这一层用的是 CSS 真模糊 —— 它模糊的是
-   「页面里浮层背后的内容」，观感就是毛玻璃，但不会把桌面壁纸也糊进来。 */
+   材质见文件顶部 --hp-* 变量的注释：奶白渐变 + 发丝边 + 顶部内高光 + 大阴影，
+   一套固定配方，不随窗口浓度 / 材质档位变化。 */
 .hover-preview {
   position: fixed;
   z-index: 1500;
   /* 与 .card 相同的 10px 内边距：浮层是从卡片里「长出来」的一块，留白要接得上 */
   padding: 10px;
   border-radius: var(--radius-sm);
-  background: var(--hover-glass-bg);
-  backdrop-filter: var(--hover-glass-blur);
-  -webkit-backdrop-filter: var(--hover-glass-blur);
-  border: 1px solid var(--stroke);
-  box-shadow: var(--shadow), inset 0 1px 0 var(--hover-glass-rim);
+  background: linear-gradient(160deg, var(--hp-bg-top), var(--hp-bg-bottom));
+  /* 浮层通常浮在空处，这一步大多没有内容可糊；留着是为了压到卡片上时能糊开 */
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid var(--hp-border);
+  box-shadow: var(--hp-shadow), inset 0 1px 0 var(--hp-rim);
   max-width: 460px;
   color: var(--text);
   font-family: var(--font);
   /* 纯展示层：不吃鼠标事件，避免遮挡卡片自身的 hover/click */
   pointer-events: none;
-}
-
-/* 不该模糊的两种情况，退回近不透明实色：
-   1) 圆角模式 —— 该模式下窗口本身就不做背景模糊（设置项写明「圆角 + 无背景模糊」），
-      浮层再模糊就自相矛盾；
-   2) 兜底档（没有系统材质）—— 窗口本来就是实色，模糊背后没有任何东西可糊，
-      只是白白吃 GPU。 */
-body.round .hover-preview,
-body.tier-solid .hover-preview {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: rgba(250, 250, 252, 0.97);
-}
-
-body.dark.round .hover-preview,
-body.dark.tier-solid .hover-preview {
-  background: rgba(40, 40, 44, 0.97);
 }
 
 /* hidden 属性依赖 UA 的 display:none，作者样式会覆盖，需显式声明
