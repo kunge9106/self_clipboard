@@ -22,8 +22,6 @@
 
   /* 逐条错开的间隔：列表类内容一条一条浮上来，比整体一起淡入有层次 */
   --fx-step: 45ms;
-  /* 顶部色带的光扫周期：慢，只当氛围 */
-  --fx-sweep-dur: 3.6s;
 }
 
 @keyframes fx-fade-in {
@@ -57,17 +55,6 @@
   }
 }
 
-/* 一道光横扫过去：给顶部色带用。故意做慢（3.6s 一轮、无限循环），
-   只在余光里动，不抢注意力。 */
-@keyframes fx-sweep {
-  from {
-    transform: translateX(-120%);
-  }
-  to {
-    transform: translateX(120%);
-  }
-}
-
 /* ── 具名效果 ──────────────────────────────────────────────────────────────
    `both` 让起始态在动画开始前就生效，避免第一帧闪一下「已显示」的样子 */
 .fx-fade-in {
@@ -80,11 +67,6 @@
 
 .fx-pop-in {
   animation: fx-pop-in var(--dur-slow) var(--ease-spring) both;
-}
-
-/* 无限循环的光扫：只给装饰性元素用，且周期慢，别让人盯着看 */
-.fx-sweep {
-  animation: fx-sweep var(--fx-sweep-dur) var(--ease-out) infinite;
 }
 
 /* 级联进场：直接子元素一条条错开上浮。
@@ -115,7 +97,6 @@
   .fx-fade-in,
   .fx-fade-up,
   .fx-pop-in,
-  .fx-sweep,
   .fx-stagger > * {
     animation: none;
   }

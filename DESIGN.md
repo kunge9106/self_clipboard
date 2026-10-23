@@ -565,7 +565,7 @@ Win10 的 acrylic 在窗口刚创建时不一定立刻铺开。显示后按 200 
 
 样式分两处：`src/styles.css`（全部组件样式）与 `src/animations.css`（**动效系统**）。
 
-`animations.css` 是项目里唯一允许出现 `@keyframes` 的地方 —— 里面定义时长/缓动 token（`--dur-*`、`--ease-*`）和具名效果（`.fx-fade-in` / `.fx-fade-up` / `.fx-pop-in` / `.fx-sweep` / `.fx-stagger`）。业务只加 class，不写裸动画、不硬编码时长。需要重播时用 `replayFx()`（移除 class → 强制回流 → 加回），否则同一个 class 连续存在时浏览器不会重跑。整块都受 `prefers-reduced-motion` 兜底。
+`animations.css` 是项目里唯一允许出现 `@keyframes` 的地方 —— 里面定义时长/缓动 token（`--dur-*`、`--ease-*`）和具名效果（`.fx-fade-in` / `.fx-fade-up` / `.fx-pop-in` / `.fx-stagger`）。业务只加 class，不写裸动画、不硬编码时长。需要重播时用 `replayFx()`（移除 class → 强制回流 → 加回），否则同一个 class 连续存在时浏览器不会重跑。整块都受 `prefers-reduced-motion` 兜底。
 
 ### 8.2 视图与过滤
 
@@ -670,7 +670,7 @@ settings   设置页
 
 **版面是固定 460×410 的**（`.modal.is-tour`）：7 步内容长短差别很大（实测每步内容高 173–298px），不固定的话翻页时卡片忽高忽低、按钮上下跳。正文区 `flex:1` + `overflow-y:auto`，最长那步（设置全解，298px）也放得下（正文区 316px）。各步内容用 `margin-block:auto` 垂直居中 —— 用 `justify-content:center` 会在内容超长时把顶部裁掉，auto margin 溢出时自动归零。
 
-视觉上：顶部三色渐变带 + 一道缓慢横扫的光（`.fx-sweep`）、卡片内两团模糊冷光（`::before` / `::after` 的 blur 圆斑）、图标按 `nth-child(3n)` 轮换蓝/紫/青三色相、当前进度条是拉长的胶囊带光晕、末步按钮是渐变加悬停抬起。第 1 步额外放了一条**复用真实 `.tag` 徽章**的示意卡 —— 讲「记下来是什么样」比讲三张抽象小卡更具体。
+视觉上：顶部三色渐变带（**静态**，试过加横扫的光，与其余部分只做进场不协调，已去掉）、卡片内两团模糊冷光（`::before` / `::after` 的 blur 圆斑）、图标按 `nth-child(3n)` 轮换蓝/紫/青三色相、当前进度条是拉长的胶囊带光晕、末步按钮是渐变加悬停抬起。第 1 步额外放了一条**复用真实 `.tag` 徽章**的示意卡 —— 讲「记下来是什么样」比讲三张抽象小卡更具体。
 
 **记忆用版本号而不是布尔**：`config.json` 的 `tour_seen_version` 与 `TOUR_VERSION` 比较。以后加了新功能把常量 +1，老用户会再看一次增量导览；布尔值只能二选一。**新装弹、升级不弹**靠两处默认值分开 —— `Config::default()` 给 0（没有 `config.json`＝全新安装），serde 缺字段默认给 `TOUR_VERSION`（有配置但没这字段＝老用户）。有单测钉住这条（`tour_version_defaults_split_new_install_and_upgrade`）。
 

@@ -1492,24 +1492,14 @@ body.dark .modal.is-tour::after {
   background: rgba(13, 148, 136, 0.12);
 }
 
-/* 顶部渐变色带 + 一道缓慢横扫的光。
-   色带做三色过渡，光扫由 animations.css 的 fx-sweep 提供 —— 这里只引用，
-   不写 keyframes（项目铁律：动效集中一处定义）。 */
+/* 顶部渐变色带：三色与图标轮换的色相一致。
+   曾在这上面加过一道横扫的光，实际看着与整体不搭（光扫是「动」的，而卡片
+   其余部分只做进场），已去掉 —— 保持静态。 */
 .tour-band {
   position: absolute;
   inset: 0 0 auto 0;
   height: 3px;
-  overflow: hidden;
   background: linear-gradient(90deg, #2f6bff, #7c3aed 45%, #0d9488);
-}
-
-/* 光扫用一个子元素承载，而不是 ::after —— 这样动画能挂在 .fx-sweep 这个
-   具名预设上，prefers-reduced-motion 里统一关掉（伪元素加不了 class）。 */
-.tour-band-sweep {
-  position: absolute;
-  inset: 0;
-  width: 45%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.9), transparent);
 }
 
 .tour-body {
