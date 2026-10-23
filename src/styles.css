@@ -32,10 +32,14 @@
        + 顶部 1px 内高光（玻璃的边缘反光，这是「像材质」的关键）
        + 大而软的外阴影（把它从背景上「托起来」）
      backdrop-filter 仍保留：万一浮层压到了卡片上（窗口窄时可能），
-     那一块会真的糊开，比纯色块自然。 */
-  --hp-bg-top: rgba(255, 255, 255, 0.95);
-  --hp-bg-bottom: rgba(242, 244, 248, 0.93);
-  --hp-border: rgba(0, 0, 0, 0.07);
+     那一块会真的糊开，比纯色块自然。
+
+     渐变分三档而不是两档：两档时上下只差十几个色阶，实际尺寸下看不出来，
+     像一张糊掉的白纸；三档拉开到 30 级左右才看得出「玻璃有厚度」。 */
+  --hp-grad-top: #ffffff;
+  --hp-grad-mid: #f6f8fc;
+  --hp-grad-bottom: #e3e8f1;
+  --hp-border: rgba(0, 0, 0, 0.08);
   --hp-rim: rgba(255, 255, 255, 0.95);
   --hp-shadow: 0 12px 30px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
   --stroke: rgba(255, 255, 255, 0.35);
@@ -54,14 +58,17 @@
   --select: #d9b95c;
   /* 卡片徽章底色。文字色：置顶直接用 --accent，收藏用固定琥珀 400（#ba7517），
      两者在浅色/深色的徽章底上都能读；底色则按主题各调一档浓度。
-     类型徽章按 kind 分色相 —— 三者原先共用同一个中性 tint，扫列表时分不清：
-       文本 = 明蓝（多数派，用最中性、最亮的蓝）
+     类型徽章按 kind 分色相 —— 三者原先共用同一个中性 tint，扫列表时分不清。
+       文本 = 墨色（中性、最高对比）
        图片 = 紫
        文件 = 青绿
-     三个色相间隔够大，11px 小字也不会糊成一片（前一版文本用去饱和石板蓝、
-     文件用深青，两个都偏暗，反而更容易看混）。 */
-  --tag-kind-text-fg: #3b82f6;
-  --tag-kind-text-bg: rgba(59, 130, 246, 0.12);
+     **文本为什么回到中性而不是给个色相**：11px 徽章里已经挤了 7 个语义
+     （置顶蓝 / 收藏琥珀 / 已编辑绿 / 失效红 / 图片紫 / 文件青绿），色相不够分。
+     上一版给文本配了明蓝，结果和「已置顶」的 accent 蓝几乎一模一样 —— 用户一眼
+     就看出不对。而品红、黄绿这些空位要么离失效红太近，要么发脏。
+     文本是默认类型，中性墨色正好表达「这条没啥特殊」，深灰也足够清楚，不暗。 */
+  --tag-kind-text-fg: #3d4552;
+  --tag-kind-text-bg: rgba(61, 69, 82, 0.1);
   --tag-kind-image-fg: #7c3aed;
   --tag-kind-image-bg: rgba(124, 58, 237, 0.12);
   --tag-kind-files-fg: #0d9488;
@@ -80,10 +87,11 @@ body.dark {
   --glass: rgba(28, 28, 30, 0.24);
   --glass-strong: rgba(40, 40, 44, 0.38);
   --glass-hover: rgba(255, 255, 255, 0.1);
-  /* 深色浮层：同样不跟窗口浓度走。底色比卡片亮一档才浮得起来，
+  /* 深色浮层：同样不跟窗口浓度走。上端比下端亮一档才浮得起来，
      发丝边换成浅色（深底上白边才看得见），内高光压到很低否则发灰。 */
-  --hp-bg-top: rgba(60, 60, 67, 0.95);
-  --hp-bg-bottom: rgba(40, 40, 46, 0.94);
+  --hp-grad-top: #4a4a52;
+  --hp-grad-mid: #3f3f46;
+  --hp-grad-bottom: #34343a;
   --hp-border: rgba(255, 255, 255, 0.13);
   --hp-rim: rgba(255, 255, 255, 0.13);
   --hp-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.28);
@@ -95,8 +103,8 @@ body.dark {
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
   --select: #e9d189;
-  --tag-kind-text-fg: #93c0ff;
-  --tag-kind-text-bg: rgba(120, 170, 255, 0.2);
+  --tag-kind-text-fg: #cbd1db;
+  --tag-kind-text-bg: rgba(203, 209, 219, 0.16);
   --tag-kind-image-fg: #bda6ff;
   --tag-kind-image-bg: rgba(160, 130, 255, 0.2);
   --tag-kind-files-fg: #5fd6c8;
@@ -839,11 +847,10 @@ body.dark .tag-missing {
   color: var(--text-dim);
 }
 
-/* 类型徽章：三个类型各一个色相，扫列表时靠颜色就能分出「文本 / 图片 / 文件」。
-   统一取**高亮度 + 中高饱和**的三档，任何一档在 11px 下都读得清 ——
-   前一版把文本和文件都压成了暗色（石板蓝 / 深青），小字上容易看混。
-   不能用 --glass-strong —— 那是半透明白（深色为半透明深灰），叠在本就同色系的
-   卡片底上几乎隐形，看起来就像纯文字。 */
+/* 类型徽章：三个类型要能一眼分开，且不能和任何状态徽章撞色。
+   文本走中性墨色（默认类型，本就不该有「颜色倾向」），图片紫、文件青绿承担
+   区分度 —— 这样七个语义互不重叠。不能用 --glass-strong —— 那是半透明白
+   （深色为半透明深灰），叠在本就同色系的卡片底上几乎隐形，看起来就像纯文字。 */
 .tag-kind-text {
   color: var(--tag-kind-text-fg);
   background: var(--tag-kind-text-bg);
@@ -1278,7 +1285,12 @@ html:not(.hovers-off) .statusbar-clear:hover {
   /* 与 .card 相同的 10px 内边距：浮层是从卡片里「长出来」的一块，留白要接得上 */
   padding: 10px;
   border-radius: var(--radius-sm);
-  background: linear-gradient(160deg, var(--hp-bg-top), var(--hp-bg-bottom));
+  background: linear-gradient(
+    168deg,
+    var(--hp-grad-top) 0%,
+    var(--hp-grad-mid) 42%,
+    var(--hp-grad-bottom) 100%
+  );
   /* 浮层通常浮在空处，这一步大多没有内容可糊；留着是为了压到卡片上时能糊开 */
   backdrop-filter: blur(18px) saturate(140%);
   -webkit-backdrop-filter: blur(18px) saturate(140%);
