@@ -1308,6 +1308,11 @@ async function copyBack(item) {
   } catch (e) {
     toast("复制失败：" + e);
   }
+  // 复制完立刻重查这一条：原文件可能刚被删或挪走，而列表上的「已失效」是**渲染时**
+  // 算出来的 —— 不在这里补一刀，用户看到的就是「提示已经不存在，但卡片上没有任何标记」，
+  // 两个信息互相打架，还得手动触发重绘才一致。
+  // 部分失效（只跳过其中一个）同样要标，因为失效的判定本来就是「有一个不存在就算」。
+  if (item.kind === "files") await recheckMissing([item.id]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1333,6 +1338,31 @@ async function refreshMissing(list) {
     missingFiles = new Set(await invoke("check_files_alive", { ids }));
   } catch {
     return; // 查询失败就不标记，不能因此打断列表渲染
+  }
+  applyMissingMarks();
+}
+
+/**
+ * 只重查这几个 id，把结论并进 missingFiles 并**增量**刷新徽章。
+ *
+ * 与 `refreshMissing` 的分工：那个是「整屏重算」，只在渲染之后跑一次；
+ * 这个是「事后补一刀」，用于复制失败这类**刚刚才知道**状态变了的情形。
+ *
+ * 走增量而不是整屏重渲：用户正看着列表，不能因为一次复制失败就把滚动位置顶掉 ——
+ * 这也正是「无感」的含义，标记自己浮出来，画面不动。
+ */
+async function recheckMissing(ids) {
+  if (ids.length === 0) return;
+  let dead;
+  try {
+    dead = await invoke("check_files_alive", { ids });
+  } catch {
+    return; // 查询失败就不动标记，不能因此打断复制流程
+  }
+  const deadSet = new Set(dead);
+  for (const id of ids) {
+    if (deadSet.has(id)) missingFiles.add(id);
+    else missingFiles.delete(id); // 文件又回来了（撤销删除/移回来）也要能恢复
   }
   applyMissingMarks();
 }

@@ -37,11 +37,13 @@
   --select: #d9b95c;
   /* 卡片徽章底色。文字色：置顶直接用 --accent，收藏用固定琥珀 400（#ba7517），
      两者在浅色/深色的徽章底上都能读；底色则按主题各调一档浓度。
-     类型徽章原先统一用「文字反色」的中性 tint（玻璃变量叠在同色系卡片底上会隐形），
-     但文本/图片/文件三个徽章于是长得一模一样，扫列表时分不清 —— 现在按类型分色相：
-     文本是绝对多数，保持中性不抢眼；图片走紫、文件走青，都与置顶蓝/收藏琥珀/
-     失效红/已编辑绿错开，一列里既分得清又不吵。 */
-  --tag-kind-bg: rgba(0, 0, 0, 0.06);
+     类型徽章按 kind 分色相 —— 三者原先共用同一个中性 tint，扫列表时分不清：
+       文本 = 石板蓝（去饱和，压得住，因为它是绝对多数）
+       图片 = 紫
+       文件 = 青
+     都与置顶蓝/收藏琥珀/已编辑绿/失效红错开。 */
+  --tag-kind-text-fg: #55698a;
+  --tag-kind-text-bg: rgba(85, 105, 138, 0.13);
   --tag-kind-image-fg: #6d4aff;
   --tag-kind-image-bg: rgba(109, 74, 255, 0.12);
   --tag-kind-files-fg: #0d7d8a;
@@ -68,7 +70,8 @@ body.dark {
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
   --select: #e9d189;
-  --tag-kind-bg: rgba(255, 255, 255, 0.12);
+  --tag-kind-text-fg: #a9bcd6;
+  --tag-kind-text-bg: rgba(150, 175, 210, 0.2);
   --tag-kind-image-fg: #ad9dff;
   --tag-kind-image-bg: rgba(139, 116, 255, 0.22);
   --tag-kind-files-fg: #5ec8d6;
@@ -812,12 +815,13 @@ body.dark .tag-missing {
 }
 
 /* 类型徽章：三个类型各一个色相，扫列表时靠颜色就能分出「文本 / 图片 / 文件」。
-   文本是绝对多数，保持中性 —— 给多数派上色会让整列都在抢注意力；
-   图片与文件用色相区分，与置顶蓝、收藏琥珀、失效红、已编辑绿都错开。
+   文本用**去饱和**的石板蓝：它是绝对多数，正蓝色会被误当成置顶（--accent 就是蓝），
+   去饱和后既与置顶区分开，又不会让整列都在喊。图片走紫、文件走青。
    不能用 --glass-strong —— 那是半透明白（深色为半透明深灰），叠在本就同色系的
    卡片底上几乎隐形，看起来就像纯文字。 */
 .tag-kind-text {
-  background: var(--tag-kind-bg);
+  color: var(--tag-kind-text-fg);
+  background: var(--tag-kind-text-bg);
 }
 
 .tag-kind-image {
@@ -851,22 +855,12 @@ body.dark .tag-edited {
   color: #6ddb8e;
 }
 
-/* 圆角模式：材质不走系统模糊、卡片底接近实色，半透明的中性徽章底会糊进卡片里，
-   看起来就跟纯文字一样 → 底色加实、文字改用正文色并提高字重，一眼能看出是徽章。
-   只对**中性**的文本徽章这么处理：图片/文件徽章的色相本身就足以撑起辨识度，
-   若一并改成正文色反而把刚分好的类型又抹平了（且它们的底色浓度已足够）。 */
+/* 圆角模式：材质不走系统模糊、卡片底接近实色，半透明的徽章底会糊进卡片里，
+   看起来就跟纯文字一样 → 提高字重，让人一眼看出是徽章。
+   原先这里还会把中性徽章刷成「加实底色 + 正文色文字」，那是为了救**灰色**徽章的
+   辨识度；现在三个类型各有色相，再刷成正文色等于把刚分开的类型又抹平，所以去掉。 */
 body.round .tag {
   font-weight: 500;
-}
-
-body.round .tag-kind-text {
-  background: rgba(0, 0, 0, 0.1);
-  color: var(--text);
-}
-
-body.dark.round .tag-kind-text {
-  background: rgba(255, 255, 255, 0.16);
-  color: var(--text);
 }
 
 /* 时间推到最右：左边是状态徽章组，右边自成一列，
@@ -1249,16 +1243,23 @@ html:not(.hovers-off) .statusbar-clear:hover {
 }
 
 /* 悬浮补充信息浮层（图片 / 文本 / 文件 共用一份）。
-   卡片本体只能放一张小缩略图或 2 行摘要，鼠标停 1s 后在这里补更多内容。 */
+   卡片本体只能放一张小缩略图或 2 行摘要，鼠标停 1s 后在这里补更多内容。
+
+   面板底子沿用软件里既有的「浮层」配方（右键菜单 .ctx-menu / 弹窗 .modal 同一套）：
+   高不透明底 + 1px 描边 + 大阴影 + --radius-sm。
+   不能用 var(--glass)：那是卡片用的半透明叠层，浮在内容上会把下面的字透出来。 */
 .hover-preview {
   position: fixed;
   z-index: 1500;
-  padding: 8px;
+  /* 与 .card 相同的 10px 内边距：浮层是从卡片里「长出来」的一块，留白要接得上 */
+  padding: 10px;
   border-radius: var(--radius-sm);
   background: rgba(252, 252, 252, 0.96);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
   max-width: 460px;
+  color: var(--text);
+  font-family: var(--font);
   /* 纯展示层：不吃鼠标事件，避免遮挡卡片自身的 hover/click */
   pointer-events: none;
 }
@@ -1274,11 +1275,13 @@ html:not(.hovers-off) .statusbar-clear:hover {
   display: block;
   max-width: 340px;
   max-height: 260px;
+  /* 内圆角比外框小一档，避免「内框圆角顶到外框」的错位感 */
   border-radius: 4px;
 }
 
-/* 文本：保留换行与缩进（与详情弹窗观感一致），长单词 / 长 URL 强制断行。
-   固定 4 行后省略 —— 折行由浏览器排版决定，只有 line-clamp 能准确卡「视觉行数」，
+/* 文本：保留换行与缩进，长单词 / 长 URL 强制断行。
+   13px 与 .card-preview 一致 —— 浮层是同一段文字的延续，字号跳档会让人以为换了东西。
+   固定 4 行后省略：折行由浏览器排版决定，只有 line-clamp 能准确卡「视觉行数」，
    JS 按 \n 数行数学不准（一行十万字会被算成 1 行）。 */
 .hp-text {
   display: -webkit-box;
@@ -1286,23 +1289,24 @@ html:not(.hovers-off) .statusbar-clear:hover {
   -webkit-line-clamp: 4;
   overflow: hidden;
   max-width: 420px;
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.62;
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-all;
 }
 
 /* 文件清单：一条一行，**只给文件名**（完整路径留给右键「查看」）。
-   单条最长占 2 行后省略 —— 文件名本身很少这么长，留 2 行是给超长名字兜底，
-   完全不限会让浮层高度失控。 */
+   同样 13px，与文本浮层保持同一档字号 —— 两种内容在同一个位置上出现，
+   字号不同会显得像两个不同层级的控件。
+   单条最长占 2 行后省略：文件名本身很少这么长，留 2 行是给超长名字兜底。 */
 .hp-files {
   margin: 0;
   padding: 0;
   list-style: none;
   max-width: 420px;
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.62;
   color: var(--text);
 }
 
@@ -1315,9 +1319,10 @@ html:not(.hovers-off) .statusbar-clear:hover {
 }
 
 .hp-files li + li {
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
+/* 折叠行是「还有更多」的提示，压一档色 —— 与卡片 meta 的次要信息同一处理 */
 .hp-files .hp-more {
   color: var(--text-dim);
 }
