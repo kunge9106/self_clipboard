@@ -1,7 +1,7 @@
 {
   "name": "self-clipboard",
   "private": true,
-  "version": "2.2.1-beta.3",
+  "version": "2.3.0",
   "type": "module",
   "description": "轻贴 — 本地剪贴板管理工具（Tauri 2）",
   "license": "MIT",
