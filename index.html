@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>轻贴</title>
     <link rel="stylesheet" href="/src/styles.css" />
+    <link rel="stylesheet" href="/src/animations.css" />
   </head>
   <body>
     <div class="app">
@@ -259,28 +260,70 @@
     </div>
 
     <!-- 首次运行功能导览：7 步卡片式巡览。
-         卡片式而非聚光灯：窗口只有 1060×690，遮罩挖洞很容易连要指的控件一起盖住，
-         而且控件位置随视图/分栏变化，定位逻辑必然错位。
-         正文区可滚动 —— 第 6 步「设置全解」最长，不滚动会把弹窗顶出窗口。
+         卡片式而非聚光灯：窗口只有 1060×690，遮罩挖洞容易连要指的控件一起盖住。
+         宽高固定 460×440、正文区内部滚动 —— 翻页时卡片边缘与按钮都不动。
+         动效统一走 src/animations.css 的具名效果（fx-fade-up），不写裸 keyframes。
          内容与依据见 ONBOARDING.md。 -->
     <div class="modal-mask" id="feature-tour" hidden>
       <div class="modal is-tour">
+        <!-- 顶部渐变色带：整张卡片的设计感主要来自这条。
+             里面那层 fx-sweep 是缓慢横扫的光；动效定义在 animations.css，
+             这里只声明用哪个效果。 -->
+        <div class="tour-band" aria-hidden="true">
+          <i class="tour-band-sweep fx-sweep"></i>
+        </div>
+
         <div class="tour-body">
           <section class="tour-step">
-            <div class="modal-title">复制过的，都在这儿</div>
-            <div class="modal-text">轻贴常驻后台，自动记下三类内容：</div>
-            <ul class="tour-lines">
-              <li><b>文本</b> —— 复制的文字、代码、链接</li>
-              <li><b>图片</b> —— 截图、从网页复制的图</li>
-              <li><b>文件</b> —— 资源管理器里复制的文件（默认关闭，第 5 步讲）</li>
-            </ul>
-            <div class="modal-hint">
-              关掉窗口也照记；内容只存在本机，正文、路径和索引都是加密的。
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="8" y="3.5" width="8" height="3" rx="1" />
+                  <path d="M16 5h1.6A1.4 1.4 0 0 1 19 6.4v13.2A1.4 1.4 0 0 1 17.6 21H6.4A1.4 1.4 0 0 1 5 19.6V6.4A1.4 1.4 0 0 1 6.4 5H8" />
+                </svg>
+              </span>
+              <h3 class="tour-title">复制过的，都在这儿</h3>
             </div>
+            <p class="tour-sub">轻贴常驻后台，自动记下三类内容：</p>
+            <div class="tour-cards">
+              <div class="tour-card">
+                <span class="tour-card-k">文本</span>
+                <span class="tour-card-v">文字、代码、链接</span>
+              </div>
+              <div class="tour-card">
+                <span class="tour-card-k">图片</span>
+                <span class="tour-card-v">截图、网页图</span>
+              </div>
+              <div class="tour-card is-dim">
+                <span class="tour-card-k">文件</span>
+                <span class="tour-card-v">默认关闭</span>
+              </div>
+            </div>
+            <!-- 示意条：复用真实的 .tag 徽章样式，让这一步有个具体的样子可看，
+                 而不是只有三张抽象小卡 + 一大片空白 -->
+            <div class="tour-mock">
+              <span class="tag tag-kind tag-kind-text">文本</span>
+              <span class="tour-mock-line">这是一条被自动记下的内容</span>
+              <span class="tour-mock-time">刚刚</span>
+            </div>
+            <p class="tour-hint">
+              记下来就长这样，点一下即可复制回去。关掉窗口也照记；内容只存在本机，
+              正文、路径和索引都是加密的。
+            </p>
           </section>
 
           <section class="tour-step">
-            <div class="modal-title">左键复制，右键有更多</div>
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="9" y="9" width="11" height="11" rx="2" />
+                  <path d="M5 15V6a2 2 0 0 1 2-2h9" />
+                </svg>
+              </span>
+              <h3 class="tour-title">左键复制，右键有更多</h3>
+            </div>
             <ul class="tour-lines">
               <li><b>左键点卡片</b> —— 立刻复制回剪贴板，去别处粘贴</li>
               <li><b>右键「复制」</b> —— 同样的效果，不想误点时用</li>
@@ -290,13 +333,19 @@
                 保存后会多一条标着「已编辑」的记录
               </li>
             </ul>
-            <div class="modal-hint">
-              编辑是「改副本」：历史永远忠实反映你当初复制了什么。
-            </div>
+            <p class="tour-hint">编辑是「改副本」：历史永远忠实反映你当初复制了什么。</p>
           </section>
 
           <section class="tour-step">
-            <div class="modal-title">置顶、收藏、搜索</div>
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 4.2l2.38 4.83 5.32.77-3.85 3.75.91 5.3L12 16.35l-4.76 2.5.91-5.3L4.3 9.8l5.32-.77z" />
+                </svg>
+              </span>
+              <h3 class="tour-title">置顶、收藏、搜索</h3>
+            </div>
             <ul class="tour-lines">
               <li>
                 <b>置顶</b> —— 让某条浮到最上面。默认「按分类独立」（在文本里置顶不影响
@@ -309,26 +358,41 @@
               </li>
               <li><b>分类</b> —— 左侧能只看文本、图片或文件</li>
             </ul>
-            <div class="modal-hint">
-              选择「批量删除」后左键改为勾选，可一次清掉多条。
-            </div>
+            <p class="tour-hint">选择「批量删除」后左键改为勾选，可一次清掉多条。</p>
           </section>
 
           <section class="tour-step">
-            <div class="modal-title">鼠标停 1 秒，看更多</div>
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2.2 12S5.8 6.2 12 6.2 21.8 12 21.8 12 18.2 17.8 12 17.8 2.2 12 2.2 12z" />
+                  <circle cx="12" cy="12" r="2.6" />
+                </svg>
+              </span>
+              <h3 class="tour-title">鼠标停 1 秒，看更多</h3>
+            </div>
             <ul class="tour-lines">
               <li><b>图片</b> —— 弹出大图</li>
               <li><b>文本</b> —— 比卡片多显示几行（卡片只有 2 行）</li>
               <li><b>文件</b> —— 列出前几个文件名，更多折叠成「…另有 N 个」</li>
             </ul>
-            <div class="modal-hint">
+            <p class="tour-hint">
               卡片上已经显示全的内容不会弹 —— 重复一遍没意义。想看全文和完整路径，
               右键「查看」。
-            </div>
+            </p>
           </section>
 
           <section class="tour-step">
-            <div class="modal-title">文件相关功能默认是关的</div>
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3.5 7.2A1.7 1.7 0 0 1 5.2 5.5h3.9l2 2.4h7.7a1.7 1.7 0 0 1 1.7 1.7v7.9a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7z" />
+                </svg>
+              </span>
+              <h3 class="tour-title">文件相关功能默认是关的</h3>
+            </div>
             <ul class="tour-lines">
               <li>
                 <b>要先打开</b> —— 设置 → 记录与缓存 → 打开「文件复制」，
@@ -343,31 +407,58 @@
                 不会误删还活着的
               </li>
             </ul>
-            <div class="modal-hint">
-              部分文件失效时，复制会自动跳过失效的那些，并提示跳过了几个。
-            </div>
+            <p class="tour-hint">部分文件失效时，复制会自动跳过失效的那些，并提示跳过了几个。</p>
           </section>
 
           <section class="tour-step">
-            <div class="modal-title">设置里最该知道的</div>
-            <ul class="tour-lines">
-              <li><b>通用</b> —— 开机自启、关闭时是否后台运行、置顶是否跨分类同步</li>
-              <li><b>外观</b> —— 材质浓度（40–90%，越高越厚实）、圆角模式</li>
-              <li>
-                <b>记录与缓存</b> ——
-                <b>文件复制默认关着</b>（复制文件没记录就是这条没开）；
-                <b>保留天数</b>到期自动清理，改成 0 是永久保存；
-                <b>缓存目录</b>可以搬走，搬完会重启一次
-              </li>
-              <li><b>关于</b> —— 版本、检查更新、运行环境自检</li>
-            </ul>
-            <div class="modal-hint">
-              三个最常踩的坑已经列在上面了，其余项目按字面意思调即可。
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 7.5h9M17.5 7.5H20" />
+                  <circle cx="15.2" cy="7.5" r="2.3" />
+                  <path d="M4 16.5h3M11.5 16.5H20" />
+                  <circle cx="9.2" cy="16.5" r="2.3" />
+                </svg>
+              </span>
+              <h3 class="tour-title">设置里最该知道的</h3>
             </div>
+            <div class="tour-grid">
+              <div class="tour-cell">
+                <span class="tour-cell-k">通用</span>
+                <span class="tour-cell-v">自启 · 后台运行 · 置顶互通</span>
+              </div>
+              <div class="tour-cell">
+                <span class="tour-cell-k">外观</span>
+                <span class="tour-cell-v">材质浓度 · 圆角模式</span>
+              </div>
+              <div class="tour-cell is-wide">
+                <span class="tour-cell-k">记录与缓存</span>
+                <ul class="tour-hot">
+                  <li>文件复制<b>默认关着</b>，复制文件没记录就是这条没开</li>
+                  <li>保留天数<b>默认 3 天</b>，到期自动清理；改成 0 才是永久保存</li>
+                  <li>缓存目录<b>可以搬走</b>，搬完会重启一次</li>
+                </ul>
+              </div>
+              <div class="tour-cell is-wide">
+                <span class="tour-cell-k">关于</span>
+                <span class="tour-cell-v">版本 · 检查更新 · 运行环境自检</span>
+              </div>
+            </div>
+            <p class="tour-hint">三个最常踩的坑已经列在上面了，其余项目按字面意思调即可。</p>
           </section>
 
           <section class="tour-step">
-            <div class="modal-title">内容只在本机</div>
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="4.8" y="10" width="14.4" height="10.2" rx="2.2" />
+                  <path d="M8.2 10V7.5a3.8 3.8 0 0 1 7.6 0V10" />
+                </svg>
+              </span>
+              <h3 class="tour-title">内容只在本机</h3>
+            </div>
             <ul class="tour-lines">
               <li>
                 <b>加密</b> —— 正文和路径用 Windows 账户级密钥加密，换账户或换机器
@@ -384,13 +475,16 @@
           </section>
         </div>
 
-        <div class="tour-dots" id="tour-dots"></div>
+        <div class="tour-foot">
+          <span class="tour-count" id="tour-count"></span>
+          <div class="tour-dots" id="tour-dots"></div>
+        </div>
 
         <div class="modal-actions">
           <button class="btn-ghost" id="tour-skip">跳过</button>
           <span class="tour-spacer"></span>
           <button class="btn-ghost" id="tour-prev">上一步</button>
-          <button class="btn-primary" id="tour-next">下一步</button>
+          <button class="btn-primary is-cta" id="tour-next">下一步</button>
         </div>
       </div>
     </div>

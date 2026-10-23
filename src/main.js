@@ -2517,7 +2517,19 @@ function tourEls() {
     prev: document.getElementById("tour-prev"),
     next: document.getElementById("tour-next"),
     skip: document.getElementById("tour-skip"),
+    card: mask.querySelector(".modal"),
   };
+}
+
+/** 重播一个具名动效（见 src/animations.css）。
+ *
+ * 必须「移除 → 强制回流 → 加回」：同一个 class 一直在时浏览器不会重跑动画，
+ * 翻页会变成从第二页起就没有进场效果。读一次 offsetWidth 是为了逼出回流。 */
+function replayFx(el, cls) {
+  if (!el) return;
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
 }
 
 function renderTourStep(t) {
@@ -2525,6 +2537,10 @@ function renderTourStep(t) {
   t.steps.forEach((s, i) => (s.hidden = i !== tourStep));
   // 正文区回到顶部：上一步可能是长内容（设置那步），滚到底再翻页会停在半截
   if (t.body) t.body.scrollTop = 0;
+  replayFx(t.steps[tourStep], "fx-stagger");
+  // 步骤计数放在进度条左边，与胶囊互相印证
+  const count = document.getElementById("tour-count");
+  if (count) count.textContent = `${tourStep + 1} / ${t.steps.length}`;
   // 进度点按步数生成，步数改了这里不用动
   if (t.dots && t.dots.childElementCount !== t.steps.length) {
     t.dots.replaceChildren(
@@ -2553,6 +2569,7 @@ function openFeatureTour(fromFirstRun = false) {
   tourStep = 0;
   renderTourStep(t);
   t.mask.hidden = false;
+  replayFx(t.card, "fx-pop-in");
 }
 
 /**

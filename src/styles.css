@@ -1426,21 +1426,102 @@ body.dark .modal {
 /* ---------------------------------------------------------------------------
    首次运行功能导览（7 步卡片式巡览）
    与下面「全文详情弹窗」同一个思路：普通 .modal 的 320px 不够用，单独放宽。
-   **宽高都固定**：7 步的内容长短不一，若不固定，翻页时弹窗会忽高忽低、
+   **宽高都固定 460×440**：7 步内容长短不一，若不固定，翻页时弹窗忽高忽低、
    底部按钮跟着上下跳，眼睛得重新找位置。宁可留白也不让它跳。
-   正文区吃满剩余空间并滚动，进度点与按钮始终钉在同一位置。
+   动效来自 src/animations.css 的 .fx-fade-up —— 这里不写 keyframes（项目铁律：
+   所有动效集中在那一处，业务只声明用哪个效果）。
 --------------------------------------------------------------------------- */
 .modal.is-tour {
+  position: relative;
   width: 460px;
   max-width: 460px;
-  height: 420px;
+  /* 400 是按最高的那一步量的：正文区约 300，最长一步（设置全解）约 230，
+     留 70 的余量。再高就是一整片空白了。 */
+  height: 410px;
+  padding: 22px 22px 16px;
+  /* 给顶部色带和角落光斑裁个边 */
+  overflow: hidden;
+  /* 比普通弹窗更透一点、更亮一点，让它看起来是「一张卡片」而不是一个对话框 */
+  background: linear-gradient(
+    160deg,
+    rgba(255, 255, 255, 0.99) 0%,
+    rgba(248, 250, 254, 0.98) 55%,
+    rgba(243, 246, 252, 0.98) 100%
+  );
+}
+
+body.dark .modal.is-tour {
+  background: linear-gradient(
+    160deg,
+    rgba(46, 46, 54, 0.99) 0%,
+    rgba(38, 38, 44, 0.98) 60%,
+    rgba(33, 33, 39, 0.98) 100%
+  );
+}
+
+/* 右上角一团冷光、左下角一团青光：卡片底色因此不是死平一片。
+   用模糊而不是渐变，边界更自然，也更像「有光透进来」。 */
+.modal.is-tour::before,
+.modal.is-tour::after {
+  content: "";
+  position: absolute;
+  width: 240px;
+  height: 240px;
+  border-radius: 50%;
+  pointer-events: none;
+  filter: blur(38px);
+}
+
+.modal.is-tour::before {
+  top: -120px;
+  right: -80px;
+  background: rgba(47, 107, 255, 0.16);
+}
+
+.modal.is-tour::after {
+  left: -110px;
+  bottom: -140px;
+  background: rgba(13, 148, 136, 0.13);
+}
+
+body.dark .modal.is-tour::before {
+  background: rgba(91, 140, 255, 0.18);
+}
+
+body.dark .modal.is-tour::after {
+  background: rgba(13, 148, 136, 0.12);
+}
+
+/* 顶部渐变色带 + 一道缓慢横扫的光。
+   色带做三色过渡，光扫由 animations.css 的 fx-sweep 提供 —— 这里只引用，
+   不写 keyframes（项目铁律：动效集中一处定义）。 */
+.tour-band {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  overflow: hidden;
+  background: linear-gradient(90deg, #2f6bff, #7c3aed 45%, #0d9488);
+}
+
+/* 光扫用一个子元素承载，而不是 ::after —— 这样动画能挂在 .fx-sweep 这个
+   具名预设上，prefers-reduced-motion 里统一关掉（伪元素加不了 class）。 */
+.tour-band-sweep {
+  position: absolute;
+  inset: 0;
+  width: 45%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.9), transparent);
 }
 
 .tour-body {
+  /* 压住角落的两团光斑（它们是 .modal 的伪元素，z-index 同层会盖住正文） */
+  position: relative;
+  z-index: 1;
   /* flex:1 + 固定总高：正文区吃掉剩余高度，内容超出就在这一块里滚 */
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   /* 滚动条别贴着文字 */
   padding-right: 4px;
 }
@@ -1448,28 +1529,169 @@ body.dark .modal {
 .tour-step {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+  /* 内容垂直居中：各步长短不一，顶对齐会让短的那几步像被截断了上半截。
+     用 auto margin 而不是 justify-content:center —— 后者在内容超长时会
+     把顶部裁掉，auto margin 溢出时自动归零，不会吃字。 */
+  margin-block: auto;
 }
 
-/* 同上：hidden 依赖 UA 的 display:none，会被上面的 display:flex 盖掉，
+/* hidden 依赖 UA 的 display:none，会被上面的 display:flex 盖掉，
    不显式声明的话 7 个步骤会全部堆在弹窗里。 */
 .tour-step[hidden] {
   display: none;
 }
 
-.tour-lines {
-  margin: 0;
-  padding-left: 18px;
+/* ── 标题行：图标 + 标题 ──────────────────────────────────────────────── */
+.tour-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 图标托在一个渐变圆角方块里：整组标题因此有个视觉锚点，不再是光秃秃一行字。
+   内描边当高光，让这块「小牌子」有厚度。 */
+.tour-icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--accent);
+  background: linear-gradient(135deg, rgba(47, 107, 255, 0.2), rgba(124, 58, 237, 0.12));
+  box-shadow: inset 0 0 0 1px rgba(47, 107, 255, 0.14);
+}
+
+/* 7 步轮换三色相：一路看下来颜色有变化，不会像 7 张一模一样的幻灯片。
+   用 nth-child 而不是给每步加 data 属性 —— 步骤顺序变了自己就跟着变。 */
+.tour-body .tour-step:nth-child(3n + 2) .tour-icon {
+  color: #7c3aed;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.2), rgba(219, 39, 119, 0.1));
+  box-shadow: inset 0 0 0 1px rgba(124, 58, 237, 0.14);
+}
+
+.tour-body .tour-step:nth-child(3n) .tour-icon {
+  color: #0d9488;
+  background: linear-gradient(135deg, rgba(13, 148, 136, 0.2), rgba(47, 107, 255, 0.1));
+  box-shadow: inset 0 0 0 1px rgba(13, 148, 136, 0.16);
+}
+
+.tour-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.tour-title {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+
+.tour-sub {
+  font-size: 13px;
+  color: var(--text-dim);
+  /* 贴着标题，读作标题的续句 */
+  margin-top: -4px;
+}
+
+/* ── 第 1 步：三类内容的小卡 ──────────────────────────────────────────── */
+.tour-cards {
+  display: flex;
+  gap: 8px;
+}
+
+.tour-card {
+  flex: 1 1 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 3px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--stroke);
+  background: var(--track-bg);
+}
+
+.tour-card-k {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tour-card-v {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+/* 默认关闭的那一类压暗 —— 与「不是开箱即用」这件事对应上。
+   压太多会读不清，0.72 是「明显次要但仍可读」的档。 */
+.tour-card.is-dim {
+  opacity: 0.72;
+}
+
+/* ── 第 1 步的示意条：复用真实卡片的徽章，让人看到「记下来是什么样」 ──── */
+.tour-mock {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--stroke);
+  background: var(--track-bg);
+}
+
+/* 这条是被截断的正文，省略号由 CSS 出，不用 JS 算 */
+.tour-mock-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tour-mock-time {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
+/* ── 要点列表 ────────────────────────────────────────────────────────── */
+.tour-lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
   font-size: 13px;
   line-height: 1.55;
   color: var(--text);
 }
 
-.tour-lines li::marker {
-  color: var(--text-dim);
+/* 圆点用伪元素而不是 ::marker：marker 的颜色、尺寸在各浏览器里不一致，
+   而且没法做「只染圆点不染文字」的轻量处理 */
+.tour-lines > li {
+  position: relative;
+  padding-left: 14px;
+}
+
+.tour-lines > li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.55;
 }
 
 .tour-lines b {
@@ -1485,35 +1707,131 @@ body.dark .modal {
   background: var(--track-bg);
 }
 
-/* 小字补丁：比正文再压一档，读作「补充说明」而不是第二条正文 */
-.modal-hint {
+/* ── 第 6 步：四个设置标签的网格 ──────────────────────────────────────── */
+.tour-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.tour-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--stroke);
+  background: var(--track-bg);
+}
+
+.tour-cell.is-wide {
+  grid-column: 1 / -1;
+}
+
+.tour-cell-k {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.tour-cell-v {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+/* 「记录与缓存」里的三个坑：单独列出并加重，它们是这一步的重点 */
+.tour-hot {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.tour-hot b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ── 底部小字补丁 ────────────────────────────────────────────────────── */
+.tour-hint {
   font-size: 12px;
   line-height: 1.6;
   color: var(--text-dim);
 }
 
-.tour-dots {
+/* ── 底部：步骤计数 + 胶囊进度 ────────────────────────────────────────── */
+.tour-foot {
+  position: relative;
+  z-index: 1;
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 「3 / 7」：等宽数字，翻页时宽度不跳 */
+.tour-count {
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+
+.tour-dots {
+  flex: 1 1 auto;
+  display: flex;
+  gap: 5px;
   justify-content: center;
 }
 
 .tour-dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: 3px;
   background: var(--track-bg);
-  transition: background 0.15s ease, transform 0.15s ease;
+  transition: width var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
 }
 
+/* 当前这一步：胶囊拉长 + 一圈光晕，余光里就能看出「走到哪了」 */
 .tour-dot.is-on {
+  width: 20px;
   background: var(--accent);
-  transform: scale(1.15);
+  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.16);
 }
 
-/* 底部按钮行：.modal-actions 是右对齐，这里用弹性占位把「跳过」推到最左 */
+body.dark .tour-dot.is-on {
+  box-shadow: 0 0 0 3px rgba(91, 140, 255, 0.22);
+}
+
+/* 底部按钮行也要压住角落光斑 */
+.modal.is-tour .modal-actions {
+  position: relative;
+  z-index: 1;
+}
+
 .tour-spacer {
   flex: 1 1 auto;
+}
+
+/* 主按钮：渐变 + 光晕 + 悬停抬起，作为整条流程的终点该有的分量 */
+.btn-primary.is-cta {
+  background: linear-gradient(135deg, #2f6bff, #6a45e0);
+  box-shadow: 0 4px 14px rgba(47, 107, 255, 0.32);
+  transition: transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.btn-primary.is-cta:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(47, 107, 255, 0.38);
 }
 
 /* ---------------------------------------------------------------------------
