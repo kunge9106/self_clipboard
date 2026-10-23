@@ -111,6 +111,17 @@ pub struct Config {
     /// 老用户升级时被弹一次功能导览是纯打扰，他们早就摸索过了。
     #[serde(default = "tour_version_now")]
     pub tour_seen_version: u32,
+    /// 不跟随 Windows 缩放比例：界面固定按 **100%** 渲染（**默认开启**）。
+    ///
+    /// 为什么默认开：窗口尺寸是按逻辑单位定的（1060×690）。系统缩放调高后可用
+    /// **逻辑**分辨率变小 —— 1080p 屏在 150% 下只有 1280×720，扣掉任务栏约 680，
+    /// 比窗口还矮，底部状态栏直接被切掉，看起来就是「布局乱了」。托盘菜单同理。
+    ///
+    /// 开启时的做法：webview 缩放设为 1/scale，窗口尺寸改用**物理**像素，
+    /// 于是 1 CSS px = 1 物理像素 —— 不管系统怎么缩放，界面看上去都和 100% 时一样。
+    /// 关掉就回到常规的「跟随系统缩放」。
+    #[serde(default = "default_true")]
+    pub ignore_dpi_scale: bool,
 }
 
 /// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次增量。
@@ -233,6 +244,8 @@ impl Default for Config {
             update_cache: None,
             // 全新安装（没有 config.json）才走这里 → 0 → 会弹功能导览
             tour_seen_version: 0,
+            // 默认不跟随系统缩放（见字段注释）
+            ignore_dpi_scale: true,
         }
     }
 }
@@ -331,6 +344,7 @@ pub fn get_settings() -> serde_json::Value {
         // 不自己再存一份版本号常量 —— 那样改后端时前端会静默不跟着变。
         "tourSeenVersion": cfg.tour_seen_version,
         "tourVersion": TOUR_VERSION,
+        "ignoreDpiScale": cfg.ignore_dpi_scale,
     })
 }
 
@@ -369,6 +383,17 @@ pub fn set_clean_on_close(value: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn set_file_copy(value: bool) -> Result<(), String> {
     update(|c| c.file_copy = value);
+    Ok(())
+}
+
+/// 切换「不跟随系统缩放」。改完**立刻**重算 webview 缩放与窗口尺寸，
+/// 不用重启 —— 这个开关的效果是即时可见的，让人重启才生效反而反直觉。
+#[tauri::command]
+pub fn set_ignore_dpi_scale(app: tauri::AppHandle, value: bool) -> Result<(), String> {
+    update(|c| c.ignore_dpi_scale = value);
+    if let Some(w) = app.get_webview_window("main") {
+        crate::effects::apply_dpi_policy(&w);
+    }
     Ok(())
 }
 

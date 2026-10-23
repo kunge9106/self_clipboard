@@ -95,6 +95,10 @@ fn setup_effects(app: &tauri::AppHandle) {
         }
     };
 
+    // 先按当前显示器把窗口夹进工作区，再套材质/圆角 —— 否则高缩放下窗口按
+    // 1060×690 铺开、超出屏幕，圆角区域也会按错的尺寸算一遍。
+    effects::apply_dpi_policy(&window);
+
     let hwnd = match window.hwnd() {
         Ok(h) => h.0 as isize,
         Err(e) => {
@@ -157,8 +161,11 @@ fn setup_effects(app: &tauri::AppHandle) {
                     drop(w2);
                 });
             }
-            // 跨屏拖动 DPI 变化后，半径要按新 DPI 重新换算
+            // 跨屏拖动 DPI 变化后，半径要按新 DPI 重新换算；
+            // 同时窗口可能已经超出新显示器的工作区（缩放变了、可用逻辑分辨率也变了），
+            // 一并夹一次，否则底部会被切掉。
             tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                effects::apply_dpi_policy(&window_for_events);
                 effects::apply_rounded_corners(hwnd);
             }
             // 「关闭时后台运行」：隐藏到托盘而不是退出（迁移自 v1 trayOnClose）
@@ -256,6 +263,7 @@ pub fn run() {
             settings::set_file_copy,
             settings::set_pin_global,
             settings::set_pin_cancel_on_disable,
+            settings::set_ignore_dpi_scale,
             tray::tray_show_main,
             tray::tray_quit,
             tray::tray_menu_look,

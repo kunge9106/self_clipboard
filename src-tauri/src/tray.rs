@@ -22,11 +22,45 @@ use tauri::{
 static TRAY: Mutex<Option<tauri::tray::TrayIcon>> = Mutex::new(None);
 
 const MENU_LABEL: &str = "tray-menu";
+/// 以下三个都是**逻辑单位**（CSS px）。`inner_size` 收的就是逻辑值，会按 DPI 放大；
+/// 而托盘图标坐标、显示器工作区都是**物理像素** —— 两套单位在 `open_menu` 里
+/// 必须显式换算，否则高缩放下菜单会偏半个身位（150% 差 42px），还会被错误地
+/// 夹到屏幕外。
+///
+/// 让托盘菜单套用**与主窗口同一套** DPI 策略。
+///
+/// 为什么菜单也要管：开关打开（不跟随系统缩放）时主界面按物理像素渲染、字号恒定，
+/// 而菜单窗口如果还按默认 zoom 走，就会跟着系统放大 —— 两个窗口放一起看，
+/// 字号一个恒定一个变大，明显不是一个东西。菜单是个 112×84 的小窗口，差异更刺眼。
+///
+/// 返回菜单当前的**物理**像素尺寸，供 `open_menu` 定位时统一单位。
+/// - 不跟随：webview 缩到 1/scale，窗口建成物理尺寸 → 逻辑/物理 1:1，返回值就是常量本身
+/// - 跟随：常规行为，窗口是逻辑尺寸，物理值要乘 scale
+fn menu_physical_size(win: &tauri::WebviewWindow) -> (f64, f64) {
+    let scale = win.scale_factor().unwrap_or(1.0).max(0.1);
+    if crate::settings::get().ignore_dpi_scale {
+        let _ = win.set_zoom(1.0 / scale);
+        let _ = win.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+            MENU_W as u32,
+            MENU_H as u32,
+        )));
+        (MENU_W, MENU_H)
+    } else {
+        let _ = win.set_zoom(1.0);
+        let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(MENU_W, MENU_H)));
+        (MENU_W * scale, MENU_H * scale)
+    }
+}
+
 /// 贴合内容宽度：6px 菜单内边距×2 + 10px 项内边距×2 + 14px 图标 + 8px 间距
-/// + 「显示轻贴」4 个汉字（13px 字号 ≈ 52px）+ 2px 描边 ≈ 108px，留 4px 余量。
+/// + 「显示轻贴」4 个汉字（13px 字号 ≈ 52px）+ 2px 描边 ≈ 108px。
+///
+/// 余量给到 12px 而不是贴着算：不同 Windows 版本的中文字体宽度有出入（缺字形回退到
+/// 别的字体时会更宽），算得太紧就会把 34px 高的菜单项挤成两行 —— 用户同事在
+/// 150% 缩放下实测过。文字另加 `white-space: nowrap` 兜底（宁可贴边也不换行）。
 /// 以后菜单项变多/变长，把这里加回去即可。
-const MENU_W: f64 = 112.0;
-/// 两个 34px 菜单项 + 6px 上下内边距 + 2px 描边
+const MENU_W: f64 = 120.0;
+/// 两个 34px 菜单项 + 2px 项间距 + 6px 上下内边距×2 + 2px 描边
 const MENU_H: f64 = 84.0;
 /// 菜单与鼠标（托盘图标）之间的间隙
 const MENU_GAP: f64 = 8.0;
@@ -130,19 +164,25 @@ fn open_menu(app: &AppHandle, pos: PhysicalPosition<f64>) {
         return;
     };
 
+    // 先套 DPI 策略并拿到菜单的**物理**尺寸 —— 结果与下面的 pos / work_area 同单位，
+    // 直接相减即可，不再混用两套单位（150% 下曾偏半个身位，差约 42px）。
+    let (mw, mh) = menu_physical_size(&win);
+    let gap = MENU_GAP * win.scale_factor().unwrap_or(1.0).max(0.1);
+
     // 托盘通常在任务栏上（多在屏幕下缘）→ 菜单弹在光标**上方**；再按显示器工作区夹一下，
     // 保证不会跑到屏幕外（多屏 / 负坐标显示器也算对）。
-    let (mut x, mut y) = (pos.x, pos.y - MENU_H - MENU_GAP);
+    let (mut x, mut y) = (pos.x, pos.y - mh - gap);
     if let Ok(Some(mon)) = app.monitor_from_point(pos.x, pos.y) {
         let wa = mon.work_area();
         let (ax, ay) = (wa.position.x as f64, wa.position.y as f64);
         let (aw, ah) = (wa.size.width as f64, wa.size.height as f64);
         if y < ay + 4.0 {
             // 上面放不下（例如任务栏在屏幕顶部）→ 翻到光标下方
-            y = pos.y + MENU_GAP;
+            y = pos.y + gap;
         }
-        x = x.min(ax + aw - MENU_W - 4.0).max(ax + 4.0);
-        y = y.min(ay + ah - MENU_H - 4.0).max(ay + 4.0);
+        // 菜单比工作区还大时（极端高缩放），max 会把 min 压过去 → 用 min/max 顺序兜住
+        x = x.min(ax + aw - mw - 4.0).max(ax + 4.0);
+        y = y.min(ay + ah - mh - 4.0).max(ay + 4.0);
     }
 
     let _ = win.set_position(PhysicalPosition::new(x, y));

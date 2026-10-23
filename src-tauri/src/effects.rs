@@ -971,6 +971,118 @@ static RESIZE_ORIGIN: std::sync::Mutex<(i32, i32, i32, i32, i32, i32)> =
 const MIN_LOGICAL_W: i32 = 720;
 const MIN_LOGICAL_H: i32 = 480;
 
+/// 窗口与屏幕边缘之间留的余量（逻辑 px）
+const FIT_EDGE: f64 = 12.0;
+
+/// 「不跟随系统缩放」的运行时开关。放静态是因为自定义缩放的逐帧计算也要读它。
+static IGNORE_DPI: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// 设计尺寸 = 100% 缩放时窗口的物理尺寸
+const DESIGN_W: f64 = 1060.0;
+const DESIGN_H: f64 = 690.0;
+
+pub fn ignore_dpi() -> bool {
+    IGNORE_DPI.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 按「不跟随系统缩放」策略设置 webview 缩放与窗口尺寸，两个方向都走这里。
+///
+/// 开启时：webview 缩放设为 1/scale，窗口改用**物理**像素定尺寸 ——
+/// 于是 1 CSS px = 1 物理像素，不管系统缩放怎么调，界面看上去都和 100% 时一样。
+/// 关闭时：缩放回 1，窗口按逻辑单位并夹进工作区（就是常规行为）。
+pub fn apply_dpi_policy(window: &tauri::WebviewWindow) {
+    let ignore = crate::settings::get().ignore_dpi_scale;
+    IGNORE_DPI.store(ignore, std::sync::atomic::Ordering::Relaxed);
+
+    let Ok(Some(mon)) = window.current_monitor() else {
+        let _ = window.set_zoom(1.0);
+        return;
+    };
+    let scale = mon.scale_factor().max(0.1);
+
+    if !ignore {
+        let _ = window.set_zoom(1.0);
+        fit_to_work_area(window);
+        return;
+    }
+
+    let _ = window.set_zoom(1.0 / scale);
+
+    let wa = mon.work_area().size;
+    let max_w = (wa.width as f64 - FIT_EDGE * 2.0).max(320.0);
+    let max_h = (wa.height as f64 - FIT_EDGE * 2.0).max(320.0);
+    let w = DESIGN_W.min(max_w);
+    let h = DESIGN_H.min(max_h);
+
+    // 最小尺寸也按物理像素 —— 此模式下逻辑与物理是 1:1
+    let _ = window.set_min_size(Some(tauri::Size::Physical(tauri::PhysicalSize::new(
+        (MIN_LOGICAL_W as f64).min(max_w) as u32,
+        (MIN_LOGICAL_H as f64).min(max_h) as u32,
+    ))));
+
+    if let Ok(cur) = window.inner_size() {
+        if (cur.width as f64 - w).abs() > 1.0 || (cur.height as f64 - h).abs() > 1.0 {
+            let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+                w as u32, h as u32,
+            )));
+        }
+    }
+}
+
+/// 把窗口夹进当前显示器的工作区（全部按**逻辑 px** 计算）。
+///
+/// 为什么需要：默认窗口 1060×690 逻辑 px。系统缩放调高后可用**逻辑**分辨率变小 ——
+/// 1080p 屏在 150% 下只有 1280×720，扣掉任务栏约 680，690 高的窗口直接装不进去，
+/// 底部状态栏被切掉，看起来就是「布局乱了」。
+///
+/// 顺带把最小尺寸也夹一遍：小屏 + 高缩放时 720×480 都可能超出工作区，
+/// 那样窗口既放不下又缩不回去，只能拖来拖去。
+pub fn fit_to_work_area(window: &tauri::WebviewWindow) {
+    let Ok(Some(mon)) = window.current_monitor() else {
+        return;
+    };
+    let scale = mon.scale_factor();
+    if !(scale > 0.0) {
+        return;
+    }
+    let wa = mon.work_area().size;
+    // 下限 320 是个兜底：真拿到异常小的值时不至于把窗口压成一条
+    let max_w = (wa.width as f64 / scale - FIT_EDGE * 2.0).max(320.0);
+    let max_h = (wa.height as f64 / scale - FIT_EDGE * 2.0).max(320.0);
+
+    let min_w = (MIN_LOGICAL_W as f64).min(max_w);
+    let min_h = (MIN_LOGICAL_H as f64).min(max_h);
+    let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize::new(
+        min_w, min_h,
+    ))));
+
+    let Ok(cur) = window.inner_size() else {
+        return;
+    };
+    let (cw, ch) = (cur.width as f64 / scale, cur.height as f64 / scale);
+    let (mut nw, mut nh) = (cw, ch);
+    if nw > max_w {
+        nw = max_w;
+    }
+    if nh > max_h {
+        nh = max_h;
+    }
+    if nw < min_w {
+        nw = min_w;
+    }
+    if nh < min_h {
+        nh = min_h;
+    }
+    // 只有真需要改才动窗口，避免每次启动都触发一次多余的 Resized
+    if (nw - cw).abs() > 0.5 || (nh - ch).abs() > 0.5 {
+        crate::log_print!(
+            "[effects] 窗口超出工作区，按缩放 {scale} 夹到 {nw:.0}×{nh:.0}（原 {cw:.0}×{ch:.0}）"
+        );
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(nw, nh)));
+    }
+}
+
 pub fn begin_custom_resize(hwnd: isize, edge: u32) {
     if edge == 0 {
         return;
@@ -1017,10 +1129,12 @@ fn resize_move_to_cursor(hwnd: isize) {
         const SWP_NOZORDER: u32 = 0x0004;
         const SWP_NOACTIVATE: u32 = 0x0010;
 
-        // 最小尺寸按逻辑 px 定义，这里按窗口 DPI 换算成物理像素
+        // 最小尺寸按逻辑 px 定义，这里按窗口 DPI 换算成物理像素。
+        // 「不跟随系统缩放」时 1 CSS px = 1 物理 px，不再乘比例。
         let dpi = GetDpiForWindow(hwnd).max(96) as f64 / 96.0;
-        let min_w = (MIN_LOGICAL_W as f64 * dpi).round() as i32;
-        let min_h = (MIN_LOGICAL_H as f64 * dpi).round() as i32;
+        let factor = if ignore_dpi() { 1.0 } else { dpi };
+        let min_w = (MIN_LOGICAL_W as f64 * factor).round() as i32;
+        let min_h = (MIN_LOGICAL_H as f64 * factor).round() as i32;
 
         let (sx, sy, l0, t0, r0, b0) = RESIZE_ORIGIN
             .lock()
