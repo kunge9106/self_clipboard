@@ -2696,37 +2696,59 @@ fn encrypt_legacy_entities(dir: &PathBuf) -> usize {
 
 fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     let path = dir.join("index.json");
-    match fs::read_to_string(&path) {
-        Ok(s) => {
-            let mut v: Vec<HistoryItem> = serde_json::from_str(&s).unwrap_or_else(|e| {
-                crate::log_warn!("[clipboard] index.json 解析失败：{e}，返回空（历史清空）");
-                Vec::new()
-            });
-            // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
-            // 历史是默认视图，用户当初置顶的内容在历史里仍然浮顶，行为不变。
-            let mut migrated = 0usize;
-            for i in v.iter_mut() {
-                if i.pinned && !i.pinned_views.iter().any(|x| x == "history") {
-                    i.pinned_views.push("history".to_string());
-                    migrated += 1;
-                }
-            }
-            if migrated > 0 {
-                crate::log_print!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
-            }
-            v
+    // 按**字节**读，不按字符串：新格式是 DPAPI 密文（带 ENC_MAGIC），不是 UTF-8 JSON。
+    let Ok(raw) = fs::read(&path) else {
+        return Vec::new();
+    };
+    // decode_text_bytes 同时兼容老版本的明文 JSON（没有魔数 → 原样返回），
+    // 老用户升级后历史不会因为格式切换而清空。
+    let Some(json) = decode_text_bytes(&raw) else {
+        crate::log_err!(
+            "clipboard",
+            "index.json 解密失败（可能换了 Windows 账户或机器），历史列表读不出来"
+        );
+        return Vec::new();
+    };
+    let mut v: Vec<HistoryItem> = serde_json::from_str(&json).unwrap_or_else(|e| {
+        crate::log_warn!("[clipboard] index.json 解析失败：{e}，返回空（历史清空）");
+        Vec::new()
+    });
+    // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
+    // 历史是默认视图，用户当初置顶的内容在历史里仍然浮顶，行为不变。
+    let mut migrated = 0usize;
+    for i in v.iter_mut() {
+        if i.pinned && !i.pinned_views.iter().any(|x| x == "history") {
+            i.pinned_views.push("history".to_string());
+            migrated += 1;
         }
-        Err(_) => Vec::new(),
     }
+    if migrated > 0 {
+        crate::log_print!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
+    }
+    v
 }
 
+/// 落盘索引：**整份 DPAPI 加密**，落盘的不是明文 JSON。
+///
+/// 为什么必须加密：`index.json` 里有 `preview`（正文前 2 行）和 `files`（完整
+/// 路径列表）—— 前者可能直接是密码、密钥、聊天记录，后者暴露目录结构与项目名。
+/// 内容实体（`data/` `files/`）早就加密了，索引却是明文，等于把同一份内容
+/// 抄了个不加密的副本放在旁边，加密就白做了。
+///
+/// 为什么整份加密而不是逐字段：`save_index` 每次捕获都会跑，逐字段要对上千条
+/// 各调一次 `CryptProtectData`，一次复制能卡上百毫秒；整份只调一次。
+/// 代价是 index.json 不再是人眼可读的 JSON —— 但它本来就是程序独占的索引，
+/// 需要排查时看日志就够了。
+///
+/// 加密失败时 `encrypt_text` 会退回明文（与内容实体同一策略）：
+/// 宁可少一层保护，也不能因为 DPAPI 异常把整份历史弄丢。读出时靠魔数区分。
 fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
     let path = dir.join("index.json");
     match serde_json::to_string_pretty(hist) {
         Ok(s) => {
             // 写失败要记：index.json 是重启后恢复历史/置顶/收藏的唯一依据，
             // 静默失败会表现为「重启后记录全没了」却查无实据。
-            if let Err(e) = fs::write(&path, s) {
+            if let Err(e) = fs::write(&path, encrypt_text(&s)) {
                 crate::log_err!("clipboard", "index.json 写入失败：{e}");
             }
         }
@@ -2749,10 +2771,11 @@ fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
             continue;
         }
         let rel = format!("files/{}.txt", item.id);
-        if fs::write(dir.join(&rel), files.join("\r\n").as_bytes()).is_ok() {
-            item.files_path = Some(rel);
-            n += 1;
-        }
+        // 必须走 write_text_entity（会自动 DPAPI 加密）—— 这里原先是裸 fs::write 明文，
+        // 与「内容落盘一律加密」自相矛盾，等于给老条目补了一份明文副本。
+        write_text_entity(dir, &rel, &files.join("\r\n"));
+        item.files_path = Some(rel);
+        n += 1;
     }
     n
 }
@@ -3283,6 +3306,74 @@ mod tests {
             decode_text_bytes(legacy).as_deref(),
             Some("旧版本留下的明文内容")
         );
+    }
+
+    /// 造一份最小可用的条目，供索引相关用例复用。
+    fn sample_item(id: &str, preview: &str) -> HistoryItem {
+        HistoryItem {
+            id: id.to_string(),
+            kind: "text".into(),
+            ts: 1,
+            pinned: false,
+            pinned_views: Vec::new(),
+            favorite: false,
+            edited: false,
+            preview: preview.to_string(),
+            preview_truncated: false,
+            size: 1,
+            text_path: None,
+            img_path: None,
+            files_path: None,
+            files: None,
+        }
+    }
+
+    /// 索引必须**整份加密**落盘。
+    ///
+    /// 这条是真需求而不是洁癖：`index.json` 里有 `preview`（正文前 2 行）和
+    /// `files`（完整路径）。内容实体已经加密了，索引若还是明文，等于给同一份
+    /// 内容留了个不加密的副本，前面的加密全白做。
+    #[test]
+    fn index_saved_encrypted_and_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("qingtie-idx-enc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let secret = "密码 hunter2 不能出现在索引里";
+        save_index(&dir, &vec![sample_item("t1", secret)]);
+
+        let raw = fs::read(dir.join("index.json")).unwrap();
+        assert!(raw.starts_with(ENC_MAGIC), "索引必须带加密魔数");
+        let needle = "hunter2".as_bytes();
+        assert!(
+            !raw.windows(needle.len()).any(|w| w == needle),
+            "index.json 里不能出现明文正文"
+        );
+
+        // 解回来必须逐字一致，否则加密就成了丢数据
+        let back = load_index(&dir);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].preview, secret);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 兼容性：老版本 index.json 是明文 JSON，读取时必须照常解析（靠魔数区分），
+    /// 否则升级后所有人的历史会被当成「解析失败」清空。
+    #[test]
+    fn index_accepts_legacy_plaintext() {
+        let dir = std::env::temp_dir().join(format!("qingtie-idx-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let json = serde_json::to_string_pretty(&vec![sample_item("t2", "旧版明文索引")]).unwrap();
+        fs::write(dir.join("index.json"), json.as_bytes()).unwrap();
+
+        let back = load_index(&dir);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].preview, "旧版明文索引");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 带魔数但内容被破坏 → 返回 None（而不是把垃圾当文本显示出来）。
