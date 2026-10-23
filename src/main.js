@@ -1927,6 +1927,9 @@ function settingsGeneralHtml(s) {
     <div class="row"><label>　└ 关闭时取消同步置顶</label>
       <input type="checkbox" id="set-pin-cancel" ${s.pinCancelOnDisable ? "checked" : ""} />
       <span class="hint">勾选则关掉互通时连同它产生的同步置顶一起取消（置顶回到当初的分类）；不勾选则同步置顶永久保留</span></div>
+    <div class="row"><label>不跟随系统缩放</label>
+      <input type="checkbox" id="set-ignore-dpi" ${s.ignoreDpiScale ? "checked" : ""} />
+      <span class="hint">界面固定按 100% 显示，Windows 调缩放后窗口与布局不再跟着变（含托盘菜单）。关掉则恢复正常跟随</span></div>
     <div class="btn-row">
       <button class="btn-ghost" id="replay-tour">重新查看功能引导</button>
     </div>`;
@@ -2753,6 +2756,7 @@ function bindSettings(view) {
   bindCheck("set-clean-confirm", "set_clean_confirm_exit");
 
   bindCheck("set-pin-cancel", "set_pin_cancel_on_disable");
+  bindCheck("set-ignore-dpi", "set_ignore_dpi_scale");
 
   // 重看功能导览：只打开，不写「已看过」标记 —— 看多少次都不影响首次判断
   const replayTour = view.querySelector("#replay-tour");

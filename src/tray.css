@@ -31,6 +31,8 @@
   align-items: center;
   gap: 8px;
   height: 34px;
+  /* 高度写死 34px，项就不许被内容撑开 */
+  flex: 0 0 34px;
   padding: 0 10px;
   border: 0;
   border-radius: var(--radius-sm);
@@ -40,6 +42,14 @@
   font-size: 13px;
   text-align: left;
   cursor: default;
+}
+
+/* 换行是这里最容易出现的外观事故：宽度算得再准，换台机器字体不同（缺字形回退）
+   文字就可能比预留的宽，一行变两行、把整个菜单撑变形。寧可顶到边上也不换行。 */
+.tray-item span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 html:not(.hovers-off) .tray-item:hover {
