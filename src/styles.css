@@ -858,7 +858,8 @@ body.dark.round .tag-kind {
   word-break: break-all;
   display: -webkit-box;
   /* 2 行：列表是「扫一眼找哪条」的视图，不是用来读正文的 ——
-     想细看有右键「查看全文」。2 行让卡片高度更整齐、同屏条数更多。
+     想细看可以右键「查看」，或鼠标停留 1s 看悬浮浮层（.hover-preview）。
+     2 行让卡片高度更整齐、同屏条数更多。
      （后端 make_text_preview 也按 2 行生成，两边必须一致，否则会出现
       「内容够 3 行但被这里截成 2 行」的错位感。） */
   -webkit-line-clamp: 2;
@@ -867,7 +868,7 @@ body.dark.round .tag-kind {
   user-select: text;
 }
 
-/* 图片条目小缩略图（按原宽高比缩到 160×60 内，左对齐；大图见 .img-preview） */
+/* 图片条目小缩略图（按原宽高比缩到 160×60 内，左对齐；大图见 .hover-preview） */
 .card-image {
   display: block;
   max-width: 160px;
@@ -1221,32 +1222,74 @@ html:not(.hovers-off) .statusbar-clear:hover {
   color: var(--text);
 }
 
-/* 图片悬浮预览浮层（卡片布局保持统一，大图在悬浮时弹出） */
-.img-preview {
+/* 悬浮补充信息浮层（图片 / 文本 / 文件 共用一份）。
+   卡片本体只能放一张小缩略图或 2 行摘要，鼠标停 1s 后在这里补更多内容。 */
+.hover-preview {
   position: fixed;
   z-index: 1500;
-  padding: 6px;
+  padding: 8px;
   border-radius: var(--radius-sm);
   background: rgba(252, 252, 252, 0.96);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
+  max-width: 460px;
   /* 纯展示层：不吃鼠标事件，避免遮挡卡片自身的 hover/click */
   pointer-events: none;
 }
 
-/* hidden 属性依赖 UA 的 display:none，作者样式会覆盖，需显式声明 */
-.img-preview[hidden] {
+/* hidden 属性依赖 UA 的 display:none，作者样式会覆盖，需显式声明
+   （三个内容槽也各自 hidden，所以用子元素通配统一声明一次） */
+.hover-preview[hidden],
+.hover-preview > [hidden] {
   display: none;
 }
 
-.img-preview img {
+.hover-preview img {
   display: block;
   max-width: 340px;
   max-height: 260px;
   border-radius: 4px;
 }
 
-body.dark .img-preview {
+/* 文本：保留换行与缩进（与详情弹窗观感一致），长单词 / 长 URL 强制断行 */
+.hp-text {
+  max-width: 420px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 文件清单：一条一行；单条最长占 2 行后省略 ——
+   完全不截断会让 5 条深路径把浮层拉到屏幕外，只截 1 行又看不到文件名 */
+.hp-files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-width: 420px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.hp-files li {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  word-break: break-all;
+}
+
+.hp-files li + li {
+  margin-top: 2px;
+}
+
+.hp-files .hp-more {
+  color: var(--text-dim);
+}
+
+body.dark .hover-preview {
   background: rgba(40, 40, 44, 0.96);
 }
 

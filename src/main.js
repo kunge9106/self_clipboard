@@ -627,7 +627,7 @@ const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
  * 容器一换，scrollTop 必然归零。所以必须在重建**之前**把位置记下来。
  */
 function render({ keepScroll = false } = {}) {
-  hideImagePreview(); // 重绘后旧卡片已销毁，避免浮层残留
+  hideHoverPreview(); // 重绘后旧卡片已销毁，避免浮层残留
   const prevTop = keepScroll && wrapEl ? wrapEl.scrollTop : 0;
   const view = document.getElementById("view");
   const toolbar = document.querySelector(".toolbar");
@@ -818,7 +818,7 @@ function cardEl(item) {
 
   if (item.kind === "image") {
     // 图片条目：内容区放小缩略图（不显示「[图片]」占位字），
-    // 大图仍由鼠标悬浮时的浮层给出（见 bindImagePreview）
+    // 大图仍由鼠标悬浮时的浮层给出（见 bindHoverPreview）
     const img = document.createElement("img");
     img.className = "card-image";
     img.alt = "图片";
@@ -826,7 +826,6 @@ function cardEl(item) {
     // 否则一次渲染几十张图会同时产生几十个大 BMP 字符串（内存峰值飙升）
     img.dataset.imgId = item.id;
     body.appendChild(img);
-    bindImagePreview(card, item);
   } else {
     const preview = document.createElement("div");
     preview.className = "card-preview";
@@ -834,6 +833,10 @@ function cardEl(item) {
     body.appendChild(preview);
   }
   card.appendChild(body);
+
+  // 悬浮 1s 弹补充内容：图片给大图、文本给更多行、文件给路径清单。
+  // 三种类型共用同一个浮层 —— 定位 / 显隐 / 延迟这套逻辑与类型无关，只该有一份。
+  bindHoverPreview(card, item);
 
   // 左键 → 复制回剪贴板；批量选中模式下改为切换选中
   card.addEventListener("click", () => {
@@ -852,10 +855,15 @@ function cardEl(item) {
 }
 
 // ---------------------------------------------------------------------------
-// 图片悬浮预览
-// 卡片布局与其它类型完全一致（图片条目只显示「[图片]」一行），
-// 鼠标移入后再在卡片旁弹出大图。效率取舍：按需读取 + 内存缓存，
-// 同一张图第二次悬浮不再走 IPC / 磁盘。
+// 悬浮补充信息浮层（图片 / 文本 / 文件 共用一份）
+//
+// 卡片本体只能放一张小缩略图或 2 行摘要，鼠标停留 1s 后按类型补更多内容：
+//   图片 → 卡片旁弹大图
+//   文本 → 比卡片预览多几行，超出截断
+//   文件 → 前 5 条路径，其余折叠成「…另有 N 个」
+//
+// 只做**一个**浮层盒子：定位、显隐、延迟这套逻辑跟内容类型无关。
+// 若按类型各造一个浮层，这份逻辑就会变成三份，日后改延迟 / 改边界必然不同步。
 // ---------------------------------------------------------------------------
 
 /**
@@ -985,27 +993,57 @@ function observeImages(rootEl) {
     .forEach((el) => imgObserver.observe(el));
 }
 
+// 浮层里三个内容槽常驻，按类型显示其中一个（切换时把另外两个清空，
+// 避免上一次的文本 / 清单在 DOM 里留着）。
+const PREVIEW_TEXT_MAX_LINES = 12;
+const PREVIEW_TEXT_MAX_CHARS = 520;
+const PREVIEW_FILES_MAX = 5;
+
 function ensurePreviewBox() {
   if (previewBox) return previewBox;
   const box = document.createElement("div");
-  box.className = "img-preview";
+  box.className = "hover-preview";
   box.hidden = true;
   const img = document.createElement("img");
   img.alt = "预览";
-  box.appendChild(img);
+  const text = document.createElement("div");
+  text.className = "hp-text";
+  const files = document.createElement("ul");
+  files.className = "hp-files";
+  box.append(img, text, files);
   document.body.appendChild(box);
   previewBox = box;
   return box;
 }
 
-function hideImagePreview() {
+/**
+ * 只留 kind 对应的内容槽，其余清空。
+ *
+ * 清空而不是只隐藏：图片槽留着上一次的 src 会一直占着解码后的位图内存，
+ * 文本 / 清单留着也无意义。浮层是纯展示层，每次重建内容的成本可以忽略。
+ */
+function pickPreviewSlot(box, kind) {
+  const img = box.querySelector("img");
+  const text = box.querySelector(".hp-text");
+  const files = box.querySelector(".hp-files");
+  img.hidden = kind !== "image";
+  text.hidden = kind !== "text";
+  files.hidden = kind !== "files";
+  if (kind !== "image") img.removeAttribute("src");
+  if (kind !== "text") text.textContent = "";
+  if (kind !== "files") files.replaceChildren();
+  return { img, text, files };
+}
+
+function hideHoverPreview() {
   if (previewTimer) {
     clearTimeout(previewTimer);
     previewTimer = null;
   }
   if (previewBox && !previewBox.hidden) {
     previewBox.hidden = true;
-    previewBox.firstChild.removeAttribute("src");
+    // 大图的 dataURL 松开引用，别让它在浮层里常驻
+    previewBox.querySelector("img").removeAttribute("src");
   }
 }
 
@@ -1025,40 +1063,110 @@ function placePreview(box, card) {
   box.style.top = `${y}px`;
 }
 
-function bindImagePreview(card, item) {
-  // 悬浮多久才弹预览。
+function bindHoverPreview(card, item) {
+  // 悬浮多久才弹浮层。
   //
   // 演进：120ms（一碰就弹，扫过列表连弹十几次，晃眼且白触发缩略图加载）
   //   → 2000ms（用户嫌长）→ 1000ms。
   // 1s 是个平衡点：快速扫过列表不会触发，停下来看一眼时也不觉得迟。
+  // 图片 / 文本 / 文件统一 1s，同一份列表里弹得快慢不一会显得很随意。
   const HOVER_DELAY_MS = 1000;
   card.addEventListener("mouseenter", () => {
     if (previewTimer) clearTimeout(previewTimer);
-    previewTimer = setTimeout(() => showImagePreview(card, item), HOVER_DELAY_MS);
+    previewTimer = setTimeout(() => showHoverPreview(card, item), HOVER_DELAY_MS);
   });
-  card.addEventListener("mouseleave", hideImagePreview);
+  card.addEventListener("mouseleave", hideHoverPreview);
 }
 
-async function showImagePreview(card, item) {
+/**
+ * 文本截断：**行数与字符数两道上限都要**。
+ *
+ * 只有行数上限时，单行几万字的文本（压缩过的 JSON、日志一行流）照样能把浮层撑爆；
+ * 只有字符上限时，短行多的文本会挤成一大坨没有结构的字。
+ */
+function clampPreviewText(text) {
+  let s = text;
+  let cut = false;
+  const lines = s.split("\n");
+  if (lines.length > PREVIEW_TEXT_MAX_LINES) {
+    s = lines.slice(0, PREVIEW_TEXT_MAX_LINES).join("\n");
+    cut = true;
+  }
+  if (s.length > PREVIEW_TEXT_MAX_CHARS) {
+    s = s.slice(0, PREVIEW_TEXT_MAX_CHARS);
+    cut = true;
+  }
+  return cut ? `${s}…` : s;
+}
+
+/** 文件清单：前 N 条，其余折叠成一行「…另有 N 个」 */
+function fillFilePreview(ul, item) {
+  const all = Array.isArray(item.files) ? item.files : [];
+  const lis = all.slice(0, PREVIEW_FILES_MAX).map((p) => {
+    const li = document.createElement("li");
+    li.textContent = p;
+    return li;
+  });
+  if (all.length > PREVIEW_FILES_MAX) {
+    const li = document.createElement("li");
+    li.className = "hp-more";
+    li.textContent = `…另有 ${all.length - PREVIEW_FILES_MAX} 个`;
+    lis.push(li);
+  }
+  // 极老的条目可能没有 files 字段 → 退回卡片上那条摘要，至少不是个空浮层
+  if (lis.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = item.preview || "";
+    lis.push(li);
+  }
+  ul.replaceChildren(...lis);
+}
+
+async function showHoverPreview(card, item) {
   previewTimer = null;
   if (!card.isConnected || !card.matches(":hover")) return;
 
-  let url;
-  try {
-    url = await loadImage(item.id);
-  } catch {
-    return; // 图片文件缺失/损坏 → 不弹预览
-  }
-  // 读取期间鼠标可能已移开
-  if (!card.isConnected || !card.matches(":hover")) return;
-
   const box = ensurePreviewBox();
-  const img = box.firstChild;
-  // 图片尺寸只有加载完才准，加载后重新定位一次
-  img.onload = () => {
-    if (!box.hidden) placePreview(box, card);
-  };
-  img.src = url;
+
+  if (item.kind === "image") {
+    let url;
+    try {
+      url = await loadImage(item.id);
+    } catch {
+      return; // 图片文件缺失/损坏 → 不弹预览
+    }
+    // 读取期间鼠标可能已移开
+    if (!card.isConnected || !card.matches(":hover")) return;
+    const { img } = pickPreviewSlot(box, "image");
+    // 图片尺寸只有加载完才准，加载后重新定位一次
+    img.onload = () => {
+      if (!box.hidden) placePreview(box, card);
+    };
+    img.src = url;
+    box.hidden = false;
+    placePreview(box, card);
+    return;
+  }
+
+  if (item.kind === "files") {
+    const { files } = pickPreviewSlot(box, "files");
+    fillFilePreview(files, item);
+    box.hidden = false;
+    placePreview(box, card);
+    return;
+  }
+
+  // 文本：卡片上只有 2 行摘要，这里多给几行。
+  // 必须读全文 —— `item.preview` 本身就是截断过的摘要，拿它渲染等于把卡片内容重复一遍。
+  let data;
+  try {
+    data = await invoke("get_full_content", { id: item.id });
+  } catch {
+    return;
+  }
+  if (!card.isConnected || !card.matches(":hover")) return;
+  const { text } = pickPreviewSlot(box, "text");
+  text.textContent = clampPreviewText(data.text || "");
   box.hidden = false;
   placePreview(box, card);
 }
@@ -1537,7 +1645,7 @@ document.addEventListener(
   "scroll",
   () => {
     closeContextMenu();
-    hideImagePreview();
+    hideHoverPreview();
   },
   true
 );
@@ -1549,7 +1657,7 @@ document.addEventListener("keydown", (e) => {
       return;
     }
     closeContextMenu();
-    hideImagePreview();
+    hideHoverPreview();
     exitSelectMode();
   }
 });
