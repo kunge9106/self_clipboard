@@ -104,6 +104,73 @@ async function applyEffectInfo() {
 
 function applyTheme(dark) {
   document.body.classList.toggle("dark", !!dark);
+  syncThemeToggleLabel();
+}
+
+/// 侧栏那个切换按钮的文案跟着当前深浅变：深色时写「浅色」，点了就去浅色。
+/// 放在 applyTheme 里统一刷，跟随系统变化、手动切换都不会出现「写着深色其实已是深色」。
+function syncThemeToggleLabel() {
+  const el = document.getElementById("theme-toggle-label");
+  if (el) el.textContent = document.body.classList.contains("dark") ? "浅色" : "深色";
+}
+
+/// 设置页三选一的高亮。存在才动 —— 侧栏按钮与设置页可能不同时可见，
+/// 用同一个函数刷新，两边就不会各刷各的、各说各话。
+function markThemeSeg(mode) {
+  const seg = document.getElementById("set-theme");
+  if (!seg) return;
+  seg.querySelectorAll("button[data-theme]").forEach((b) =>
+    b.classList.toggle("on", b.dataset.theme === mode)
+  );
+}
+
+/// 切换主题模式的**唯一入口**：侧栏快捷按钮与设置页三选一都走这里。
+///
+/// 同步关系是单向收敛的：手动点了任何一边 → 模式落到 light/dark（脱离 system），
+/// 设置页选中项与侧栏文案一起更新；只有选了「系统」才重新跟随 Windows，
+/// 此时侧栏按钮仍按**当前实际深浅**显示它点了会去哪边。
+async function setThemeMode(mode) {
+  try {
+    await invoke("set_theme_mode", { value: mode });
+  } catch (e) {
+    // 不能静默：最常见的原因是跑着旧二进制（改了 Rust 没重新编译），
+    // 命令根本不存在，用户看到的就是「点了没反应」。
+    toast(`主题切换失败：${e}`);
+    console.error("set theme mode failed", e);
+    return;
+  }
+  settings = { ...(settings || {}), themeMode: mode };
+  await applyThemeMode(mode);
+  markThemeSeg(mode);
+}
+
+/// 侧栏深浅色快捷切换：当前是深就切浅、是浅就切深。
+/// 只落 light/dark 两档 —— 「系统」是另一回事，留在设置 → 通用里选。
+function bindThemeToggle() {
+  const btn = document.getElementById("theme-toggle");
+  if (!btn) return;
+  syncThemeToggleLabel();
+  btn.addEventListener("click", async () => {
+    const mode = document.body.classList.contains("dark") ? "light" : "dark";
+    try {
+      await setThemeMode(mode);
+    } catch (e) {
+      console.error("set theme mode failed", e);
+    }
+  });
+}
+
+/**
+ * 应用主题模式：浅色/深色直接钉住，system 才跟系统。
+ *
+ * 窗口主题在 Rust 侧已按设置钉好（`effects::apply_theme_mode`，启动时与切换时各一次），
+ * 前端只负责把 `body.dark` 同步到位 —— 三档共用同一条 onThemeChanged 链路，
+ * 所以手动钉住时系统主题变化不会再影响界面。
+ */
+async function applyThemeMode(mode) {
+  if (mode === "light") return applyTheme(false);
+  if (mode === "dark") return applyTheme(true);
+  applyTheme((await appWindow.theme().catch(() => "light")) === "dark");
 }
 
 /**
@@ -1930,6 +1997,13 @@ function settingsGeneralHtml(s) {
     <div class="row"><label>不跟随系统缩放</label>
       <input type="checkbox" id="set-ignore-dpi" ${s.ignoreDpiScale ? "checked" : ""} />
       <span class="hint">界面固定按 100% 显示，Windows 调缩放后窗口与布局不再跟着变（含托盘菜单）。关掉则恢复正常跟随</span></div>
+    <div class="row"><label>外观主题</label>
+      <div class="seg" id="set-theme">
+        <button type="button" data-theme="light" ${s.themeMode === "light" ? 'class="on"' : ""}>浅色</button>
+        <button type="button" data-theme="dark" ${s.themeMode === "dark" ? 'class="on"' : ""}>深色</button>
+        <button type="button" data-theme="system" ${(s.themeMode || "system") === "system" ? 'class="on"' : ""}>系统</button>
+      </div>
+      <span class="hint">「系统」跟随 Windows 的深浅色设置；侧栏底部另有一个深浅切换按钮</span></div>
     <div class="btn-row">
       <button class="btn-ghost" id="replay-tour">重新查看功能引导</button>
     </div>`;
@@ -2758,6 +2832,22 @@ function bindSettings(view) {
   bindCheck("set-pin-cancel", "set_pin_cancel_on_disable");
   bindCheck("set-ignore-dpi", "set_ignore_dpi_scale");
 
+  // 主题三档：浅色 / 深色 / 系统。切换走 setThemeMode（与侧栏按钮同一入口），
+  // 所以在这边点了之后侧栏按钮的文案也会跟着变。
+  const themeSeg = view.querySelector("#set-theme");
+  if (themeSeg) {
+    markThemeSeg(settings.themeMode || "system");
+    themeSeg.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-theme]");
+      if (!btn) return;
+      try {
+        await setThemeMode(btn.dataset.theme);
+      } catch (err) {
+        console.error("set theme mode failed", err);
+      }
+    });
+  }
+
   // 重看功能导览：只打开，不写「已看过」标记 —— 看多少次都不影响首次判断
   const replayTour = view.querySelector("#replay-tour");
   if (replayTour) replayTour.onclick = () => openFeatureTour();
@@ -2951,18 +3041,11 @@ async function main() {
   bindFirstRunModals();
   bindDetailModal();
   bindNav();
+  bindThemeToggle();
   bindSearch();
   startTimeTicker();
 
   await applyEffectInfo();
-
-  // 主题相关：单独 try，避免权限缺失时中断其余绑定
-  try {
-    applyTheme((await appWindow.theme().catch(() => "light")) === "dark");
-    await appWindow.onThemeChanged(({ payload }) => applyTheme(payload === "dark"));
-  } catch (e) {
-    console.error("theme setup failed", e);
-  }
 
   // 初始历史
   try {
@@ -2978,6 +3061,16 @@ async function main() {
     applyGlassAlpha(settings.materialAlpha ?? 50);
     // 圆角模式（圆角 + 无系统模糊）
     applyRoundMode(settings.roundMode);
+    // 主题三档（浅色/深色/系统）：单独 try，避免权限缺失时中断其余绑定
+    try {
+      await applyThemeMode(settings.themeMode);
+      await appWindow.onThemeChanged(({ payload }) => {
+        // 手动钉住时不跟系统；只有 system 档才响应
+        if ((settings.themeMode || "system") === "system") applyTheme(payload === "dark");
+      });
+    } catch (e) {
+      console.error("theme setup failed", e);
+    }
   } catch (e) {
     console.error("load settings failed", e);
   }

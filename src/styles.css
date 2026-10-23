@@ -5,6 +5,24 @@
      2. 按 tier 调整叠加层浓度与圆角上限
    ========================================================================== */
 
+/* ── 主题系统（浅色 / 深色 / 跟随系统）───────────────────────────────────
+   深浅由 `body.dark` 一个类切换，状态源头只有一个：Rust 侧按设置把窗口主题
+   钉住（`effects::apply_theme_mode`，传 None = 跟随系统），前端收到主题事件后
+   只负责同步这个类。
+
+   三条约定（新增 UI 时必须遵守，否则深浅某一态一定会出现「看不清」）：
+     1. **颜色一律走变量**，且 `:root`（浅）与 `body.dark`（深）**成对定义**。
+        尺寸、字号、圆角与主题无关，不必成对。
+     2. **禁止在组件里写死颜色**。要加新色，先在两个块里各定一个变量再用。
+        唯一允许写死的是无论深浅都成立的装饰（例如纯白高光 `rgba(255,255,255,…)`
+        这类的叠加层，那是「光」而不是「底色」）。
+     3. **不要为某个组件单独写 `body.dark .x` 覆盖**。需要深浅不同 = 该色应成为
+        变量；写成覆盖就会出现「改了变量但组件没跟上」的漏网之鱼。
+        历史遗留的这类覆盖是改造前的产物，见到就顺手收进变量。
+
+   校验：改完可以用脚本比对两个变量块的键集合（除了尺寸/字体类应当一一对应）。
+   ========================================================================== */
+
 :root {
   --sidebar-w: 168px;
   --titlebar-h: 40px;
@@ -81,24 +99,46 @@
      1px 描边会糊在里面看不见，靠这层阴影把卡片「托起来」以便识别。 */
   --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.06),
     0 2px 8px -2px rgba(0, 0, 0, 0.14);
+
+  /* ── 危险色（删除 / 退出 / 失效）───────────────────────────────────────
+     三个一组：**字色 / 淡底 / 实心底上的字色**。深浅各一档，
+     因为 #e81123 压在深底上偏暗、读不清（主题系统要求颜色成对定义，
+     见文件顶部「主题系统」说明）。 */
+  --danger: #e81123;
+  --danger-soft-bg: rgba(232, 17, 35, 0.12);
+  /* 实心红底上要放白字；深色下红本身变浅，就得换成深字 */
+  --danger-on: #fff;
 }
 
 body.dark {
-  --glass: rgba(28, 28, 30, 0.24);
-  --glass-strong: rgba(40, 40, 44, 0.38);
-  --glass-hover: rgba(255, 255, 255, 0.1);
+  /* 深色要的是**黑**，不是灰。三处一起收：
+     1. 主体材质压到近黑（10 10 12）并把不透明度提到 0.92 ——
+        原先 22 22 24 @62% 会让桌面壁纸透进来三成，深色看着就是一层灰；
+     2. 卡片/浮起块改用「低比例白叠加」而不是「深灰叠加」：
+        深灰叠在近黑上几乎等于没叠（卡片认不出来），白叠加才拉出层次，
+        5% 的量在近黑底上仍是很深的黑灰，不会泛白；
+     3. hover/strong 同比例下调，保证「越上层越亮」的层次还在，
+        但整体保持在黑调里。 */
+  --glass: rgba(255, 255, 255, 0.05);
+  --glass-strong: rgba(255, 255, 255, 0.09);
+  --glass-hover: rgba(255, 255, 255, 0.07);
   /* 深色浮层：同样不跟窗口浓度走。上端比下端亮一档才浮得起来，
      发丝边换成浅色（深底上白边才看得见），内高光压到很低否则发灰。 */
-  --hp-grad-top: #4a4a52;
-  --hp-grad-mid: #3f3f46;
-  --hp-grad-bottom: #34343a;
+  /* 悬浮预览浮层：也要压进黑调（原来 #4a4a52 在近黑窗口上像一块灰板），
+     只保留「上亮下暗」的那点层次，靠边框和阴影托起来，而不是靠亮度。 */
+  --hp-grad-top: #2e2e34;
+  --hp-grad-mid: #26262b;
+  --hp-grad-bottom: #1e1e22;
   --hp-border: rgba(255, 255, 255, 0.13);
   --hp-rim: rgba(255, 255, 255, 0.13);
   --hp-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.28);
   --stroke: rgba(255, 255, 255, 0.12);
   --track-bg: rgba(255, 255, 255, 0.14);
-  --material-rgb: 22 22 24;
-  --glass-alpha: 0.62;
+  /* 浓度给到 0.96：主体层是「渐变两端 = alpha ±0.05」，
+     也就是顶端 1.0（完全不透）、下端 0.91 —— 下端最多只透 9% 的桌面/系统材质，
+     深色因此站得住，不会被亮壁纸冲成灰。 */
+  --material-rgb: 10 10 12;
+  --glass-alpha: 0.96;
   --text: #f2f2f5;
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
@@ -115,6 +155,12 @@ body.dark {
   --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3),
     0 2px 8px -2px rgba(0, 0, 0, 0.36);
+
+  /* 压在深底上的红必须提亮，否则「退出」「删除」「已失效」读不清。
+     实心红底随之变浅，配深字而不是白字（白字压在浅红上同样看不清）。 */
+  --danger: #ff8a8a;
+  --danger-soft-bg: rgba(226, 75, 74, 0.2);
+  --danger-on: #1b1b1f;
 }
 
 /* 兜底档：没有真材质时不透明，观感不能崩 */
@@ -128,11 +174,12 @@ body.tier-solid {
   --glass-alpha: 0.99;
 }
 body.dark.tier-solid {
-  --glass: rgba(32, 32, 34, 0.97);
-  --glass-strong: rgba(44, 44, 48, 0.98);
-  --glass-hover: rgba(255, 255, 255, 0.08);
+  /* 兜底档没有 acrylic，本就是实色 —— 与真材质档对齐到同一档黑 */
+  --glass: rgba(255, 255, 255, 0.05);
+  --glass-strong: rgba(255, 255, 255, 0.09);
+  --glass-hover: rgba(255, 255, 255, 0.07);
   --stroke: rgba(255, 255, 255, 0.08);
-  --material-rgb: 32 32 34;
+  --material-rgb: 14 14 16;
   --glass-alpha: 0.99;
 }
 
@@ -338,8 +385,8 @@ html:not(.hovers-off) .wc-btn:hover {
 }
 
 html:not(.hovers-off) .wc-close:hover {
-  background: #e81123;
-  color: #fff;
+  background: var(--danger);
+  color: var(--danger-on);
 }
 
 /* 主体 */
@@ -535,6 +582,57 @@ html:not(.hovers-off) #update-banner .ub-close:hover {
   stroke-width: 1.3;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/* ── 侧栏深浅色切换按钮 ──────────────────────────────────────────────────
+   图标随主题换：浅色时显示月亮（点了去深色），深色时显示太阳（点了去浅色），
+   与旁边那行文字说的是同一件事。切换靠 body.dark，不用 JS 再加 class ——
+   主题状态只有一个来源，两边才不会对不上。 */
+#theme-toggle .i-sun {
+  display: none;
+}
+
+body.dark #theme-toggle .i-moon {
+  display: none;
+}
+
+body.dark #theme-toggle .i-sun {
+  display: inline;
+}
+
+/* ── 设置页的三选一（浅色 / 深色 / 系统）────────────────────────────────
+   大厂那种分段控件：整块是个凹槽（--track-bg 已按主题分深浅），
+   选中项浮起来。不用单选框 —— 三选一且每一项都很短，分段更直观。 */
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: var(--track-bg);
+}
+
+.seg button {
+  padding: 5px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: default;
+  transition: background var(--dur-base) var(--ease-out),
+    color var(--dur-base) var(--ease-out);
+}
+
+.seg button.on {
+  background: var(--glass-strong);
+  color: var(--text);
+  font-weight: 600;
+}
+
+html:not(.hovers-off) .seg button:not(.on):hover {
+  color: var(--text);
 }
 
 /* 右侧内容 */
@@ -828,14 +926,8 @@ html:not(.hovers-off) .card:hover {
 }
 
 .tag-missing {
-  color: #e81123;
-  background: rgba(232, 17, 35, 0.12);
-}
-
-/* 深色下 #e81123 压在深底上偏暗，换浅一档的红保证可读（浅色观感不变） */
-body.dark .tag-missing {
-  color: #f09595;
-  background: rgba(226, 75, 74, 0.2);
+  color: var(--danger);
+  background: var(--danger-soft-bg);
 }
 
 .card-body {
@@ -1014,12 +1106,12 @@ html:not(.hovers-off) .ctx-item:hover {
 }
 
 .ctx-item.danger {
-  color: #e81123;
+  color: var(--danger);
 }
 
 html:not(.hovers-off) .ctx-item.danger:hover {
-  background: #e81123;
-  color: #fff;
+  background: var(--danger);
+  color: var(--danger-on);
 }
 
 /* 不可用项（例如「清理 N 天前」但确实没有旧内容） */
@@ -1967,18 +2059,18 @@ body.dark .detail-body {
   align-self: flex-start;
   height: 32px;
   padding: 0 14px;
-  border: 1px solid #e81123;
+  border: 1px solid var(--danger);
   border-radius: var(--radius-sm);
   background: transparent;
-  color: #e81123;
+  color: var(--danger);
   font-family: var(--font);
   font-size: 13px;
   cursor: default;
 }
 
 html:not(.hovers-off) .btn-danger:hover {
-  background: #e81123;
-  color: #fff;
+  background: var(--danger);
+  color: var(--danger-on);
 }
 
 /* 复制反馈 toast：与整体玻璃风格一致 */
