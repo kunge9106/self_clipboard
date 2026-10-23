@@ -98,6 +98,8 @@ fn setup_effects(app: &tauri::AppHandle) {
     // 先按当前显示器把窗口夹进工作区，再套材质/圆角 —— 否则高缩放下窗口按
     // 1060×690 铺开、超出屏幕，圆角区域也会按错的尺寸算一遍。
     effects::apply_dpi_policy(&window);
+    // 主题要在页面真正渲染前钉好，否则系统深色 + 用户选浅色时会先闪一下深色
+    effects::apply_theme_mode(&window);
 
     let hwnd = match window.hwnd() {
         Ok(h) => h.0 as isize,
@@ -264,6 +266,7 @@ pub fn run() {
             settings::set_pin_global,
             settings::set_pin_cancel_on_disable,
             settings::set_ignore_dpi_scale,
+            settings::set_theme_mode,
             tray::tray_show_main,
             tray::tray_quit,
             tray::tray_menu_look,

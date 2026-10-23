@@ -122,6 +122,13 @@ pub struct Config {
     /// 关掉就回到常规的「跟随系统缩放」。
     #[serde(default = "default_true")]
     pub ignore_dpi_scale: bool,
+    /// 主题模式：`"light"` / `"dark"` / `"system"`（默认 `system` = 跟随 Windows）。
+    ///
+    /// 为什么是字符串而不是枚举：这个字段要原样进 config.json 和下发给前端，
+    /// 用字符串最省事，也不必为了兼容旧值写反序列化兜底。非法值在 `set_theme_mode`
+    /// 里挡掉，读的时候一律按 `system` 处理（见 `theme_is_dark`）。
+    #[serde(default = "default_theme_mode")]
+    pub theme_mode: String,
 }
 
 /// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次增量。
@@ -164,6 +171,10 @@ pub struct UpdateCache {
 
 fn default_retention() -> u32 {
     3
+}
+
+fn default_theme_mode() -> String {
+    "system".into()
 }
 
 fn default_true() -> bool {
@@ -246,6 +257,7 @@ impl Default for Config {
             tour_seen_version: 0,
             // 默认不跟随系统缩放（见字段注释）
             ignore_dpi_scale: true,
+            theme_mode: default_theme_mode(),
         }
     }
 }
@@ -345,6 +357,7 @@ pub fn get_settings() -> serde_json::Value {
         "tourSeenVersion": cfg.tour_seen_version,
         "tourVersion": TOUR_VERSION,
         "ignoreDpiScale": cfg.ignore_dpi_scale,
+        "themeMode": cfg.theme_mode,
     })
 }
 
@@ -393,6 +406,25 @@ pub fn set_ignore_dpi_scale(app: tauri::AppHandle, value: bool) -> Result<(), St
     update(|c| c.ignore_dpi_scale = value);
     if let Some(w) = app.get_webview_window("main") {
         crate::effects::apply_dpi_policy(&w);
+    }
+    Ok(())
+}
+
+/// 切换主题模式：`light` / `dark` / `system`。
+///
+/// 改完立刻生效：窗口主题被钉住/交还系统后，前端的 `onThemeChanged` 会自己跟上，
+/// 不需要重启 —— 深浅色是「点了就要看见」的那类设置。
+#[tauri::command]
+pub fn set_theme_mode(app: tauri::AppHandle, value: String) -> Result<(), String> {
+    if !matches!(value.as_str(), "light" | "dark" | "system") {
+        return Err(format!("未知主题模式：{value}"));
+    }
+    update(|c| c.theme_mode = value);
+    // 托盘菜单窗口也要跟上，否则主界面深色、菜单浅色
+    for label in ["main", "tray-menu"] {
+        if let Some(w) = app.get_webview_window(label) {
+            crate::effects::apply_theme_mode(&w);
+        }
     }
     Ok(())
 }

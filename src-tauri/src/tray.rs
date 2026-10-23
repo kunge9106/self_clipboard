@@ -187,6 +187,10 @@ fn open_menu(app: &AppHandle, pos: PhysicalPosition<f64>) {
 
     let _ = win.set_position(PhysicalPosition::new(x, y));
 
+    // 菜单是懒创建的，setup 时它还不存在 —— 每次弹出时按设置钉一次主题，
+    // 免得主界面深色、菜单浅色（用户手动选了浅色但系统是深色时最容易撞上）。
+    crate::effects::apply_theme_mode(&win);
+
     // 主窗口的材质是「显示之后」才铺得开（同 setup_effects 里的补涂），所以这里
     // 先 show 再上材质；菜单每次弹出都重刷一次，顺带跟随系统主题变化。
     let _ = win.show();

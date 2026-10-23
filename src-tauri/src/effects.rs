@@ -986,6 +986,19 @@ pub fn ignore_dpi() -> bool {
     IGNORE_DPI.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// 按设置把窗口主题钉成浅色/深色，或交还给系统（跟随 Windows）。
+///
+/// 传 `None` 就是「跟随系统」—— Tauri 会继续监听系统主题变化并派发事件，
+/// 前端的 `onThemeChanged` 因此不用改，三档切换共用同一条链路。
+pub fn apply_theme_mode(window: &tauri::WebviewWindow) {
+    let theme = match crate::settings::get().theme_mode.as_str() {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    };
+    let _ = window.set_theme(theme);
+}
+
 /// 按「不跟随系统缩放」策略设置 webview 缩放与窗口尺寸，两个方向都走这里。
 ///
 /// 开启时：webview 缩放设为 1/scale，窗口改用**物理**像素定尺寸 ——

@@ -628,9 +628,26 @@ settings   设置页
 
 内存测量口径提醒：`tasklist` 的工作集包含共享页，会显著虚高；应查看任务管理器的专用工作集，或 `\Process(*)\Working Set - Private`。同一时刻两种口径可能相差一倍以上。
 
-### 8.5 深色模式
+### 8.5 深色模式与主题三档
 
-跟随系统：`getCurrentWindow().theme()` 与 `onThemeChanged`，切换 `body.dark` 类。Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作用域整体替换。
+**三档**：浅色 / 深色 / 系统，`settings.theme_mode`（默认 `system`）。Rust 侧
+`effects::apply_theme_mode` 在启动时与切换时把窗口主题钉住（`set_theme(Some(Light/Dark))`）
+或交还系统（`None`）—— 钉住后系统主题变化不会再影响窗口，所以前端 `onThemeChanged`
+只在 system 档才响应。托盘菜单窗口是懒创建的，每次弹出时补钉一次。
+
+**两个入口、一个状态源**：侧栏底部的快捷按钮（当前深→切浅，反之亦然；只落
+light/dark 两档）与设置 → 通用的三选一，都收敛到前端 `setThemeMode()` 一个函数，
+保证两边选中态/文案即时同步 —— 不允许各自为政。
+
+**主题系统约定**（`styles.css` 顶部有全文）：颜色一律走变量，且 `:root`（浅）与
+`body.dark`（深）成对定义；组件里禁止写死颜色，需要深浅不同就升级成变量，
+**不要**为单个组件写 `body.dark .x` 覆盖（那会出现「改变量组件没跟上」的漏网之鱼）。
+可以用脚本比对两个变量块的键集合做回归校验（尺寸/字体类除外应一一对应）。
+历史上按色板空位定的徽章色（置顶蓝/收藏琥珀/编辑绿/失效红/图片紫/文件青绿/文本黄绿）
+与危险色 `--danger` 三件套（字色/淡底/实心底上的字色）都遵循此约定。
+
+跟随系统时：`getCurrentWindow().theme()` 与 `onThemeChanged`，切换 `body.dark` 类。
+Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作用域整体替换。
 
 ### 8.6 关于页（`about.rs` + 前端）
 
