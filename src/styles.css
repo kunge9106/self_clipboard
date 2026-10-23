@@ -1492,14 +1492,24 @@ body.dark .modal.is-tour::after {
   background: rgba(13, 148, 136, 0.12);
 }
 
-/* 顶部渐变色带：三色与图标轮换的色相一致。
-   曾在这上面加过一道横扫的光，实际看着与整体不搭（光扫是「动」的，而卡片
-   其余部分只做进场），已去掉 —— 保持静态。 */
+/* 顶部进度条：3px 的暗轨 + 一条随步骤变长的填充。
+   灯带式的三色渐变试过，与卡片的蓝紫主色不是一套；这里只用蓝→紫，
+   与图标轮换色相、末步按钮的渐变同源。 */
 .tour-band {
   position: absolute;
   inset: 0 0 auto 0;
   height: 3px;
-  background: linear-gradient(90deg, #2f6bff, #7c3aed 45%, #0d9488);
+  background: var(--track-bg);
+}
+
+.tour-band-fill {
+  display: block;
+  height: 100%;
+  /* 第 1 步就有进度，不是从 0 开始 —— 一上来空着会让人以为条没生效 */
+  width: 0;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(90deg, #2f6bff, #7c3aed);
+  transition: width var(--dur-slow) var(--ease-out);
 }
 
 .tour-body {

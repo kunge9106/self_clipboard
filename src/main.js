@@ -2541,6 +2541,9 @@ function renderTourStep(t) {
   // 步骤计数放在进度条左边，与胶囊互相印证
   const count = document.getElementById("tour-count");
   if (count) count.textContent = `${tourStep + 1} / ${t.steps.length}`;
+  // 顶部进度条：按步数推进（第 1 步就有填充，不从 0 起步）
+  const fill = document.getElementById("tour-fill");
+  if (fill) fill.style.width = `${((tourStep + 1) / t.steps.length) * 100}%`;
   // 进度点按步数生成，步数改了这里不用动
   if (t.dots && t.dots.childElementCount !== t.steps.length) {
     t.dots.replaceChildren(
