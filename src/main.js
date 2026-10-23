@@ -809,6 +809,9 @@ function cardEl(item) {
       : `<span class="tag tag-kind">${KIND_LABEL[item.kind] || item.kind}</span>`) +
     (pinned ? '<span class="tag tag-pinned">已置顶</span>' : "") +
     (item.favorite && !hideFav ? '<span class="tag tag-fav">已收藏</span>' : "") +
+    // 「已编辑」= 在全文编辑里改过并保存后落成的新条目。原文条目始终保留不动，
+    // 两条内容相近、挨在一起，靠这个徽章才能一眼分清哪条是自己改过的。
+    (item.edited ? '<span class="tag tag-edited">已编辑</span>' : "") +
     // 时间放最后，靠 CSS 的 margin-left:auto 推到最右
     `<span class="card-time" data-ts="${item.ts}">${timeStr(item.ts)}</span>`;
   body.appendChild(meta);
@@ -1346,11 +1349,13 @@ function bindDetailModal() {
   document.getElementById("detail-save").onclick = async () => {
     const text = $detail("detail-editor").value;
     try {
-      // ⚠️ 保存 = 写剪贴板，**不改历史那条记录**（用户选定的「编辑副本」方案）。
-      // 历史上必须忠实反映「当初复制了什么」；而且这个动作不产生新条目
-      // （Rust 侧会 mark_skip，与「点击条目复制」一致）。
-      await invoke("set_clipboard_text", { text });
-      toast("已保存到剪贴板");
+      // 保存 = 写剪贴板 + **改过的内容记一条新条目**，原条目原样不动（编辑副本原则）。
+      // 历史必须忠实反映「当初复制了什么」，所以不允许原地改原条目；
+      // 但编辑后的内容若在历史里找不到就等于白改，因此落成新条目并带「已编辑」徽章。
+      const changed = text !== detailOriginal;
+      await invoke("set_clipboard_text", { text, changed });
+      // 一个字没改就保存 ≡ 复制原文：只写剪贴板，不记历史，避免多出一模一样的一条。
+      toast(changed ? "已保存并记入历史" : "已保存到剪贴板");
       closeDetail();
     } catch (err) {
       toast("保存失败：" + err);

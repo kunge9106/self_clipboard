@@ -67,7 +67,8 @@ static LAST_IMG: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
-static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip)>> = OnceLock::new();
+/// 元组第三项 = 是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
+static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip, bool)>> = OnceLock::new();
 /// 缩略图生成线程的投递端。与捕获线程分开：捕获线程只做「落盘 + 通知前端」必须快，
 /// 缩略图解码慢、且不影响条目出现，所以单独排队，避免拖慢快速连续复制。
 static THUMB_TX: OnceLock<std::sync::mpsc::Sender<HistoryItem>> = OnceLock::new();
@@ -127,6 +128,16 @@ pub struct HistoryItem {
     #[serde(default, skip_serializing)]
     pub pinned: bool,
     pub favorite: bool,
+    /// 本条是否由「复制并编辑」的保存动作产生（即编辑后的副本）。
+    ///
+    /// 为什么需要这个标记：编辑保存的内容写进了剪贴板，用户的预期就是「它该像
+    /// 一次复制那样被记住」。可它和原文高度相似，历史里两条挨着很难分清哪条是
+    /// 改过的 —— 所以给这类条目一个「已编辑」徽章。
+    ///
+    /// `#[serde(default)]` 是**必需的**：老 index.json 里没有这个字段，
+    /// 缺了它整个索引会解析失败、历史全部丢失。
+    #[serde(default)]
+    pub edited: bool,
     /// 文本前若干字符 / "[图片]" / "N 个文件"
     pub preview: String,
     pub size: u64,
@@ -412,16 +423,20 @@ fn summarize_content(raw: String) -> FullContent {
 
 /// 把任意文本写入系统剪贴板（供「复制并编辑」的保存动作使用）。
 ///
-/// **为什么是「编辑副本」而不是「直接改历史」**：历史必须忠实反映「当初复制了
-/// 什么」。若能原地改，用户会怀疑「我明明复制的是 A，怎么变成 B 了」；而且剪贴板
-/// 历史常被当安全网（删了还在），改动它却不可逆是件危险的事。
-/// 所以保存动作 = **写剪贴板**，不碰 index.json、不改原文。
+/// **原条目始终不动**（编辑副本原则，不变）：历史要忠实反映「当初复制了什么」。
+/// 若能原地改，用户会怀疑「我明明复制的是 A，怎么变成 B 了」；而剪贴板历史常被当
+/// 安全网（删了还在），改动它却不可逆是件危险的事。
 ///
-/// **不会产生新条目**：内部走 `write_text_to_clipboard`，它会 `mark_skip()`，
-/// 于是这次自写不会被当成一次外部复制回灌成新记录 —— 与「点击条目复制回剪贴板」
-/// 的行为保持一致（历史只由**外部**复制产生）。
+/// **改过的内容要记一条**（2026-10-23 调整）：此前保存只写剪贴板、不入历史
+/// （`mark_skip` 把自读拦掉了）。但实测用下来，编辑后的内容在历史里找不到就等于
+/// 白改 —— 它已经进了剪贴板，用户的预期是「它该像一次复制那样被记住」。
+/// 所以现在：内容确实被改过时，额外落成**一条新条目**（带「已编辑」标记，
+/// 见 `HistoryItem::edited`），原条目原样保留。
+///
+/// `changed = false`（进了编辑态但一个字没改就保存）时维持旧行为：只写剪贴板、
+/// 不记历史 —— 那种情况等同于「复制原文」，再记一条只会多出一份一模一样的记录。
 #[tauri::command]
-pub fn set_clipboard_text(text: String) -> Result<(), String> {
+pub fn set_clipboard_text(text: String, changed: bool) -> Result<(), String> {
     if text.is_empty() {
         return Err("内容为空，未写入剪贴板".into());
     }
@@ -429,9 +444,16 @@ pub fn set_clipboard_text(text: String) -> Result<(), String> {
         Ok(()) => {
             // 只记字符数，绝不记内容本身（编辑后的正文同样是用户数据）。
             crate::log_print!(
-                "[clipboard] 编辑保存：写回剪贴板 {} 字符",
-                text.chars().count()
+                "[clipboard] 编辑保存：写回剪贴板 {} 字符（changed={}）",
+                text.chars().count(),
+                changed
             );
+            // 这里会且只会产生一条：`write_text_to_clipboard` 内部做了 `mark_skip()`，
+            // 本次自写在「事件」与「兜底轮询」两条通道上都会被认出并跳过，
+            // 所以不会出现「系统自读一条 + 手动入库一条」变成两条。
+            if changed {
+                dispatch_raw(RawClip::Text(text), true);
+            }
             Ok(())
         }
         Err(e) => {
@@ -738,17 +760,18 @@ fn spawn_clipboard_watchdog() {
 fn spawn_worker() {
     // app 走全局 APP（OnceLock，在 init 首行写入）；worker 在订阅监听之前
     // 启动，所以取用时必定已就绪。
-    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip)>();
+    // 元组第三项：这条是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip, bool)>();
     std::thread::Builder::new()
         .name("clipboard-store".into())
         .spawn(move || {
-            while let Ok((captured_ms, raw)) = rx.recv() {
+            while let Ok((captured_ms, raw, edited)) = rx.recv() {
                 // guard 保证 PENDING 一定减回去 —— handle_clip 里判重拦截会
                 // 提前 return，手写 fetch_sub 迟早漏掉一次。
                 let _guard = PendingGuard;
                 // handle_clip 内部完成：解码 → 同图判重 → 落盘 → emit。
                 // 这里只负责串行投递，保证与复制顺序一致。
-                handle_clip(captured_ms, raw);
+                handle_clip(captured_ms, raw, edited);
             }
         })
         .map_err(|e| crate::log_warn!("[clipboard] 落盘工作线程启动失败：{e}"))
@@ -952,7 +975,7 @@ pub fn on_clipboard_update() {
     READING.store(false, Ordering::Release);
     match raw {
         Some(raw) => {
-            dispatch_raw(raw);
+            dispatch_raw(raw, false);
         }
         None => {
             // ❌ **不推进 LAST_SEQ** → 轮询下一拍自动重试，直到读到、或剪贴板被新复制替换。
@@ -981,15 +1004,18 @@ pub fn on_clipboard_update() {
 /// ⚠️ **时间戳必须在这里打**（捕获时刻），不能到 worker 里再取当前时间：worker 单线程串行，
 /// 前面压着一张大图的解码时本条要排队几秒才轮到，那时再取时间，判重窗口算出的「间隔」
 /// 会包含排队时长 —— 实测出现过「同一秒、同一指纹、却记了两条」，根因就在这里。
-fn dispatch_raw(raw: RawClip) {
+///
+/// `edited`：true 表示这条来自「复制并编辑」的保存动作，落成条目后带
+/// 「已编辑」标记；**外部复制**一律传 false。
+fn dispatch_raw(raw: RawClip, edited: bool) {
     let captured_ms = now_ms();
     if let Some(tx) = WORKER.get() {
-        if tx.send((captured_ms, raw)).is_ok() {
+        if tx.send((captured_ms, raw, edited)).is_ok() {
             PENDING.fetch_add(1, Ordering::Relaxed);
         }
     } else {
         // 工作线程还没起来（正常不会发生——init 里先启线程再订阅监听）
-        handle_clip(captured_ms, raw);
+        handle_clip(captured_ms, raw, edited);
     }
 }
 
@@ -1015,7 +1041,8 @@ pub fn flush_pending(timeout: std::time::Duration) {
 ///
 /// 顺序很重要：先 `resolve`（解码），再做图片指纹判重 —— 指纹要基于像素
 /// 内容算，未解码前拿不到。
-fn handle_clip(captured_ms: u64, raw: RawClip) {
+/// `edited` 透传给 `store_raw`：为 true 时新条目带「已编辑」标记。
+fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
     let Some(raw) = resolve(raw) else {
         // resolve 只在「临时文件读不出」或「不是图片」且「文件复制」关闭时返回 None，
         // 即按用户设置主动跳过。记一条，便于区分「被设置跳过」与「识别失败」。
@@ -1071,7 +1098,7 @@ fn handle_clip(captured_ms: u64, raw: RawClip) {
         }
     }
 
-    let item = store_raw(raw);
+    let item = store_raw(raw, edited);
     if let Some(app) = APP.get() {
         let _ = app.emit("clipboard-update", item.clone());
     }
@@ -1938,7 +1965,7 @@ fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usi
     changed
 }
 
-fn store_raw(raw: RawClip) -> HistoryItem {
+fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
     let dir = DIR.get().unwrap().clone();
     let ts = now_ms();
     let id = make_id(ts);
@@ -1949,6 +1976,7 @@ fn store_raw(raw: RawClip) -> HistoryItem {
         pinned: false,
         pinned_views: Vec::new(),
         favorite: false,
+        edited,
         preview: String::new(),
         size: 0,
         text_path: None,
