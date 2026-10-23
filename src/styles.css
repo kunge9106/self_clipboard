@@ -21,6 +21,13 @@
   --glass: rgba(255, 255, 255, 0.16);
   --glass-strong: rgba(255, 255, 255, 0.28);
   --glass-hover: rgba(255, 255, 255, 0.24);
+  /* 悬浮浮层的玻璃：底色只压一层淡 tint 保证文字可读，真正的「毛」由
+     backdrop-filter 实时模糊浮层背后的页面内容给出（见 .hover-preview）。
+     --hover-glass-rim 是顶部 1px 内高光 —— 玻璃的「边缘反光」才是它看起来
+     像实体材质的关键，少了这条就只是个半透明色块。 */
+  --hover-glass-bg: rgba(252, 252, 252, 0.62);
+  --hover-glass-blur: blur(22px) saturate(150%);
+  --hover-glass-rim: rgba(255, 255, 255, 0.55);
   --stroke: rgba(255, 255, 255, 0.35);
   /* 进度条空轨：玻璃白在浅色底上等于隐形，必须用「比底深一点」的中性色 */
   --track-bg: rgba(0, 0, 0, 0.08);
@@ -62,6 +69,10 @@ body.dark {
   --glass: rgba(28, 28, 30, 0.24);
   --glass-strong: rgba(40, 40, 44, 0.38);
   --glass-hover: rgba(255, 255, 255, 0.1);
+  /* 深色下 tint 要更浓一点才压得住：模糊会把背后的浅色内容「晕」上来，
+     太通透会让 13px 的正文发飘。顶点高光也随之压到很低。 */
+  --hover-glass-bg: rgba(38, 38, 42, 0.66);
+  --hover-glass-rim: rgba(255, 255, 255, 0.08);
   --stroke: rgba(255, 255, 255, 0.12);
   --track-bg: rgba(255, 255, 255, 0.14);
   --material-rgb: 22 22 24;
@@ -1245,23 +1256,46 @@ html:not(.hovers-off) .statusbar-clear:hover {
 /* 悬浮补充信息浮层（图片 / 文本 / 文件 共用一份）。
    卡片本体只能放一张小缩略图或 2 行摘要，鼠标停 1s 后在这里补更多内容。
 
-   面板底子沿用软件里既有的「浮层」配方（右键菜单 .ctx-menu / 弹窗 .modal 同一套）：
-   高不透明底 + 1px 描边 + 大阴影 + --radius-sm。
-   不能用 var(--glass)：那是卡片用的半透明叠层，浮在内容上会把下面的字透出来。 */
+   材质：真毛玻璃。底色只压一层淡 tint，真正的「毛」由 backdrop-filter 实时模糊
+   浮层背后的页面内容给出，再叠一条顶部 1px 内高光当玻璃边缘反光。
+
+   ⚠️ 能力边界（写下来免得日后又试一遍）：系统级 acrylic/mica 只能**整窗**套用
+   （SetWindowCompositionAttribute / DwmSetWindowAttribute 都作用于 HWND），
+   没法只给窗口里的一块 DOM 生效。所以这一层用的是 CSS 真模糊 —— 它模糊的是
+   「页面里浮层背后的内容」，观感就是毛玻璃，但不会把桌面壁纸也糊进来。 */
 .hover-preview {
   position: fixed;
   z-index: 1500;
   /* 与 .card 相同的 10px 内边距：浮层是从卡片里「长出来」的一块，留白要接得上 */
   padding: 10px;
   border-radius: var(--radius-sm);
-  background: rgba(252, 252, 252, 0.96);
+  background: var(--hover-glass-bg);
+  backdrop-filter: var(--hover-glass-blur);
+  -webkit-backdrop-filter: var(--hover-glass-blur);
   border: 1px solid var(--stroke);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow), inset 0 1px 0 var(--hover-glass-rim);
   max-width: 460px;
   color: var(--text);
   font-family: var(--font);
   /* 纯展示层：不吃鼠标事件，避免遮挡卡片自身的 hover/click */
   pointer-events: none;
+}
+
+/* 不该模糊的两种情况，退回近不透明实色：
+   1) 圆角模式 —— 该模式下窗口本身就不做背景模糊（设置项写明「圆角 + 无背景模糊」），
+      浮层再模糊就自相矛盾；
+   2) 兜底档（没有系统材质）—— 窗口本来就是实色，模糊背后没有任何东西可糊，
+      只是白白吃 GPU。 */
+body.round .hover-preview,
+body.tier-solid .hover-preview {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(250, 250, 252, 0.97);
+}
+
+body.dark.round .hover-preview,
+body.dark.tier-solid .hover-preview {
+  background: rgba(40, 40, 44, 0.97);
 }
 
 /* hidden 属性依赖 UA 的 display:none，作者样式会覆盖，需显式声明
@@ -1325,10 +1359,6 @@ html:not(.hovers-off) .statusbar-clear:hover {
 /* 折叠行是「还有更多」的提示，压一档色 —— 与卡片 meta 的次要信息同一处理 */
 .hp-files .hp-more {
   color: var(--text-dim);
-}
-
-body.dark .hover-preview {
-  background: rgba(40, 40, 44, 0.96);
 }
 
 /* 退出确认弹窗 */
