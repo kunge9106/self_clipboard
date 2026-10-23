@@ -130,7 +130,15 @@ function markThemeSeg(mode) {
 /// 设置页选中项与侧栏文案一起更新；只有选了「系统」才重新跟随 Windows，
 /// 此时侧栏按钮仍按**当前实际深浅**显示它点了会去哪边。
 async function setThemeMode(mode) {
-  await invoke("set_theme_mode", { value: mode });
+  try {
+    await invoke("set_theme_mode", { value: mode });
+  } catch (e) {
+    // 不能静默：最常见的原因是跑着旧二进制（改了 Rust 没重新编译），
+    // 命令根本不存在，用户看到的就是「点了没反应」。
+    toast(`主题切换失败：${e}`);
+    console.error("set theme mode failed", e);
+    return;
+  }
   settings = { ...(settings || {}), themeMode: mode };
   await applyThemeMode(mode);
   markThemeSeg(mode);
