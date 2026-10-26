@@ -106,57 +106,10 @@ pub fn create_tray(app: &AppHandle) {
 // ---------------------------------------------------------------------------
 
 fn ensure_menu_window(app: &AppHandle) -> Option<WebviewWindow> {
-    if let Some(w) = app.get_webview_window(MENU_LABEL) {
-        return Some(w);
-    }
-
-    let mut b = WebviewWindowBuilder::new(app, MENU_LABEL, WebviewUrl::App("tray.html".into()))
-        .title("轻贴菜单")
-        .inner_size(MENU_W, MENU_H)
-        .decorations(false)
-        .transparent(true)
-        .shadow(false)
-        .resizable(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .visible(false)
-        .focused(false);
-
-    // 必须与主窗口用**同一套**浏览器参数：WebView2 只有在「同一 user data 目录 +
-    // 完全相同的一组参数」下才会共享同一个浏览器进程，否则会另起一个进程组，
-    // 内存直接翻倍。这里直接复用主窗口的那串配置，避免两处漂移。
-    if let Some(args) = app
-        .config()
-        .app
-        .windows
-        .first()
-        .and_then(|w| w.additional_browser_args.clone())
-    {
-        b = b.additional_browser_args(&args);
-    }
-
-    let win = match b.build() {
-        Ok(w) => w,
-        Err(e) => {
-            crate::log_warn!("[tray] 创建托盘菜单窗口失败：{e}");
-            return None;
-        }
-    };
-
-    // 失焦即收起（点别处 = 关菜单）；菜单没有关闭按钮，被要求关闭时也只隐藏
-    let w = win.clone();
-    win.on_window_event(move |e| match e {
-        tauri::WindowEvent::Focused(false) => {
-            let _ = w.hide();
-        }
-        tauri::WindowEvent::CloseRequested { api, .. } => {
-            api.prevent_close();
-            let _ = w.hide();
-        }
-        _ => {}
-    });
-
-    Some(win)
+    // 创建形态（无边框 / 透明 / 置顶 / 失焦收起 / 共享 WebView2 进程）与快捷面板
+    // 完全一致，统一走 `popup::ensure` —— 那份注释里记着「浏览器参数必须与主窗口
+    // 一致，否则内存翻倍」这个坑，只该存在于一处。
+    crate::popup::ensure(app, MENU_LABEL, "tray.html", "轻贴菜单", MENU_W, MENU_H)
 }
 
 fn open_menu(app: &AppHandle, pos: PhysicalPosition<f64>) {
@@ -169,22 +122,9 @@ fn open_menu(app: &AppHandle, pos: PhysicalPosition<f64>) {
     let (mw, mh) = menu_physical_size(&win);
     let gap = MENU_GAP * win.scale_factor().unwrap_or(1.0).max(0.1);
 
-    // 托盘通常在任务栏上（多在屏幕下缘）→ 菜单弹在光标**上方**；再按显示器工作区夹一下，
-    // 保证不会跑到屏幕外（多屏 / 负坐标显示器也算对）。
-    let (mut x, mut y) = (pos.x, pos.y - mh - gap);
-    if let Ok(Some(mon)) = app.monitor_from_point(pos.x, pos.y) {
-        let wa = mon.work_area();
-        let (ax, ay) = (wa.position.x as f64, wa.position.y as f64);
-        let (aw, ah) = (wa.size.width as f64, wa.size.height as f64);
-        if y < ay + 4.0 {
-            // 上面放不下（例如任务栏在屏幕顶部）→ 翻到光标下方
-            y = pos.y + gap;
-        }
-        // 菜单比工作区还大时（极端高缩放），max 会把 min 压过去 → 用 min/max 顺序兜住
-        x = x.min(ax + aw - mw - 4.0).max(ax + 4.0);
-        y = y.min(ay + ah - mh - 4.0).max(ay + 4.0);
-    }
-
+    // 托盘通常在任务栏上（多在屏幕下缘）→ 菜单优先弹在光标**上方**，
+    // 放不下会翻到下方；工作区钳制与多屏处理都在 `popup::place` 里。
+    let (x, y) = crate::popup::place(app, mw, mh, pos, true, gap);
     let _ = win.set_position(PhysicalPosition::new(x, y));
 
     // 菜单是懒创建的，setup 时它还不存在 —— 每次弹出时按设置钉一次主题，
@@ -194,6 +134,7 @@ fn open_menu(app: &AppHandle, pos: PhysicalPosition<f64>) {
     // 主窗口的材质是「显示之后」才铺得开（同 setup_effects 里的补涂），所以这里
     // 先 show 再上材质；菜单每次弹出都重刷一次，顺带跟随系统主题变化。
     let _ = win.show();
+    crate::popup::mark_shown(MENU_LABEL);
     let _ = win.set_focus();
     apply_material(&win);
 

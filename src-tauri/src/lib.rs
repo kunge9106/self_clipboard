@@ -16,6 +16,8 @@ mod autostart;
 mod tray;
 mod logger;
 mod hotkey;
+mod popup;
+mod panel;
 #[cfg(windows)]
 mod purge;
 
@@ -289,6 +291,8 @@ pub fn run() {
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,
             settings::set_hotkey,
+            panel::panel_hide,
+            panel::panel_paste,
             settings::set_clean_confirm_exit,
             settings::exit_app,
             settings::set_retention_days,

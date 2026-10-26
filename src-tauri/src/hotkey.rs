@@ -79,8 +79,8 @@ pub fn init(app: tauri::AppHandle) {
         let mut msg: Msg = std::mem::zeroed();
         while GetMessageW(&mut msg, 0, 0, 0) > 0 {
             if msg.message == WM_HOTKEY {
-                crate::log_print!("[hotkey] 触发，唤出主窗口");
-                crate::tray::show_main(&app);
+                crate::log_print!("[hotkey] 触发，弹出快捷面板");
+                crate::panel::show(&app);
             } else if msg.message == WM_RELOAD {
                 let job = PENDING.lock().ok().and_then(|mut g| g.take());
                 if let Some((combo, tx)) = job {

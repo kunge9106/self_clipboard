@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>轻贴</title>
+    <link rel="stylesheet" href="/src/panel.css" />
+  </head>
+  <body>
+    <!-- 快捷面板：独立最小页面，理由同 tray.html —— 从无到有显示时不会带出主界面残影。
+         样式复用主界面的变量与基类，观感一致。 -->
+    <div class="panel">
+      <div class="panel-head">
+        <input
+          id="panel-search"
+          class="panel-search"
+          type="text"
+          placeholder="搜索剪贴板…"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+      <div id="panel-list" class="panel-list" role="listbox"></div>
+      <div class="panel-foot">
+        <span id="panel-status" class="panel-status"></span>
+        <span class="panel-keys">上下键选择 · Enter 粘贴 · Esc 关闭</span>
+      </div>
+    </div>
+    <script type="module" src="/src/panel.js"></script>
+  </body>
+</html>

@@ -1,0 +1,118 @@
+/* 快捷面板样式。
+   与 tray.css 一样 @import 主界面样式表：整窗材质、描边、圆角、深色模式全部复用
+   同一套变量，多打包几 KB 换零重复定义。 */
+@import "./styles.css";
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  /* 面板窗口本身是透明的，底色由 .panel 负责 —— 否则圆角外会露出方块 */
+  background: transparent;
+  overflow: hidden;
+  /* 面板里不需要主界面的字体平滑以外的装饰 */
+  user-select: none;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  box-sizing: border-box;
+  /* 用不透明底（--solid-bg）而不是半透明面板色：面板浮在任意内容之上，
+     半透明会把背后的文字透出来，读自己的列表都费劲。 */
+  background: var(--solid-bg, rgba(252, 252, 252, 0.98));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.panel-head {
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.panel-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.panel-search:focus {
+  border-color: var(--accent);
+}
+
+.panel-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.p-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text);
+  cursor: default;
+}
+
+.p-row.is-sel {
+  background: var(--accent);
+  color: #fff;
+}
+
+.p-kind {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--glass-strong);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.p-row.is-sel .p-kind {
+  /* 选中态整行是强调色底，徽章改为半透明白，否则深色徽章压在蓝底上看不清 */
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
+.p-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.panel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.panel-status {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.panel-keys {
+  flex: none;
+  opacity: 0.75;
+}
