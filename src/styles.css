@@ -1146,9 +1146,9 @@ html:not(.hovers-off) .ctx-item.danger:hover {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  max-width: 520px;
-  /* 撑满 .view 的高度：内容是 .settings-body 在滚，标题与标签栏固定不随之滚走。
-     不撑满的话 flex:1 的内容区算不出可用高度，overflow 也就无从谈起。 */
+  /* **不限制整列宽度**：滚动条要落在窗口右缘，而不是贴在 520px 内容列的边上
+     —— 那样一条竖线横在页面中间，看着像把内容切断了（用户实测反馈）。
+     阅读宽度限制下移到 .settings-body 的子项上。 */
   height: 100%;
   /* 设置页隐藏了工具栏，标题需与搜索栏距离顶部一致（52-32)/2 = 10px */
   padding-top: 10px;
@@ -1210,9 +1210,17 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
      12px 与 .view 的 padding-right 相等，两者一减滚动条正好落在内容与窗框中间。 */
   scrollbar-gutter: stable;
   padding-right: 12px;
+  /* 滚到底时最后一行不贴边：底部按钮（清空全部历史）原来会被窗口下缘切掉一截 */
+  padding-bottom: 16px;
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+/* 正文保持 520 的舒适阅读宽度；右侧多出来的空间留给滚动条与留白，
+   于是滚动条贴在窗口右缘，不再横在内容中间。 */
+.settings-body > * {
+  max-width: 520px;
 }
 
 .settings .row {
