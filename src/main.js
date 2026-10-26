@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { cardPreviewHtml, hostOf, esc as escFmt } from "./formats.js";
 
 const appWindow = getCurrentWindow();
 
@@ -805,7 +806,14 @@ function startTimeTicker() {
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
 // 文本的子类型标签：只用于卡片徽章与搜索匹配，**不是分类**
 // （链接/代码仍然是文本条目，侧栏里不会单独出现）
-const SUBTYPE_LABEL = { link: "链接", code: "代码" };
+const SUBTYPE_LABEL = { link: "链接", code: "代码", markdown: "Markdown" };
+// 徽章样式：markdown 与 code 同属「源码」，共用一套配色，靠文字区分 ——
+// 再开一个色相会让九个徽章挤在一起分不清（颜色已经排满了）。
+const SUBTYPE_BADGE = {
+  link: ["tag-link", "链接"],
+  code: ["tag-code", "代码"],
+  markdown: ["tag-code", "Markdown"],
+};
 
 /**
  * 重绘列表。
@@ -1009,10 +1017,8 @@ function cardEl(item) {
       : `<span class="tag tag-kind tag-kind-${item.kind}">${KIND_LABEL[item.kind] || item.kind}</span>`) +
     // 子类型徽章：任何视图都显示（它不是分类，而是「这条内容是什么」的提示，
     // 在「文本」视图里尤其有用 —— 那里所有条目都叫文本，靠它才分得出代码和链接）
-    (item.subtype === "link"
-      ? '<span class="tag tag-link">链接</span>'
-      : item.subtype === "code"
-      ? '<span class="tag tag-code">代码</span>'
+    (SUBTYPE_BADGE[item.subtype]
+      ? `<span class="tag ${SUBTYPE_BADGE[item.subtype][0]}">${SUBTYPE_BADGE[item.subtype][1]}</span>`
       : "") +
     (pinned ? '<span class="tag tag-pinned">已置顶</span>' : "") +
     (item.favorite && !hideFav ? '<span class="tag tag-fav">已收藏</span>' : "") +
@@ -1035,8 +1041,22 @@ function cardEl(item) {
     body.appendChild(img);
   } else {
     const preview = document.createElement("div");
-    preview.className = "card-preview";
-    preview.textContent = item.preview || "";
+    // 按子类型给不同排版：代码/Markdown 用等宽字体并着色，链接整体染成链接色。
+    // 富文本（html_path）在卡片上仍显示纯文本 —— 小卡片里排版 HTML 收益低、
+    // 而且高度会失控；完整排版放在「查看」里做。
+    const sub = item.subtype;
+    preview.className = "card-preview" + (sub ? ` is-${sub}` : "");
+    if (sub === "code" || sub === "markdown") {
+      // cardPreviewHtml 内部对每一段都做了转义，可以安全赋给 innerHTML
+      preview.innerHTML = cardPreviewHtml(item.preview || "", sub);
+    } else if (sub === "link") {
+      preview.textContent = item.preview || "";
+      // 域名单独提出来做视觉锚点（不改变文本内容）
+      const host = hostOf(item.preview || "");
+      if (host) preview.title = host;
+    } else {
+      preview.textContent = item.preview || "";
+    }
     body.appendChild(preview);
   }
   card.appendChild(body);
@@ -2286,13 +2306,8 @@ const TIER_LABEL = {
 };
 
 // 关于页会渲染缓存目录、Release 更新说明等外部文本，统一转义后再插 innerHTML。
-function esc(s) {
-  return String(s ?? "").replace(
-    /[&<>"']/g,
-    (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
-  );
-}
+// 转义统一走 formats.js（渲染模块自己也要用同一份，不能各写一遍）
+const esc = escFmt;
 
 // ── 极简 Markdown 渲染 ──────────────────────────────────────────────────
 // Release 说明是 Markdown，纯文本显示会满屏 ** 和 -。不引第三方库（项目取向是

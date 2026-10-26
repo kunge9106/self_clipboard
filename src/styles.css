@@ -32,6 +32,9 @@
   --radius: 20px;
   --radius-sm: 8px;
 
+  /* 等宽字体：代码 / Markdown 预览与详情正文共用。原本详情页里内联了一串
+     ui-monospace 列表，两处各写一遍就会漂移，抽成变量。 */
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
   --font: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
     "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
 
@@ -105,6 +108,14 @@
      边缘反光），压在浅底上做分组边界根本看不见；这里要的是「深一点的分隔」。
      一个变量管两处（边框 + 分隔线），不再各造一个。 */
   --line: rgba(0, 0, 0, 0.09);
+  /* 代码着色：四类 token + Markdown 标记。
+     只做「一眼分得出是代码」，不做主题级配色；色相与徽章错开，
+     避免正文里的紫色和图片徽章的紫色混为一谈。 */
+  --tok-kw: #7c3aed;
+  --tok-str: #15803d;
+  --tok-num: #b45309;
+  --tok-cmt: #94a3b8;
+  --tok-md: #94a3b8;
   /* 浮层实底：右键菜单 / 弹窗 / toast 共用。
      与面板的 --glass-strong 不是一回事 —— 浮层必须**盖住**背后的内容，
      半透明会把下面的字透出来。三处原本各写一遍 rgba(252,252,252,0.9x)，
@@ -174,6 +185,11 @@ body.dark {
   --tag-code-bg: rgba(203, 213, 225, 0.16);
   --line: rgba(255, 255, 255, 0.09);
   --solid-bg: rgba(40, 40, 44, 0.96);
+  --tok-kw: #c4b5fd;
+  --tok-str: #86efac;
+  --tok-num: #fcd34d;
+  --tok-cmt: #7c8496;
+  --tok-md: #7c8496;
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
   --tag-edited-bg: rgba(74, 194, 107, 0.2);
@@ -876,7 +892,7 @@ html:not(.hovers-off) .btn-primary:hover {
 
 .empty-sub {
   font-size: 12px;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   opacity: 0.8;
 }
 
@@ -950,6 +966,38 @@ html:not(.hovers-off) .card:hover {
 .card.is-missing .card-preview {
   color: var(--text-dim);
 }
+/* 代码 / Markdown：等宽字体。字号比正文小一档 —— 等宽字宽更大，
+   保持 13px 会让两行只装得下十几个字符。 */
+.card-preview.is-code,
+.card-preview.is-markdown {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 链接：整体染成链接色。不拆开只染域名 —— 拆分会在文本中间产生断点，
+   中文与长路径混排时反而更乱。 */
+.card-preview.is-link {
+  color: var(--tag-link-fg);
+}
+
+/* token 着色只作用于代码/Markdown 预览，不影响普通文本 */
+.tok-kw {
+  color: var(--tok-kw);
+}
+.tok-str {
+  color: var(--tok-str);
+}
+.tok-num {
+  color: var(--tok-num);
+}
+.tok-cmt {
+  color: var(--tok-cmt);
+}
+.tok-md {
+  color: var(--tok-md);
+}
+
 
 /* 卡片 meta 行的徽章：几何统一（沿用原先「已失效」徽章的尺寸），颜色按语义区分
    —— 类型=中性、置顶=accent 蓝、收藏=琥珀、失效=红。 */

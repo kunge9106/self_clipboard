@@ -1062,7 +1062,7 @@ pub fn init(app: &AppHandle) {
     // 规则改成「开头最多 2 行」后必须**重算存量**，否则用户看到的还是旧预览，
     // 会以为修复没生效。
     // 识别规则升级：把存量子类型清空重算一次（只在规则版本提升后发生）
-    const SUBTYPE_RULE_VERSION: u32 = 1;
+    const SUBTYPE_RULE_VERSION: u32 = 2;
     if crate::settings::get().subtype_version < SUBTYPE_RULE_VERSION {
         let mut n = 0usize;
         for item in hist.iter_mut() {
@@ -2551,7 +2551,68 @@ fn looks_like_code(t: &str) -> bool {
     kw_hits >= 1 && score >= 3
 }
 
-/// 判定文本条目的子类型：`Some("link")` / `Some("code")` / `None`。
+/// 是否像 Markdown **源码**。
+///
+/// 只认**结构性强特征**，且要命中 ≥2 种：单个特征太容易撞车 ——
+/// 代码里的 `#` 注释、`- ` 开头的负号行、SQL 里的 `**` 都可能误命中。
+/// 强特征清单（都是「整行形态」，普通正文里几乎不会出现）：
+///   ATX 标题(`## `)、无序列表(`- `)、有序列表(`1. `)、表格(`| a | b |`)、
+///   引用(`> `)、链接语法(`[文字](地址)`)。
+///
+/// 刻意不把 `**粗体**` 和行内反引号算进来：代码里的乘号与模板字符串会中招。
+fn looks_like_markdown(t: &str) -> bool {
+    let mut hits = 0;
+    let lines: Vec<&str> = t.lines().collect();
+
+    // 1) ATX 标题：行首 1~6 个 `#` 且紧跟空格
+    let atx = lines.iter().any(|l| {
+        let s = l.trim_start();
+        let n = s.chars().take_while(|c| *c == '#').count();
+        (1..=6).contains(&n) && s.chars().nth(n) == Some(' ')
+    });
+    if atx {
+        hits += 1;
+    }
+
+    // 2) 无序列表
+    if lines.iter().any(|l| {
+        let s = l.trim_start();
+        s.starts_with("- ") || s.starts_with("* ") || s.starts_with("+ ")
+    }) {
+        hits += 1;
+    }
+
+    // 3) 有序列表：数字 + `. `（要求行首，避免匹配正文里的「第 3 点：」）
+    if lines.iter().any(|l| {
+        let s = l.trim_start();
+        let digits = s.chars().take_while(|c| c.is_ascii_digit()).count();
+        digits > 0 && s[digits..].starts_with(". ")
+    }) {
+        hits += 1;
+    }
+
+    // 4) 表格：整行以 `|` 开头且至少两个 `|`
+    if lines
+        .iter()
+        .any(|l| l.trim_start().starts_with('|') && l.matches('|').count() >= 2)
+    {
+        hits += 1;
+    }
+
+    // 5) 引用
+    if lines.iter().any(|l| l.trim_start().starts_with("> ")) {
+        hits += 1;
+    }
+
+    // 6) 链接语法 `[文字](地址)`
+    if t.contains("](") {
+        hits += 1;
+    }
+
+    hits >= 2
+}
+
+/// 判定文本条目的子类型：`"link"` / `"markdown"` / `"code"` / `None`。
 ///
 /// 链接优先：一个网址即使带查询参数也不该被当成代码。
 fn detect_subtype(text: &str) -> Option<&'static str> {
@@ -2561,6 +2622,11 @@ fn detect_subtype(text: &str) -> Option<&'static str> {
     }
     if is_single_url(t) {
         return Some("link");
+    }
+    // Markdown 在代码之前判：一篇带代码块的 Markdown 文档，用户认知里是「Markdown」
+    // 而不是「代码」。而纯代码几乎不会满足「≥2 种结构强特征」，不会被抢走。
+    if looks_like_markdown(t) {
+        return Some("markdown");
     }
     if looks_like_code(t) {
         return Some("code");
@@ -4974,6 +5040,34 @@ mod tests {
         // 夹在一句话里的链接仍然是普通文本 —— 标成「链接」会误导
         assert_eq!(detect_subtype("看这个 https://example.com"), None);
         assert_eq!(detect_subtype("https://example.com\n第二行"), None);
+    }
+
+    /// Markdown 源码要认出来（用户会复制整篇 md 文档）。
+    #[test]
+    fn subtype_markdown_detected_for_structured_source() {
+        let md = "## 1. 铁律\n\n1. 先退出软件\n2. 再重新安装\n\n| 列A | 列B |\n| --- | --- |";
+        assert_eq!(detect_subtype(md), Some("markdown"));
+
+        // 含代码块的 Markdown 仍应判 Markdown，而不是被围栏抢走
+        let with_fence = "## 示例\n\n```rust\nfn main() {}\n```\n\n- 说明一\n- 说明二";
+        assert_eq!(detect_subtype(with_fence), Some("markdown"));
+    }
+
+    /// 只有**一个**结构强特征时不算 Markdown —— 中文正文里「# 号」「1. 」都可能出现，
+    /// 单个特征就判会让徽章泛滥。
+    #[test]
+    fn subtype_markdown_needs_two_structural_hints() {
+        assert_eq!(detect_subtype("# 号标题在中文里也常见"), None);
+        // 用户实测那条「渲染后的纯文本」只有有序列表一个特征 —— 保持不标
+        assert_eq!(
+            detect_subtype("1. 铁律（不可协商）\n只能用命令行工具，禁止使用外壳脚本。"),
+            None
+        );
+        // 代码里的行注释不该被当成 Markdown 标题
+        assert_eq!(
+            detect_subtype("fn main() {\n    // 注释\n    let x = 1;\n}"),
+            Some("code")
+        );
     }
 
     /// 同源判定：Markdown 原文 vs 它的渲染文本要判为「同一次复制」。
