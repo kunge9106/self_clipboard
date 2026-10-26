@@ -15,9 +15,7 @@
 use std::sync::Mutex;
 
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 
 static TRAY: Mutex<Option<tauri::tray::TrayIcon>> = Mutex::new(None);
 

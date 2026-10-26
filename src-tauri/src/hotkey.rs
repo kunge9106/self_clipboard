@@ -74,9 +74,10 @@ pub fn init(app: tauri::AppHandle) {
     std::thread::spawn(move || unsafe {
         THREAD_ID.store(GetCurrentThreadId(), Ordering::SeqCst);
 
-        // 启动时按配置注册一次
+        // 启动时按配置注册一次。失败只影响「这台机器上热键不生效」，
+        // 不能让热键线程直接退出 —— 否则改键也救不回来，只能重启程序。
         let cfg = crate::settings::get();
-        register_slots(&slots_of(&cfg));
+        let _ = register_slots(&slots_of(&cfg));
 
         let mut msg: Msg = std::mem::zeroed();
         while GetMessageW(&mut msg, 0, 0, 0) > 0 {
@@ -86,7 +87,7 @@ pub fn init(app: tauri::AppHandle) {
                 match msg.w_param as i32 {
                     HOTKEY_MAIN => {
                         crate::log_print!("[hotkey] 触发：快捷面板");
-                        crate::panel::show(&app);
+                        crate::panel::toggle(&app);
                     }
                     HOTKEY_SHOT => {
                         crate::log_print!("[hotkey] 触发：截图");

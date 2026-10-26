@@ -13,6 +13,12 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
+/// 快捷面板的窗口 label。
+///
+/// 放在这一层而不是各自 `const` 一份：失焦策略要按 label 区分（见 `closes_on_blur`），
+/// 两边各写一个 `"panel"` 字面量，哪天改名字就会出现「策略认不出这是面板」的静默失效。
+pub const PANEL_LABEL: &str = "panel";
+
 /// 各弹出窗口「最近一次真正显示」的时刻。
 ///
 /// 为什么需要：窗口刚 `show` 出来时，焦点会抖一下（系统先把焦点给同进程的其它窗口，
@@ -82,7 +88,7 @@ pub fn ensure(app: &AppHandle, label: &'static str, url: &str, title: &str, w: f
     let w2 = win.clone();
     win.on_window_event(move |e| match e {
         tauri::WindowEvent::Focused(false) => {
-            if !in_grace(label) {
+            if !in_grace(label) && closes_on_blur(label) {
                 let _ = w2.hide();
             }
         }
@@ -94,6 +100,21 @@ pub fn ensure(app: &AppHandle, label: &'static str, url: &str, title: &str, w: f
     });
 
     Some(win)
+}
+
+/// 某窗口失焦时是否收起。
+///
+/// 托盘菜单**永远**收起：菜单的语义就是「点别处即关闭」，留着不走反而挡住它下面
+/// 那块界面。快捷面板交给用户决定（`panel_stay_on_blur`）—— 见那个字段的注释。
+///
+/// 每次事件现读配置而不是缓存：这个开关随时可能在设置页被改，缓存就得同步失效，
+/// 而读一次配置只是一把锁 + 一次 clone，代价远小于「改完要重启」的体验损失。
+fn closes_on_blur(label: &str) -> bool {
+    if label == PANEL_LABEL {
+        !crate::settings::get().panel_stay_on_blur
+    } else {
+        true
+    }
 }
 
 /// 把窗口摆到锚点附近，并钳制在锚点所在显示器的工作区内。

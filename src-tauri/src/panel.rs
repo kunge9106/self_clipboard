@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
-const PANEL_LABEL: &str = "panel";
+/// 窗口 label 由 `popup` 统一定义（它要按 label 决定失焦策略），这里不另立一份。
+use crate::popup::PANEL_LABEL;
+
 const PANEL_W: f64 = 620.0;
 const PANEL_H: f64 = 460.0;
 /// 面板与鼠标之间留一点距离，别让光标正好压在第一行上
@@ -108,6 +110,26 @@ pub fn show(app: &AppHandle) {
     if let Err(e) = app.run_on_main_thread(move || show_now(&app2)) {
         crate::log_warn!("[panel] 切到主线程失败：{e}");
     }
+}
+
+/// 快捷键被按下时的动作：已在前台就收起，否则（重新）唤出。
+///
+/// 为什么不是无脑 `show`：把「面板失焦保持打开」打开之后，用户去别的窗口干完事
+/// 回来按快捷键，如果只会 `show`，面板就一直赖着不走了 —— 那时唯一的下车方式只有 Esc。
+///
+/// 判据是「可见 **且** 在前台」才收起。只可见不算：面板可能被用户丢在一边、前台换了
+/// 别的窗口，这时按快捷键用户想的是「把面板叫回来」，收起来最反直觉。
+pub fn toggle(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(PANEL_LABEL) {
+        let visible = win.is_visible().unwrap_or(false);
+        let hwnd = win.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+        if visible && hwnd != 0 && unsafe { GetForegroundWindow() } == hwnd {
+            crate::log_print!("[panel] 快捷键再次按下，收起面板");
+            let _ = win.hide();
+            return;
+        }
+    }
+    show(app);
 }
 
 fn show_now(app: &AppHandle) {

@@ -35,6 +35,16 @@ pub struct Config {
     /// 全局快捷键组合，形如 `ctrl+alt+v`。解析见 `hotkey::parse_combo`。
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
+    /// 快捷面板**失焦时是否保持打开**（默认 false = 点别处就收起）。
+    ///
+    /// 为什么做成开关：失焦收起是「点一下就走」的默认体验，但也确实挡住一种很常见的
+    /// 用法 —— 按快捷键弹出面板后，想先回原窗口瞄一眼内容再决定选哪条，一回去面板
+    /// 就没了，等于白按一次。两种用法都合理，所以给开关而不是二选一。
+    ///
+    /// 打开后收起方式：Esc、再按一次唤起快捷键、选中一条（粘贴后自动收起）。
+    /// 只影响**快捷面板**；托盘菜单失焦必须收起（点别处 = 关掉菜单），不听这个开关。
+    #[serde(default)]
+    pub panel_stay_on_blur: bool,
     /// 截图快捷键是否启用
     #[serde(default = "default_true")]
     pub screenshot_hotkey_enabled: bool,
@@ -320,6 +330,8 @@ impl Default for Config {
             prune_include_pinned: false,
             hotkey_enabled: true,
             hotkey: default_hotkey(),
+            // 默认保持既有行为：点别处即收起
+            panel_stay_on_blur: false,
             screenshot_hotkey_enabled: true,
             screenshot_hotkey: default_screenshot_hotkey(),
             // 首次安装时为空：没有「从哪一版升上来」，关于页只显示当前版本一节
@@ -533,6 +545,7 @@ pub fn get_settings() -> serde_json::Value {
         "retentionDays": cfg.retention_days,
         "hotkeyEnabled": cfg.hotkey_enabled,
         "hotkey": cfg.hotkey,
+        "panelStayOnBlur": cfg.panel_stay_on_blur,
         "screenshotHotkeyEnabled": cfg.screenshot_hotkey_enabled,
         "screenshotHotkey": cfg.screenshot_hotkey,
         "pruneIncludePinned": cfg.prune_include_pinned,
@@ -676,6 +689,20 @@ pub fn set_pin_cancel_on_disable(value: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn set_clean_include_pinned(value: bool) -> Result<(), String> {
     update(|c| c.clean_include_pinned = value);
+    Ok(())
+}
+
+/// 快捷面板失焦时是否保持打开（设置页，默认关闭 = 点别处就收起）。
+///
+/// **只存值，无需通知谁**：失焦处理器每次触发时现读配置（见 `popup::closes_on_blur`），
+/// 所以改完立即生效，不必重建窗口或重启。
+#[tauri::command]
+pub fn set_panel_stay_on_blur(value: bool) -> Result<(), String> {
+    crate::log_print!(
+        "[settings] 面板失焦{}",
+        if value { "保持打开" } else { "即收起" }
+    );
+    update(|c| c.panel_stay_on_blur = value);
     Ok(())
 }
 

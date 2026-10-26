@@ -2369,6 +2369,14 @@ function settingsGeneralHtml(s) {
           true,
           "set-hotkey"
         ) +
+        // 从属项：它调的正是上一行那个面板的失焦行为，所以缩进一级
+        rowCheck(
+          "set-panel-stay",
+          "面板失焦不收起",
+          "默认点别处即收起；打开后可先去别的窗口看一眼再回来选。Esc 或再按一次唤起快捷键收起",
+          s.panelStayOnBlur,
+          true
+        ) +
         rowCheck(
           "set-shot-hotkey-enabled",
           "截图",
@@ -2385,8 +2393,6 @@ function settingsGeneralHtml(s) {
           "set-shot-hotkey"
         )
     ),
-    block(
-      "置顶",    ),
     block(
       "置顶",
       rowCheck(
@@ -3385,6 +3391,8 @@ function bindSettings(view) {
     fallback: "alt+q",
     get: () => settings.screenshotHotkey,
   });
+  // 面板失焦行为：只存一个布尔，后端失焦处理器现读配置，改完立即生效
+  bindCheck("set-panel-stay", "set_panel_stay_on_blur");
 
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
