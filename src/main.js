@@ -668,7 +668,10 @@ function bindClearViewModal() {
 function bindNav() {
   // 监听整个侧栏：历史/收藏/图片/文件 与 底部「设置」都在 .sidebar 内
   document.querySelector(".sidebar").addEventListener("click", (e) => {
-    const item = e.target.closest(".nav-item");
+    // 只认带 data-view 的项。侧栏里「深色/浅色」按钮也用了 .nav-item 的样式，
+    // 但它不是导航 —— 之前它被这个委托一起处理，`currentView` 被赋成 undefined，
+    // 于是点一下深浅色，界面就跳回了别的页面（用户实测）。
+    const item = e.target.closest(".nav-item[data-view]");
     if (!item) return;
     document
       .querySelectorAll(".nav-item")
@@ -2133,7 +2136,7 @@ function settingsAppearanceHtml(s) {
       rowCtl(
         "材质浓度",
         "越高越厚实 · 越低越通透",
-        `<input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 50}" /><span class="hint" id="material-val">${s.materialAlpha ?? 50}%</span>`
+        `<input type="range" id="set-material" min="10" max="90" value="${s.materialAlpha ?? 50}" /><span class="hint" id="material-val">${s.materialAlpha ?? 50}%</span>`
       ) +
         rowCheck(
           "set-round",
@@ -3112,8 +3115,10 @@ function bindSettings(view) {
   const material = view.querySelector("#set-material");
   if (material) {
     const label = view.querySelector("#material-val");
+    // 只显示百分比：括号里的说明与上方「越高越厚实 · 越低越通透」重复，
+    // 而且拖动时文字长度跳动，视觉上像"突然冒出一串括号"（用户实测反馈）。
     const show = (v) => {
-      if (label) label.textContent = `${v}%（越高越厚实 · 越低越通透）`;
+      if (label) label.textContent = `${v}%`;
     };
     // 拖动中：只改观感与本地状态，不落盘（高频写 config.json 没必要）。
     // 关键是同步模块级 settings —— settingsHtml() 读的就是它，
