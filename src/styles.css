@@ -2136,8 +2136,7 @@ body.dark .tour-dot.is-on {
   border-radius: var(--radius-sm);
   /* 比窗口底稍深一点，让正文区看起来是「一块内容」而不是浮在玻璃上 */
   background: rgba(0, 0, 0, 0.04);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, "Microsoft YaHei UI",
-    monospace;
+  font-family: var(--font-mono);
   /* 15px：比列表正文（13px）明显大一档，长文本连读不费眼。
      查看态与编辑态共用这个类，所以两边字号永远一致。 */
   font-size: 15px;
@@ -2150,6 +2149,134 @@ body.dark .tour-dot.is-on {
   /* 明确允许选中与光标样式：这个弹窗的主要用途就是「挑一段复制」 */
   user-select: text;
   cursor: text;
+}
+
+/* 富文本 / Markdown 排版态：容器换成正文排版规则，块元素自己负责换行与间距。
+   纯文本态仍走上面的 pre-wrap + 等宽字体，观感与改版前一致。 */
+.detail-body.is-rich {
+  white-space: normal;
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.detail-body.is-rich > :first-child {
+  margin-top: 0;
+}
+
+.detail-body.is-rich > :last-child {
+  margin-bottom: 0;
+}
+
+.detail-body.is-rich p {
+  margin: 0 0 10px;
+}
+
+.detail-body.is-rich h1,
+.detail-body.is-rich h2,
+.detail-body.is-rich h3,
+.detail-body.is-rich h4,
+.detail-body.is-rich h5,
+.detail-body.is-rich h6 {
+  margin: 16px 0 8px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.detail-body.is-rich h1 {
+  font-size: 20px;
+}
+.detail-body.is-rich h2 {
+  font-size: 17px;
+}
+.detail-body.is-rich h3 {
+  font-size: 15px;
+}
+.detail-body.is-rich h4,
+.detail-body.is-rich h5,
+.detail-body.is-rich h6 {
+  font-size: 14px;
+}
+
+.detail-body.is-rich ul,
+.detail-body.is-rich ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+
+.detail-body.is-rich li {
+  margin: 3px 0;
+}
+
+.detail-body.is-rich blockquote {
+  margin: 0 0 10px;
+  padding: 6px 12px;
+  border-left: 3px solid var(--line);
+  color: var(--text-dim);
+}
+
+.detail-body.is-rich hr {
+  margin: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.detail-body.is-rich a.md-link {
+  color: var(--tag-link-fg);
+  cursor: default;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.detail-body.is-rich code,
+.detail-body.is-rich .md-inline {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--glass-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.detail-body.is-rich pre.md-code {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.detail-body.is-rich pre.md-code code {
+  padding: 0;
+  background: none;
+  font-size: inherit;
+}
+
+.detail-body.is-rich table.md-table {
+  margin: 0 0 12px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.detail-body.is-rich table.md-table th,
+.detail-body.is-rich table.md-table td {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  text-align: left;
+}
+
+.detail-body.is-rich table.md-table th {
+  font-weight: 600;
+  background: var(--glass-strong);
+}
+
+/* 富文本里的图片一律丢弃（外链会发请求、data URI 可能撑爆内存），
+   这里保留一条占位提示，让人知道原文里有图而不是内容缺失。 */
+.detail-body.is-rich img {
+  display: none;
 }
 
 .detail-body:focus-visible {

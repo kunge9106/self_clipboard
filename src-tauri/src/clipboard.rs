@@ -520,6 +520,11 @@ const DETAIL_DISPLAY_CAP: usize = 200_000;
 pub struct FullContent {
     /// 正文（超长时只返回前 `DETAIL_DISPLAY_CAP` 个字符）
     pub text: String,
+    /// 富文本原文（`HTML Format` / CF_HTML）。仅当这条复制源提供过格式时才存在。
+    ///
+    /// 详情弹窗拿它做「按格式查看」；不参与搜索、不进列表，只在这一刻读一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
     /// 是否因过长而被截断（前端据此提示用户）
     pub truncated: bool,
     /// 完整内容的字符总数
@@ -550,7 +555,17 @@ pub fn get_full_content(id: String) -> Result<FullContent, String> {
         .or(item.files_path.as_ref())
         .ok_or("该条目没有可查看的文本内容")?;
     let raw = read_text_entity(&dir, rel)?;
-    Ok(summarize_content(raw))
+    let mut full = summarize_content(raw);
+    // 富文本只在这条确实带格式时才多读一次（解不开就当没有，不影响纯文本显示）
+    if let Some(hrel) = item.html_path.as_ref() {
+        match read_text_entity(&dir, hrel) {
+            Ok(h) => full.html = Some(h),
+            Err(e) => crate::log_warn!(
+                "[clipboard] 详情：富文本实体读取失败 {hrel}：{e}（回退纯文本显示）"
+            ),
+        }
+    }
+    Ok(full)
 }
 
 /// 按显示上限截断正文，并统计**完整内容**的规模。
@@ -571,6 +586,7 @@ fn summarize_content(raw: String) -> FullContent {
     };
     FullContent {
         text,
+        html: None,
         truncated,
         total_chars,
         total_lines,

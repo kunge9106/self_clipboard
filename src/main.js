@@ -2,7 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { cardPreviewHtml, hostOf, esc as escFmt } from "./formats.js";
+import {
+  cardPreviewHtml,
+  hostOf,
+  esc as escFmt,
+  renderMarkdown,
+  highlightCode,
+  sanitizeRichHtml,
+} from "./formats.js";
 
 const appWindow = getCurrentWindow();
 
@@ -1668,6 +1675,53 @@ function canEditDetail() {
 }
 
 /** 查看态 / 编辑态互斥切换 */
+/// 当前详情弹窗的上下文（退出编辑态要重放渲染）
+let detailCtx = null;
+
+/// 按格式渲染详情正文，返回是否用了「排版」而不是纯文本。
+///
+/// 优先级刻意如此：
+///   Markdown 排版 > 富文本白名单 > 代码高亮 > 纯文本
+/// Markdown 条目即使带着 html 也优先排版源码 —— 用户的原话是「查看里怎么还是一堆
+/// markdown 原符号」，他要的就是渲染后的样子。
+function renderDetailBody(item, data) {
+  const body = $detail("detail-body");
+  if (!body || !data) return false;
+  body.className = "detail-body";
+  body.replaceChildren();
+
+  const sub = item?.subtype;
+
+  if (sub === "markdown" && data.text) {
+    body.classList.add("is-rich");
+    // renderMarkdown 内部对每一段都做了转义，可以安全赋给 innerHTML
+    body.innerHTML = renderMarkdown(data.text);
+    return true;
+  }
+
+  if (data.html) {
+    body.classList.add("is-rich");
+    const drops = [];
+    body.appendChild(sanitizeRichHtml(data.html, (kind) => drops.push(kind)));
+    // 丢弃项汇总成一条日志（复用现成的前端上报通道，不另造一套）。
+    // 逐项上报会让一条内容刷几十行，把真正有用的上下文挤掉。
+    if (drops.length) {
+      const kinds = [...new Set(drops)].slice(0, 5).join(",");
+      reportFrontend("WARN", "format", `富文本过滤丢弃 ${drops.length} 项：${kinds}`);
+    }
+    return true;
+  }
+
+  if (sub === "code") {
+    body.classList.add("is-rich");
+    body.innerHTML = `<pre class="md-code"><code>${highlightCode(data.text)}</code></pre>`;
+    return true;
+  }
+
+  body.textContent = data.text;
+  return false;
+}
+
 function setDetailMode(mode) {
   const editing = mode === "edit";
   $detail("detail-body").hidden = editing;
@@ -1684,7 +1738,11 @@ function setDetailMode(mode) {
   } else {
     // 退出编辑时丢弃改动，视图回到原文
     $detail("detail-editor").value = detailOriginal;
-    $detail("detail-body").textContent = detailOriginal;
+    // 必须走渲染而不是直接塞纯文本：否则「编辑一次再退出」，Markdown / 富文本的
+    // 排版就退回成源码，用户会以为渲染只生效一次。
+    if (!detailCtx || !renderDetailBody(detailCtx.item, detailCtx.data)) {
+      $detail("detail-body").textContent = detailOriginal;
+    }
     window.getSelection()?.removeAllRanges();
     $detail("detail-select").textContent = "全选";
   }
@@ -1727,7 +1785,8 @@ async function openDetail(item, { startEdit = false } = {}) {
   detailItem = item;
   detailOriginal = data.text;
   detailTruncated = !!data.truncated;
-  body.textContent = data.text;
+  detailCtx = { item, data };
+  renderDetailBody(item, data);
   $detail("detail-editor").value = data.text;
 
   // 规模信息：帮助判断内容大小，也是「有没有被截断」的唯一提示
@@ -1829,6 +1888,17 @@ function bindDetailModal() {
       toast("保存失败：" + err);
     }
   };
+
+  // 渲染出来的链接（Markdown / 富文本）用事件委托交给系统浏览器。
+  // WebView 内的 <a href> 会被当作应用内导航（点了直接白屏），必须拦下 ——
+  // 与关于页更新日志里的链接同一套处理。
+  document.getElementById("detail-body")?.addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-ext]");
+    if (!a) return;
+    e.preventDefault();
+    e.stopPropagation();
+    invoke("open_external", { url: a.dataset.ext });
+  });
 
   document.getElementById("detail-copy").onclick = async () => {
     if (!detailItem) return;
