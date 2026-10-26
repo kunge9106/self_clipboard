@@ -29,6 +29,18 @@ pub struct Config {
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
+    /// 上次运行时的版本号（每次启动写成当前版本）。
+    ///
+    /// 用来判断「本次是不是升级上来的」：两个版本号不一致，就说明用户刚换了版本，
+    /// 关于页需要把中间跨过的所有更新日志一次性显示出来，而不是只显示当前这一节。
+    #[serde(default)]
+    pub last_run_version: String,
+    /// 本次升级的起点版本（`last_run_version` 在版本变化时留下的一份）。
+    ///
+    /// 只在版本变化时更新，所以升级后**一直保留**：用户随时打开关于页，看到的都是
+    /// 「从哪一版升上来、中间都改了什么」，直到下一次升级才换成新的起点。
+    #[serde(default)]
+    pub upgraded_from: String,
     /// 保留期到期清理时，是否连置顶/收藏一起删。**默认 false = 置顶/收藏永不到期**。
     ///
     /// 与 `clean_include_pinned` 分开而不是合并：两者风险等级不同。
@@ -280,6 +292,9 @@ impl Default for Config {
             retention_days: default_retention(),
             // 置顶/收藏默认不受保留期影响
             prune_include_pinned: false,
+            // 首次安装时为空：没有「从哪一版升上来」，关于页只显示当前版本一节
+            last_run_version: String::new(),
+            upgraded_from: String::new(),
             alpha_straight: default_alpha_straight(),
             alpha_round: default_alpha_round(),
             legacy_alpha: None,
@@ -348,6 +363,33 @@ pub fn init(app: &tauri::AppHandle) {
         cfg.alpha_round
     );
     let _ = CONFIG.set(Mutex::new(cfg));
+
+    // 版本升级检测：把上次运行的版本留作「升级起点」。
+    //
+    // 放在 init 末尾而不是读配置时做：这里 CONFIG 已经就位，`update` 能正常落盘。
+    // 判据只看两个版本号是否相同 —— 降级（用户装回旧版）同样会记录起点，
+    // 关于页显示的是「旧版到当前之间」的日志，语义仍然成立。
+    let cur = env!("CARGO_PKG_VERSION");
+    update(|c| record_upgrade(c, cur));
+}
+
+/// 记录「本次是从哪一版升上来的」，供关于页显示跨版本的完整更新日志。
+///
+/// 抽成独立函数是为了能单测：这段逻辑错了，表现是「升级后看不到中间版本的说明」，
+/// 或者更糟 —— 把起点清空导致永远只显示一节，而这类问题在开发机上很难复现
+/// （得真的装旧版再升级）。
+fn record_upgrade(c: &mut Config, cur: &str) {
+    if c.last_run_version == cur {
+        return; // 同版本：什么都不动
+    }
+    if c.last_run_version.is_empty() {
+        // 首次安装：没有「从哪一版来」，关于页只显示当前版本一节
+        c.upgraded_from.clear();
+    } else {
+        // 升级（或用户装回旧版）：留下起点。起点是**上一版**，不是更早那一次。
+        c.upgraded_from = c.last_run_version.clone();
+    }
+    c.last_run_version = cur.to_string();
 }
 
 /// 落盘配置。**原子写 + 失败必报**。
@@ -664,6 +706,37 @@ pub fn set_autostart(value: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 升级起点的记录：关于页靠它显示「跨版本」的完整更新日志。
+    ///
+    /// 四种情况都要对，写错任一种的表现都是「日志显示不全」或「永远只显示一节」，
+    /// 而这类问题只有真的装旧版再升级才会暴露 —— 所以在这里钉死。
+    #[test]
+    fn record_upgrade_tracks_origin_version() {
+        // 1. 首次安装：没有起点
+        let mut c = Config::default();
+        record_upgrade(&mut c, "2.4.1");
+        assert_eq!(c.last_run_version, "2.4.1");
+        assert_eq!(c.upgraded_from, "");
+
+        // 2. 正常升级：起点 = 上一版，且 last_run 前进
+        let mut c = Config {
+            last_run_version: "2.3.0".into(),
+            ..Config::default()
+        };
+        record_upgrade(&mut c, "2.4.1");
+        assert_eq!(c.upgraded_from, "2.3.0");
+        assert_eq!(c.last_run_version, "2.4.1");
+
+        // 3. 同版本再启动：起点保持不变（否则第二次启动就把跨越范围丢了）
+        record_upgrade(&mut c, "2.4.1");
+        assert_eq!(c.upgraded_from, "2.3.0");
+
+        // 4. 装回旧版：起点换成被降级掉的那一版，语义仍是「从它到当前」
+        record_upgrade(&mut c, "2.2.0");
+        assert_eq!(c.upgraded_from, "2.4.1");
+        assert_eq!(c.last_run_version, "2.2.0");
+    }
 
     /// 功能导览的判定：**新装与升级都要弹一次**，弹过之后不再弹。
     ///
