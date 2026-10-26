@@ -1700,16 +1700,22 @@ function renderDetailBody(item, data) {
   }
 
   if (data.html) {
-    body.classList.add("is-rich");
     const drops = [];
-    body.appendChild(sanitizeRichHtml(data.html, (kind) => drops.push(kind)));
+    const frag = sanitizeRichHtml(data.html, (kind) => drops.push(kind));
     // 丢弃项汇总成一条日志（复用现成的前端上报通道，不另造一套）。
     // 逐项上报会让一条内容刷几十行，把真正有用的上下文挤掉。
     if (drops.length) {
       const kinds = [...new Set(drops)].slice(0, 5).join(",");
       reportFrontend("WARN", "format", `富文本过滤丢弃 ${drops.length} 项：${kinds}`);
     }
-    return true;
+    // 片段为空不能直接返回：那会摆出一个空白面板，用户以为内容丢了。
+    // 典型来源是「只有 CF_HTML 头、正文缺失」的坏数据 —— 落到下面按纯文本显示，
+    // 至少还能看到文字。
+    if (frag.childNodes.length > 0) {
+      body.classList.add("is-rich");
+      body.appendChild(frag);
+      return true;
+    }
   }
 
   if (sub === "code") {
