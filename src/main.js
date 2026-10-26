@@ -1897,23 +1897,13 @@ function openContextMenu(x, y, item) {
     });
   }
   // 「复制」对所有类型都有意义，永远排在阅读项之后、置顶之前。
-  // 文本条目如果带富文本，就同时给出「保留格式」与「纯文本」两条路 ——
-  // 只给一条的话，用户要么粘出来丢了格式，要么没法贴进代码编辑器。
-  const rich = item.kind === "text" && (item.html_path || item.rtf_path);
-  if (rich) {
-    entries.push({
-      label: "复制（保留格式）",
-      icon: CTX_ICONS.copy,
-      act: () => copyBack(item, false),
-    });
-    entries.push({
-      label: "复制为纯文本",
-      icon: CTX_ICONS.copy,
-      act: () => copyBack(item, true),
-    });
-  } else {
-    entries.push({ label: "复制", icon: CTX_ICONS.copy, act: () => copyBack(item) });
-  }
+  // 文案就是「复制」——不带「保留格式」这类前缀：主路径本来就是保留格式，
+  // 不需要在菜单里解释一遍（用户 2026-10-26 要求去掉）。
+  entries.push({
+    label: "复制",
+    icon: CTX_ICONS.copy,
+    act: () => copyBack(item, false),
+  });
   // 「编辑」只给文本条目。
   // 文件条目的内容是**路径清单**，编辑它再写回剪贴板会退化成一段纯文本
   // （文件语义丢失，粘贴出去不再是文件）—— 那不是用户要的。
@@ -1922,6 +1912,17 @@ function openContextMenu(x, y, item) {
       label: "编辑",
       icon: CTX_ICONS.edit,
       act: () => openDetail(item, { startEdit: true }),
+    });
+  }
+  // 「复制为纯文本」只对带格式的文本条目出现，位置紧跟「编辑」——
+  // 它和「复制」是同一件事的两种结果，让它们分处「编辑」两侧是刻意的：
+  // 主路径在上、降级路径在下，中间隔着用户最常用的编辑入口。
+  const rich = item.kind === "text" && (item.html_path || item.rtf_path);
+  if (rich) {
+    entries.push({
+      label: "复制为纯文本",
+      icon: CTX_ICONS.copy,
+      act: () => copyBack(item, true),
     });
   }
   entries.push({ sep: true });
