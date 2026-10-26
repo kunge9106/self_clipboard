@@ -146,6 +146,14 @@ pub struct Config {
     /// 造成不可恢复的后果。
     #[serde(default)]
     pub delete_files_permanent: bool,
+    /// 「链接 / 代码」识别规则的版本号。
+    ///
+    /// 识别是启发式的，规则改了之后**存量条目必须重算**，否则用户看到的还是旧结论
+    /// （比如不带 http 的裸域名仍然是「文本」）。条目本身没有地方存规则版本，
+    /// 所以记在配置里：`< 当前版本` 时把存量文本的 subtype 全部重置、再跑一遍判定。
+    /// 只在规则变更时递增，正常运行不会触发。
+    #[serde(default)]
+    pub subtype_version: u32,
 }
 
 /// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次增量。
@@ -273,6 +281,8 @@ impl Default for Config {
             delete_files_with_item: false,
             // 默认回收站（可还原）
             delete_files_permanent: false,
+            // 0 = 尚未按当前规则算过，首次启动会重算一遍存量
+            subtype_version: 0,
             pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
             pin_cancel_on_disable: true, // 默认开启：关掉互通即撤销它铺开的置顶
             cache_dir: None,

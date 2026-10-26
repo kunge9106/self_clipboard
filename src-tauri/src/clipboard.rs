@@ -63,6 +63,17 @@ static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// 两张（实际是好几张）」的成因，也意味着要重复做 6 次秒级的解码+写盘，卡顿被
 /// 放大数倍。保留一个小队列，窗口内的重复一律合并。
 static LAST_IMG: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+/// 最近落过的文本指纹（内容哈希）与时刻。
+///
+/// 为什么文本也需要：一次复制可能被应用**写两次**剪贴板（先纯文本、后补富文本），
+/// 于是两条通道各收一次，历史里出现两条一模一样的记录 —— 用户实测反馈过。
+/// 图片早就有这套指纹去重（`LAST_IMG`），文本一直没有。
+static LAST_TEXT: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+/// 文本判重窗口。比图片的 60s 短得多，因为语义不同：
+/// 图片的 60s 是为了扛住微信「隔几十秒补写同一张图」；
+/// 文本这里只合并「同一次复制被写两遍」，2 秒足够，也不会把用户
+/// 真的连续复制两次同一段文字（通常间隔更久）误合并。
+const TEXT_DUP_WINDOW_MS: u64 = 2_000;
 /// 队列上限：只关心「最近这一小段时间」，不用无限增长。
 const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
@@ -1037,6 +1048,20 @@ pub fn init(app: &AppHandle) {
     // 老条目的 preview 是在「只取首行」的旧规则下写入的 —— 首行短就只显示几个字。
     // 规则改成「开头最多 2 行」后必须**重算存量**，否则用户看到的还是旧预览，
     // 会以为修复没生效。
+    // 识别规则升级：把存量子类型清空重算一次（只在规则版本提升后发生）
+    const SUBTYPE_RULE_VERSION: u32 = 1;
+    if crate::settings::get().subtype_version < SUBTYPE_RULE_VERSION {
+        let mut n = 0usize;
+        for item in hist.iter_mut() {
+            if item.kind == "text" && item.subtype.is_some() {
+                item.subtype = None;
+                n += 1;
+            }
+        }
+        crate::settings::update(|c| c.subtype_version = SUBTYPE_RULE_VERSION);
+        crate::log_print!("[clipboard] 识别规则已升级，{n} 条存量子类型待重算");
+    }
+
     let refreshed = refresh_text_previews(&dir, &mut hist);
     // 存量条目补算「链接 / 代码」子类型（只在升级后首次启动真正干活）
     let subtyped = refresh_text_subtypes(&dir, &mut hist);
@@ -1278,6 +1303,24 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
     // 判重：两种形态各有各的指纹来源，但都**不需要解码**。
     //   - ImageOriginal（微信走的就是这条）：文件内容哈希（FNV-1a）
     //   - Image（CF_DIB 原始位图，本机实测微信不走）：像素量化指纹
+    // 文本判重：同一次复制被应用写两遍时（先纯文本、后补富文本），只保留一条。
+    if let RawClip::Text { text, html, rtf } = &raw {
+        let fp = content_hash(text.as_bytes());
+        let dup = LAST_TEXT
+            .lock()
+            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, TEXT_DUP_WINDOW_MS))
+            .unwrap_or(false);
+        if dup {
+            // 关键：第二次往往**才带格式**（延迟渲染）。这里把格式补到已有那条上，
+            // 而不是丢掉 —— 否则用户复制一次，格式永远进不来。
+            let patched = merge_rich_into_latest(html, rtf);
+            crate::log_print!(
+                "[clipboard] 重复文本已合并（同一次复制的第二次写入，补格式={patched}）"
+            );
+            return;
+        }
+    }
+
     let fp = match &raw {
         RawClip::ImageOriginal { hash, .. } => Some(*hash),
         RawClip::Image(dib) => Some(image_fingerprint(dib)),
@@ -1318,15 +1361,62 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
 /// 规则：**只与队列最后一条比对**（微信补写必然紧挨着上一条）；命中则把它的
 /// 时间戳刷新为 `now`（滑动续期），使持续到来的同图始终保持在同一簇里。
 /// 未命中则入队并清理过期项。
+/// 把这次捕获到的富文本补到**最新那条**文本条目上。
+///
+/// 触发场景：应用分两次写剪贴板（先纯文本、再补 HTML/RTF），第一次产生的条目
+/// 没有格式。补在这里而不是丢掉第二次，否则用户复制一次、格式永远进不来。
+///
+/// 幂等：最新条目已经有对应格式，或它不是文本条目，就什么都不做。
+fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
+    if html.is_none() && rtf.is_none() {
+        return false;
+    }
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return false;
+    };
+    let Ok(mut g) = hist.lock() else { return false };
+    let Some(last) = g.first_mut() else { return false };
+    if last.kind != "text" {
+        return false;
+    }
+    let id = last.id.clone();
+    let mut changed = false;
+    if last.html_path.is_none() {
+        if let Some(h) = html {
+            let rel = format!("data/{id}.html");
+            write_text_entity(&dir, &rel, h);
+            last.html_path = Some(rel);
+            changed = true;
+        }
+    }
+    if last.rtf_path.is_none() {
+        if let Some(r) = rtf {
+            let rel = format!("data/{id}.rtf");
+            write_text_entity(&dir, &rel, r);
+            last.rtf_path = Some(rel);
+            changed = true;
+        }
+    }
+    if changed {
+        save_index(&dir, &g);
+    }
+    changed
+}
+
 fn dedup_merge(g: &mut Vec<(u64, u64)>, fp: u64, now: u64) -> bool {
+    dedup_merge_with(g, fp, now, DUP_WINDOW_MS)
+}
+
+/// 同 `dedup_merge`，但窗口可指定（文本用更短的窗口，见 `TEXT_DUP_WINDOW_MS`）。
+fn dedup_merge_with(g: &mut Vec<(u64, u64)>, fp: u64, now: u64, window: u64) -> bool {
     if let Some(last) = g.last_mut() {
-        if last.0 == fp && now.saturating_sub(last.1) < DUP_WINDOW_MS {
+        if last.0 == fp && now.saturating_sub(last.1) < window {
             last.1 = now; // 滑动窗口：续上这一簇
             return true;
         }
     }
     g.push((fp, now));
-    g.retain(|(_, t)| now.saturating_sub(*t) < DUP_WINDOW_MS);
+    g.retain(|(_, t)| now.saturating_sub(*t) < window);
     let len = g.len();
     if len > LAST_IMG_KEEP {
         g.drain(0..len - LAST_IMG_KEEP);
@@ -2152,16 +2242,59 @@ fn decode_image_file(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
 /// 返回 `(预览串, 是否截断)`。第二个值不是顺手加的：前端要靠它判断
 /// 「卡片已经显示全了就别再弹悬浮浮层」，而这个判断必须与截断规则**同源** ——
 /// 前端照抄一份「2 行 / 140 字」的规则，日后改了一边就必然漂移。
+/// 常见顶级域名白名单 —— 只用来识别**不带协议**的裸域名。
+///
+/// 为什么必须白名单，而不是「含点号且无空格」：`报告.docx`、`v1.2.3`、`3.14`
+/// 全都符合那个形状，真按它判会把一堆普通文本标成「链接」，徽章立刻失去意义。
+/// 白名单只影响裸域名；带 `http(s)://` 的一律直接认，不查表。
+const TLDS: &[&str] = &[
+    "com", "cn", "net", "org", "io", "dev", "app", "co", "me", "info", "xyz", "top", "site",
+    "tech", "ai", "gov", "edu", "cc", "tv", "biz", "pro", "online", "shop", "blog", "wiki",
+    "so", "gg", "ly", "to", "fm", "sh", "run", "page", "link", "cloud", "store", "design",
+    "art", "work", "live", "news", "world", "today", "space", "website", "host", "press",
+    "zone", "email", "group", "team", "plus", "one", "moe", "hk", "tw", "jp", "us", "uk",
+];
+
+/// 不带协议的裸域名：`github.com/x`、`example.com`、`mp.weixin.qq.com/s/xxx`。
+///
+/// 与 `is_single_url` 同一套前提：整条内容不含空白（一句话里夹个域名不算）。
+fn looks_like_bare_url(t: &str) -> bool {
+    if t.chars().any(char::is_whitespace) {
+        return false;
+    }
+    // 行尾的句号/逗号/右括号是标点，不属于域名
+    let core = t.trim_end_matches(['.', ',', ';', ')', ']', '。', '，', '、']);
+    let host = core.split(['/', '?', '#']).next().unwrap_or("");
+    if !host.contains('.') {
+        return false;
+    }
+    // host 只允许字母数字、点、横线、下划线（排除 @ 邮箱、含中文的句子等）
+    if !host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return false;
+    }
+    match host.rsplit('.').next() {
+        Some(tld) => TLDS.contains(&tld.to_ascii_lowercase().as_str()),
+        None => false,
+    }
+}
+
 /// 整条内容是否「就是一个网址」。
 ///
-/// 判定收得很紧：不能含任何空白（含换行），必须以 `http(s)://` 或 `www.` 开头。
-/// 一句话里夹着链接不算 —— 那仍然是普通文本，标成「链接」反而误导。
+/// 两种形态都认：带协议的（`http(s)://`、`www.`），以及**裸域名**（`github.com/x`）——
+/// 后者是用户实测反馈「明明是个链接却标成文本」的那种。
+/// 但都要求整条内容不含空白：一句话里夹着链接仍是普通文本，标成「链接」反而误导。
 fn is_single_url(t: &str) -> bool {
-    if t.chars().any(char::is_whitespace) || t.len() < 10 {
+    if t.chars().any(char::is_whitespace) || t.len() < 6 {
         return false;
     }
     let lower = t.to_ascii_lowercase();
-    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("www.")
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("www.") {
+        return lower.len() >= 10;
+    }
+    looks_like_bare_url(t)
 }
 
 /// 文本是否「看起来是代码」。
@@ -2183,10 +2316,25 @@ fn looks_like_code(t: &str) -> bool {
         }
     }
 
+    // 关键字表：只认「后跟空格」或带括号的形态，避免命中普通词
+    const KEYWORDS: &[&str] = &[
+        "fn ", "let ", "const ", "var ", "function ", "def ", "class ", "import ", "from ",
+        "return ", "public ", "private ", "static ", "void ", "package ", "namespace ",
+        "#include", "<?php", "console.log(", "await ", "async ", "elif ", "func ", "SELECT ",
+        "INSERT ", "UPDATE ", "CREATE TABLE",
+    ];
+
     let lines: Vec<&str> = t.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.len() < 2 {
-        // 单行不判定：`const x = 1;` 与「注意：这样做；」在统计上没有区别
-        return false;
+        // 单行：多行那套「比例/缩进」统计用不上，但完全不判会把
+        // `const x = 1;`、`import os` 这类整行粘贴的代码漏掉（用户实测反馈）。
+        // 只用**强特征**，宁可漏：「注意：这样做；」不含括号、不以关键字开头，
+        // 因此不会被误标。
+        let starts_kw = KEYWORDS.iter().any(|k| t.starts_with(k));
+        let ends_semi = t.trim_end().ends_with(';');
+        let has_arrow = t.contains("=>") || t.contains("::") || t.contains("->");
+        let looks_call = t.contains('(') && t.contains(')');
+        return starts_kw || (has_arrow && ends_semi) || (ends_semi && looks_call);
     }
 
     let mut score = 0;
@@ -2221,13 +2369,6 @@ fn looks_like_code(t: &str) -> bool {
         score += 1;
     }
 
-    // 关键字：只认「后跟空格」或带括号的形态，避免命中普通词
-    const KEYWORDS: &[&str] = &[
-        "fn ", "let ", "const ", "var ", "function ", "def ", "class ", "import ", "from ",
-        "return ", "public ", "private ", "static ", "void ", "package ", "namespace ",
-        "#include", "<?php", "console.log(", "await ", "async ", "elif ", "func ", "SELECT ",
-        "INSERT ", "UPDATE ", "CREATE TABLE",
-    ];
     let kw_hits = KEYWORDS.iter().filter(|k| t.contains(**k)).count();
     if kw_hits >= 2 {
         score += 2;
@@ -4664,6 +4805,39 @@ mod tests {
         assert_eq!(detect_subtype("https://example.com\n第二行"), None);
     }
 
+    /// 裸域名也要识别成链接 —— 用户实测「复制的是正确链接，只是没带 http，却被标成文本」。
+    /// 同时必须挡住 `报告.docx` / `v1.2.3` / `3.14` 这类「像但不是」的内容。
+    #[test]
+    fn subtype_link_accepts_bare_domains() {
+        assert_eq!(detect_subtype("github.com/kunge9106/self_clipboard"), Some("link"));
+        assert_eq!(detect_subtype("example.com"), Some("link"));
+        assert_eq!(detect_subtype("mp.weixin.qq.com/s/AbCdEf"), Some("link"));
+        assert_eq!(detect_subtype("example.com."), Some("link"), "行尾句号应被忽略");
+
+        // 以下都含点号，但都不是域名 —— 标成链接会让徽章失去意义
+        assert_eq!(detect_subtype("报告.docx"), None);
+        assert_eq!(detect_subtype("v1.2.3"), None);
+        assert_eq!(detect_subtype("3.14"), None);
+        assert_eq!(detect_subtype("第一.二条"), None);
+        assert_eq!(detect_subtype("a@b.com"), None, "邮箱不是链接");
+        assert_eq!(detect_subtype("看 example.com"), None, "句子里夹域名不算");
+    }
+
+    /// 单行代码也要认（用户实测 `const x = 1;` 这类整行粘贴的代码被漏掉），
+    /// 但只认强特征，普通句子不能误标。
+    #[test]
+    fn subtype_code_accepts_single_line_with_strong_features() {
+        assert_eq!(detect_subtype("const x = 1;"), Some("code"));
+        assert_eq!(detect_subtype("import os"), Some("code"));
+        assert_eq!(detect_subtype("console.log(1);"), Some("code"));
+        assert_eq!(detect_subtype("value => value * 2;"), Some("code"));
+
+        // 中文说明：带冒号、带分号，但不含括号、不以关键字开头
+        assert_eq!(detect_subtype("注意：这样做；"), None);
+        assert_eq!(detect_subtype("请稍等；"), None);
+        assert_eq!(detect_subtype("结论：先跑一遍。"), None);
+    }
+
     /// 子类型判定：代码要能认出来，且**不能把中文文档误判成代码**。
     ///
     /// 误判的代价比漏判大：漏了只是少一个徽章，误了会让用户对整列徽章失去信任。
@@ -4691,8 +4865,9 @@ mod tests {
             detect_subtype("这是一段普通说明。\n第二行继续说明，没有代码特征。"),
             None
         );
-        // 单行代码不判定：与普通句子在统计上没有区别
-        assert_eq!(detect_subtype("const x = 1;"), None);
+        // 单行**已改为按强特征判定**（见 subtype_code_accepts_single_line_with_strong_features）：
+        // 原来这里断言「单行一律不判」，会把整行粘贴的代码全部漏掉。
+        assert_eq!(detect_subtype("const x = 1;"), Some("code"));
     }
 
     /// 改动前按 120 字硬截且没有省略号，视觉上像「话说半截断掉」——
