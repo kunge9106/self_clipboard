@@ -2506,11 +2506,20 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
     // 等于把用户复制的文本**明文**写进日志文件。日志的用途是排查问题，
     // 不该顺带成为一份内容副本；用户明确反馈过「不安全」。
     // 需要定位内容相关问题时，用这里的 id 去缓存目录里找对应条目即可。
+    // `rich=` 是排查富文本的第一落点：一眼能看出这次复制到底有没有拿到格式。
+    // none 说明源应用没提供 HTML/RTF，或体积超限被放弃（后者另有一条 WARN）。
+    let rich = match (&item.html_path, &item.rtf_path) {
+        (Some(_), Some(_)) => "html+rtf",
+        (Some(_), None) => "html",
+        (None, Some(_)) => "rtf",
+        (None, None) => "none",
+    };
     crate::log_print!(
-        "[clipboard] 新增 {} 条目 kind={} size={}",
+        "[clipboard] 新增 {} 条目 kind={} size={} rich={}",
         id,
         item.kind,
-        item.size
+        item.size,
+        rich
     );
     item
 }
