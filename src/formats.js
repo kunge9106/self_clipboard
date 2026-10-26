@@ -79,7 +79,16 @@ export function cardMarkdown(text) {
       const h = line.match(/^\s*#{1,6}\s+(.*)$/);
       if (h) return `<strong>${inlineFormat(h[1])}</strong>`;
       const ul = line.match(/^(\s*)[-*+]\s+(.*)$/);
-      if (ul) return `${ul[1]}<span class="md-bullet">•</span> ${inlineFormat(ul[2])}`;
+      if (ul) {
+        // 任务列表：卡片里没有空间画方块，用 ☑ / ☐ 两个字符表示勾选状态。
+        // 不显示成 `• [x]` —— 那是没解析的原始标记，正是用户之前抱怨过的观感。
+        const tm = ul[2].match(/^\[([ xX])\]\s+(.*)$/);
+        if (tm) {
+          const mark = tm[1].toLowerCase() === "x" ? "☑" : "☐";
+          return `${ul[1]}<span class="md-bullet">${mark}</span> ${inlineFormat(tm[2])}`;
+        }
+        return `${ul[1]}<span class="md-bullet">•</span> ${inlineFormat(ul[2])}`;
+      }
       const ol = line.match(/^(\s*)(\d+\.)\s+(.*)$/);
       if (ol) return `${ol[1]}<span class="md-bullet">${ol[2]}</span> ${inlineFormat(ol[3])}`;
       const bq = line.match(/^\s*>\s?(.*)$/);
@@ -149,11 +158,15 @@ export function renderMarkdown(text) {
   const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
   const out = [];
   let i = 0;
-  let list = null; // "ul" | "ol"
+  // 列表栈：每层记 { tag, indent, liOpen }。
+  // 单层 `list` 变量做不了嵌套 —— `- a` 里再缩进一层必须把 `<ul>` 放进上一个
+  // `<li>` 内部，而 `<li>` 得**延迟闭合**。所以栈里还要记这一层是否开着 li。
+  const listStack = [];
   const closeList = () => {
-    if (list) {
-      out.push(`</${list}>`);
-      list = null;
+    while (listStack.length) {
+      const top = listStack.pop();
+      if (top.liOpen) out.push("</li>");
+      out.push(`</${top.tag}>`);
     }
   };
 
@@ -227,17 +240,54 @@ export function renderMarkdown(text) {
       continue;
     }
 
-    // 列表
-    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
-    const ol = line.match(/^\s*\d+\.\s+(.*)$/);
-    if (ul || ol) {
-      const want = ul ? "ul" : "ol";
-      if (list !== want) {
-        closeList();
-        out.push(`<${want}>`);
-        list = want;
+    // 列表（支持嵌套与任务列表）
+    // 缩进宽度决定层级：制表符按 4 空格算，覆盖各种编辑器的输出。
+    const lm = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+    if (lm) {
+      const indent = lm[1].replace(/\t/g, "    ").length;
+      const tag = /\d/.test(lm[2]) ? "ol" : "ul";
+      let body = lm[3];
+
+      // 任务列表：`- [ ] xxx` / `- [x] xxx`
+      let task = null; // null = 普通列表项
+      const tm = body.match(/^\[([ xX])\]\s+(.*)$/);
+      if (tm) {
+        task = tm[1].toLowerCase() === "x";
+        body = tm[2];
       }
-      out.push(`<li>${inlineFormat((ul || ol)[1])}</li>`);
+
+      // 回到合适层级：缩进比栈顶浅就把那几层收掉（每层先关掉自己开着的 li）
+      while (listStack.length && indent < listStack[listStack.length - 1].indent) {
+        const top = listStack.pop();
+        if (top.liOpen) out.push("</li>");
+        out.push(`</${top.tag}>`);
+      }
+
+      const top = listStack[listStack.length - 1];
+      if (!top || indent > top.indent) {
+        // 更深一层：**不关上一层的 li**，直接嵌套进去
+        listStack.push({ tag, indent, liOpen: false });
+        out.push(`<${tag}>`);
+      } else {
+        // 同级：先关掉上一条 li
+        if (top.liOpen) {
+          out.push("</li>");
+          top.liOpen = false;
+        }
+        if (top.tag !== tag) {
+          // `- ` 接 `1. ` 这种类型切换：换标签，层级不变
+          out.push(`</${top.tag}>`);
+          listStack[listStack.length - 1] = { tag, indent, liOpen: false };
+          out.push(`<${tag}>`);
+        }
+      }
+
+      const box =
+        task === null ? "" : `<span class="md-box${task ? " is-on" : ""}"></span>`;
+      out.push(
+        `<li${task === null ? "" : ' class="md-task"'}>${box}${inlineFormat(body)}`
+      );
+      listStack[listStack.length - 1].liOpen = true;
       i++;
       continue;
     }
