@@ -59,14 +59,6 @@ extern "system" {
     fn GetMessageW(msg: *mut Msg, hwnd: isize, min: u32, max: u32) -> i32;
     fn PostThreadMessageW(thread_id: u32, msg: u32, w_param: usize, l_param: isize) -> i32;
     fn GetCurrentThreadId() -> u32;
-    fn ShellExecuteW(
-        hwnd: isize,
-        op: *const u16,
-        file: *const u16,
-        params: *const u16,
-        dir: *const u16,
-        show: i32,
-    ) -> isize;
 }
 
 /// 启动热键线程。**只调一次**（`lib.rs` 的 setup 里）。
@@ -91,7 +83,7 @@ pub fn init(app: tauri::AppHandle) {
                     }
                     HOTKEY_SHOT => {
                         crate::log_print!("[hotkey] 触发：截图");
-                        launch_screen_clip();
+                        crate::screenclip::launch();
                     }
                     other => crate::log_warn!("[hotkey] 未知热键 ID {other}"),
                 }
@@ -105,6 +97,12 @@ pub fn init(app: tauri::AppHandle) {
                     // 接收端可能已经超时放弃，发送失败不算问题
                     let _ = tx.send(r);
                 }
+            } else if msg.message == crate::screenclip::WM_INSTALL_HOOK {
+                // 低级鼠标钩子必须装在有消息循环的线程上 —— 就装在这里，
+                // 不再单独起一个线程和一套 MSG 结构。
+                crate::screenclip::install_hook();
+            } else if msg.message == crate::screenclip::WM_REMOVE_HOOK {
+                crate::screenclip::remove_hook();
             }
         }
         crate::log_warn!("[hotkey] 消息循环退出，热键不再生效");
@@ -218,29 +216,12 @@ unsafe fn register_slots(slots: &[(i32, String)]) -> Result<(), String> {
     }
 }
 
-/// 唤起系统截图。
+/// 热键线程的线程 ID（0 = 还没起来）。
 ///
-/// 用 `ms-screenclip:` 协议而不是自己画选区：选区框选、多屏 DPI、缩放适配这些
-/// Windows 已经做得很稳，自己做一套至少要两三天，还容易在 150% 缩放的多屏上错位。
-/// 截完图会进剪贴板，采集线程随即把它记成图片条目 —— 用户拿到的体验是
-/// 「按一下、框一块、进轻贴」。
-fn launch_screen_clip() {
-    unsafe {
-        let op: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
-        let target: Vec<u16> = "ms-screenclip:".encode_utf16().chain(std::iter::once(0)).collect();
-        // 返回值 > 32 才算成功（<= 32 是错误码）
-        let rc = ShellExecuteW(
-            0,
-            op.as_ptr(),
-            target.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1, // SW_SHOWNORMAL
-        );
-        if rc as isize <= 32 {
-            crate::log_warn!("[hotkey] 唤起系统截图失败（ShellExecuteW 返回 {rc}），可能系统版本不支持");
-        }
-    }
+/// 给 `screenclip` 投递「装/卸鼠标钩子」用：低级钩子与安装线程绑定，只能由这个
+/// 线程来装卸。
+pub fn thread_id() -> u32 {
+    THREAD_ID.load(Ordering::SeqCst)
 }
 
 /// `"ctrl+alt+v"` → (修饰键, 虚拟键码)。

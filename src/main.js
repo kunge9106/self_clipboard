@@ -2391,6 +2391,14 @@ function settingsGeneralHtml(s) {
           }>${comboLabel(s.screenshotHotkey || "alt+q")}</button>`,
           true,
           "set-shot-hotkey"
+        ) +
+        // 截图覆盖层本身不响应右键，这一项把右键翻译成 Esc —— 默认开
+        rowCheck(
+          "set-shot-rclick",
+          "截图时右键取消",
+          "在系统截图上点右键即取消（等同 Esc）；关闭后右键没有反应",
+          s.screenshotRightClickCancel,
+          true
         )
     ),
     block(
@@ -3393,6 +3401,8 @@ function bindSettings(view) {
   });
   // 面板失焦行为：只存一个布尔，后端失焦处理器现读配置，改完立即生效
   bindCheck("set-panel-stay", "set_panel_stay_on_blur");
+  // 截图右键取消：同样只存布尔，下次唤起截图时按新值决定装不装钩子
+  bindCheck("set-shot-rclick", "set_screenshot_right_click_cancel");
 
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");

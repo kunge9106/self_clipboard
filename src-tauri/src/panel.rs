@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
 /// 窗口 label 由 `popup` 统一定义（它要按 label 决定失焦策略），这里不另立一份。
 use crate::popup::PANEL_LABEL;
+use crate::effects::Rect;
 
 const PANEL_W: f64 = 620.0;
 const PANEL_H: f64 = 460.0;
@@ -24,54 +25,6 @@ const GAP: f64 = 12.0;
 /// 唤出面板之前的前台窗口。0 = 未知（例如从托盘打开面板）。
 static PREV_FG: AtomicIsize = AtomicIsize::new(0);
 
-#[repr(C)]
-struct Point {
-    x: i32,
-    y: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct MouseInput {
-    dx: i32,
-    dy: i32,
-    mouse_data: u32,
-    flags: u32,
-    time: u32,
-    extra: usize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KeybdInput {
-    vk: u16,
-    scan: u16,
-    flags: u32,
-    time: u32,
-    extra: usize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct HardwareInput {
-    msg: u32,
-    param_l: u16,
-    param_h: u16,
-}
-
-#[repr(C)]
-union InputUnion {
-    mi: MouseInput,
-    ki: KeybdInput,
-    hi: HardwareInput,
-}
-
-#[repr(C)]
-struct Input {
-    ty: u32,
-    u: InputUnion,
-}
-
 extern "system" {
     fn GetForegroundWindow() -> isize;
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
@@ -80,12 +33,12 @@ extern "system" {
     fn SetFocus(hwnd: isize) -> isize;
     fn GetCurrentThreadId() -> u32;
     fn SetForegroundWindow(hwnd: isize) -> i32;
-    fn GetCursorPos(pt: *mut Point) -> i32;
-    fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
+    // `GetCursorPos` 要一个 POINT，这里用 `effects::Rect` 接：两个结构的前两个字段
+    // 都是 x/y（i32），系统只写前 8 字节。自己再立一个 `Point` 会和 effects 里那份
+    // 声明打架（同名 extern 签名不同 → clashing 警告），不如共用同一个物理坐标类型。
+    fn GetCursorPos(pt: *mut Rect) -> i32;
 }
 
-const INPUT_KEYBOARD: u32 = 1;
-const KEYEVENTF_KEYUP: u32 = 0x0002;
 const VK_CONTROL: u16 = 0x11;
 const VK_V: u16 = 0x56;
 
@@ -140,12 +93,17 @@ fn show_now(app: &AppHandle) {
 
     // 跟随鼠标：这是「光标附近弹出」最实用的近似。真正的插入符位置要靠
     // `GetCaretPos`，但它只在同进程窗口里可靠，跨进程拿到的经常是 0。
-    let mut pt = Point { x: 0, y: 0 };
+    let mut pt = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
     let anchor = unsafe {
         if GetCursorPos(&mut pt) == 0 {
             PhysicalPosition::new(200.0, 200.0)
         } else {
-            PhysicalPosition::new(pt.x as f64, pt.y as f64)
+            PhysicalPosition::new(pt.left as f64, pt.top as f64)
         }
     };
 
@@ -215,33 +173,14 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
             crate::log_warn!("[panel] 焦点没能切回原窗口，跳过模拟粘贴（内容已在剪贴板）");
             return Ok(());
         }
-        send_ctrl_v();
+        // 顺序：Ctrl 按下 → V 按下 → V 抬起 → Ctrl 抬起。
+        // 注入实现只有 `input` 一份，截图取消发 Esc 走的是同一个函数。
+        if !crate::input::send_keys(&[VK_CONTROL, VK_V]) {
+            crate::log_warn!("[panel] SendInput 未能送出全部按键（可能被权限拦截）");
+        }
     }
     crate::log_print!("[panel] 已粘贴回原窗口");
     Ok(())
-}
-
-unsafe fn send_ctrl_v() {
-    let key = |vk: u16, up: bool| Input {
-        ty: INPUT_KEYBOARD,
-        u: InputUnion {
-            ki: KeybdInput {
-                vk,
-                scan: 0,
-                flags: if up { KEYEVENTF_KEYUP } else { 0 },
-                time: 0,
-                extra: 0,
-            },
-        },
-    };
-    // 顺序：Ctrl 按下 → V 按下 → V 抬起 → Ctrl 抬起。
-    // 一次 SendInput 提交四个事件，中间不会被别的输入插进来。
-    let seq = [key(VK_CONTROL, false), key(VK_V, false), key(VK_V, true), key(VK_CONTROL, true)];
-    let size = std::mem::size_of::<Input>() as i32;
-    let sent = SendInput(seq.len() as u32, seq.as_ptr(), size);
-    if sent != seq.len() as u32 {
-        crate::log_warn!("[panel] SendInput 只送出 {sent}/4 个事件（可能被权限拦截）");
-    }
 }
 
 /// 前端按 Esc 或点空白处时收起面板。

@@ -53,6 +53,15 @@ pub struct Config {
     /// 不用 `ctrl+alt+a`（微信占着）、也不建议 `alt+z`（部分编辑器拿它做撤销的变体）。
     #[serde(default = "default_screenshot_hotkey")]
     pub screenshot_hotkey: String,
+    /// 截图时**右键取消**（默认开启）。
+    ///
+    /// 系统截图覆盖层本身对右键毫无反应（Win11 实测），只能 Esc 或点 ×。很多人
+    /// （包括本项目的用户）习惯右键取消，所以额外挂一个临时鼠标钩子把右键翻译成 Esc。
+    ///
+    /// 为什么要开关：这是一段会**全局监听鼠标**的代码，虽然只在截图期间存在、且只对
+    /// 覆盖层生效，但「我的程序在监听鼠标」这件事应该由用户自己决定，不能默认替他装。
+    #[serde(default = "default_true")]
+    pub screenshot_right_click_cancel: bool,
     /// 上次运行时的版本号（每次启动写成当前版本）。
     ///
     /// 用来判断「本次是不是升级上来的」：两个版本号不一致，就说明用户刚换了版本，
@@ -334,6 +343,8 @@ impl Default for Config {
             panel_stay_on_blur: false,
             screenshot_hotkey_enabled: true,
             screenshot_hotkey: default_screenshot_hotkey(),
+            // 默认开启：系统覆盖层对右键没反应，转成 Esc 才能右键取消
+            screenshot_right_click_cancel: true,
             // 首次安装时为空：没有「从哪一版升上来」，关于页只显示当前版本一节
             last_run_version: String::new(),
             upgraded_from: String::new(),
@@ -548,6 +559,7 @@ pub fn get_settings() -> serde_json::Value {
         "panelStayOnBlur": cfg.panel_stay_on_blur,
         "screenshotHotkeyEnabled": cfg.screenshot_hotkey_enabled,
         "screenshotHotkey": cfg.screenshot_hotkey,
+        "screenshotRightClickCancel": cfg.screenshot_right_click_cancel,
         "pruneIncludePinned": cfg.prune_include_pinned,
         // 当前模式生效的那一档（前端滑块直接用这个）
         "materialAlpha": cfg.alpha(),
@@ -758,6 +770,21 @@ pub fn set_screenshot_hotkey(combo: String, enabled: bool) -> Result<(), String>
             Err(e)
         }
     }
+}
+
+/// 截图右键取消开关（设置页，默认开启）。
+///
+/// 只存值：钩子是在**每次唤起截图时**按当时的配置决定装不装的（见
+/// `screenclip::launch`），所以这里不需要通知谁，也不必清理已经挂着的钩子 ——
+/// 它本来就只活一次截图的时间。
+#[tauri::command]
+pub fn set_screenshot_right_click_cancel(value: bool) -> Result<(), String> {
+    crate::log_print!(
+        "[settings] 截图右键取消已{}",
+        if value { "开启" } else { "关闭" }
+    );
+    update(|c| c.screenshot_right_click_cancel = value);
+    Ok(())
 }
 
 /// 录制快捷键期间临时注销热键。
