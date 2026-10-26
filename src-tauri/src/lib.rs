@@ -15,6 +15,7 @@ mod settings;
 mod autostart;
 mod tray;
 mod logger;
+mod hotkey;
 #[cfg(windows)]
 mod purge;
 
@@ -287,6 +288,7 @@ pub fn run() {
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,
+            settings::set_hotkey,
             settings::set_clean_confirm_exit,
             settings::exit_app,
             settings::set_retention_days,
@@ -324,6 +326,8 @@ pub fn run() {
         about::prune_stale_installers();
         // 托盘图标常驻：程序一运行就显示（不再依赖「关闭时后台运行」开关）
         tray::create_tray(app.handle());
+        // 全局快捷键：独立线程跑消息循环，触发时复用托盘那套「唤回主窗口」
+        hotkey::init(app.handle().clone());
         // 启动后自动检查一次更新：后台线程、静默 —— 有新版才发通知，
         // 检查失败或没有新版一律不打扰用户（前端其余情况只认手动点击）。
         about::auto_check(app.handle().clone());

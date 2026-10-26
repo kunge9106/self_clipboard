@@ -2208,6 +2208,14 @@ function block(title, inner, opts = {}) {
   return `<section class="${cls}">${title ? `<h3 class="block-h">${title}</h3>` : ""}${inner}</section>`;
 }
 
+/// 可选的快捷键组合。值必须能被后端 `hotkey::parse_combo` 解析。
+const HOTKEY_PRESETS = [
+  { value: "ctrl+alt+v", label: "Ctrl + Alt + V" },
+  { value: "ctrl+shift+space", label: "Ctrl + Shift + 空格" },
+  { value: "ctrl+alt+c", label: "Ctrl + Alt + C" },
+  { value: "alt+`", label: "Alt + `" },
+];
+
 function settingsGeneralHtml(s) {
   return [
     block(
@@ -2218,6 +2226,30 @@ function settingsGeneralHtml(s) {
           "关闭时收进托盘",
           "关掉窗口后在后台继续记录；右键托盘图标可打开菜单",
           s.trayOnClose
+        ) +
+        rowCheck(
+          "set-hotkey-enabled",
+          "全局快捷键",
+          "在任何程序里按下组合键都能唤出轻贴窗口",
+          s.hotkeyEnabled
+        ) +
+        // 组合只给几个预设，不做「按键录入」：录入要处理 Esc 退出、非法组合、
+        // 与系统键冲突等一堆分支，而真正需要冷门组合的人是少数。
+        rowCtl(
+          "快捷键组合",
+          "被其它程序占用时会提示，可按提示换一个",
+          `<select id="set-hotkey-combo" class="combo-select"${
+            s.hotkeyEnabled ? "" : " disabled"
+          }>
+            ${HOTKEY_PRESETS.map(
+              (p) =>
+                `<option value="${p.value}"${
+                  p.value === (s.hotkey || "ctrl+alt+v") ? " selected" : ""
+                }>${p.label}</option>`
+            ).join("")}
+          </select>`,
+          true,
+          "set-hotkey-combo"
         )
     ),
     block(
@@ -3202,6 +3234,39 @@ function bindSettings(view) {
       }
     });
   }
+  // 全局快捷键：开关与组合是同一件事的两半，合成一处绑定 ——
+  // 切开关时要连同下拉的可用态一起改，否则关了开关下拉还亮着，看着像没生效。
+  const hkEnabled = view.querySelector("#set-hotkey-enabled");
+  const hkCombo = view.querySelector("#set-hotkey-combo");
+  if (hkEnabled) {
+    hkEnabled.onchange = async () => {
+      const combo = hkCombo?.value || settings.hotkey || "ctrl+alt+v";
+      try {
+        await invoke("set_hotkey", { combo, enabled: hkEnabled.checked });
+        settings = await invoke("get_settings");
+        if (hkCombo) hkCombo.disabled = !hkEnabled.checked;
+        toast(`全局快捷键已${hkEnabled.checked ? "开启" : "关闭"}`);
+      } catch (e) {
+        toast("快捷键设置失败：" + e);
+        hkEnabled.checked = !hkEnabled.checked;
+      }
+    };
+  }
+  if (hkCombo) {
+    hkCombo.onchange = async () => {
+      const label = hkCombo.selectedOptions[0]?.textContent || hkCombo.value;
+      try {
+        await invoke("set_hotkey", { combo: hkCombo.value, enabled: true });
+        settings = await invoke("get_settings");
+        toast("全局快捷键已改为 " + label);
+      } catch (e) {
+        // 后端已回滚到旧组合，这里只要把界面拉回去
+        toast("该组合不可用：" + e);
+        hkCombo.value = settings.hotkey || "ctrl+alt+v";
+      }
+    };
+  }
+
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
   // 保留期清理的豁免开关。与上面那条是**两个不同策略点**，别合并：
