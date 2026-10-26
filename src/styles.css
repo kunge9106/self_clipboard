@@ -314,6 +314,12 @@ body.round .cache-box {
   box-shadow: var(--card-shadow);
 }
 
+/* 圆角模式下没有背景模糊，面板靠阴影立层次 —— 与关于页的 hero/facts/log 同一套。
+   设置页的区块是「面板」，理应与它们一致；内层元素（如缓存块）由下面那条规则清阴影。 */
+body.round .settings .block {
+  box-shadow: var(--card-shadow);
+}
+
 /* 噪点层：真·Windows 亚克力 = 模糊 + 色调 + **噪点** + 亮度层。
    我们之前只有「模糊 + 色调」，缺了噪点，所以看着像「平模糊」不够高级。
    这里叠一层极淡的噪点（约 4%），模拟 Fluent 材质的颗粒感。 */
@@ -1442,12 +1448,14 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   cursor: default;
 }
 
-/* 缓存块嵌在「存储位置」区块里，去掉它自己的外框与底色 ——
-   双层边框 + 两层底色会让这一块看起来「框里有框」。 */
+/* 缓存块嵌在「存储位置」区块里，去掉它自己的外框、底色与阴影 ——
+   否则区块里又浮出一张卡片，看着是「框里有框」（用户截图反馈，只在圆角模式出现：
+   因为 `body.round .cache-box` 会给它加 --card-shadow，而原先这里只清了边框与底色）。 */
 .settings .block .cache-box {
   padding: 4px 0 0;
   border: 0;
   background: transparent;
+  box-shadow: none;
   gap: 6px;
 }
 
