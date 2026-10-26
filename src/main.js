@@ -1700,16 +1700,22 @@ function renderDetailBody(item, data) {
   }
 
   if (data.html) {
-    body.classList.add("is-rich");
     const drops = [];
-    body.appendChild(sanitizeRichHtml(data.html, (kind) => drops.push(kind)));
+    const frag = sanitizeRichHtml(data.html, (kind) => drops.push(kind));
     // 丢弃项汇总成一条日志（复用现成的前端上报通道，不另造一套）。
     // 逐项上报会让一条内容刷几十行，把真正有用的上下文挤掉。
     if (drops.length) {
       const kinds = [...new Set(drops)].slice(0, 5).join(",");
       reportFrontend("WARN", "format", `富文本过滤丢弃 ${drops.length} 项：${kinds}`);
     }
-    return true;
+    // 片段为空不能直接返回：那会摆出一个空白面板，用户以为内容丢了。
+    // 典型来源是「只有 CF_HTML 头、正文缺失」的坏数据 —— 落到下面按纯文本显示，
+    // 至少还能看到文字。
+    if (frag.childNodes.length > 0) {
+      body.classList.add("is-rich");
+      body.appendChild(frag);
+      return true;
+    }
   }
 
   if (sub === "code") {
@@ -2303,10 +2309,19 @@ function settingsDataHtml(s) {
       ) +
         rowCtl(
           "保留天数",
-          "到期自动清理，<b>默认 3 天</b>；填 0 表示永久保存",
+          "到期自动清理，<b>默认 3 天</b>；填 0 表示永久保存。<b>置顶与收藏默认豁免</b>，见下方选项",
           `<input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" /><span class="hint">0 = 永久保存</span>`,
           false,
           "set-retention"
+        ) +
+        // 置顶/收藏默认豁免到期清理：用户把它们标成「要留着」，到期自动删掉
+        // 等于违背这个意图。要连它们一起清，必须在这里显式勾选。
+        rowCheck(
+          "set-prune-pinned",
+          "到期清理置顶/收藏",
+          "不勾选（默认）则置顶与收藏<b>不会</b>因到期被删；勾选后到期一并清理（不可恢复）",
+          s.pruneIncludePinned,
+          true
         )
     ),
     block(
@@ -3180,6 +3195,9 @@ function bindSettings(view) {
   }
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
+  // 保留期清理的豁免开关。与上面那条是**两个不同策略点**，别合并：
+  // 一个是「我主动退出时清不清置顶」，一个是「后台到期时清不清置顶」。
+  bindCheck("set-prune-pinned", "set_prune_include_pinned");
   bindCheck("set-clean-confirm", "set_clean_confirm_exit");
 
   bindCheck("set-pin-cancel", "set_pin_cancel_on_disable");

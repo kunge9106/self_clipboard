@@ -286,6 +286,7 @@ pub fn run() {
             settings::set_tray_on_close,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
+            settings::set_prune_include_pinned,
             settings::set_clean_confirm_exit,
             settings::exit_app,
             settings::set_retention_days,

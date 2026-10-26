@@ -284,13 +284,60 @@ const RICH_STYLES = new Set([
   "text-align", "font-size", "font-family", "line-height",
 ]);
 
+// ── CF_HTML 头部剥离（详情渲染前必做）──────────────────────────────────
+/// 从 Windows 剪贴板的 `HTML Format` 里取出**正文片段**，丢掉封装头。
+///
+/// `HTML Format` 不是裸 HTML，而是一份带头的 CF_HTML：
+///
+///   Version:1.0
+///   StartHTML:0000000192            ← 整份文档起点
+///   EndHTML:0000042891              ← 整份文档终点
+///   StartFragment:0000040287        ← 正文片段起点（**字节**偏移）
+///   EndFragment:0000042851          ← 正文片段终点
+///   SourceURL:file:///D:/…/报告.docx ← 来源路径
+///
+/// 这些偏移是**回贴时原样写回**所必需的（自己重算容易错，尤其带中文时），
+/// 所以存储必须完整保留。但对用户毫无意义，而且 SourceURL 会暴露本地路径 ——
+/// 绝不能出现在「查看」里。
+///
+/// 不剥会怎样：DOMParser 把 `<html>` 之前那些纯文本当成正文文本节点，
+/// 于是详情第一段就变成 `Version:1.0 StartHTML:0000000192 …`（用户实测截图）。
+export function cfHtmlFragment(raw) {
+  const s = String(raw ?? "");
+  if (!/^\s*Version:/i.test(s)) return s; // 不是 CF_HTML，原样交出
+
+  const sf = s.match(/StartFragment:(\d+)/i);
+  const ef = s.match(/EndFragment:(\d+)/i);
+  if (sf && ef) {
+    // 偏移按**字节**算，不是字符 —— 必须走 TextEncoder/TextDecoder。
+    // 中文内容下按字符切会偏，切出来的片段会从半个字中间开始。
+    const bytes = new TextEncoder().encode(s);
+    const from = Number(sf[1]);
+    const to = Number(ef[1]);
+    if (from > 0 && to > from && to <= bytes.length) {
+      return new TextDecoder("utf-8").decode(bytes.slice(from, to));
+    }
+  }
+  // 偏移缺失或越界（有的应用会写全 0）：退化成「截掉头部」。
+  // 头部一定在第一个 '<' 之前，从那里开始就是正文。
+  const i = s.indexOf("<");
+  return i >= 0 ? s.slice(i) : "";
+}
+
 /// 把一段 HTML 过滤成可安全插入 DOM 的节点树。
 /// `onDrop(kind)` 用来把「丢了什么」报给日志（复用现有前端日志通道，不另造一套）。
 export function sanitizeRichHtml(html, onDrop) {
   let doc;
   try {
+    // 先剥掉 CF_HTML 封装头：否则 `Version:1.0 StartHTML:…` 会被 DOMParser
+    // 当成正文文本节点显示在开头（用户实测截图）。
+    const body = cfHtmlFragment(html);
+    if (!body.trim()) {
+      onDrop?.("empty-fragment");
+      return document.createDocumentFragment();
+    }
     // DOMParser 解析不会执行脚本，也不加载资源 —— 比 innerHTML 安全得多
-    doc = new DOMParser().parseFromString(String(html ?? ""), "text/html");
+    doc = new DOMParser().parseFromString(body, "text/html");
   } catch (e) {
     onDrop?.(`parse-fail:${e}`);
     return document.createDocumentFragment();
