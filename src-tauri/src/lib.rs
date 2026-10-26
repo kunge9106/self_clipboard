@@ -291,6 +291,7 @@ pub fn run() {
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,
             settings::set_hotkey,
+            settings::set_screenshot_hotkey,
             settings::hotkey_suspend,
             settings::hotkey_resume,
             panel::panel_hide,

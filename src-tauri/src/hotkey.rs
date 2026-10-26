@@ -11,8 +11,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Mutex;
 
-/// 热键 ID。同一线程内唯一即可，取 "QT" 的 ASCII 值。
-const HOTKEY_ID: i32 = 0x5154;
+/// 唤出面板的热键 ID。同一线程内唯一即可，取 "QT" 的 ASCII 值。
+pub const HOTKEY_MAIN: i32 = 0x5154;
+/// 截图的热键 ID（"QS"）。
+pub const HOTKEY_SHOT: i32 = 0x5153;
 
 /// 系统投递给注册线程的热键消息。
 const WM_HOTKEY: u32 = 0x0312;
@@ -30,11 +32,14 @@ const MOD_NOREPEAT: u32 = 0x4000;
 /// 热键线程的线程 ID（`GetCurrentThreadId`）。0 = 线程还没起来。
 static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
-/// 待处理的注册请求：组合 + 结果回传通道。
+/// 待处理的注册请求：**所有槽位**的新组合 + 结果回传通道。
+///
+/// 一次提交全部槽位而不是逐个改：注册是「先全注销、再逐个注册」，
+/// 分几次做会让另一个热键在中间短暂失效，甚至被别的程序抢走。
 ///
 /// 为什么需要回传：注册可能失败（组合被别的程序占用），而失败必须能告诉用户 ——
 /// 否则他改完键位、按了没反应，只能猜是软件坏了。
-static PENDING: Mutex<Option<(String, Sender<Result<(), String>>)>> = Mutex::new(None);
+static PENDING: Mutex<Option<(Vec<(i32, String)>, Sender<Result<(), String>>)>> = Mutex::new(None);
 
 #[repr(C)]
 struct Msg {
@@ -54,6 +59,14 @@ extern "system" {
     fn GetMessageW(msg: *mut Msg, hwnd: isize, min: u32, max: u32) -> i32;
     fn PostThreadMessageW(thread_id: u32, msg: u32, w_param: usize, l_param: isize) -> i32;
     fn GetCurrentThreadId() -> u32;
+    fn ShellExecuteW(
+        hwnd: isize,
+        op: *const u16,
+        file: *const u16,
+        params: *const u16,
+        dir: *const u16,
+        show: i32,
+    ) -> isize;
 }
 
 /// 启动热键线程。**只调一次**（`lib.rs` 的 setup 里）。
@@ -63,28 +76,28 @@ pub fn init(app: tauri::AppHandle) {
 
         // 启动时按配置注册一次
         let cfg = crate::settings::get();
-        let combo = if cfg.hotkey_enabled {
-            cfg.hotkey.clone()
-        } else {
-            String::new()
-        };
-        match register(&combo) {
-            Ok(()) if !combo.is_empty() => {
-                crate::log_print!("[hotkey] 已注册全局快捷键 {combo}");
-            }
-            Ok(()) => crate::log_print!("[hotkey] 全局快捷键未启用"),
-            Err(e) => crate::log_warn!("[hotkey] 启动时注册失败：{e}"),
-        }
+        register_slots(&slots_of(&cfg));
 
         let mut msg: Msg = std::mem::zeroed();
         while GetMessageW(&mut msg, 0, 0, 0) > 0 {
             if msg.message == WM_HOTKEY {
-                crate::log_print!("[hotkey] 触发，弹出快捷面板");
-                crate::panel::show(&app);
+                // `wParam` 就是注册时的 ID —— 两个热键共用一条消息循环，
+                // 靠它区分是哪一个。
+                match msg.w_param as i32 {
+                    HOTKEY_MAIN => {
+                        crate::log_print!("[hotkey] 触发：快捷面板");
+                        crate::panel::show(&app);
+                    }
+                    HOTKEY_SHOT => {
+                        crate::log_print!("[hotkey] 触发：截图");
+                        launch_screen_clip();
+                    }
+                    other => crate::log_warn!("[hotkey] 未知热键 ID {other}"),
+                }
             } else if msg.message == WM_RELOAD {
                 let job = PENDING.lock().ok().and_then(|mut g| g.take());
-                if let Some((combo, tx)) = job {
-                    let r = register(&combo);
+                if let Some((slots, tx)) = job {
+                    let r = register_slots(&slots);
                     if let Err(e) = &r {
                         crate::log_warn!("[hotkey] 改键后注册失败：{e}");
                     }
@@ -97,22 +110,61 @@ pub fn init(app: tauri::AppHandle) {
     });
 }
 
-/// 改键 / 启停。`combo` 为空表示不注册。
+/// 按配置算出两个槽位要注册的组合（禁用 = 空串）。
+fn slots_of(cfg: &crate::settings::Config) -> Vec<(i32, String)> {
+    vec![
+        (
+            HOTKEY_MAIN,
+            if cfg.hotkey_enabled {
+                cfg.hotkey.trim().to_string()
+            } else {
+                String::new()
+            },
+        ),
+        (
+            HOTKEY_SHOT,
+            if cfg.screenshot_hotkey_enabled {
+                cfg.screenshot_hotkey.trim().to_string()
+            } else {
+                String::new()
+            },
+        ),
+    ]
+}
+
+/// 改键 / 启停。两个槽位**一起提交**。
 ///
 /// 返回的是**实际注册结果**：被占用时前端要即时提示，不能让用户以为设成功了。
-pub fn apply(combo: &str, enabled: bool) -> Result<(), String> {
-    let combo = if enabled {
-        combo.trim().to_string()
-    } else {
-        String::new()
-    };
+pub fn apply(main: (&str, bool), shot: (&str, bool)) -> Result<(), String> {
+    let slots = vec![
+        (
+            HOTKEY_MAIN,
+            if main.1 {
+                main.0.trim().to_string()
+            } else {
+                String::new()
+            },
+        ),
+        (
+            HOTKEY_SHOT,
+            if shot.1 {
+                shot.0.trim().to_string()
+            } else {
+                String::new()
+            },
+        ),
+    ];
+    post(slots)
+}
+
+fn post(slots: Vec<(i32, String)>) -> Result<(), String> {
     let tid = THREAD_ID.load(Ordering::SeqCst);
     if tid == 0 {
         // 线程还没起来（极少见：启动瞬间改了设置）—— 配置已存，启动时会注册
         return Ok(());
     }
     let (tx, rx) = std::sync::mpsc::channel();
-    *PENDING.lock().map_err(|_| "热键状态锁失效")? = Some((combo, tx));
+    *PENDING.lock().map_err(|_| "热键状态锁失效")? = Some((slots, tx));
     unsafe {
         PostThreadMessageW(tid, WM_RELOAD, 0, 0);
     }
@@ -120,17 +172,74 @@ pub fn apply(combo: &str, enabled: bool) -> Result<(), String> {
         .map_err(|_| "快捷键注册超时（热键线程无响应）".to_string())?
 }
 
-/// 在当前线程注册（先注销旧的）。空组合 = 只注销。
-unsafe fn register(combo: &str) -> Result<(), String> {
-    UnregisterHotKey(0, HOTKEY_ID);
-    if combo.trim().is_empty() {
-        return Ok(());
+/// 全部注销（录制快捷键时用：否则按键被系统截走，界面录不到）。
+pub fn suspend() -> Result<(), String> {
+    post(vec![(HOTKEY_MAIN, String::new()), (HOTKEY_SHOT, String::new())])
+}
+
+/// 按当前配置恢复注册。
+pub fn resume() -> Result<(), String> {
+    post(slots_of(&crate::settings::get()))
+}
+
+/// 在当前线程注册整批槽位：先全部注销，再逐个注册。
+///
+/// 一个槽位失败不影响另一个（继续往下注册），错误只报第一个 —— 常见情况是
+/// 「截图键被占用、面板键没问题」，那种时候不该把面板键一起废掉。
+unsafe fn register_slots(slots: &[(i32, String)]) -> Result<(), String> {
+    for (id, _) in slots {
+        UnregisterHotKey(0, *id);
     }
-    let (mods, vk) = parse_combo(combo)?;
-    if RegisterHotKey(0, HOTKEY_ID, mods | MOD_NOREPEAT, vk) == 0 {
-        return Err(format!("{combo} 已被其它程序占用，请换一个组合"));
+    let mut first_err: Option<String> = None;
+    for (id, combo) in slots {
+        if combo.trim().is_empty() {
+            continue;
+        }
+        match parse_combo(combo).and_then(|(mods, vk)| {
+            if RegisterHotKey(0, *id, mods | MOD_NOREPEAT, vk) == 0 {
+                Err(format!("{combo} 已被其它程序占用，请换一个组合"))
+            } else {
+                Ok(())
+            }
+        }) {
+            Ok(()) => crate::log_print!("[hotkey] 已注册 {combo}"),
+            Err(e) => {
+                crate::log_warn!("[hotkey] 注册失败：{e}");
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
     }
-    Ok(())
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// 唤起系统截图。
+///
+/// 用 `ms-screenclip:` 协议而不是自己画选区：选区框选、多屏 DPI、缩放适配这些
+/// Windows 已经做得很稳，自己做一套至少要两三天，还容易在 150% 缩放的多屏上错位。
+/// 截完图会进剪贴板，采集线程随即把它记成图片条目 —— 用户拿到的体验是
+/// 「按一下、框一块、进轻贴」。
+fn launch_screen_clip() {
+    unsafe {
+        let op: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+        let target: Vec<u16> = "ms-screenclip:".encode_utf16().chain(std::iter::once(0)).collect();
+        // 返回值 > 32 才算成功（<= 32 是错误码）
+        let rc = ShellExecuteW(
+            0,
+            op.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        );
+        if rc as isize <= 32 {
+            crate::log_warn!("[hotkey] 唤起系统截图失败（ShellExecuteW 返回 {rc}），可能系统版本不支持");
+        }
+    }
 }
 
 /// `"ctrl+alt+v"` → (修饰键, 虚拟键码)。

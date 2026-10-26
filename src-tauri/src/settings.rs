@@ -35,6 +35,14 @@ pub struct Config {
     /// 全局快捷键组合，形如 `ctrl+alt+v`。解析见 `hotkey::parse_combo`。
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
+    /// 截图快捷键是否启用
+    #[serde(default = "default_true")]
+    pub screenshot_hotkey_enabled: bool,
+    /// 截图快捷键组合，默认 `alt+q`。
+    ///
+    /// 不用 `ctrl+alt+a`（微信占着）、也不建议 `alt+z`（部分编辑器拿它做撤销的变体）。
+    #[serde(default = "default_screenshot_hotkey")]
+    pub screenshot_hotkey: String,
     /// 上次运行时的版本号（每次启动写成当前版本）。
     ///
     /// 用来判断「本次是不是升级上来的」：两个版本号不一致，就说明用户刚换了版本，
@@ -243,6 +251,10 @@ fn default_hotkey() -> String {
     "ctrl+alt+v".to_string()
 }
 
+fn default_screenshot_hotkey() -> String {
+    "alt+q".to_string()
+}
+
 /// 直角 / 圆角模式各自的**默认**浓度。
 ///
 /// 圆角模式没有背景模糊，同样浓度会显得更透，所以默认档更高。
@@ -308,6 +320,8 @@ impl Default for Config {
             prune_include_pinned: false,
             hotkey_enabled: true,
             hotkey: default_hotkey(),
+            screenshot_hotkey_enabled: true,
+            screenshot_hotkey: default_screenshot_hotkey(),
             // 首次安装时为空：没有「从哪一版升上来」，关于页只显示当前版本一节
             last_run_version: String::new(),
             upgraded_from: String::new(),
@@ -519,6 +533,8 @@ pub fn get_settings() -> serde_json::Value {
         "retentionDays": cfg.retention_days,
         "hotkeyEnabled": cfg.hotkey_enabled,
         "hotkey": cfg.hotkey,
+        "screenshotHotkeyEnabled": cfg.screenshot_hotkey_enabled,
+        "screenshotHotkey": cfg.screenshot_hotkey,
         "pruneIncludePinned": cfg.prune_include_pinned,
         // 当前模式生效的那一档（前端滑块直接用这个）
         "materialAlpha": cfg.alpha(),
@@ -671,7 +687,10 @@ pub fn set_clean_include_pinned(value: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn set_hotkey(combo: String, enabled: bool) -> Result<(), String> {
     let prev = get();
-    match crate::hotkey::apply(&combo, enabled) {
+    match crate::hotkey::apply(
+        (&combo, enabled),
+        (&prev.screenshot_hotkey, prev.screenshot_hotkey_enabled),
+    ) {
         Ok(()) => {
             update(|c| {
                 c.hotkey = combo;
@@ -680,7 +699,35 @@ pub fn set_hotkey(combo: String, enabled: bool) -> Result<(), String> {
             Ok(())
         }
         Err(e) => {
-            let _ = crate::hotkey::apply(&prev.hotkey, prev.hotkey_enabled);
+            let _ = crate::hotkey::apply(
+                (&prev.hotkey, prev.hotkey_enabled),
+                (&prev.screenshot_hotkey, prev.screenshot_hotkey_enabled),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// 设置截图快捷键。回滚逻辑与 `set_hotkey` 相同。
+#[tauri::command]
+pub fn set_screenshot_hotkey(combo: String, enabled: bool) -> Result<(), String> {
+    let prev = get();
+    match crate::hotkey::apply(
+        (&prev.hotkey, prev.hotkey_enabled),
+        (&combo, enabled),
+    ) {
+        Ok(()) => {
+            update(|c| {
+                c.screenshot_hotkey = combo;
+                c.screenshot_hotkey_enabled = enabled;
+            });
+            Ok(())
+        }
+        Err(e) => {
+            let _ = crate::hotkey::apply(
+                (&prev.hotkey, prev.hotkey_enabled),
+                (&prev.screenshot_hotkey, prev.screenshot_hotkey_enabled),
+            );
             Err(e)
         }
     }
@@ -692,14 +739,13 @@ pub fn set_hotkey(combo: String, enabled: bool) -> Result<(), String> {
 /// 用户就永远录不进「与当前相同的组合」，也录不进任何被自己占用的键。
 #[tauri::command]
 pub fn hotkey_suspend() -> Result<(), String> {
-    crate::hotkey::apply("", false)
+    crate::hotkey::suspend()
 }
 
 /// 录制结束（无论成功、取消还是失败）后按当前配置恢复注册。
 #[tauri::command]
 pub fn hotkey_resume() -> Result<(), String> {
-    let c = get();
-    crate::hotkey::apply(&c.hotkey, c.hotkey_enabled)
+    crate::hotkey::resume()
 }
 
 /// 保留期到期清理是否连置顶/收藏一起删。
