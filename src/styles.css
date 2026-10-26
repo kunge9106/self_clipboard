@@ -1217,10 +1217,10 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   gap: 18px;
 }
 
-/* 正文保持 520 的舒适阅读宽度；右侧多出来的空间留给滚动条与留白，
-   于是滚动条贴在窗口右缘，不再横在内容中间。 */
+/* 正文与滚动条同步撑满：滚动条已在窗口右缘，内容却卡在 520 宽的话，
+   右边会留出一大片空白，"拉到最右"这件事就只做了一半。 */
 .settings-body > * {
-  max-width: 520px;
+  max-width: none;
 }
 
 .settings .row {
