@@ -393,7 +393,7 @@ function bindClearAllModal() {
       await invoke("clear_all");
       items = [];
       render();
-      toast("已清空");
+      toast("已清空全部历史");
     } catch (e) {
       toast("清空失败：" + e);
     }
@@ -3127,17 +3127,24 @@ function bindSettings(view) {
     };
   });
 
+  /// 开关类设置的统一绑定。
+  ///
+  /// 提示文案从**行标题**取（`.row-title`），而不是写死「已开启/已关闭」——
+  /// 八个开关共用一条绑定，写死的话用户只看到「已关闭」，根本不知道关的是哪个
+  /// （用户实测反馈）。取标题还有个好处：以后新增开关不用再改文案。
   const bindCheck = (id, cmd) => {
     const el = view.querySelector("#" + id);
     if (!el) return;
     el.onchange = async () => {
+      const title =
+        el.closest(".row")?.querySelector(".row-title")?.textContent?.trim() || "设置";
       try {
         await invoke(cmd, { value: el.checked });
         // 同步本地缓存（退出弹窗文案等依赖最新配置）
         settings = await invoke("get_settings");
-        toast(el.checked ? "已开启" : "已关闭");
+        toast(`${title}已${el.checked ? "开启" : "关闭"}`);
       } catch (e) {
-        toast("保存失败：" + e);
+        toast(`${title}保存失败：${e}`);
         el.checked = !el.checked;
       }
     };
