@@ -1950,10 +1950,14 @@ unsafe fn read_clipboard() -> (Option<RawClip>, String) {
 /// 若压根没有目标格式，说明这次真没有可记录的东西，重读没有意义。
 /// 富文本寄存器的体积上限。
 ///
-/// `HTML Format` 经常内联 base64 图片（一张截图就能顶到几 MB），而我们要的只是
-/// 「文字带格式」。超过这个量级就**放弃富文本、只留纯文本** —— 宁可少一点保真，
-/// 也不能让一次复制往磁盘里塞几 MB、还拖慢启动时的索引重建。
-const RICH_MAX_BYTES: usize = 512 * 1024;
+/// `HTML Format` 经常内联 base64 图片，所以量级远大于纯文字：一页带两张插图的
+/// Word 文档通常 300KB~1.5MB。原来的 512KB 会让这类内容直接降级成纯文本 ——
+/// 用户复制排版好的文档，回来发现格式全没了，而原因只是「带图」。
+///
+/// 提到 2MB：覆盖绝大多数单页文档与网页选区，又不至于让一次复制往磁盘里塞几十 MB
+/// （超大 base64 主要来自长文档里的多张大图，那种内容的格式价值也有限）。
+/// 详情渲染侧另有单图上限，见 `formats.js` 的 `RICH_IMG_MAX`。
+const RICH_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// 读一个**注册剪贴板格式**的文本内容（如 `HTML Format` / `Rich Text Format`）。
 ///
@@ -1992,7 +1996,7 @@ unsafe fn read_clip_text_format(name: &str) -> Option<String> {
         }
         if buf.len() > RICH_MAX_BYTES {
             crate::log_warn!(
-                "[clipboard] {name} 体积 {}KB 超过 {}KB 上限，本条只保留纯文本",
+                "[clipboard] {name} 体积 {}KB 超过 {}KB 上限（多半是内联图片太多），本条只保留纯文本",
                 buf.len() / 1024,
                 RICH_MAX_BYTES / 1024
             );

@@ -327,8 +327,18 @@ const RICH_TAGS = new Set([
 ]);
 const RICH_DROP = new Set([
   "SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "LINK", "META", "BASE", "FORM",
-  "INPUT", "BUTTON", "TEXTAREA", "SELECT", "SVG", "IMG", "VIDEO", "AUDIO", "CANVAS", "LINK",
+  "INPUT", "BUTTON", "TEXTAREA", "SELECT", "SVG", "VIDEO", "AUDIO", "CANVAS",
 ]);
+
+/// 单张内联图片的大小上限（base64 **字符数**，解码后约为其 3/4）。
+///
+/// 只放行 `data:` 内联图，**外链一律丢弃**：`<img src="https://…">` 会在渲染时
+/// 自动发请求，等于把「我在读这段内容」告诉对方服务器。内联图是本地的，没有这个问题。
+const RICH_IMG_MAX = 1_200_000;
+/// 一条内容里所有内联图的合计上限。防止一条长文档把详情页拖死。
+const RICH_IMG_TOTAL = 6_000_000;
+/// 只认这几种位图。**不含 svg** —— SVG 可以内嵌脚本，即使走 data: 也不安全。
+const RICH_IMG_MIME = /^data:image\/(png|jpe?g|gif|webp|bmp);base64,/i;
 const RICH_STYLES = new Set([
   "color", "background-color", "font-weight", "font-style", "text-decoration",
   "text-align", "font-size", "font-family", "line-height",
@@ -374,6 +384,17 @@ export function cfHtmlFragment(raw) {
   return i >= 0 ? s.slice(i) : "";
 }
 
+/// 内联图片的准入判断（纯函数，便于单测）。
+///
+/// 返回 `"ok"` / `"external"`（外链或 svg）/ `"too-large"` / `"budget"`。
+export function richImgVerdict(src, usedChars = 0) {
+  const s = String(src ?? "").trim();
+  if (!RICH_IMG_MIME.test(s)) return "external";
+  if (s.length > RICH_IMG_MAX) return "too-large";
+  if (usedChars + s.length > RICH_IMG_TOTAL) return "budget";
+  return "ok";
+}
+
 /// 把一段 HTML 过滤成可安全插入 DOM 的节点树。
 /// `onDrop(kind)` 用来把「丢了什么」报给日志（复用现有前端日志通道，不另造一套）。
 export function sanitizeRichHtml(html, onDrop) {
@@ -394,6 +415,8 @@ export function sanitizeRichHtml(html, onDrop) {
   }
 
   const root = document.createElement("div");
+  /// 已放进来的内联图大小合计（字符数），用于 `RICH_IMG_TOTAL` 预算
+  let imgChars = 0;
 
   const filterStyle = (style) =>
     style
@@ -421,6 +444,27 @@ export function sanitizeRichHtml(html, onDrop) {
       if (node.nodeType !== Node.ELEMENT_NODE) continue;
 
       const tag = node.tagName.toUpperCase();
+
+      // 图片单独处理：只放行内联 data: 位图，且受单张与合计两道预算约束
+      if (tag === "IMG") {
+        const src = (node.getAttribute?.("src") || "").trim();
+        const verdict = richImgVerdict(src, imgChars);
+        if (verdict !== "ok") {
+          onDrop?.(`drop-img:${verdict}`);
+          continue;
+        }
+        imgChars += src.length;
+        const img = document.createElement("img");
+        // 只赋 src 与 alt：width/height/style 一律不带（否则原文档的固定尺寸
+        // 会让图片溢出详情区），显示尺寸交给 CSS 控制。
+        img.src = src;
+        const alt = node.getAttribute?.("alt");
+        if (alt) img.alt = String(alt).slice(0, 200);
+        img.loading = "lazy";
+        dst.appendChild(img);
+        continue;
+      }
+
       if (RICH_DROP.has(tag)) {
         onDrop?.(`drop-tag:${tag}`);
         continue; // 连同内容一起丢

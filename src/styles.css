@@ -2294,6 +2294,16 @@ body.dark .tour-dot.is-on {
   transform: rotate(45deg);
 }
 
+/* 富文本里的内联图片：宽度跟着正文走，不按原图尺寸铺开。
+   只约束显示尺寸，不改动数据本身（原图仍完整存着，复制回去还是原样）。 */
+.detail-body.is-rich img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px 0;
+  border-radius: 4px;
+}
+
 /* 任务项不需要额外的列表符号间距 */
 .detail-body.is-rich li.md-task {
   list-style: none;
