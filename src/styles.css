@@ -1422,21 +1422,21 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   color: var(--text-dim);
 }
 
-/* 设置页里的下拉框（目前只有快捷键组合用）。用系统原生 select，
-   不自己造下拉 —— 原生控件能跟随系统主题、支持键盘操作、也不会被窗口边界裁剪。 */
-.settings .combo-select {
-  min-width: 148px;
-  padding: 4px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--glass-strong);
-  color: var(--text);
-  font-size: 13px;
-  font-family: inherit;
-  cursor: pointer;
+/* 快捷键录制按钮：平时与普通 ghost 按钮一样，录制中换成强调色。
+   宽度固定，免得「Ctrl + Alt + V」和「请按下组合键…」之间来回跳。 */
+.settings .hotkey-btn {
+  min-width: 176px;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
 }
 
-.settings .combo-select:disabled {
+.settings .hotkey-btn.is-recording {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.18);
+}
+
+.settings .hotkey-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }

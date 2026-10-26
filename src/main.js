@@ -2208,13 +2208,35 @@ function block(title, inner, opts = {}) {
   return `<section class="${cls}">${title ? `<h3 class="block-h">${title}</h3>` : ""}${inner}</section>`;
 }
 
-/// 可选的快捷键组合。值必须能被后端 `hotkey::parse_combo` 解析。
-const HOTKEY_PRESETS = [
-  { value: "ctrl+alt+v", label: "Ctrl + Alt + V" },
-  { value: "ctrl+shift+space", label: "Ctrl + Shift + 空格" },
-  { value: "ctrl+alt+c", label: "Ctrl + Alt + C" },
-  { value: "alt+`", label: "Alt + `" },
-];
+/// 把 `ctrl+alt+v` 显示成 `Ctrl + Alt + V`（值的形式由后端 `hotkey::parse_combo` 定义）。
+function comboLabel(combo) {
+  return String(combo || "")
+    .split("+")
+    .map((p) => {
+      const k = p.trim().toLowerCase();
+      if (k === "ctrl" || k === "control") return "Ctrl";
+      if (k === "alt") return "Alt";
+      if (k === "shift") return "Shift";
+      if (k === "win" || k === "super") return "Win";
+      if (k === "space") return "空格";
+      return k.toUpperCase();
+    })
+    .filter(Boolean)
+    .join(" + ");
+}
+
+/// DOM `KeyboardEvent.key` → 后端能解析的键名；不支持的返回 null。
+function hotkeyKeyName(key) {
+  if (key === " ") return "space";
+  if (key.length === 1) {
+    const c = key.toLowerCase();
+    // 与后端 `vk_of` 的白名单保持一致：字母、数字、反引号、减号
+    if (/[a-z0-9`\-]/.test(c)) return c;
+    return null;
+  }
+  if (/^f([1-9]|1[0-2])$/i.test(key)) return key.toLowerCase();
+  return null;
+}
 
 function settingsGeneralHtml(s) {
   return [
@@ -2233,23 +2255,17 @@ function settingsGeneralHtml(s) {
           "在任何程序里按下组合键都能唤出轻贴窗口",
           s.hotkeyEnabled
         ) +
-        // 组合只给几个预设，不做「按键录入」：录入要处理 Esc 退出、非法组合、
-        // 与系统键冲突等一堆分支，而真正需要冷门组合的人是少数。
+        // 组合可自定义：点一下进入录制，按下想要的组合即可。
+        // 录制期间会临时注销全局热键 —— 否则按键被系统先截走，WebView 收不到，
+        // 用户永远录不进「与当前相同的组合」。
         rowCtl(
           "快捷键组合",
-          "被其它程序占用时会提示，可按提示换一个",
-          `<select id="set-hotkey-combo" class="combo-select"${
+          "点击后按下想要的组合（至少含一个修饰键）；按 Esc 取消",
+          `<button type="button" class="btn-ghost hotkey-btn" id="set-hotkey"${
             s.hotkeyEnabled ? "" : " disabled"
-          }>
-            ${HOTKEY_PRESETS.map(
-              (p) =>
-                `<option value="${p.value}"${
-                  p.value === (s.hotkey || "ctrl+alt+v") ? " selected" : ""
-                }>${p.label}</option>`
-            ).join("")}
-          </select>`,
+          }>${comboLabel(s.hotkey || "ctrl+alt+v")}</button>`,
           true,
-          "set-hotkey-combo"
+          "set-hotkey"
         )
     ),
     block(
@@ -3234,17 +3250,35 @@ function bindSettings(view) {
       }
     });
   }
-  // 全局快捷键：开关与组合是同一件事的两半，合成一处绑定 ——
-  // 切开关时要连同下拉的可用态一起改，否则关了开关下拉还亮着，看着像没生效。
+  // 全局快捷键：开关 + 组合录制。
+  //
+  // 录制期间必须临时注销全局热键（`hotkey_suspend`）：注册过的组合会被系统先截走，
+  // WebView 根本收不到 keydown，用户就永远录不进「与当前相同」的组合。
   const hkEnabled = view.querySelector("#set-hotkey-enabled");
-  const hkCombo = view.querySelector("#set-hotkey-combo");
+  const hkBtn = view.querySelector("#set-hotkey");
+  let recording = false;
+  const hkLabel = () => comboLabel(settings.hotkey || "ctrl+alt+v");
+
+  const endRecording = async () => {
+    if (!recording) return;
+    recording = false;
+    hkBtn?.classList.remove("is-recording");
+    if (hkBtn) hkBtn.textContent = hkLabel();
+    // 无论成功、取消还是失败，都按当前配置把热键注册回去
+    try {
+      await invoke("hotkey_resume");
+    } catch {
+      /* 恢复失败会影响全局快捷键，但此时上报也没地方显示，日志里已有 */
+    }
+  };
+
   if (hkEnabled) {
     hkEnabled.onchange = async () => {
-      const combo = hkCombo?.value || settings.hotkey || "ctrl+alt+v";
+      const combo = settings.hotkey || "ctrl+alt+v";
       try {
         await invoke("set_hotkey", { combo, enabled: hkEnabled.checked });
         settings = await invoke("get_settings");
-        if (hkCombo) hkCombo.disabled = !hkEnabled.checked;
+        if (hkBtn) hkBtn.disabled = !hkEnabled.checked;
         toast(`全局快捷键已${hkEnabled.checked ? "开启" : "关闭"}`);
       } catch (e) {
         toast("快捷键设置失败：" + e);
@@ -3252,17 +3286,69 @@ function bindSettings(view) {
       }
     };
   }
-  if (hkCombo) {
-    hkCombo.onchange = async () => {
-      const label = hkCombo.selectedOptions[0]?.textContent || hkCombo.value;
+
+  if (hkBtn) {
+    hkBtn.onclick = async () => {
+      if (recording) return;
+      recording = true;
+      hkBtn.classList.add("is-recording");
+      hkBtn.textContent = "请按下组合键…（Esc 取消）";
+      hkBtn.focus();
       try {
-        await invoke("set_hotkey", { combo: hkCombo.value, enabled: true });
-        settings = await invoke("get_settings");
-        toast("全局快捷键已改为 " + label);
+        await invoke("hotkey_suspend");
       } catch (e) {
-        // 后端已回滚到旧组合，这里只要把界面拉回去
-        toast("该组合不可用：" + e);
-        hkCombo.value = settings.hotkey || "ctrl+alt+v";
+        toast("暂停热键失败：" + e);
+      }
+    };
+    // 点到别处 = 放弃录制
+    hkBtn.onblur = () => void endRecording();
+
+    hkBtn.onkeydown = async (e) => {
+      if (!recording) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        void endRecording();
+        return;
+      }
+      // 只按住了修饰键：先把它显示出来，等主键
+      if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) {
+        const pre = [];
+        if (e.ctrlKey) pre.push("Ctrl");
+        if (e.altKey) pre.push("Alt");
+        if (e.shiftKey) pre.push("Shift");
+        if (e.metaKey) pre.push("Win");
+        hkBtn.textContent = pre.length
+          ? pre.join(" + ") + " + …"
+          : "请按下组合键…（Esc 取消）";
+        return;
+      }
+      const mods = [];
+      if (e.ctrlKey) mods.push("ctrl");
+      if (e.altKey) mods.push("alt");
+      if (e.shiftKey) mods.push("shift");
+      if (e.metaKey) mods.push("win");
+      const main = hotkeyKeyName(e.key);
+      if (!main) {
+        toast("这个键暂不支持，请用字母、数字、F1–F12、空格或 `");
+        return;
+      }
+      if (mods.length === 0) {
+        toast("至少需要一个修饰键（Ctrl / Alt / Shift / Win）");
+        return;
+      }
+      const combo = [...mods, main].join("+");
+      recording = false;
+      hkBtn.classList.remove("is-recording");
+      hkBtn.textContent = comboLabel(combo);
+      try {
+        await invoke("set_hotkey", { combo, enabled: true });
+        settings = await invoke("get_settings");
+        toast("全局快捷键已改为 " + comboLabel(combo));
+      } catch (err) {
+        // 后端已回滚并重注册旧组合，这里只把界面拉回去
+        toast("该组合不可用：" + err);
+        hkBtn.textContent = hkLabel();
       }
     };
   }

@@ -686,6 +686,22 @@ pub fn set_hotkey(combo: String, enabled: bool) -> Result<(), String> {
     }
 }
 
+/// 录制快捷键期间临时注销热键。
+///
+/// 必须做：`RegisterHotKey` 注册的组合会被系统**先截走**，WebView 收不到 keydown，
+/// 用户就永远录不进「与当前相同的组合」，也录不进任何被自己占用的键。
+#[tauri::command]
+pub fn hotkey_suspend() -> Result<(), String> {
+    crate::hotkey::apply("", false)
+}
+
+/// 录制结束（无论成功、取消还是失败）后按当前配置恢复注册。
+#[tauri::command]
+pub fn hotkey_resume() -> Result<(), String> {
+    let c = get();
+    crate::hotkey::apply(&c.hotkey, c.hotkey_enabled)
+}
+
 /// 保留期到期清理是否连置顶/收藏一起删。
 ///
 /// **刻意不在这里立刻执行一次清理**：勾上开关就立即删掉一批置顶条目，是很惊悚的
