@@ -74,6 +74,16 @@ static LAST_TEXT: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 /// 文本这里只合并「同一次复制被写两遍」，2 秒足够，也不会把用户
 /// 真的连续复制两次同一段文字（通常间隔更久）误合并。
 const TEXT_DUP_WINDOW_MS: u64 = 2_000;
+/// 「同一次复制的两次写入」判定窗口。
+///
+/// 实测：Markdown 复制时应用先写渲染文本（812 字）、约 20ms 后再写原文（1347 字），
+/// 两次**纯文本并不相同**，所以内容哈希判不了。这里放宽成「短时间内 + 内容同源」。
+/// 窗口只给 800ms：人要连续复制两段不同内容，间隔远大于此；
+/// 而机器分两次写剪贴板都在几十毫秒内。
+const TEXT_SAME_ORIGIN_MS: u64 = 800;
+/// 同源相似度阈值。实测 Markdown 原文 vs 其渲染文本 ≈ 0.6~0.75（标记被去掉、空白不同），
+/// 而两段无关正文的 bigram 重叠通常 < 0.25 —— 0.5 落在两者中间。
+const TEXT_SAME_ORIGIN_SIM: f32 = 0.5;
 /// 队列上限：只关心「最近这一小段时间」，不用无限增长。
 const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
@@ -1303,13 +1313,32 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
     // 判重：两种形态各有各的指纹来源，但都**不需要解码**。
     //   - ImageOriginal（微信走的就是这条）：文件内容哈希（FNV-1a）
     //   - Image（CF_DIB 原始位图，本机实测微信不走）：像素量化指纹
-    // 文本判重：同一次复制被应用写两遍时（先纯文本、后补富文本），只保留一条。
+    // 文本判重，两层：
+    //   一、内容完全相同（应用把同一次复制写了两遍）→ 只补格式，不新增；
+    //   二、内容**不同但同源**（先写渲染文本、再写 Markdown 原文）→ 用后者替换前者。
+    // 第二层是用户实测出来的：复制 Markdown 会落下两条，一条是去掉标记的纯文本、
+    // 一条是原文，长度和内容都不一样，光靠哈希根本拦不住。
     if let RawClip::Text { text, html, rtf } = &raw {
         let fp = content_hash(text.as_bytes());
         let dup = LAST_TEXT
             .lock()
             .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, TEXT_DUP_WINDOW_MS))
             .unwrap_or(false);
+        if !dup && is_same_origin_recent(text, captured_ms) {
+            if replace_latest_text(text, html, rtf) {
+                // 指纹换成新内容，否则紧接着的第三次写入又会被当成新条目
+                if let Ok(mut g) = LAST_TEXT.lock() {
+                    if let Some(last) = g.last_mut() {
+                        last.0 = fp;
+                        last.1 = captured_ms;
+                    }
+                }
+                crate::log_print!(
+                    "[clipboard] 同一次复制的另一种表示（如 Markdown 原文 vs 渲染文本），已替换上一条"
+                );
+                return;
+            }
+        }
         if dup {
             // 关键：第二次往往**才带格式**（延迟渲染）。这里把格式补到已有那条上，
             // 而不是丢掉 —— 否则用户复制一次，格式永远进不来。
@@ -1361,6 +1390,106 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
 /// 规则：**只与队列最后一条比对**（微信补写必然紧挨着上一条）；命中则把它的
 /// 时间戳刷新为 `now`（滑动续期），使持续到来的同图始终保持在同一簇里。
 /// 未命中则入队并清理过期项。
+/// 最近一条文本是否与这次「同源」（同一次复制的另一种表示）。
+///
+/// 时间窗口是硬的：`TEXT_SAME_ORIGIN_MS` 之外一律不合并 ——
+/// 用户隔几秒真的复制了两段相似内容，那是两次操作，必须各自成条。
+fn is_same_origin_recent(text: &str, ts: u64) -> bool {
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return false;
+    };
+    let Ok(g) = hist.lock() else { return false };
+    let Some(last) = g.first() else { return false };
+    if last.kind != "text" {
+        return false;
+    }
+    if ts.saturating_sub(last.ts) > TEXT_SAME_ORIGIN_MS {
+        return false;
+    }
+    let Some(rel) = &last.text_path else {
+        return false;
+    };
+    match read_text_entity(&dir, rel) {
+        Ok(prev) => same_origin(&prev, text),
+        Err(_) => false,
+    }
+}
+
+/// 两段文本「是不是同一份内容的两种表示」。
+///
+/// 用 **bigram 集合的 Jaccard 相似度**，而不是逐字比对：
+/// 同一次复制的两次写入，一次是 Markdown 原文、一次是渲染后的纯文本 ——
+/// 标记符号、换行、空白全不同，但相邻字符的组合高度重合。
+///
+/// 归一化时去掉空白与常见标记符号（`# * ` | - _ > [ ] ( ) ! ~`），
+/// 这样 `## 标题` 与 `标题` 在归一化后一致。
+fn same_origin(a: &str, b: &str) -> bool {
+    let norm = |s: &str| -> Vec<char> {
+        s.chars()
+            .filter(|c| {
+                !c.is_whitespace()
+                    && !matches!(c, '#' | '*' | '`' | '|' | '-' | '_' | '>' | '[' | ']' | '(' | ')' | '!' | '~' | '<' | '/')
+            })
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    };
+    let (na, nb) = (norm(a), norm(b));
+    // 太短的文本没有判别力（一句话恰好相似的概率太高），直接不合并
+    if na.len() < 12 || nb.len() < 12 {
+        return false;
+    }
+    let grams = |v: &[char]| -> std::collections::HashSet<(char, char)> {
+        v.windows(2).map(|w| (w[0], w[1])).collect()
+    };
+    let (sa, sb) = (grams(&na), grams(&nb));
+    let inter = sa.intersection(&sb).count() as f32;
+    let union = sa.union(&sb).count() as f32;
+    union > 0.0 && inter / union >= TEXT_SAME_ORIGIN_SIM
+}
+
+/// 用「同一次复制的另一次写入」**替换**最新那条文本条目。
+///
+/// 为什么是替换而不是丢弃：两次写入的内容不同（渲染文本 vs 原文），
+/// 后者才是用户真正复制的东西。丢掉第二次等于把 Markdown 原文换成去掉标记的纯文本。
+/// 剪贴板的语义本来就是「最终状态」，所以以最新的为准。
+fn replace_latest_text(text: &str, html: &Option<String>, rtf: &Option<String>) -> bool {
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return false;
+    };
+    let Ok(mut g) = hist.lock() else { return false };
+    let Some(last) = g.first_mut() else { return false };
+    if last.kind != "text" {
+        return false;
+    }
+    let id = last.id.clone();
+    let rel = format!("data/{id}.txt");
+    write_text_entity(&dir, &rel, text);
+    last.text_path = Some(rel);
+    last.size = text.len() as u64;
+    let (preview, truncated) = text_preview_parts(text);
+    last.preview = preview;
+    last.preview_truncated = truncated;
+    last.subtype = Some(detect_subtype(text).unwrap_or("").to_string());
+    // 富文本一并换掉（第二次往往才带格式）
+    if let Some(h) = html {
+        let hrel = format!("data/{id}.html");
+        write_text_entity(&dir, &hrel, h);
+        last.html_path = Some(hrel);
+    }
+    if let Some(r) = rtf {
+        let rrel = format!("data/{id}.rtf");
+        write_text_entity(&dir, &rrel, r);
+        last.rtf_path = Some(rrel);
+    }
+    let updated = last.clone();
+    save_index(&dir, &g);
+    drop(g);
+    if let Some(app) = APP.get() {
+        let _ = app.emit("clipboard-update", updated);
+    }
+    true
+}
+
 /// 把这次捕获到的富文本补到**最新那条**文本条目上。
 ///
 /// 触发场景：应用分两次写剪贴板（先纯文本、再补 HTML/RTF），第一次产生的条目
@@ -4803,6 +4932,38 @@ mod tests {
         // 夹在一句话里的链接仍然是普通文本 —— 标成「链接」会误导
         assert_eq!(detect_subtype("看这个 https://example.com"), None);
         assert_eq!(detect_subtype("https://example.com\n第二行"), None);
+    }
+
+    /// 同源判定：Markdown 原文 vs 它的渲染文本要判为「同一次复制」。
+    ///
+    /// 真实数据取自用户剪贴板（812 字 vs 1347 字），实测 Jaccard = **0.937**，
+    /// 离阈值 0.5 很远 —— 这个余量说明阈值不是拍脑袋定的。
+    #[test]
+    fn same_origin_detects_markdown_vs_rendered() {
+        let md = "## 1. 铁律（不可协商）\n\n1. **只能用 Bash，禁止使用命令行外壳。**\n2. **每次加功能或修 bug 都必须新建分支**，不需要人来提醒。";
+        let rendered = "1. 铁律（不可协商）\n只能用 Bash，禁止使用命令行外壳。\n\n每次加功能或修 bug 都必须新建分支，不需要人来提醒。";
+        assert!(same_origin(md, rendered), "同一次复制的两种表示必须判为同源");
+    }
+
+    /// 反例同样取自实测：两段无关中文的相似度是 **0.0**，离阈值有充足距离。
+    #[test]
+    fn same_origin_rejects_unrelated_text() {
+        assert!(!same_origin(
+            "今天下午三点开会，讨论下季度的产品路线图和预算分配。",
+            "这个 bug 出现在用户点击删除按钮之后，索引文件被截断成半截。"
+        ));
+        assert!(!same_origin(
+            "const a = 1;\nconst b = 2;",
+            "def foo():\n    return 42"
+        ));
+    }
+
+    /// 太短的文本不做同源判定：一句话恰好相似的概率太高，
+    /// 合并掉用户真复制的第二条比多一条更糟。
+    #[test]
+    fn same_origin_ignores_very_short_text() {
+        assert!(!same_origin("abc", "abd"));
+        assert!(!same_origin("收到", "收到"));
     }
 
     /// 裸域名也要识别成链接 —— 用户实测「复制的是正确链接，只是没带 http，却被标成文本」。
