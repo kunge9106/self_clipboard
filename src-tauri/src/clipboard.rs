@@ -144,6 +144,16 @@ pub struct HistoryItem {
     /// 缺了它整个索引会解析失败、历史全部丢失。
     #[serde(default)]
     pub edited: bool,
+    /// 文本条目的**子类型**：`"link"` = 整条内容就是一个网址，`"code"` = 看起来是代码。
+    ///
+    /// 为什么不新增 `kind`：侧栏分类是按「用户想找什么」分的，链接与代码在语义上
+    /// 仍然是文本 —— 单开一类只会让同一条内容在两个地方各出现一次，违背「一条记录
+    /// 只属于一个位置」。子类型只服务两件事：卡片上多一个徽章，让人一眼认出这条是什么。
+    ///
+    /// `skip_serializing_if` 是刻意的：绝大多数文本都不是这两种，没必要往加密索引
+    /// 里给每一条都塞一个 `"subtype":null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<String>,
     /// 文本前若干字符 / "[图片]" / "N 个文件"
     pub preview: String,
     /// 文本预览是否**被截断过**（即卡片那 2 行没把正文显示完）。
@@ -1963,6 +1973,110 @@ fn decode_image_file(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
 /// 返回 `(预览串, 是否截断)`。第二个值不是顺手加的：前端要靠它判断
 /// 「卡片已经显示全了就别再弹悬浮浮层」，而这个判断必须与截断规则**同源** ——
 /// 前端照抄一份「2 行 / 140 字」的规则，日后改了一边就必然漂移。
+/// 整条内容是否「就是一个网址」。
+///
+/// 判定收得很紧：不能含任何空白（含换行），必须以 `http(s)://` 或 `www.` 开头。
+/// 一句话里夹着链接不算 —— 那仍然是普通文本，标成「链接」反而误导。
+fn is_single_url(t: &str) -> bool {
+    if t.chars().any(char::is_whitespace) || t.len() < 10 {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("www.")
+}
+
+/// 文本是否「看起来是代码」。
+///
+/// 用打分而不是单条特征：单独看「行尾有分号」会把中文项目符号、SQL 说明都算进来，
+/// 而只看关键字又会把「我在文章里提到 return 这个词」误判成代码。宁可漏标（不显示徽章），
+/// 也不要乱标 —— 徽章是「一眼认出这条是什么」的辅助，标错了比不标更糟。
+///
+/// 四条线索：围栏 / JSON 形状 / 行尾结构符号 / 缩进 / 运算符 / 关键字密度。
+fn looks_like_code(t: &str) -> bool {
+    // 显式围栏：用户贴代码块时通常自带，最可靠的信号
+    if t.contains("```") {
+        return true;
+    }
+    // JSON / 配置片段：首尾成对且含键值分隔
+    if (t.starts_with('{') && t.ends_with('}')) || (t.starts_with('[') && t.ends_with(']')) {
+        if t.contains(':') {
+            return true;
+        }
+    }
+
+    let lines: Vec<&str> = t.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() < 2 {
+        // 单行不判定：`const x = 1;` 与「注意：这样做；」在统计上没有区别
+        return false;
+    }
+
+    let mut score = 0;
+
+    // 行尾是分号 / 花括号：代码最常见的结构符号
+    let struct_lines = lines
+        .iter()
+        .filter(|l| {
+            let s = l.trim_end();
+            s.ends_with(';') || s.ends_with('{') || s.ends_with('}')
+        })
+        .count();
+    if struct_lines >= 2 {
+        score += 1;
+    }
+    if struct_lines * 2 > lines.len() {
+        score += 1;
+    }
+
+    // 缩进：至少两行以空格或 tab 开头
+    if lines
+        .iter()
+        .filter(|l| l.starts_with("  ") || l.starts_with('\t'))
+        .count()
+        >= 2
+    {
+        score += 1;
+    }
+
+    // 代码专属运算符（中文排版本里几乎不会出现）
+    if t.contains("=>") || t.contains("::") || t.contains("->") || t.contains("&&") {
+        score += 1;
+    }
+
+    // 关键字：只认「后跟空格」或带括号的形态，避免命中普通词
+    const KEYWORDS: &[&str] = &[
+        "fn ", "let ", "const ", "var ", "function ", "def ", "class ", "import ", "from ",
+        "return ", "public ", "private ", "static ", "void ", "package ", "namespace ",
+        "#include", "<?php", "console.log(", "await ", "async ", "elif ", "func ", "SELECT ",
+        "INSERT ", "UPDATE ", "CREATE TABLE",
+    ];
+    let kw_hits = KEYWORDS.iter().filter(|k| t.contains(**k)).count();
+    if kw_hits >= 2 {
+        score += 2;
+    } else if kw_hits == 1 {
+        score += 1;
+    }
+
+    // 必须有至少一个关键字：纯结构符号（项目符号、表格线）不算代码
+    kw_hits >= 1 && score >= 3
+}
+
+/// 判定文本条目的子类型：`Some("link")` / `Some("code")` / `None`。
+///
+/// 链接优先：一个网址即使带查询参数也不该被当成代码。
+fn detect_subtype(text: &str) -> Option<&'static str> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if is_single_url(t) {
+        return Some("link");
+    }
+    if looks_like_code(t) {
+        return Some("code");
+    }
+    None
+}
+
 fn text_preview_parts(text: &str) -> (String, bool) {
     /// 与 CSS `.card-preview { -webkit-line-clamp }` 一致
     const MAX_LINES: usize = 2;
@@ -2076,6 +2190,7 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
         pinned_views: Vec::new(),
         favorite: false,
         edited,
+        subtype: None,
         preview: String::new(),
         preview_truncated: false,
         size: 0,
@@ -2088,6 +2203,8 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
     match raw {
         RawClip::Text(text) => {
             item.kind = "text".into();
+            // 子类型只用于卡片徽章（链接 / 代码），不参与分类
+            item.subtype = detect_subtype(&text).map(str::to_string);
             item.size = text.len() as u64;
             let (preview, truncated) = text_preview_parts(&text);
             item.preview = preview;
@@ -3387,6 +3504,7 @@ mod tests {
             pinned_views: Vec::new(),
             favorite: false,
             edited: false,
+            subtype: None,
             preview: preview.to_string(),
             preview_truncated: false,
             size: 1,
