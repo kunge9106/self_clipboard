@@ -69,6 +69,9 @@ static LAST_IMG: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 /// 于是两条通道各收一次，历史里出现两条一模一样的记录 —— 用户实测反馈过。
 /// 图片早就有这套指纹去重（`LAST_IMG`），文本一直没有。
 static LAST_TEXT: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+/// 最近落过的「文件路径清单」指纹。文件条目同样会被写两次（资源管理器在选中多个
+/// 文件时可能连续两次 SetClipboardData），日志里出现过同秒同大小的 files 重复。
+static LAST_FILES: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 /// 文本判重窗口。比图片的 60s 短得多，因为语义不同：
 /// 图片的 60s 是为了扛住微信「隔几十秒补写同一张图」；
 /// 文本这里只合并「同一次复制被写两遍」，2 秒足够，也不会把用户
@@ -1350,6 +1353,38 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
         }
     }
 
+    // 文件清单判重：同一批路径在极短时间内被写两次，只留一条。
+    if let RawClip::Files(paths) = &raw {
+        let fp = content_hash(paths.join("\n").as_bytes());
+        let dup = LAST_FILES
+            .lock()
+            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, TEXT_SAME_ORIGIN_MS))
+            .unwrap_or(false);
+        if dup {
+            crate::log_print!("[clipboard] 重复文件清单已合并（同一次复制的第二次写入）");
+            return;
+        }
+    }
+
+    // 图片：同一次复制可能先给 DIB、再给原文件。两条路径算出来的指纹**体系不同**
+    // （文件字节哈希 vs 像素指纹），所以 `LAST_IMG` 那层对不上，日志里因此出现过
+    // 同秒、同大小、两张一模一样的图。
+    // 这里用「极短时间窗内上一条也是图片」兜底：人不可能在 800ms 内复制两张不同的图
+    // （截图/选中文件都需要更久），而程序分两次写剪贴板都在几十毫秒内。
+    if matches!(
+        raw,
+        RawClip::Image(_) | RawClip::ImageOriginal { .. } | RawClip::ImageRaw(_)
+    ) {
+        if let Some((kind, ts)) = latest_kind_ts() {
+            if kind == "image" && captured_ms.saturating_sub(ts) < TEXT_SAME_ORIGIN_MS {
+                crate::log_print!(
+                    "[clipboard] 重复图片已合并（同一次复制的另一种格式，指纹体系不同）"
+                );
+                return;
+            }
+        }
+    }
+
     let fp = match &raw {
         RawClip::ImageOriginal { hash, .. } => Some(*hash),
         RawClip::Image(dib) => Some(image_fingerprint(dib)),
@@ -1390,6 +1425,13 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
 /// 规则：**只与队列最后一条比对**（微信补写必然紧挨着上一条）；命中则把它的
 /// 时间戳刷新为 `now`（滑动续期），使持续到来的同图始终保持在同一簇里。
 /// 未命中则入队并清理过期项。
+/// 最新条目的（类型, 时间戳）。用于「同一次复制的多条写入」判定。
+fn latest_kind_ts() -> Option<(String, u64)> {
+    let hist = HISTORY.get()?;
+    let g = hist.lock().ok()?;
+    g.first().map(|i| (i.kind.clone(), i.ts))
+}
+
 /// 最近一条文本是否与这次「同源」（同一次复制的另一种表示）。
 ///
 /// 时间窗口是硬的：`TEXT_SAME_ORIGIN_MS` 之外一律不合并 ——
