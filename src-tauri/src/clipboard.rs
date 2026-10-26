@@ -63,6 +63,30 @@ static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// 两张（实际是好几张）」的成因，也意味着要重复做 6 次秒级的解码+写盘，卡顿被
 /// 放大数倍。保留一个小队列，窗口内的重复一律合并。
 static LAST_IMG: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+/// 最近落过的文本指纹（内容哈希）与时刻。
+///
+/// 为什么文本也需要：一次复制可能被应用**写两次**剪贴板（先纯文本、后补富文本），
+/// 于是两条通道各收一次，历史里出现两条一模一样的记录 —— 用户实测反馈过。
+/// 图片早就有这套指纹去重（`LAST_IMG`），文本一直没有。
+static LAST_TEXT: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+/// 最近落过的「文件路径清单」指纹。文件条目同样会被写两次（资源管理器在选中多个
+/// 文件时可能连续两次 SetClipboardData），日志里出现过同秒同大小的 files 重复。
+static LAST_FILES: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+/// 文本判重窗口。比图片的 60s 短得多，因为语义不同：
+/// 图片的 60s 是为了扛住微信「隔几十秒补写同一张图」；
+/// 文本这里只合并「同一次复制被写两遍」，2 秒足够，也不会把用户
+/// 真的连续复制两次同一段文字（通常间隔更久）误合并。
+const TEXT_DUP_WINDOW_MS: u64 = 2_000;
+/// 「同一次复制的两次写入」判定窗口。
+///
+/// 实测：Markdown 复制时应用先写渲染文本（812 字）、约 20ms 后再写原文（1347 字），
+/// 两次**纯文本并不相同**，所以内容哈希判不了。这里放宽成「短时间内 + 内容同源」。
+/// 窗口只给 800ms：人要连续复制两段不同内容，间隔远大于此；
+/// 而机器分两次写剪贴板都在几十毫秒内。
+const TEXT_SAME_ORIGIN_MS: u64 = 800;
+/// 同源相似度阈值。实测 Markdown 原文 vs 其渲染文本 ≈ 0.6~0.75（标记被去掉、空白不同），
+/// 而两段无关正文的 bigram 重叠通常 < 0.25 —— 0.5 落在两者中间。
+const TEXT_SAME_ORIGIN_SIM: f32 = 0.5;
 /// 队列上限：只关心「最近这一小段时间」，不用无限增长。
 const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
@@ -144,6 +168,16 @@ pub struct HistoryItem {
     /// 缺了它整个索引会解析失败、历史全部丢失。
     #[serde(default)]
     pub edited: bool,
+    /// 文本条目的**子类型**：`"link"` = 整条内容就是一个网址，`"code"` = 看起来是代码。
+    ///
+    /// 为什么不新增 `kind`：侧栏分类是按「用户想找什么」分的，链接与代码在语义上
+    /// 仍然是文本 —— 单开一类只会让同一条内容在两个地方各出现一次，违背「一条记录
+    /// 只属于一个位置」。子类型只服务两件事：卡片上多一个徽章，让人一眼认出这条是什么。
+    ///
+    /// `skip_serializing_if` 是刻意的：绝大多数文本都不是这两种，没必要往加密索引
+    /// 里给每一条都塞一个 `"subtype":null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<String>,
     /// 文本前若干字符 / "[图片]" / "N 个文件"
     pub preview: String,
     /// 文本预览是否**被截断过**（即卡片那 2 行没把正文显示完）。
@@ -159,6 +193,12 @@ pub struct HistoryItem {
     pub size: u64,
     /// 长文本落盘路径（相对 DIR/data/）
     pub text_path: Option<String>,
+    /// 富文本实体：`data/<id>.html`（CF_HTML 原文）与 `data/<id>.rtf`。
+    /// 仅当复制源提供了对应格式时才存在；两者都没有就是纯文本条目。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtf_path: Option<String>,
     /// 图片落盘路径（相对 DIR/images/）
     pub img_path: Option<String>,
     /// 文件路径清单落盘路径（相对 DIR/files/，每行一个完整路径）
@@ -179,6 +219,52 @@ pub struct HistoryItem {
 // 对外命令
 // ---------------------------------------------------------------------------
 
+/// 复制一份诊断信息到剪贴板（给用户报障用）。
+///
+/// 为什么需要：用户反馈问题时，最常缺的就是「版本 / 系统 / 材质 / 数据在哪」这四项，
+/// 每次都要来回追问、截图。这里一次性拼好，用户点一下粘贴就能发出来。
+///
+/// 内容**只含元数据**，不含任何剪贴板正文 —— 与日志同一条红线。
+/// 写剪贴板会走 `mark_skip()`，所以这条诊断文本不会被记成一条历史。
+#[tauri::command]
+pub fn copy_diagnostics() -> Result<String, String> {
+    let info = crate::about::about_info();
+    let s = crate::settings::get();
+    let cache = cache_info();
+    let items = HISTORY
+        .get()
+        .and_then(|m| m.lock().ok().map(|g| g.len()))
+        .unwrap_or(0);
+    let get = |k: &str| info.get(k).and_then(|v| v.as_str()).unwrap_or("—").to_string();
+
+    let text = format!(
+        "轻贴 {}（{}）\n系统：{}\n材质档位：{}\n界面缩放：{}\n主题：{}\n保留天数：{}\n历史条目：{} 条\n缓存目录：{}\n缓存占用：{} 个文件 / {:.1} MB",
+        get("version"),
+        if get("debug") == "true" { "debug" } else { "release" },
+        get("osDisplay"),
+        get("tier"),
+        if s.ignore_dpi_scale {
+            "固定 100%（不跟随系统）"
+        } else {
+            "跟随系统"
+        },
+        s.theme_mode,
+        if s.retention_days == 0 {
+            "永久保存".to_string()
+        } else {
+            format!("{} 天", s.retention_days)
+        },
+        items,
+        cache.dir,
+        cache.count,
+        cache.size as f64 / 1024.0 / 1024.0
+    );
+
+    unsafe { write_text_to_clipboard(&text)? };
+    crate::log_print!("[clipboard] 已复制诊断信息到剪贴板（不含任何正文）");
+    Ok(text)
+}
+
 #[tauri::command]
 pub fn get_history() -> Vec<HistoryItem> {
     HISTORY
@@ -187,23 +273,77 @@ pub fn get_history() -> Vec<HistoryItem> {
         .unwrap_or_default()
 }
 
+/// 处理条目引用的本地文件（回收站 / 永久删除），返回给前端的提示串。
+///
+/// **两道闸**，缺一不可：
+///   1. 前端必须显式要求（`delete_local_files = true`）—— 它来自用户在弹窗里的确认；
+///   2. 设置里必须已开启 `delete_files_with_item` —— 防止前端 bug 或误调用直接把
+///      用户的真实文件带走。
+/// 所以后端不信任任何一侧，两边都满足才动手。
+///
+/// 日志只记**数量**，不记路径：路径里带着文件名，属于内容级信息。
+fn purge_local_files(items: &[HistoryItem]) -> Option<String> {
+    let cfg = crate::settings::get();
+    if !cfg.delete_files_with_item {
+        return None;
+    }
+    let paths: Vec<String> = items
+        .iter()
+        .filter(|i| i.kind == "files")
+        .filter_map(|i| i.files.clone())
+        .flatten()
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+
+    let total = paths.len();
+    let (ok, failed) = crate::purge::purge(&paths, cfg.delete_files_permanent);
+    let how = if cfg.delete_files_permanent {
+        "永久删除"
+    } else {
+        "移入回收站"
+    };
+    if failed.is_empty() {
+        crate::log_print!("[clipboard] 已{how} {ok} 个本地文件");
+        Some(format!("已{how} {ok} 个本地文件"))
+    } else {
+        crate::log_warn!(
+            "[clipboard] {how}本地文件：成功 {ok}/{total}，失败 {} 个（详见界面提示）",
+            failed.len()
+        );
+        Some(format!(
+            "已{how} {ok} 个，{} 个未能处理（可能被占用或已不存在）",
+            failed.len()
+        ))
+    }
+}
+
 #[tauri::command]
-pub fn delete_item(id: String) -> Result<(), String> {
+pub fn delete_item(id: String, delete_local_files: Option<bool>) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
     if let Some(pos) = hist.iter().position(|i| i.id == id) {
         let item = hist.remove(pos);
         let kind = item.kind.clone();
         drop(hist);
+        // 先处理本地文件，再删记录与缓存实体：即便文件处理失败，条目也该删掉
+        // （用户要的是「这条记录不要了」），失败的个体会在提示里说清楚。
+        let note = if delete_local_files.unwrap_or(false) {
+            purge_local_files(std::slice::from_ref(&item))
+        } else {
+            None
+        };
         remove_item_files(&dir, &item);
         save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
         // 只记 id / kind 等元数据，不含内容。
         crate::log_print!("[clipboard] 删除条目 {id} kind={kind}");
+        Ok(note)
     } else {
         // 前端理论上不会删不存在的条目；真出现说明前后端状态不同步，值得记一笔。
         crate::log_warn!("[clipboard] 删除失败：条目不存在 {id}（前后端状态不同步）");
+        Ok(None)
     }
-    Ok(())
 }
 
 /// `pinned_views` 里的通配项：**同步置顶的永久标记**，表示在所有分类里置顶。
@@ -380,6 +520,11 @@ const DETAIL_DISPLAY_CAP: usize = 200_000;
 pub struct FullContent {
     /// 正文（超长时只返回前 `DETAIL_DISPLAY_CAP` 个字符）
     pub text: String,
+    /// 富文本原文（`HTML Format` / CF_HTML）。仅当这条复制源提供过格式时才存在。
+    ///
+    /// 详情弹窗拿它做「按格式查看」；不参与搜索、不进列表，只在这一刻读一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
     /// 是否因过长而被截断（前端据此提示用户）
     pub truncated: bool,
     /// 完整内容的字符总数
@@ -410,7 +555,17 @@ pub fn get_full_content(id: String) -> Result<FullContent, String> {
         .or(item.files_path.as_ref())
         .ok_or("该条目没有可查看的文本内容")?;
     let raw = read_text_entity(&dir, rel)?;
-    Ok(summarize_content(raw))
+    let mut full = summarize_content(raw);
+    // 富文本只在这条确实带格式时才多读一次（解不开就当没有，不影响纯文本显示）
+    if let Some(hrel) = item.html_path.as_ref() {
+        match read_text_entity(&dir, hrel) {
+            Ok(h) => full.html = Some(h),
+            Err(e) => crate::log_warn!(
+                "[clipboard] 详情：富文本实体读取失败 {hrel}：{e}（回退纯文本显示）"
+            ),
+        }
+    }
+    Ok(full)
 }
 
 /// 按显示上限截断正文，并统计**完整内容**的规模。
@@ -431,6 +586,7 @@ fn summarize_content(raw: String) -> FullContent {
     };
     FullContent {
         text,
+        html: None,
         truncated,
         total_chars,
         total_lines,
@@ -468,7 +624,7 @@ pub fn set_clipboard_text(text: String, changed: bool) -> Result<(), String> {
             // 本次自写在「事件」与「兜底轮询」两条通道上都会被认出并跳过，
             // 所以不会出现「系统自读一条 + 手动入库一条」变成两条。
             if changed {
-                dispatch_raw(RawClip::Text(text), true);
+                dispatch_raw(RawClip::Text { text, html: None, rtf: None }, true);
             }
             Ok(())
         }
@@ -518,7 +674,7 @@ const PASTE_MAX_SIDE: u32 = 8192;
 /// 返回 Ok(Some(提示)) 时前端用该提示替代默认的「已复制到剪贴板」——
 /// 目前只有文件条目会用到（部分原文件已失效、已跳过）。
 #[tauri::command]
-pub fn copy_back(id: String) -> Result<Option<String>, String> {
+pub fn copy_back(id: String, plain: Option<bool>) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let hist = HISTORY.get().unwrap().lock().unwrap();
     let item = hist
@@ -539,6 +695,22 @@ pub fn copy_back(id: String) -> Result<Option<String>, String> {
                     Some(rel) => read_text_entity(&dir, rel)?,
                     None => item.preview.clone(),
                 };
+                // 默认**保留格式**（用户复制的是带格式的内容，粘回去也该带格式）；
+                // 想要纯文本走右键菜单里的「粘贴为纯文本」。
+                if !plain.unwrap_or(false) {
+                    if let Some(rel) = &item.html_path {
+                        if let Ok(cf) = read_text_entity(&dir, rel) {
+                            unsafe { write_html_to_clipboard(&cf, &text)? };
+                            return Ok(Some("已按原格式复制".into()));
+                        }
+                    }
+                    if let Some(rel) = &item.rtf_path {
+                        if let Ok(rtf) = read_text_entity(&dir, rel) {
+                            unsafe { write_rtf_to_clipboard(&rtf, &text)? };
+                            return Ok(Some("已按原格式复制（RTF）".into()));
+                        }
+                    }
+                }
                 unsafe { write_text_to_clipboard(&text) }.map(|_| None)
             }
             "files" => {
@@ -664,9 +836,24 @@ pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn delete_items(ids: Vec<String>) -> Result<(), String> {
+pub fn delete_items(
+    ids: Vec<String>,
+    delete_local_files: Option<bool>,
+) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    // 先把待处理的目标捞出来：`retain` 里拿不到可变借用之外的东西，
+    // 而本地文件必须在条目被移除**之前**按它自己记录的路径处理。
+    let purge_targets: Vec<HistoryItem> = if delete_local_files.unwrap_or(false) {
+        hist.iter()
+            .filter(|i| ids.iter().any(|id| id == &i.id))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let note = purge_local_files(&purge_targets);
+
     let mut removed = 0usize;
     hist.retain(|i| {
         if ids.iter().any(|id| id == &i.id) {
@@ -680,7 +867,7 @@ pub fn delete_items(ids: Vec<String>) -> Result<(), String> {
     drop(hist);
     save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
     crate::log_print!("[clipboard] 批量删除 {removed} 条");
-    Ok(())
+    Ok(note)
 }
 
 // ---------------------------------------------------------------------------
@@ -836,9 +1023,19 @@ pub fn init(app: &AppHandle) {
             .join("clipboard"),
     };
 
-    let _ = fs::create_dir_all(dir.join("data"));
-    let _ = fs::create_dir_all(dir.join("images"));
-    let _ = fs::create_dir_all(dir.join("files"));
+    // 这三个目录是「记录能不能落盘」的前提。创建失败（磁盘满、路径只读、
+    // 被安全软件拦）之后每一次复制都会失败，而用户看到的只是「复制了没反应」。
+    // 以前是 `let _ =`，等于把根因咽掉，只剩一个空列表可看。
+    for sub in ["data", "images", "files"] {
+        let p = dir.join(sub);
+        if let Err(e) = fs::create_dir_all(&p) {
+            crate::log_err!(
+                "clipboard",
+                "缓存子目录创建失败（{}）：{e} —— 该类型内容将无法记录",
+                p.display()
+            );
+        }
+    }
     // 缩略图目录从旧的顶层 `thumbs/` 迁到 `images/thumbs/`（与图片放一起）。
     // 一次性、幂等：老目录在、新目录不在时才搬；搬不动也不影响后续按需生成。
     let old_thumbs = dir.join("thumbs");
@@ -851,6 +1048,26 @@ pub fn init(app: &AppHandle) {
     let _ = DIR.set(dir.clone());
 
     let mut hist = load_index(&dir);
+    // 索引条目数明显少于缓存目录里的内容文件 → 索引坏了，按文件补齐。
+    //
+    // 不只看「索引为空」：用户实测的损坏形态是索引被截断、只剩最后几条
+    // （写入途中被强杀），如果只判空就永远不会触发，列表会永远少掉几百条。
+    // 判据用「文件数 > 索引条数」而不是「>=」：正常状态下两者相等（清空、删除都会
+    // 连实体一起删），只有索引丢条目时才会出现文件多于条目。
+    // 重建本身只补不删（已有 id 跳过），因此即便判据误触发也不会破坏现有数据。
+    let entity_count = count_entities(&dir);
+    if entity_count > hist.len() {
+        let before = hist.len();
+        let rebuilt = rebuild_index_from_files(&dir, &mut hist);
+        if rebuilt > 0 {
+            crate::log_warn!(
+                "[clipboard] 索引只有 {before} 条、缓存目录有 {entity_count} 个内容文件 → 判为索引损坏，已补回 {rebuilt} 条（共 {} 条）；旧索引备份为 index.json.corrupt",
+                hist.len()
+            );
+            let _ = fs::copy(dir.join("index.json"), dir.join("index.json.corrupt"));
+            save_index(&dir, &hist);
+        }
+    }
     // 老版本 index.json 把文件路径内联在 files 里、没有落盘清单 → 补一份，
     // 让历史文件条目在缓存目录里也有实体（返回补了几条）
     let backfilled = backfill_files(&dir, &mut hist);
@@ -860,7 +1077,23 @@ pub fn init(app: &AppHandle) {
     // 老条目的 preview 是在「只取首行」的旧规则下写入的 —— 首行短就只显示几个字。
     // 规则改成「开头最多 2 行」后必须**重算存量**，否则用户看到的还是旧预览，
     // 会以为修复没生效。
+    // 识别规则升级：把存量子类型清空重算一次（只在规则版本提升后发生）
+    const SUBTYPE_RULE_VERSION: u32 = 2;
+    if crate::settings::get().subtype_version < SUBTYPE_RULE_VERSION {
+        let mut n = 0usize;
+        for item in hist.iter_mut() {
+            if item.kind == "text" && item.subtype.is_some() {
+                item.subtype = None;
+                n += 1;
+            }
+        }
+        crate::settings::update(|c| c.subtype_version = SUBTYPE_RULE_VERSION);
+        crate::log_print!("[clipboard] 识别规则已升级，{n} 条存量子类型待重算");
+    }
+
     let refreshed = refresh_text_previews(&dir, &mut hist);
+    // 存量条目补算「链接 / 代码」子类型（只在升级后首次启动真正干活）
+    let subtyped = refresh_text_subtypes(&dir, &mut hist);
     if backfilled > 0 {
         crate::log_print!("[clipboard] 已为 {backfilled} 条历史文件条目补写 files/ 清单");
     }
@@ -870,7 +1103,10 @@ pub fn init(app: &AppHandle) {
     if refreshed > 0 {
         crate::log_print!("[clipboard] 已按新规则重算 {refreshed} 条文本条目的预览");
     }
-    if backfilled > 0 || refreshed > 0 {
+    if subtyped > 0 {
+        crate::log_print!("[clipboard] 已为 {subtyped} 条存量文本判定「链接 / 代码」子类型");
+    }
+    if backfilled > 0 || refreshed > 0 || subtyped > 0 {
         save_index(&dir, &hist);
     }
 
@@ -1096,6 +1332,75 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
     // 判重：两种形态各有各的指纹来源，但都**不需要解码**。
     //   - ImageOriginal（微信走的就是这条）：文件内容哈希（FNV-1a）
     //   - Image（CF_DIB 原始位图，本机实测微信不走）：像素量化指纹
+    // 文本判重，两层：
+    //   一、内容完全相同（应用把同一次复制写了两遍）→ 只补格式，不新增；
+    //   二、内容**不同但同源**（先写渲染文本、再写 Markdown 原文）→ 用后者替换前者。
+    // 第二层是用户实测出来的：复制 Markdown 会落下两条，一条是去掉标记的纯文本、
+    // 一条是原文，长度和内容都不一样，光靠哈希根本拦不住。
+    if let RawClip::Text { text, html, rtf } = &raw {
+        let fp = content_hash(text.as_bytes());
+        let dup = LAST_TEXT
+            .lock()
+            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, TEXT_DUP_WINDOW_MS))
+            .unwrap_or(false);
+        if !dup && is_same_origin_recent(text, captured_ms) {
+            if replace_latest_text(text, html, rtf) {
+                // 指纹换成新内容，否则紧接着的第三次写入又会被当成新条目
+                if let Ok(mut g) = LAST_TEXT.lock() {
+                    if let Some(last) = g.last_mut() {
+                        last.0 = fp;
+                        last.1 = captured_ms;
+                    }
+                }
+                crate::log_print!(
+                    "[clipboard] 同一次复制的另一种表示（如 Markdown 原文 vs 渲染文本），已替换上一条"
+                );
+                return;
+            }
+        }
+        if dup {
+            // 关键：第二次往往**才带格式**（延迟渲染）。这里把格式补到已有那条上，
+            // 而不是丢掉 —— 否则用户复制一次，格式永远进不来。
+            let patched = merge_rich_into_latest(html, rtf);
+            crate::log_print!(
+                "[clipboard] 重复文本已合并（同一次复制的第二次写入，补格式={patched}）"
+            );
+            return;
+        }
+    }
+
+    // 文件清单判重：同一批路径在极短时间内被写两次，只留一条。
+    if let RawClip::Files(paths) = &raw {
+        let fp = content_hash(paths.join("\n").as_bytes());
+        let dup = LAST_FILES
+            .lock()
+            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, TEXT_SAME_ORIGIN_MS))
+            .unwrap_or(false);
+        if dup {
+            crate::log_print!("[clipboard] 重复文件清单已合并（同一次复制的第二次写入）");
+            return;
+        }
+    }
+
+    // 图片：同一次复制可能先给 DIB、再给原文件。两条路径算出来的指纹**体系不同**
+    // （文件字节哈希 vs 像素指纹），所以 `LAST_IMG` 那层对不上，日志里因此出现过
+    // 同秒、同大小、两张一模一样的图。
+    // 这里用「极短时间窗内上一条也是图片」兜底：人不可能在 800ms 内复制两张不同的图
+    // （截图/选中文件都需要更久），而程序分两次写剪贴板都在几十毫秒内。
+    if matches!(
+        raw,
+        RawClip::Image(_) | RawClip::ImageOriginal { .. } | RawClip::ImageRaw(_)
+    ) {
+        if let Some((kind, ts)) = latest_kind_ts() {
+            if kind == "image" && captured_ms.saturating_sub(ts) < TEXT_SAME_ORIGIN_MS {
+                crate::log_print!(
+                    "[clipboard] 重复图片已合并（同一次复制的另一种格式，指纹体系不同）"
+                );
+                return;
+            }
+        }
+    }
+
     let fp = match &raw {
         RawClip::ImageOriginal { hash, .. } => Some(*hash),
         RawClip::Image(dib) => Some(image_fingerprint(dib)),
@@ -1136,15 +1441,169 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
 /// 规则：**只与队列最后一条比对**（微信补写必然紧挨着上一条）；命中则把它的
 /// 时间戳刷新为 `now`（滑动续期），使持续到来的同图始终保持在同一簇里。
 /// 未命中则入队并清理过期项。
+/// 最新条目的（类型, 时间戳）。用于「同一次复制的多条写入」判定。
+fn latest_kind_ts() -> Option<(String, u64)> {
+    let hist = HISTORY.get()?;
+    let g = hist.lock().ok()?;
+    g.first().map(|i| (i.kind.clone(), i.ts))
+}
+
+/// 最近一条文本是否与这次「同源」（同一次复制的另一种表示）。
+///
+/// 时间窗口是硬的：`TEXT_SAME_ORIGIN_MS` 之外一律不合并 ——
+/// 用户隔几秒真的复制了两段相似内容，那是两次操作，必须各自成条。
+fn is_same_origin_recent(text: &str, ts: u64) -> bool {
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return false;
+    };
+    let Ok(g) = hist.lock() else { return false };
+    let Some(last) = g.first() else { return false };
+    if last.kind != "text" {
+        return false;
+    }
+    if ts.saturating_sub(last.ts) > TEXT_SAME_ORIGIN_MS {
+        return false;
+    }
+    let Some(rel) = &last.text_path else {
+        return false;
+    };
+    match read_text_entity(&dir, rel) {
+        Ok(prev) => same_origin(&prev, text),
+        Err(_) => false,
+    }
+}
+
+/// 两段文本「是不是同一份内容的两种表示」。
+///
+/// 用 **bigram 集合的 Jaccard 相似度**，而不是逐字比对：
+/// 同一次复制的两次写入，一次是 Markdown 原文、一次是渲染后的纯文本 ——
+/// 标记符号、换行、空白全不同，但相邻字符的组合高度重合。
+///
+/// 归一化时去掉空白与常见标记符号（`# * ` | - _ > [ ] ( ) ! ~`），
+/// 这样 `## 标题` 与 `标题` 在归一化后一致。
+fn same_origin(a: &str, b: &str) -> bool {
+    let norm = |s: &str| -> Vec<char> {
+        s.chars()
+            .filter(|c| {
+                !c.is_whitespace()
+                    && !matches!(c, '#' | '*' | '`' | '|' | '-' | '_' | '>' | '[' | ']' | '(' | ')' | '!' | '~' | '<' | '/')
+            })
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    };
+    let (na, nb) = (norm(a), norm(b));
+    // 太短的文本没有判别力（一句话恰好相似的概率太高），直接不合并
+    if na.len() < 12 || nb.len() < 12 {
+        return false;
+    }
+    let grams = |v: &[char]| -> std::collections::HashSet<(char, char)> {
+        v.windows(2).map(|w| (w[0], w[1])).collect()
+    };
+    let (sa, sb) = (grams(&na), grams(&nb));
+    let inter = sa.intersection(&sb).count() as f32;
+    let union = sa.union(&sb).count() as f32;
+    union > 0.0 && inter / union >= TEXT_SAME_ORIGIN_SIM
+}
+
+/// 用「同一次复制的另一次写入」**替换**最新那条文本条目。
+///
+/// 为什么是替换而不是丢弃：两次写入的内容不同（渲染文本 vs 原文），
+/// 后者才是用户真正复制的东西。丢掉第二次等于把 Markdown 原文换成去掉标记的纯文本。
+/// 剪贴板的语义本来就是「最终状态」，所以以最新的为准。
+fn replace_latest_text(text: &str, html: &Option<String>, rtf: &Option<String>) -> bool {
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return false;
+    };
+    let Ok(mut g) = hist.lock() else { return false };
+    let Some(last) = g.first_mut() else { return false };
+    if last.kind != "text" {
+        return false;
+    }
+    let id = last.id.clone();
+    let rel = format!("data/{id}.txt");
+    write_text_entity(&dir, &rel, text);
+    last.text_path = Some(rel);
+    last.size = text.len() as u64;
+    let (preview, truncated) = text_preview_parts(text);
+    last.preview = preview;
+    last.preview_truncated = truncated;
+    last.subtype = Some(detect_subtype(text).unwrap_or("").to_string());
+    // 富文本一并换掉（第二次往往才带格式）
+    if let Some(h) = html {
+        let hrel = format!("data/{id}.html");
+        write_text_entity(&dir, &hrel, h);
+        last.html_path = Some(hrel);
+    }
+    if let Some(r) = rtf {
+        let rrel = format!("data/{id}.rtf");
+        write_text_entity(&dir, &rrel, r);
+        last.rtf_path = Some(rrel);
+    }
+    let updated = last.clone();
+    save_index(&dir, &g);
+    drop(g);
+    if let Some(app) = APP.get() {
+        let _ = app.emit("clipboard-update", updated);
+    }
+    true
+}
+
+/// 把这次捕获到的富文本补到**最新那条**文本条目上。
+///
+/// 触发场景：应用分两次写剪贴板（先纯文本、再补 HTML/RTF），第一次产生的条目
+/// 没有格式。补在这里而不是丢掉第二次，否则用户复制一次、格式永远进不来。
+///
+/// 幂等：最新条目已经有对应格式，或它不是文本条目，就什么都不做。
+fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
+    if html.is_none() && rtf.is_none() {
+        return false;
+    }
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return false;
+    };
+    let Ok(mut g) = hist.lock() else { return false };
+    let Some(last) = g.first_mut() else { return false };
+    if last.kind != "text" {
+        return false;
+    }
+    let id = last.id.clone();
+    let mut changed = false;
+    if last.html_path.is_none() {
+        if let Some(h) = html {
+            let rel = format!("data/{id}.html");
+            write_text_entity(&dir, &rel, h);
+            last.html_path = Some(rel);
+            changed = true;
+        }
+    }
+    if last.rtf_path.is_none() {
+        if let Some(r) = rtf {
+            let rel = format!("data/{id}.rtf");
+            write_text_entity(&dir, &rel, r);
+            last.rtf_path = Some(rel);
+            changed = true;
+        }
+    }
+    if changed {
+        save_index(&dir, &g);
+    }
+    changed
+}
+
 fn dedup_merge(g: &mut Vec<(u64, u64)>, fp: u64, now: u64) -> bool {
+    dedup_merge_with(g, fp, now, DUP_WINDOW_MS)
+}
+
+/// 同 `dedup_merge`，但窗口可指定（文本用更短的窗口，见 `TEXT_DUP_WINDOW_MS`）。
+fn dedup_merge_with(g: &mut Vec<(u64, u64)>, fp: u64, now: u64, window: u64) -> bool {
     if let Some(last) = g.last_mut() {
-        if last.0 == fp && now.saturating_sub(last.1) < DUP_WINDOW_MS {
+        if last.0 == fp && now.saturating_sub(last.1) < window {
             last.1 = now; // 滑动窗口：续上这一簇
             return true;
         }
     }
     g.push((fp, now));
-    g.retain(|(_, t)| now.saturating_sub(*t) < DUP_WINDOW_MS);
+    g.retain(|(_, t)| now.saturating_sub(*t) < window);
     let len = g.len();
     if len > LAST_IMG_KEEP {
         g.drain(0..len - LAST_IMG_KEEP);
@@ -1317,7 +1776,15 @@ fn content_hash(bytes: &[u8]) -> u64 {
 // ---------------------------------------------------------------------------
 
 enum RawClip {
-    Text(String),
+    Text {
+        /// 纯文本（CF_UNICODETEXT 解密后的内容）—— 唯一必有的部分
+        text: String,
+        /// `HTML Format` 原文。它本身就是**带 Version/StartHTML 头的 CF_HTML**，
+        /// 所以能原样存、原样写回，不需要自己拼头部（拼错就是「粘到 Word 里变源码」）。
+        html: Option<String>,
+        /// `Rich Text Format` 原文（部分老应用只给 RTF，不给 HTML）
+        rtf: Option<String>,
+    },
     Image(Vec<u8>), // DIB 字节
     Files(Vec<String>),
     /// CF_HDROP 给的图片**原文件路径**（尚未读取）。
@@ -1481,6 +1948,62 @@ unsafe fn read_clipboard() -> (Option<RawClip>, String) {
 /// 「可疑」= 至少一种目标格式 `IsClipboardFormatAvailable` 为真、但 `GetClipboardData`
 /// 拿到 NULL —— 这是延迟渲染 / 分次写入的典型症状，值得松锁退避后重读；
 /// 若压根没有目标格式，说明这次真没有可记录的东西，重读没有意义。
+/// 富文本寄存器的体积上限。
+///
+/// `HTML Format` 经常内联 base64 图片（一张截图就能顶到几 MB），而我们要的只是
+/// 「文字带格式」。超过这个量级就**放弃富文本、只留纯文本** —— 宁可少一点保真，
+/// 也不能让一次复制往磁盘里塞几 MB、还拖慢启动时的索引重建。
+const RICH_MAX_BYTES: usize = 512 * 1024;
+
+/// 读一个**注册剪贴板格式**的文本内容（如 `HTML Format` / `Rich Text Format`）。
+///
+/// 必须在 `OpenClipboard` 期间调用。
+unsafe fn read_clip_text_format(name: &str) -> Option<String> {
+    unsafe fn inner(name: &str) -> Option<String> {
+        // 注册格式的 ID 由系统分配，每次启动/每次调用都要现问
+        let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let fmt = RegisterClipboardFormatW(wide_name.as_ptr());
+        if fmt == 0 || IsClipboardFormatAvailable(fmt) == 0 {
+            return None;
+        }
+        let h = GetClipboardData(fmt);
+        if h == 0 {
+            return None;
+        }
+        let p = GlobalLock(h) as *const u8;
+        if p.is_null() {
+            return None;
+        }
+        let size = GlobalSize(h);
+        if size == 0 || size > RICH_MAX_BYTES * 4 {
+            GlobalUnlock(h);
+            crate::log_warn!("[clipboard] {name} 体积 {} 字节，超出可读范围，已忽略", size);
+            return None;
+        }
+        let mut buf = vec![0u8; size];
+        std::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), size);
+        GlobalUnlock(h);
+        // 去掉尾部补的 NUL（有些应用会补 1~2 个）
+        while buf.last() == Some(&0) {
+            buf.pop();
+        }
+        if buf.is_empty() {
+            return None;
+        }
+        if buf.len() > RICH_MAX_BYTES {
+            crate::log_warn!(
+                "[clipboard] {name} 体积 {}KB 超过 {}KB 上限，本条只保留纯文本",
+                buf.len() / 1024,
+                RICH_MAX_BYTES / 1024
+            );
+            return None;
+        }
+        // HTML Format 是 UTF-8；RTF 是 ANSI/ASCII 超集，按 lossy 处理不会损坏结构
+        Some(String::from_utf8_lossy(&buf).to_string())
+    }
+    inner(name)
+}
+
 unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool) {
     const CF_UNICODETEXT: u32 = 13;
     const CF_DIB: u32 = 8;
@@ -1520,7 +2043,19 @@ unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool
                 }
                 GlobalUnlock(h);
                 diag.push_str(&format!("len={} ", v.len()));
-                return Some(RawClip::Text(String::from_utf16_lossy(&v)));
+                let text = String::from_utf16_lossy(&v);
+                // 富文本：Word / 浏览器 / 微信通常同时给出 HTML Format 或 RTF。
+                // 两个都读，回贴时优先用 HTML（保真度更高）。
+                // 必须在同一个 OpenClipboard 窗口内读 —— 关掉再开，owner 可能已改内容。
+                let html = read_clip_text_format("HTML Format");
+                let rtf = read_clip_text_format("Rich Text Format");
+                if html.is_some() {
+                    diag.push_str("html:yes ");
+                }
+                if rtf.is_some() {
+                    diag.push_str("rtf:yes ");
+                }
+                return Some(RawClip::Text { text, html, rtf });
             } else {
                 // 格式存在但取不到句柄：典型「延迟渲染未就绪」——owner 还没通过
                 // WM_RENDERFORMAT 把数据交出来，或 owner 拒绝渲染。这是微信等应用
@@ -1894,6 +2429,227 @@ fn decode_image_file(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
 /// 返回 `(预览串, 是否截断)`。第二个值不是顺手加的：前端要靠它判断
 /// 「卡片已经显示全了就别再弹悬浮浮层」，而这个判断必须与截断规则**同源** ——
 /// 前端照抄一份「2 行 / 140 字」的规则，日后改了一边就必然漂移。
+/// 常见顶级域名白名单 —— 只用来识别**不带协议**的裸域名。
+///
+/// 为什么必须白名单，而不是「含点号且无空格」：`报告.docx`、`v1.2.3`、`3.14`
+/// 全都符合那个形状，真按它判会把一堆普通文本标成「链接」，徽章立刻失去意义。
+/// 白名单只影响裸域名；带 `http(s)://` 的一律直接认，不查表。
+const TLDS: &[&str] = &[
+    "com", "cn", "net", "org", "io", "dev", "app", "co", "me", "info", "xyz", "top", "site",
+    "tech", "ai", "gov", "edu", "cc", "tv", "biz", "pro", "online", "shop", "blog", "wiki",
+    "so", "gg", "ly", "to", "fm", "sh", "run", "page", "link", "cloud", "store", "design",
+    "art", "work", "live", "news", "world", "today", "space", "website", "host", "press",
+    "zone", "email", "group", "team", "plus", "one", "moe", "hk", "tw", "jp", "us", "uk",
+];
+
+/// 不带协议的裸域名：`github.com/x`、`example.com`、`mp.weixin.qq.com/s/xxx`。
+///
+/// 与 `is_single_url` 同一套前提：整条内容不含空白（一句话里夹个域名不算）。
+fn looks_like_bare_url(t: &str) -> bool {
+    if t.chars().any(char::is_whitespace) {
+        return false;
+    }
+    // 行尾的句号/逗号/右括号是标点，不属于域名
+    let core = t.trim_end_matches(['.', ',', ';', ')', ']', '。', '，', '、']);
+    let host = core.split(['/', '?', '#']).next().unwrap_or("");
+    if !host.contains('.') {
+        return false;
+    }
+    // host 只允许字母数字、点、横线、下划线（排除 @ 邮箱、含中文的句子等）
+    if !host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return false;
+    }
+    match host.rsplit('.').next() {
+        Some(tld) => TLDS.contains(&tld.to_ascii_lowercase().as_str()),
+        None => false,
+    }
+}
+
+/// 整条内容是否「就是一个网址」。
+///
+/// 两种形态都认：带协议的（`http(s)://`、`www.`），以及**裸域名**（`github.com/x`）——
+/// 后者是用户实测反馈「明明是个链接却标成文本」的那种。
+/// 但都要求整条内容不含空白：一句话里夹着链接仍是普通文本，标成「链接」反而误导。
+fn is_single_url(t: &str) -> bool {
+    if t.chars().any(char::is_whitespace) || t.len() < 6 {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("www.") {
+        return lower.len() >= 10;
+    }
+    looks_like_bare_url(t)
+}
+
+/// 文本是否「看起来是代码」。
+///
+/// 用打分而不是单条特征：单独看「行尾有分号」会把中文项目符号、SQL 说明都算进来，
+/// 而只看关键字又会把「我在文章里提到 return 这个词」误判成代码。宁可漏标（不显示徽章），
+/// 也不要乱标 —— 徽章是「一眼认出这条是什么」的辅助，标错了比不标更糟。
+///
+/// 四条线索：围栏 / JSON 形状 / 行尾结构符号 / 缩进 / 运算符 / 关键字密度。
+fn looks_like_code(t: &str) -> bool {
+    // 显式围栏：用户贴代码块时通常自带，最可靠的信号
+    if t.contains("```") {
+        return true;
+    }
+    // JSON / 配置片段：首尾成对且含键值分隔
+    if (t.starts_with('{') && t.ends_with('}')) || (t.starts_with('[') && t.ends_with(']')) {
+        if t.contains(':') {
+            return true;
+        }
+    }
+
+    // 关键字表：只认「后跟空格」或带括号的形态，避免命中普通词
+    const KEYWORDS: &[&str] = &[
+        "fn ", "let ", "const ", "var ", "function ", "def ", "class ", "import ", "from ",
+        "return ", "public ", "private ", "static ", "void ", "package ", "namespace ",
+        "#include", "<?php", "console.log(", "await ", "async ", "elif ", "func ", "SELECT ",
+        "INSERT ", "UPDATE ", "CREATE TABLE",
+    ];
+
+    let lines: Vec<&str> = t.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() < 2 {
+        // 单行：多行那套「比例/缩进」统计用不上，但完全不判会把
+        // `const x = 1;`、`import os` 这类整行粘贴的代码漏掉（用户实测反馈）。
+        // 只用**强特征**，宁可漏：「注意：这样做；」不含括号、不以关键字开头，
+        // 因此不会被误标。
+        let starts_kw = KEYWORDS.iter().any(|k| t.starts_with(k));
+        let ends_semi = t.trim_end().ends_with(';');
+        let has_arrow = t.contains("=>") || t.contains("::") || t.contains("->");
+        let looks_call = t.contains('(') && t.contains(')');
+        return starts_kw || (has_arrow && ends_semi) || (ends_semi && looks_call);
+    }
+
+    let mut score = 0;
+
+    // 行尾是分号 / 花括号：代码最常见的结构符号
+    let struct_lines = lines
+        .iter()
+        .filter(|l| {
+            let s = l.trim_end();
+            s.ends_with(';') || s.ends_with('{') || s.ends_with('}')
+        })
+        .count();
+    if struct_lines >= 2 {
+        score += 1;
+    }
+    if struct_lines * 2 > lines.len() {
+        score += 1;
+    }
+
+    // 缩进：至少两行以空格或 tab 开头
+    if lines
+        .iter()
+        .filter(|l| l.starts_with("  ") || l.starts_with('\t'))
+        .count()
+        >= 2
+    {
+        score += 1;
+    }
+
+    // 代码专属运算符（中文排版本里几乎不会出现）
+    if t.contains("=>") || t.contains("::") || t.contains("->") || t.contains("&&") {
+        score += 1;
+    }
+
+    let kw_hits = KEYWORDS.iter().filter(|k| t.contains(**k)).count();
+    if kw_hits >= 2 {
+        score += 2;
+    } else if kw_hits == 1 {
+        score += 1;
+    }
+
+    // 必须有至少一个关键字：纯结构符号（项目符号、表格线）不算代码
+    kw_hits >= 1 && score >= 3
+}
+
+/// 是否像 Markdown **源码**。
+///
+/// 只认**结构性强特征**，且要命中 ≥2 种：单个特征太容易撞车 ——
+/// 代码里的 `#` 注释、`- ` 开头的负号行、SQL 里的 `**` 都可能误命中。
+/// 强特征清单（都是「整行形态」，普通正文里几乎不会出现）：
+///   ATX 标题(`## `)、无序列表(`- `)、有序列表(`1. `)、表格(`| a | b |`)、
+///   引用(`> `)、链接语法(`[文字](地址)`)。
+///
+/// 刻意不把 `**粗体**` 和行内反引号算进来：代码里的乘号与模板字符串会中招。
+fn looks_like_markdown(t: &str) -> bool {
+    let mut hits = 0;
+    let lines: Vec<&str> = t.lines().collect();
+
+    // 1) ATX 标题：行首 1~6 个 `#` 且紧跟空格
+    let atx = lines.iter().any(|l| {
+        let s = l.trim_start();
+        let n = s.chars().take_while(|c| *c == '#').count();
+        (1..=6).contains(&n) && s.chars().nth(n) == Some(' ')
+    });
+    if atx {
+        hits += 1;
+    }
+
+    // 2) 无序列表
+    if lines.iter().any(|l| {
+        let s = l.trim_start();
+        s.starts_with("- ") || s.starts_with("* ") || s.starts_with("+ ")
+    }) {
+        hits += 1;
+    }
+
+    // 3) 有序列表：数字 + `. `（要求行首，避免匹配正文里的「第 3 点：」）
+    if lines.iter().any(|l| {
+        let s = l.trim_start();
+        let digits = s.chars().take_while(|c| c.is_ascii_digit()).count();
+        digits > 0 && s[digits..].starts_with(". ")
+    }) {
+        hits += 1;
+    }
+
+    // 4) 表格：整行以 `|` 开头且至少两个 `|`
+    if lines
+        .iter()
+        .any(|l| l.trim_start().starts_with('|') && l.matches('|').count() >= 2)
+    {
+        hits += 1;
+    }
+
+    // 5) 引用
+    if lines.iter().any(|l| l.trim_start().starts_with("> ")) {
+        hits += 1;
+    }
+
+    // 6) 链接语法 `[文字](地址)`
+    if t.contains("](") {
+        hits += 1;
+    }
+
+    hits >= 2
+}
+
+/// 判定文本条目的子类型：`"link"` / `"markdown"` / `"code"` / `None`。
+///
+/// 链接优先：一个网址即使带查询参数也不该被当成代码。
+fn detect_subtype(text: &str) -> Option<&'static str> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if is_single_url(t) {
+        return Some("link");
+    }
+    // Markdown 在代码之前判：一篇带代码块的 Markdown 文档，用户认知里是「Markdown」
+    // 而不是「代码」。而纯代码几乎不会满足「≥2 种结构强特征」，不会被抢走。
+    if looks_like_markdown(t) {
+        return Some("markdown");
+    }
+    if looks_like_code(t) {
+        return Some("code");
+    }
+    None
+}
+
 fn text_preview_parts(text: &str) -> (String, bool) {
     /// 与 CSS `.card-preview { -webkit-line-clamp }` 一致
     const MAX_LINES: usize = 2;
@@ -1995,6 +2751,29 @@ fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usi
     changed
 }
 
+/// 给存量文本条目补算 `subtype`（链接 / 代码），返回处理条数。
+///
+/// 只处理 `subtype.is_none()` 的条目 —— 已判定过的（包括「判过但两类都不是」的空串）
+/// 一律跳过，所以这个函数**天然只跑一次**：升级后首次启动扫一遍，之后每次启动
+/// 都不会再解密几百条正文。这也是用空串而不是 None 表示「无子类型」的原因。
+fn refresh_text_subtypes(dir: &PathBuf, hist: &mut [HistoryItem]) -> usize {
+    let mut changed = 0usize;
+    for item in hist.iter_mut() {
+        if item.kind != "text" || item.subtype.is_some() {
+            continue;
+        }
+        let Some(rel) = item.text_path.as_ref() else {
+            continue;
+        };
+        let Ok(text) = read_text_entity(dir, rel) else {
+            continue;
+        };
+        item.subtype = Some(detect_subtype(&text).unwrap_or("").to_string());
+        changed += 1;
+    }
+    changed
+}
+
 fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
     let dir = DIR.get().unwrap().clone();
     let ts = now_ms();
@@ -2007,18 +2786,23 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
         pinned_views: Vec::new(),
         favorite: false,
         edited,
+        subtype: None,
         preview: String::new(),
         preview_truncated: false,
         size: 0,
         text_path: None,
+        html_path: None,
+        rtf_path: None,
         img_path: None,
         files_path: None,
         files: None,
     };
 
     match raw {
-        RawClip::Text(text) => {
+        RawClip::Text { text, html, rtf } => {
             item.kind = "text".into();
+            // 子类型只用于卡片徽章（链接 / 代码），不参与分类
+            item.subtype = detect_subtype(&text).map(str::to_string);
             item.size = text.len() as u64;
             let (preview, truncated) = text_preview_parts(&text);
             item.preview = preview;
@@ -2028,6 +2812,18 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
             let rel = format!("data/{}.txt", id);
             write_text_entity(&dir, &rel, &text);
             item.text_path = Some(rel);
+            // 富文本实体单独落盘（一样加密）：纯文本永远是主数据，
+            // 富文本只是「回贴时可以更保真」的附加信息，缺了不影响使用。
+            if let Some(h) = html {
+                let hrel = format!("data/{id}.html");
+                write_text_entity(&dir, &hrel, &h);
+                item.html_path = Some(hrel);
+            }
+            if let Some(r) = rtf {
+                let rrel = format!("data/{id}.rtf");
+                write_text_entity(&dir, &rrel, &r);
+                item.rtf_path = Some(rrel);
+            }
         }
         RawClip::Files(files) => {
             item.kind = "files".into();
@@ -2104,11 +2900,20 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
     // 等于把用户复制的文本**明文**写进日志文件。日志的用途是排查问题，
     // 不该顺带成为一份内容副本；用户明确反馈过「不安全」。
     // 需要定位内容相关问题时，用这里的 id 去缓存目录里找对应条目即可。
+    // `rich=` 是排查富文本的第一落点：一眼能看出这次复制到底有没有拿到格式。
+    // none 说明源应用没提供 HTML/RTF，或体积超限被放弃（后者另有一条 WARN）。
+    let rich = match (&item.html_path, &item.rtf_path) {
+        (Some(_), Some(_)) => "html+rtf",
+        (Some(_), None) => "html",
+        (None, Some(_)) => "rtf",
+        (None, None) => "none",
+    };
     crate::log_print!(
-        "[clipboard] 新增 {} 条目 kind={} size={}",
+        "[clipboard] 新增 {} 条目 kind={} size={} rich={}",
         id,
         item.kind,
-        item.size
+        item.size,
+        rich
     );
     item
 }
@@ -2408,6 +3213,122 @@ unsafe fn write_text_to_clipboard(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 把字符串转成剪贴板要的「UTF-16LE + 结尾 NUL」字节序列。
+fn utf16_bytes(s: &str) -> Vec<u8> {
+    let mut v: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut out = Vec::with_capacity(v.len() * 2);
+    for u in v.drain(..) {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+    out
+}
+
+/// 一次写入多个剪贴板格式。
+///
+/// 为什么必须一次写完：每次写入都要 `EmptyClipboard`，分三次调就是「后写的把
+/// 先写的清掉」—— 最后只剩一种格式，用户粘到 Word 里还是没有格式。
+unsafe fn write_clipboard_formats(items: &[(u32, Vec<u8>)]) -> Result<(), String> {
+    if items.is_empty() {
+        return Err("没有可写入的格式".into());
+    }
+    let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+    if OpenClipboard(hwnd) == 0 {
+        return Err("OpenClipboard 失败".into());
+    }
+    EmptyClipboard();
+    for (fmt, data) in items {
+        let h = GlobalAlloc(0x0002, data.len()); // GMEM_MOVEABLE
+        if h == 0 {
+            CloseClipboard();
+            return Err("GlobalAlloc 失败".into());
+        }
+        let p = GlobalLock(h) as *mut u8;
+        if p.is_null() {
+            CloseClipboard();
+            return Err("GlobalLock 失败".into());
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), p, data.len());
+        GlobalUnlock(h);
+        if SetClipboardData(*fmt, h) == 0 {
+            CloseClipboard();
+            return Err(format!("SetClipboardData 失败（格式 {fmt}）"));
+        }
+    }
+    CloseClipboard();
+    mark_skip();
+    Ok(())
+}
+
+/// 给裸 HTML 补上 `HTML Format` 所需的头。
+///
+/// 从应用复制来的 `HTML Format` 本身就带这个头（所以正常路径是「原样写回」）；
+/// 这个函数只是兜底：万一拿到的是一段裸 HTML，不补头的话 Word / 邮件客户端
+/// 会把它当成**纯文本**贴出来，也就是用户看到的「粘出来是源码」。
+fn build_cf_html(body: &str) -> String {
+    const PREFIX: &str = "<html><body><!--StartFragment-->";
+    const SUFFIX: &str = "<!--EndFragment--></body></html>";
+    // 头部各偏移量都是 10 位数字，长度固定 —— 先算出来再填值
+    let head_len = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n".len();
+    let start_html = head_len;
+    let start_frag = head_len + PREFIX.len();
+    let end_frag = start_frag + body.len();
+    let end_html = end_frag + SUFFIX.len();
+    format!(
+        "Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\nStartFragment:{start_frag:010}\r\nEndFragment:{end_frag:010}\r\n{PREFIX}{body}{SUFFIX}"
+    )
+}
+
+/// 内容是否已经是带头的 CF_HTML。
+///
+/// 从 Word / 浏览器 / 微信复制来的 `HTML Format` **本来就有头**，直接原样写回即可；
+/// 再套一层会让四个偏移全错，粘到 Word 里就成了一坨源码。
+fn is_cf_html(s: &str) -> bool {
+    s.trim_start().starts_with("Version:")
+}
+
+/// 写回带格式的文本：HTML 优先，外加纯文本兜底。
+///
+/// 一定同时写 `CF_UNICODETEXT` —— 记事本、终端、多数输入框只认纯文本，
+/// 只写 HTML 会表现成「粘到一半应用里什么都没有」。
+unsafe fn write_html_to_clipboard(cf_html: &str, plain: &str) -> Result<(), String> {
+    let payload = if is_cf_html(cf_html) {
+        cf_html.to_string()
+    } else {
+        build_cf_html(cf_html)
+    };
+    let html_fmt = unsafe {
+        let name: Vec<u16> = "HTML Format".encode_utf16().chain(std::iter::once(0)).collect();
+        RegisterClipboardFormatW(name.as_ptr())
+    };
+    if html_fmt == 0 {
+        // 拿不到 HTML 格式就直接退回纯文本，而不是让回贴整个失败
+        return unsafe { write_text_to_clipboard(plain) };
+    }
+    unsafe {
+        write_clipboard_formats(&[
+            (html_fmt, payload.into_bytes()),
+            (13u32, utf16_bytes(plain)),
+        ])
+    }
+}
+
+/// 写回 RTF（`HTML Format` 缺失时的次选），同样附纯文本。
+unsafe fn write_rtf_to_clipboard(rtf: &str, plain: &str) -> Result<(), String> {
+    let rtf_fmt = unsafe {
+        let name: Vec<u16> = "Rich Text Format".encode_utf16().chain(std::iter::once(0)).collect();
+        RegisterClipboardFormatW(name.as_ptr())
+    };
+    if rtf_fmt == 0 {
+        return unsafe { write_text_to_clipboard(plain) };
+    }
+    unsafe {
+        write_clipboard_formats(&[
+            (rtf_fmt, rtf.as_bytes().to_vec()),
+            (13u32, utf16_bytes(plain)),
+        ])
+    }
+}
+
 unsafe fn write_files_to_clipboard(files: &[String]) -> Result<(), String> {
     let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
     if OpenClipboard(hwnd) == 0 {
@@ -2694,23 +3615,57 @@ fn encrypt_legacy_entities(dir: &PathBuf) -> usize {
     n
 }
 
+/// 索引读不出来时，把损坏的文件原样留一份再返回空。
+///
+/// 为什么必须留：`load_index` 返回空之后，用户随手复制一条就会触发 `save_index`，
+/// 把损坏文件**就地覆盖**成一个看起来正常的小索引 —— 事故现场彻底消失，事后
+/// 谁也无法判断是截断、解密失败还是解析失败。用户实测那次就是这样丢的证据。
+fn keep_corrupt(dir: &PathBuf, raw: &[u8], why: &str) {
+    let dst = dir.join("index.json.corrupt");
+    match fs::write(&dst, raw) {
+        Ok(()) => crate::log_err!(
+            "clipboard",
+            "index.json {why}；损坏文件 {} 字节已另存为 index.json.corrupt",
+            raw.len()
+        ),
+        Err(e) => crate::log_err!("clipboard", "index.json {why}，且备份失败：{e}"),
+    }
+}
+
 fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     let path = dir.join("index.json");
     // 按**字节**读，不按字符串：新格式是 DPAPI 密文（带 ENC_MAGIC），不是 UTF-8 JSON。
-    let Ok(raw) = fs::read(&path) else {
-        return Vec::new();
+    let raw = match fs::read(&path) {
+        Ok(v) => v,
+        Err(e) => {
+            // 曾经这里直接 `return Vec::new()` —— **一行日志都没有**。于是
+            // 「记录全没了」成了唯一线索，连「索引文件到底在不在」都查不出来。
+            // 用户实测那次日志里恰好就是这种真空。
+            if e.kind() == std::io::ErrorKind::NotFound {
+                crate::log_warn!(
+                    "[clipboard] 没有 index.json（首次运行，或索引已被删除/改名）—— 历史列表为空"
+                );
+            } else {
+                crate::log_err!("clipboard", "index.json 读取失败：{e}");
+            }
+            return Vec::new();
+        }
     };
+    if raw.is_empty() {
+        crate::log_err!(
+            "clipboard",
+            "index.json 是空文件（0 字节）—— 上次写入被中断（强杀/崩溃/断电）的特征，历史列表将为空"
+        );
+        return Vec::new();
+    }
     // decode_text_bytes 同时兼容老版本的明文 JSON（没有魔数 → 原样返回），
     // 老用户升级后历史不会因为格式切换而清空。
     let Some(json) = decode_text_bytes(&raw) else {
-        crate::log_err!(
-            "clipboard",
-            "index.json 解密失败（可能换了 Windows 账户或机器），历史列表读不出来"
-        );
+        keep_corrupt(dir, &raw, "解密失败（可能换了 Windows 账户或机器）");
         return Vec::new();
     };
     let mut v: Vec<HistoryItem> = serde_json::from_str(&json).unwrap_or_else(|e| {
-        crate::log_warn!("[clipboard] index.json 解析失败：{e}，返回空（历史清空）");
+        keep_corrupt(dir, &raw, &format!("解析失败：{e}"));
         Vec::new()
     });
     // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
@@ -2725,6 +3680,13 @@ fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     if migrated > 0 {
         crate::log_print!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
     }
+    // 成功加载也要记一条：否则「索引读到了几条、文件多大」只能靠 init 里那句
+    // 间接推断。事故复盘时最有用的是「改动前后的两条读数」，而不是只剩一条。
+    crate::log_print!(
+        "[clipboard] 索引加载成功：{} 条，{} 字节",
+        v.len(),
+        raw.len()
+    );
     v
 }
 
@@ -2744,17 +3706,244 @@ fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
 /// 宁可少一层保护，也不能因为 DPAPI 异常把整份历史弄丢。读出时靠魔数区分。
 fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
     let path = dir.join("index.json");
+    // 先写临时文件、再原子替换。
+    //
+    // 直接 `fs::write` 覆盖是**非原子**的：进程若在写入中途被强杀（taskkill、
+    // 崩溃、关机），index.json 会被截断成半截甚至 0 字节，下次启动解析失败
+    // → 历史全没。用户实测过一次：列表只剩 4 条，而 data/ 下 300 多个正文文件
+    // 都在 —— 正是这种损坏形态。rename 在同一分区上是原子的，要么是旧的完整
+    // 索引，要么是新的完整索引，不存在半截状态。
+    let tmp = dir.join("index.json.tmp");
     match serde_json::to_string_pretty(hist) {
         Ok(s) => {
             // 写失败要记：index.json 是重启后恢复历史/置顶/收藏的唯一依据，
             // 静默失败会表现为「重启后记录全没了」却查无实据。
-            if let Err(e) = fs::write(&path, encrypt_text(&s)) {
+            if let Err(e) = fs::write(&tmp, encrypt_text(&s)) {
                 crate::log_err!("clipboard", "index.json 写入失败：{e}");
+                let _ = fs::remove_file(&tmp);
+                return;
+            }
+            if let Err(e) = fs::rename(&tmp, &path) {
+                crate::log_err!("clipboard", "index.json 原子替换失败：{e}");
+                let _ = fs::remove_file(&tmp);
             }
         }
         Err(e) => crate::log_err!("clipboard", "index.json 序列化失败：{e}"),
     }
 }
+
+/// 从 id（`{:x}-{counter}`）里取回毫秒时间戳。取不到返回 None。
+fn ts_from_id(id: &str) -> Option<u64> {
+    id.split('-')
+        .next()
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+        .filter(|&ms| ms > 1_500_000_000_000) // 粗校验：2017 年之前的值视为不可信
+}
+
+fn mtime_secs(p: &Path) -> u64 {
+    fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        * 1000
+}
+
+/// 统计缓存目录里的内容实体数（正文 + 图片 + 文件清单），用来判断索引是否漏条。
+/// 只数实体文件，不数 `images/thumbs/`（缩略图不是条目）。
+fn count_entities(dir: &PathBuf) -> usize {
+    let count_in = |sub: &str, want_ext: Option<&str>| -> usize {
+        fs::read_dir(dir.join(sub))
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| {
+                        let p = e.path();
+                        p.is_file()
+                            && want_ext
+                                .map(|x| p.extension().and_then(|s| s.to_str()) == Some(x))
+                                .unwrap_or(true)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    count_in("data", Some("txt")) + count_in("files", Some("txt")) + count_in("images", None)
+}
+
+/// 实体文件存在则返回它的相对路径（用于重建时恢复可选关联，如富文本实体）。
+fn has_entity(dir: &PathBuf, rel: &str) -> Option<String> {
+    if dir.join(rel).is_file() {
+        Some(rel.to_string())
+    } else {
+        None
+    }
+}
+
+/// 索引不可用（丢失/被截断）时，按落盘文件重建条目，返回新增条数。
+///
+/// 为什么需要：内容实体是**逐个文件**落的，索引只是它们的目录。索引坏了不等于
+/// 数据没了 —— 重建能把记录一条不少地找回来（正文预览要解密读原文）。
+///
+/// 只补不删：索引里已有的 id 一律跳过，所以可以在「索引为空」时无条件调用。
+fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
+    let known: std::collections::HashSet<String> =
+        hist.iter().map(|i| i.id.clone()).collect();
+    let mut found: Vec<HistoryItem> = Vec::new();
+
+    let push_text = |found: &mut Vec<HistoryItem>, id: &str, p: &Path| {
+        let Ok(raw) = fs::read(p) else { return };
+        let Some(text) = decode_text_bytes(&raw) else {
+            return; // 解不开（换了账户）就跳过，不要用空内容污染列表
+        };
+        if text.is_empty() {
+            return;
+        }
+        let (preview, preview_truncated) = text_preview_parts(&text);
+        found.push(HistoryItem {
+            id: id.to_string(),
+            kind: "text".into(),
+            ts: ts_from_id(id).unwrap_or_else(|| mtime_secs(p)),
+            pinned: false,
+            pinned_views: Vec::new(),
+            favorite: false,
+            edited: false,
+            subtype: Some(detect_subtype(&text).unwrap_or("").to_string()),
+            preview,
+            preview_truncated,
+            size: text.len() as u64,
+            text_path: Some(format!("data/{id}.txt")),
+            // 索引丢了但富文本实体还在：按文件存在与否重建关联，
+            // 否则重建出来的条目会「格式凭空消失」。
+            html_path: has_entity(dir, &format!("data/{id}.html")),
+            rtf_path: has_entity(dir, &format!("data/{id}.rtf")),
+            img_path: None,
+            files_path: None,
+            files: None,
+        });
+    };
+
+    // 正文 → 文本条目
+    if let Ok(rd) = fs::read_dir(dir.join("data")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("txt") {
+                continue;
+            }
+            let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+                continue;
+            };
+            if known.contains(&id) {
+                continue;
+            }
+            push_text(&mut found, &id, &p);
+        }
+    }
+
+    // 文件清单 → 文件条目
+    if let Ok(rd) = fs::read_dir(dir.join("files")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("txt") {
+                continue;
+            }
+            let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+                continue;
+            };
+            if known.contains(&id) {
+                continue;
+            }
+            let Ok(raw) = fs::read(&p) else { continue };
+            let Some(body) = decode_text_bytes(&raw) else {
+                continue;
+            };
+            let files: Vec<String> = body
+                .split(['\r', '\n'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            if files.is_empty() {
+                continue;
+            }
+            let name = Path::new(&files[0])
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            found.push(HistoryItem {
+                id: id.clone(),
+                kind: "files".into(),
+                ts: ts_from_id(&id).unwrap_or_else(|| mtime_secs(&p)),
+                pinned: false,
+                pinned_views: Vec::new(),
+                favorite: false,
+                edited: false,
+                subtype: None,
+                preview: if files.len() == 1 {
+                    name
+                } else {
+                    format!("{} 等 {} 个文件", name, files.len())
+                },
+                preview_truncated: false,
+                size: files.iter().map(|f| f.len()).sum::<usize>() as u64,
+                text_path: None,
+                html_path: None,
+                rtf_path: None,
+                img_path: None,
+                files_path: Some(format!("files/{id}.txt")),
+                files: Some(files),
+            });
+        }
+    }
+
+    // 图片 → 图片条目（跳过 thumbs 子目录：那不是条目实体）
+    if let Ok(rd) = fs::read_dir(dir.join("images")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+                continue;
+            };
+            if known.contains(&id) || p.extension().and_then(|s| s.to_str()) == Some("txt") {
+                continue;
+            }
+            let size = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            let ext = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("bmp")
+                .to_string();
+            found.push(HistoryItem {
+                id: id.clone(),
+                kind: "image".into(),
+                ts: ts_from_id(&id).unwrap_or_else(|| mtime_secs(&p)),
+                pinned: false,
+                pinned_views: Vec::new(),
+                favorite: false,
+                edited: false,
+                subtype: None,
+                preview: "[图片]".into(),
+                preview_truncated: false,
+                size,
+                text_path: None,
+                html_path: None,
+                rtf_path: None,
+                img_path: Some(format!("images/{id}.{ext}")),
+                files_path: None,
+                files: None,
+            });
+        }
+    }
+
+    let n = found.len();
+    hist.extend(found);
+    // 列表约定：新→旧。重建出来的条目顺序取自 read_dir（不确定），必须重排。
+    hist.sort_by(|a, b| b.ts.cmp(&a.ts));
+    n
+}
+
 
 /// 为「内联了 files、但缺 files_path」的历史文件条目补写 `files/<id>.txt`，
 /// 返回补写的条数。老版本 index.json 是这么存的，不补的话缓存目录里看不到这些条目。
@@ -2780,17 +3969,44 @@ fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
     n
 }
 
+/// 删除条目对应的落盘实体。
+///
+/// 以前全用 `let _ =`：删失败（文件被占用、被设为只读、路径失效）就静默留下——
+/// 用户以为敏感内容已经删掉，磁盘上其实还在。这是**隐私相关**的静默失败，
+/// 必须记 ERROR；`NotFound` 不算失败（重复删除、实体本就不存在）。
 fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
+    let mut rels: Vec<&str> = Vec::new();
     if let Some(rel) = &item.text_path {
-        let _ = fs::remove_file(dir.join(rel));
+        rels.push(rel);
+    }
+    // 富文本实体与纯文本同生命周期：只删记录不删实体，等于把「带格式的正文」
+    // 留在磁盘上 —— 用户以为删干净了，其实没有（隐私问题）。
+    if let Some(rel) = &item.html_path {
+        rels.push(rel);
+    }
+    if let Some(rel) = &item.rtf_path {
+        rels.push(rel);
     }
     if let Some(rel) = &item.img_path {
-        let _ = fs::remove_file(dir.join(rel));
-        // 缩略图与原图同生命周期，一并清掉
-        let _ = fs::remove_file(dir.join(thumb_rel(&item.id)));
+        rels.push(rel);
     }
     if let Some(rel) = &item.files_path {
-        let _ = fs::remove_file(dir.join(rel));
+        rels.push(rel);
+    }
+    for rel in rels {
+        let p = dir.join(rel);
+        if let Err(e) = fs::remove_file(&p) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                crate::log_err!("clipboard", "删除实体失败（{}）：{e}", p.display());
+            }
+        }
+    }
+    // 缩略图与原图同生命周期，一并清掉
+    let thumb = dir.join(thumb_rel(&item.id));
+    if let Err(e) = fs::remove_file(&thumb) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            crate::log_err!("clipboard", "删除缩略图失败（{}）：{e}", thumb.display());
+        }
     }
 }
 
@@ -2828,9 +4044,11 @@ pub fn prune_retention(days: u32) {
 /// 纯函数版本：过滤 + 删文件 + 存索引
 fn prune_history(hist: Vec<HistoryItem>, dir: &PathBuf, days: u32) -> Vec<HistoryItem> {
     if days == 0 {
+        crate::log_print!("[clipboard] 保留策略：永久保存，不清理");
         return hist;
     }
     let deadline = now_ms().saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
+    let before = hist.len();
     let kept: Vec<HistoryItem> = hist
         .into_iter()
         .filter(|i| {
@@ -2842,6 +4060,21 @@ fn prune_history(hist: Vec<HistoryItem>, dir: &PathBuf, days: u32) -> Vec<Histor
             }
         })
         .collect();
+    // 这条日志以前**不存在**，而它删的是用户数据（连同落盘文件）。
+    //
+    // 踩过的坑：`config.json` 解析失败会回落默认配置，而默认保留天数是 3 天，
+    // 于是启动时按 3 天把几百条历史连文件一起删掉 —— 日志里一个字都没有，
+    // 现场只剩「记录全没了」。凡是「按策略自动删除用户数据」的地方，
+    // 必须留下「按什么规则、删了多少、剩多少」。
+    let removed = before - kept.len();
+    if removed > 0 {
+        crate::log_warn!(
+            "[clipboard] 保留策略：按 {days} 天清掉 {removed} 条（剩 {} 条）——若不是预期，检查设置里的保留天数",
+            kept.len()
+        );
+    } else {
+        crate::log_print!("[clipboard] 保留策略：{days} 天，无需清理（共 {} 条）", kept.len());
+    }
     save_index(dir, &kept);
     kept
 }
@@ -3244,6 +4477,8 @@ extern "system" {
     fn GlobalLock(handle: isize) -> *mut std::ffi::c_void;
     fn GlobalUnlock(handle: isize) -> i32;
     fn GlobalSize(handle: isize) -> usize;
+    /// 把 `HTML Format` / `Rich Text Format` 这类名字换成系统分配的格式 ID
+    fn RegisterClipboardFormatW(name: *const u16) -> u32;
 
     fn DragQueryFileW(hdrop: isize, i: u32, buf: *mut u16, buflen: u32) -> u32;
     // 注意：这里**故意不声明 DragFinish**。它只适用于 WM_DROPFILES 的临时 HDROP，
@@ -3318,6 +4553,9 @@ mod tests {
             pinned_views: Vec::new(),
             favorite: false,
             edited: false,
+            subtype: None,
+            html_path: None,
+            rtf_path: None,
             preview: preview.to_string(),
             preview_truncated: false,
             size: 1,
@@ -3773,6 +5011,178 @@ mod tests {
     }
 
     /// 预览：最多 2 行，且**被丢弃内容时必须补省略号**。
+    /// CF_HTML 的四个偏移必须精确指向片段边界。
+    ///
+    /// 拼错的表现很典型：粘到 Word / 邮件客户端里是**一坨 HTML 源码**，
+    /// 而不是带格式的段落。所以用中文内容（UTF-8 多字节）来测 ——
+    /// 按字符数算偏移的实现会在这里立刻露馅。
+    #[test]
+    fn cf_html_offsets_point_exactly_at_fragment() {
+        let body = "<b>你好，世界</b>";
+        let html = build_cf_html(body);
+        let field = |key: &str| -> usize {
+            html.lines()
+                .find(|l| l.starts_with(key))
+                .unwrap_or_else(|| panic!("缺少 {key}"))
+                [key.len()..]
+                .trim()
+                .parse()
+                .expect("偏移量必须是数字")
+        };
+        let (sf, ef) = (field("StartFragment:"), field("EndFragment:"));
+        assert_eq!(&html[sf..ef], body, "片段必须正好是原文");
+        assert_eq!(&html[field("StartHTML:")..][..5], "<html", "StartHTML 指向文档开头");
+        assert_eq!(ef, field("EndHTML:") - "<!--EndFragment--></body></html>".len());
+    }
+
+    /// 判断「已经是 CF_HTML」的能力必须可靠 —— 它决定回贴时原样写回还是套头。
+    /// 套错的后果是把带格式的内容粘成源码。
+    #[test]
+    fn cf_html_detection() {
+        let proper = "Version:0.9\r\nStartHTML:0000000105\r\nEndHTML:0000000200\r\nStartFragment:0000000141\r\nEndFragment:0000000180\r\n<html><body><!--StartFragment-->x<!--EndFragment--></body></html>";
+        assert!(is_cf_html(proper), "带头的必须识别为 CF_HTML");
+        assert!(is_cf_html("\r\n  Version:0.9\r\n..."), "前导空白不能影响判断");
+        assert!(!is_cf_html("<b>裸 HTML 片段</b>"), "裸片段要走套头分支");
+        assert!(!is_cf_html(""), "空内容不当作 CF_HTML");
+    }
+
+    /// 子类型判定：链接只认「整条就是一个网址」。
+    #[test]
+    fn subtype_link_requires_whole_content_to_be_a_url() {
+        assert_eq!(detect_subtype("https://example.com/a?b=1"), Some("link"));
+        assert_eq!(detect_subtype("  https://example.com  "), Some("link"));
+        assert_eq!(detect_subtype("www.example.com"), Some("link"));
+
+        // 夹在一句话里的链接仍然是普通文本 —— 标成「链接」会误导
+        assert_eq!(detect_subtype("看这个 https://example.com"), None);
+        assert_eq!(detect_subtype("https://example.com\n第二行"), None);
+    }
+
+    /// Markdown 源码要认出来（用户会复制整篇 md 文档）。
+    #[test]
+    fn subtype_markdown_detected_for_structured_source() {
+        let md = "## 1. 铁律\n\n1. 先退出软件\n2. 再重新安装\n\n| 列A | 列B |\n| --- | --- |";
+        assert_eq!(detect_subtype(md), Some("markdown"));
+
+        // 含代码块的 Markdown 仍应判 Markdown，而不是被围栏抢走
+        let with_fence = "## 示例\n\n```rust\nfn main() {}\n```\n\n- 说明一\n- 说明二";
+        assert_eq!(detect_subtype(with_fence), Some("markdown"));
+    }
+
+    /// 只有**一个**结构强特征时不算 Markdown —— 中文正文里「# 号」「1. 」都可能出现，
+    /// 单个特征就判会让徽章泛滥。
+    #[test]
+    fn subtype_markdown_needs_two_structural_hints() {
+        assert_eq!(detect_subtype("# 号标题在中文里也常见"), None);
+        // 用户实测那条「渲染后的纯文本」只有有序列表一个特征 —— 保持不标
+        assert_eq!(
+            detect_subtype("1. 铁律（不可协商）\n只能用命令行工具，禁止使用外壳脚本。"),
+            None
+        );
+        // 代码里的行注释不该被当成 Markdown 标题
+        assert_eq!(
+            detect_subtype("fn main() {\n    // 注释\n    let x = 1;\n}"),
+            Some("code")
+        );
+    }
+
+    /// 同源判定：Markdown 原文 vs 它的渲染文本要判为「同一次复制」。
+    ///
+    /// 真实数据取自用户剪贴板（812 字 vs 1347 字），实测 Jaccard = **0.937**，
+    /// 离阈值 0.5 很远 —— 这个余量说明阈值不是拍脑袋定的。
+    #[test]
+    fn same_origin_detects_markdown_vs_rendered() {
+        let md = "## 1. 铁律（不可协商）\n\n1. **只能用 Bash，禁止使用命令行外壳。**\n2. **每次加功能或修 bug 都必须新建分支**，不需要人来提醒。";
+        let rendered = "1. 铁律（不可协商）\n只能用 Bash，禁止使用命令行外壳。\n\n每次加功能或修 bug 都必须新建分支，不需要人来提醒。";
+        assert!(same_origin(md, rendered), "同一次复制的两种表示必须判为同源");
+    }
+
+    /// 反例同样取自实测：两段无关中文的相似度是 **0.0**，离阈值有充足距离。
+    #[test]
+    fn same_origin_rejects_unrelated_text() {
+        assert!(!same_origin(
+            "今天下午三点开会，讨论下季度的产品路线图和预算分配。",
+            "这个 bug 出现在用户点击删除按钮之后，索引文件被截断成半截。"
+        ));
+        assert!(!same_origin(
+            "const a = 1;\nconst b = 2;",
+            "def foo():\n    return 42"
+        ));
+    }
+
+    /// 太短的文本不做同源判定：一句话恰好相似的概率太高，
+    /// 合并掉用户真复制的第二条比多一条更糟。
+    #[test]
+    fn same_origin_ignores_very_short_text() {
+        assert!(!same_origin("abc", "abd"));
+        assert!(!same_origin("收到", "收到"));
+    }
+
+    /// 裸域名也要识别成链接 —— 用户实测「复制的是正确链接，只是没带 http，却被标成文本」。
+    /// 同时必须挡住 `报告.docx` / `v1.2.3` / `3.14` 这类「像但不是」的内容。
+    #[test]
+    fn subtype_link_accepts_bare_domains() {
+        assert_eq!(detect_subtype("github.com/kunge9106/self_clipboard"), Some("link"));
+        assert_eq!(detect_subtype("example.com"), Some("link"));
+        assert_eq!(detect_subtype("mp.weixin.qq.com/s/AbCdEf"), Some("link"));
+        assert_eq!(detect_subtype("example.com."), Some("link"), "行尾句号应被忽略");
+
+        // 以下都含点号，但都不是域名 —— 标成链接会让徽章失去意义
+        assert_eq!(detect_subtype("报告.docx"), None);
+        assert_eq!(detect_subtype("v1.2.3"), None);
+        assert_eq!(detect_subtype("3.14"), None);
+        assert_eq!(detect_subtype("第一.二条"), None);
+        assert_eq!(detect_subtype("a@b.com"), None, "邮箱不是链接");
+        assert_eq!(detect_subtype("看 example.com"), None, "句子里夹域名不算");
+    }
+
+    /// 单行代码也要认（用户实测 `const x = 1;` 这类整行粘贴的代码被漏掉），
+    /// 但只认强特征，普通句子不能误标。
+    #[test]
+    fn subtype_code_accepts_single_line_with_strong_features() {
+        assert_eq!(detect_subtype("const x = 1;"), Some("code"));
+        assert_eq!(detect_subtype("import os"), Some("code"));
+        assert_eq!(detect_subtype("console.log(1);"), Some("code"));
+        assert_eq!(detect_subtype("value => value * 2;"), Some("code"));
+
+        // 中文说明：带冒号、带分号，但不含括号、不以关键字开头
+        assert_eq!(detect_subtype("注意：这样做；"), None);
+        assert_eq!(detect_subtype("请稍等；"), None);
+        assert_eq!(detect_subtype("结论：先跑一遍。"), None);
+    }
+
+    /// 子类型判定：代码要能认出来，且**不能把中文文档误判成代码**。
+    ///
+    /// 误判的代价比漏判大：漏了只是少一个徽章，误了会让用户对整列徽章失去信任。
+    #[test]
+    fn subtype_code_detected_without_false_positives() {
+        // 典型代码：有围栏
+        assert_eq!(
+            detect_subtype("```rust\nfn main() {}\n```"),
+            Some("code")
+        );
+        // 无围栏但有缩进 + 关键字 + 结构符号
+        assert_eq!(
+            detect_subtype("fn main() {\n    let x = 1;\n    println!(\"{}\", x);\n}"),
+            Some("code")
+        );
+        // JSON / 配置片段
+        assert_eq!(detect_subtype("{\n  \"name\": \"qingtie\"\n}"), Some("code"));
+
+        // 中文正文：带分号、带冒号、多行缩进，都不该被认成代码
+        assert_eq!(
+            detect_subtype("注意事项：\n- 先退出软件；\n- 再重新安装；"),
+            None
+        );
+        assert_eq!(
+            detect_subtype("这是一段普通说明。\n第二行继续说明，没有代码特征。"),
+            None
+        );
+        // 单行**已改为按强特征判定**（见 subtype_code_accepts_single_line_with_strong_features）：
+        // 原来这里断言「单行一律不判」，会把整行粘贴的代码全部漏掉。
+        assert_eq!(detect_subtype("const x = 1;"), Some("code"));
+    }
+
     /// 改动前按 120 字硬截且没有省略号，视觉上像「话说半截断掉」——
     /// 用户反馈「这两行为什么显示不全」就是这个。
     #[test]

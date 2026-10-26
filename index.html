@@ -150,6 +150,20 @@
       </div>
     </div>
 
+    <!-- 删除文件条目时，如果设置里开了「同时删本地文件」，删之前必须弹这个窗。
+         删除对象是用户磁盘上的真实文件，一次误点不可接受 —— 所以每次都问，
+         并明确写出「几个文件、什么方式（回收站/永久删除）、前几个文件名」。 -->
+    <div class="modal-mask" id="purge-modal" hidden>
+      <div class="modal">
+        <div class="modal-title">同时处理本地文件</div>
+        <div class="modal-text" id="purge-modal-text"></div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="purge-cancel">取消</button>
+          <button class="btn-danger" id="purge-confirm">删除</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 清空「已失效」文件条目：条目还在，但原文件已被移动/改名/删除，永远贴不出来。
          同样不可撤销，所以也走二次确认；没有失效条目时根本不会弹（前端先查一遍）。 -->
     <div class="modal-mask" id="clear-missing-modal" hidden>
@@ -215,7 +229,7 @@
           <div class="modal-title" id="detail-title">全文</div>
           <div class="modal-sub" id="detail-meta"></div>
         </div>
-        <pre class="detail-body" id="detail-body" tabindex="0"></pre>
+        <div class="detail-body" id="detail-body" tabindex="0"></div>
         <textarea
           class="detail-body detail-editor"
           id="detail-editor"
@@ -227,6 +241,8 @@
           <button class="btn-ghost" id="detail-select">全选</button>
           <button class="btn-ghost" id="detail-edit">编辑</button>
           <button class="btn-ghost" id="detail-copy">复制全文</button>
+          <!-- 只复制文字、不带格式：粘进记事本 / 终端 / 代码编辑器时用 -->
+          <button class="btn-ghost" id="detail-copy-plain">复制纯文本</button>
           <button class="btn-ghost" id="detail-close">关闭</button>
           <!-- 编辑态：只留「取消 / 保存」，没有第三个出口 —— 与常见编辑弹窗一致，
                避免「手一滑把改动丢了」 -->

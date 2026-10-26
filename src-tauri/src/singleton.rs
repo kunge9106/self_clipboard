@@ -59,14 +59,29 @@ pub fn ensure_single_instance() -> bool {
     let h = unsafe { CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
     let already = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
     if h == 0 {
-        // 连锁都建不出来（极端情况）：不因为单实例机制挡住用户使用
+        // 连锁都建不出来（极端情况）：不因为单实例机制挡住用户使用。
+        // 但必须记：没有这把锁，就可能出现两个本版本实例**同时写同一份
+        // index.json**，互相覆盖对方的条目 —— 表现为「记录莫名少了一半」。
+        crate::log_warn!(
+            "[singleton] 互斥体创建失败（锁名 {}），单实例保护失效：可能多实例同时写索引",
+            lock_name()
+        );
         return true;
     }
     if already {
         unsafe { CloseHandle(h) };
+        crate::log_print!("[singleton] 已有同版本实例在运行（{}），本次唤回其窗口后退出", lock_name());
         false
     } else {
         let _ = LOCK_HANDLE.set(h);
+        // debug 与正式版用的是**不同锁名**：两者可以同时跑，而它们读写的是
+        // **同一个缓存目录与同一份 index.json**。这条日志是为了让「多实例共存时
+        // 数据被互相覆盖」这类事故一眼能看出来，而不是让人去猜。
+        crate::log_print!(
+            "[singleton] 已取得实例锁（{}），构建={}",
+            lock_name(),
+            if cfg!(debug_assertions) { "debug/开发" } else { "release/正式" }
+        );
         true
     }
 }

@@ -2,6 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  cardPreviewHtml,
+  hostOf,
+  esc as escFmt,
+  renderMarkdown,
+  highlightCode,
+  sanitizeRichHtml,
+} from "./formats.js";
 
 const appWindow = getCurrentWindow();
 
@@ -385,7 +393,7 @@ function bindClearAllModal() {
       await invoke("clear_all");
       items = [];
       render();
-      toast("已清空");
+      toast("已清空全部历史");
     } catch (e) {
       toast("清空失败：" + e);
     }
@@ -434,6 +442,51 @@ async function openClearMissingModal() {
   document.getElementById("clear-missing-modal").hidden = false;
 }
 
+// ── 删除文件条目时的「本地文件」确认窗 ────────────────────────────────────
+// 删除对象是用户磁盘上的真实文件，所以：
+//   · 只在设置里开了「删除时同时删本地文件」之后才可能弹（默认关，文件不被动）
+//   · 每次删除都弹，不做「不再询问」——误点一次就是真删了一次
+//   · 文案必须写清「几个文件 + 用什么方式」，回收站与永久删除的后果完全不同
+let purgeResolve = null;
+
+/// 返回 true 表示「用户确认要连本地文件一起处理」。
+/// 返回 false 的两条路径（设置没开 / 没有文件条目）都不弹窗，直接按旧行为删记录。
+function askPurgeFiles(targets) {
+  if (!settings?.deleteFilesWithItem) return Promise.resolve(false);
+  const files = targets
+    .filter((i) => i.kind === "files")
+    .flatMap((i) => i.files || []);
+  if (files.length === 0) return Promise.resolve(false);
+
+  const perm = !!settings.deleteFilesPermanent;
+  const how = perm ? "永久删除" : "移入回收站";
+  const tail = perm ? "（不可恢复）" : "（之后可从回收站还原）";
+  const names = files.map((p) => p.split(/[\\/]/).pop() || p);
+  const head = names.slice(0, 4).map((n) => `· ${n}`).join("\n");
+  const more = names.length > 4 ? `\n…另有 ${names.length - 4} 个` : "";
+
+  document.getElementById("purge-modal-text").textContent =
+    `将${how} ${files.length} 个本地文件${tail}：\n\n${head}${more}`;
+  document.getElementById("purge-confirm").textContent = perm ? "永久删除" : "移入回收站";
+  document.getElementById("purge-modal").hidden = false;
+  return new Promise((resolve) => {
+    purgeResolve = resolve;
+  });
+}
+
+function bindPurgeModal() {
+  const modal = document.getElementById("purge-modal");
+  const done = (v) => {
+    modal.hidden = true;
+    // 先清空再 resolve：避免回调里再次弹窗时旧的 resolve 被覆盖
+    const r = purgeResolve;
+    purgeResolve = null;
+    r?.(v);
+  };
+  document.getElementById("purge-cancel").onclick = () => done(false);
+  document.getElementById("purge-confirm").onclick = () => done(true);
+}
+
 // 与清空全部历史弹窗同理：常驻元素，只绑一次，切分类重绘不会丢绑定
 function bindClearMissingModal() {
   const modal = document.getElementById("clear-missing-modal");
@@ -447,7 +500,7 @@ function bindClearMissingModal() {
     clearMissingIds = [];
     if (ids.length === 0) return;
     try {
-      await invoke("delete_items", { ids });
+      await invoke("delete_items", { ids, deleteLocalFiles: false });
       const drop = new Set(ids);
       items = items.filter((i) => !drop.has(i.id));
       // 失效集合整体作废，让下次渲染重新检测，避免残留已删除条目的 id
@@ -508,8 +561,12 @@ function syncSelectBar() {
 async function deleteSelected() {
   const ids = [...selectedIds];
   if (ids.length === 0) return;
+  // 先问「要不要连本地文件一起处理」——它是异步的，必须放在拿 ids 之后、
+  // 调删除之前；用户取消就退化成普通删除（只删记录）。
+  const purge = await askPurgeFiles(items.filter((i) => ids.includes(i.id)));
   try {
-    await invoke("delete_items", { ids });
+    const note = await invoke("delete_items", { ids, deleteLocalFiles: purge });
+    if (note) toast(note);
   } catch (e) {
     toast("删除失败：" + e);
     return;
@@ -561,7 +618,7 @@ async function doClearView(ids) {
     return;
   }
   try {
-    await invoke("delete_items", { ids: uniq });
+    await invoke("delete_items", { ids: uniq, deleteLocalFiles: false });
     const drop = new Set(uniq);
     items = items.filter((i) => !drop.has(i.id));
     render({ keepScroll: true });
@@ -619,7 +676,10 @@ function bindClearViewModal() {
 function bindNav() {
   // 监听整个侧栏：历史/收藏/图片/文件 与 底部「设置」都在 .sidebar 内
   document.querySelector(".sidebar").addEventListener("click", (e) => {
-    const item = e.target.closest(".nav-item");
+    // 只认带 data-view 的项。侧栏里「深色/浅色」按钮也用了 .nav-item 的样式，
+    // 但它不是导航 —— 之前它被这个委托一起处理，`currentView` 被赋成 undefined，
+    // 于是点一下深浅色，界面就跳回了别的页面（用户实测）。
+    const item = e.target.closest(".nav-item[data-view]");
     if (!item) return;
     document
       .querySelectorAll(".nav-item")
@@ -700,7 +760,10 @@ function filtered() {
         // 也不在 i.files 里。把中文标签（图片/文本/文件）与英文 kind（image/text/files）
         // 都纳入后，「图片」和「image」就都能搜出图片条目。
         (KIND_LABEL[i.kind] || "").toLowerCase().includes(query) ||
-        (i.kind || "").toLowerCase().includes(query)
+        (i.kind || "").toLowerCase().includes(query) ||
+        // 子类型也参与匹配：搜「代码」/「code」、「链接」/「link」都应命中
+        (SUBTYPE_LABEL[i.subtype] || "").toLowerCase().includes(query) ||
+        (i.subtype || "").toLowerCase().includes(query)
     );
   }
   // 置顶优先，其余按时间倒序。置顶是**按分类独立**的：只在当前这个分类里置顶过的
@@ -748,6 +811,16 @@ function startTimeTicker() {
 }
 
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
+// 文本的子类型标签：只用于卡片徽章与搜索匹配，**不是分类**
+// （链接/代码仍然是文本条目，侧栏里不会单独出现）
+const SUBTYPE_LABEL = { link: "链接", code: "代码", markdown: "Markdown" };
+// 徽章样式：markdown 与 code 同属「源码」，共用一套配色，靠文字区分 ——
+// 再开一个色相会让九个徽章挤在一起分不清（颜色已经排满了）。
+const SUBTYPE_BADGE = {
+  link: ["tag-link", "链接"],
+  code: ["tag-code", "代码"],
+  markdown: ["tag-code", "Markdown"],
+};
 
 /**
  * 重绘列表。
@@ -949,6 +1022,11 @@ function cardEl(item) {
     (hideKind
       ? ""
       : `<span class="tag tag-kind tag-kind-${item.kind}">${KIND_LABEL[item.kind] || item.kind}</span>`) +
+    // 子类型徽章：任何视图都显示（它不是分类，而是「这条内容是什么」的提示，
+    // 在「文本」视图里尤其有用 —— 那里所有条目都叫文本，靠它才分得出代码和链接）
+    (SUBTYPE_BADGE[item.subtype]
+      ? `<span class="tag ${SUBTYPE_BADGE[item.subtype][0]}">${SUBTYPE_BADGE[item.subtype][1]}</span>`
+      : "") +
     (pinned ? '<span class="tag tag-pinned">已置顶</span>' : "") +
     (item.favorite && !hideFav ? '<span class="tag tag-fav">已收藏</span>' : "") +
     // 「已编辑」= 在全文编辑里改过并保存后落成的新条目。原文条目始终保留不动，
@@ -970,8 +1048,22 @@ function cardEl(item) {
     body.appendChild(img);
   } else {
     const preview = document.createElement("div");
-    preview.className = "card-preview";
-    preview.textContent = item.preview || "";
+    // 按子类型给不同排版：代码/Markdown 用等宽字体并着色，链接整体染成链接色。
+    // 富文本（html_path）在卡片上仍显示纯文本 —— 小卡片里排版 HTML 收益低、
+    // 而且高度会失控；完整排版放在「查看」里做。
+    const sub = item.subtype;
+    preview.className = "card-preview" + (sub ? ` is-${sub}` : "");
+    if (sub === "code" || sub === "markdown") {
+      // cardPreviewHtml 内部对每一段都做了转义，可以安全赋给 innerHTML
+      preview.innerHTML = cardPreviewHtml(item.preview || "", sub);
+    } else if (sub === "link") {
+      preview.textContent = item.preview || "";
+      // 域名单独提出来做视觉锚点（不改变文本内容）
+      const host = hostOf(item.preview || "");
+      if (host) preview.title = host;
+    } else {
+      preview.textContent = item.preview || "";
+    }
     body.appendChild(preview);
   }
   card.appendChild(body);
@@ -1374,10 +1466,14 @@ async function showHoverPreview(card, item) {
   placePreview(box, card);
 }
 
-async function copyBack(item) {
+/// `plain = true` 表示「只要文字、不要格式」。
+///
+/// 默认 `false` 走原格式：用户当初复制的是带格式的内容，粘回去理应是带格式的。
+/// 纯文本入口放在右键菜单里（记事本、终端、代码编辑器这类场景才需要）。
+async function copyBack(item, plain = false) {
   try {
-    // copy_back 返回可选的提示串（目前只有文件条目会返回：部分原文件已失效、已跳过）
-    const warn = await invoke("copy_back", { id: item.id });
+    // copy_back 返回可选的提示串（文件条目：部分原文件已失效；文本条目：用了哪种格式）
+    const warn = await invoke("copy_back", { id: item.id, plain });
     toast(warn || "已复制到剪贴板");
   } catch (e) {
     toast("复制失败：" + e);
@@ -1579,6 +1675,53 @@ function canEditDetail() {
 }
 
 /** 查看态 / 编辑态互斥切换 */
+/// 当前详情弹窗的上下文（退出编辑态要重放渲染）
+let detailCtx = null;
+
+/// 按格式渲染详情正文，返回是否用了「排版」而不是纯文本。
+///
+/// 优先级刻意如此：
+///   Markdown 排版 > 富文本白名单 > 代码高亮 > 纯文本
+/// Markdown 条目即使带着 html 也优先排版源码 —— 用户的原话是「查看里怎么还是一堆
+/// markdown 原符号」，他要的就是渲染后的样子。
+function renderDetailBody(item, data) {
+  const body = $detail("detail-body");
+  if (!body || !data) return false;
+  body.className = "detail-body";
+  body.replaceChildren();
+
+  const sub = item?.subtype;
+
+  if (sub === "markdown" && data.text) {
+    body.classList.add("is-rich");
+    // renderMarkdown 内部对每一段都做了转义，可以安全赋给 innerHTML
+    body.innerHTML = renderMarkdown(data.text);
+    return true;
+  }
+
+  if (data.html) {
+    body.classList.add("is-rich");
+    const drops = [];
+    body.appendChild(sanitizeRichHtml(data.html, (kind) => drops.push(kind)));
+    // 丢弃项汇总成一条日志（复用现成的前端上报通道，不另造一套）。
+    // 逐项上报会让一条内容刷几十行，把真正有用的上下文挤掉。
+    if (drops.length) {
+      const kinds = [...new Set(drops)].slice(0, 5).join(",");
+      reportFrontend("WARN", "format", `富文本过滤丢弃 ${drops.length} 项：${kinds}`);
+    }
+    return true;
+  }
+
+  if (sub === "code") {
+    body.classList.add("is-rich");
+    body.innerHTML = `<pre class="md-code"><code>${highlightCode(data.text)}</code></pre>`;
+    return true;
+  }
+
+  body.textContent = data.text;
+  return false;
+}
+
 function setDetailMode(mode) {
   const editing = mode === "edit";
   $detail("detail-body").hidden = editing;
@@ -1587,6 +1730,7 @@ function setDetailMode(mode) {
   // 不可编辑的条目连「编辑」按钮都不给，且**退出编辑态时也不能重新冒出来**
   $detail("detail-edit").hidden = editing || !canEditDetail();
   $detail("detail-copy").hidden = editing;
+  $detail("detail-copy-plain").hidden = editing;
   $detail("detail-close").hidden = editing;
   $detail("detail-revert").hidden = !editing;
   $detail("detail-save").hidden = !editing;
@@ -1595,7 +1739,11 @@ function setDetailMode(mode) {
   } else {
     // 退出编辑时丢弃改动，视图回到原文
     $detail("detail-editor").value = detailOriginal;
-    $detail("detail-body").textContent = detailOriginal;
+    // 必须走渲染而不是直接塞纯文本：否则「编辑一次再退出」，Markdown / 富文本的
+    // 排版就退回成源码，用户会以为渲染只生效一次。
+    if (!detailCtx || !renderDetailBody(detailCtx.item, detailCtx.data)) {
+      $detail("detail-body").textContent = detailOriginal;
+    }
     window.getSelection()?.removeAllRanges();
     $detail("detail-select").textContent = "全选";
   }
@@ -1638,7 +1786,8 @@ async function openDetail(item, { startEdit = false } = {}) {
   detailItem = item;
   detailOriginal = data.text;
   detailTruncated = !!data.truncated;
-  body.textContent = data.text;
+  detailCtx = { item, data };
+  renderDetailBody(item, data);
   $detail("detail-editor").value = data.text;
 
   // 规模信息：帮助判断内容大小，也是「有没有被截断」的唯一提示
@@ -1741,13 +1890,36 @@ function bindDetailModal() {
     }
   };
 
+  // 渲染出来的链接（Markdown / 富文本）用事件委托交给系统浏览器。
+  // WebView 内的 <a href> 会被当作应用内导航（点了直接白屏），必须拦下 ——
+  // 与关于页更新日志里的链接同一套处理。
+  document.getElementById("detail-body")?.addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-ext]");
+    if (!a) return;
+    e.preventDefault();
+    e.stopPropagation();
+    invoke("open_external", { url: a.dataset.ext });
+  });
+
+  // 「复制纯文本」：与右键菜单里的同名项走**同一条命令**（copy_back + plain），
+  // 不另写一套读写逻辑 —— 否则格式处理规则会在两处漂移。
+  document.getElementById("detail-copy-plain").onclick = async () => {
+    if (!detailItem) return;
+    try {
+      await invoke("copy_back", { id: detailItem.id, plain: true });
+      toast("已复制纯文本");
+    } catch (e) {
+      toast("复制失败：" + e);
+    }
+  };
+
   document.getElementById("detail-copy").onclick = async () => {
     if (!detailItem) return;
     const id = detailItem.id;
     try {
       // ⚠️ 走 copy_back：它在 Rust 侧**直接读盘**写剪贴板，不经过前端，
       // 所以即使上面的正文因为超长被截断显示，复制出去的仍是**完整原文**。
-      const hint = await invoke("copy_back", { id });
+      const hint = await invoke("copy_back", { id, plain: false });
       toast(hint || "已复制全文");
       closeDetail();
     } catch (err) {
@@ -1828,7 +2000,13 @@ function openContextMenu(x, y, item) {
     });
   }
   // 「复制」对所有类型都有意义，永远排在阅读项之后、置顶之前。
-  entries.push({ label: "复制", icon: CTX_ICONS.copy, act: () => copyBack(item) });
+  // 文案就是「复制」——不带「保留格式」这类前缀：主路径本来就是保留格式，
+  // 不需要在菜单里解释一遍（用户 2026-10-26 要求去掉）。
+  entries.push({
+    label: "复制",
+    icon: CTX_ICONS.copy,
+    act: () => copyBack(item, false),
+  });
   // 「编辑」只给文本条目。
   // 文件条目的内容是**路径清单**，编辑它再写回剪贴板会退化成一段纯文本
   // （文件语义丢失，粘贴出去不再是文件）—— 那不是用户要的。
@@ -1837,6 +2015,17 @@ function openContextMenu(x, y, item) {
       label: "编辑",
       icon: CTX_ICONS.edit,
       act: () => openDetail(item, { startEdit: true }),
+    });
+  }
+  // 「复制为纯文本」只对带格式的文本条目出现，位置紧跟「编辑」——
+  // 它和「复制」是同一件事的两种结果，让它们分处「编辑」两侧是刻意的：
+  // 主路径在上、降级路径在下，中间隔着用户最常用的编辑入口。
+  const rich = item.kind === "text" && (item.html_path || item.rtf_path);
+  if (rich) {
+    entries.push({
+      label: "复制为纯文本",
+      icon: CTX_ICONS.copy,
+      act: () => copyBack(item, true),
     });
   }
   entries.push({ sep: true });
@@ -1874,9 +2063,14 @@ function openContextMenu(x, y, item) {
       icon: CTX_ICONS.trash,
       danger: true,
       act: async () => {
-        await invoke("delete_item", { id: item.id });
+        const purge = await askPurgeFiles([item]);
+        const note = await invoke("delete_item", {
+          id: item.id,
+          deleteLocalFiles: purge,
+        });
         items = items.filter((i) => i.id !== item.id);
         render({ keepScroll: true });
+        if (note) toast(note);
       },
     }
   );
@@ -1940,9 +2134,9 @@ function toast(msg) {
 // 「记录」已并入「记录与缓存」：记什么（文件复制）→ 留多久（保留天数）→ 存在哪
 // （缓存目录）→ 怎么清（清理缓存 / 清空全部），本就是同一条链路，拆成两页反而跳。
 const SETTINGS_TABS = [
-  { id: "general", label: "通用" },
+  { id: "general", label: "常规" },
   { id: "appearance", label: "外观" },
-  { id: "data", label: "记录与缓存" },
+  { id: "data", label: "数据" },
   { id: "about", label: "关于" },
 ];
 
@@ -1980,43 +2174,111 @@ function settingsHtml() {
   </div>`;
 }
 
+// ── 设置页的排版基元 ──────────────────────────────────────────────────────
+// 设置页一律「区块（卡片）→ 行 → 标题 + 说明 + 右侧控件」三段式。
+// 抽成这三个函数而不是每个模板手写：一页十几行，手写必然出现某行少了 row-text、
+// 某个 label 忘了 for、某个子项忘了 is-sub —— 这类不一致正是上一版看起来"乱"的原因。
+//
+// `sub = true` 表示这一项从属于上一项（缩进 + 左侧竖线），取代原来用全角空格
+// 「　└ 」伪装层级的写法。
+function rowText(title, desc, id) {
+  const t = id
+    ? `<label class="row-title" for="${id}">${title}</label>`
+    : `<span class="row-title">${title}</span>`;
+  return `<div class="row-text">${t}${desc ? `<div class="row-desc">${desc}</div>` : ""}</div>`;
+}
+
+function rowCheck(id, title, desc, checked, sub = false) {
+  return `<div class="row${sub ? " is-sub" : ""}">${rowText(title, desc, id)}<div class="row-ctrl"><input type="checkbox" id="${id}" ${checked ? "checked" : ""} /></div></div>`;
+}
+
+/// 右侧是自定义控件（分段控件 / 按钮 / 数字框 / 滑块）的行
+function rowCtl(title, desc, ctl, sub = false, id) {
+  return `<div class="row${sub ? " is-sub" : ""}">${rowText(title, desc, id)}<div class="row-ctrl">${ctl}</div></div>`;
+}
+
+function block(title, inner, opts = {}) {
+  const cls = ["block", opts.danger ? "is-danger" : ""].filter(Boolean).join(" ");
+  return `<section class="${cls}">${title ? `<h3 class="block-h">${title}</h3>` : ""}${inner}</section>`;
+}
+
 function settingsGeneralHtml(s) {
-  return `
-    <div class="row"><label>开机自启</label>
-      <input type="checkbox" id="set-autostart" ${s.autoStart ? "checked" : ""} />
-      <span class="hint">开机后自动运行</span></div>
-    <div class="row"><label>关闭时后台运行</label>
-      <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
-      <span class="hint">关闭时收进托盘，继续在后台记录（右键托盘可开菜单）</span></div>
-    <div class="row"><label>置顶互通</label>
-      <input type="checkbox" id="set-pin-global" ${s.pinGlobal ? "checked" : ""} />
-      <span class="hint">任一分类置顶或取消，其它分类同步；关闭后各分类独立记录</span></div>
-    <div class="row"><label>　└ 关闭时取消同步置顶</label>
-      <input type="checkbox" id="set-pin-cancel" ${s.pinCancelOnDisable ? "checked" : ""} />
-      <span class="hint">勾选则关掉互通时连同它产生的同步置顶一起取消（置顶回到当初的分类）；不勾选则同步置顶永久保留</span></div>
-    <div class="row"><label>外观主题</label>
-      <div class="seg" id="set-theme">
-        <button type="button" data-theme="light" ${s.themeMode === "light" ? 'class="on"' : ""}>浅色</button>
-        <button type="button" data-theme="dark" ${s.themeMode === "dark" ? 'class="on"' : ""}>深色</button>
-        <button type="button" data-theme="system" ${(s.themeMode || "system") === "system" ? 'class="on"' : ""}>系统</button>
-      </div>
-      <span class="hint">「系统」跟随 Windows 的深浅色设置；侧栏底部另有一个深浅切换按钮</span></div>
-    <div class="btn-row">
-      <button class="btn-ghost" id="replay-tour">重新查看功能引导</button>
-    </div>`;
+  return [
+    block(
+      "启动",
+      rowCheck("set-autostart", "开机自启", "开机后自动运行", s.autoStart) +
+        rowCheck(
+          "set-tray",
+          "关闭时收进托盘",
+          "关掉窗口后在后台继续记录；右键托盘图标可打开菜单",
+          s.trayOnClose
+        )
+    ),
+    block(
+      "置顶",
+      rowCheck(
+        "set-pin-global",
+        "置顶互通",
+        "任一分类置顶或取消，其它分类同步；关闭后各分类独立记录",
+        s.pinGlobal
+      ) +
+        rowCheck(
+          "set-pin-cancel",
+          "关闭互通时取消同步置顶",
+          "勾选则关掉互通时连同它产生的同步置顶一起取消；不勾选则永久保留",
+          s.pinCancelOnDisable,
+          true
+        )
+    ),
+    block(
+      "帮助",
+      rowCtl(
+        "功能导览",
+        "随时可以再看一遍这 7 步说明",
+        `<button class="btn-ghost" id="replay-tour">重新查看</button>`
+      )
+    ),
+  ].join("");
 }
 
 function settingsAppearanceHtml(s) {
-  return `
-    <div class="row"><label>材质浓度</label>
-      <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 50}" />
-      <span class="hint" id="material-val">${s.materialAlpha ?? 50}%（越高越厚实 · 越低越通透）</span></div>
-    <div class="row"><label>圆角模式</label>
-      <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
-      <span class="hint">圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感</span></div>
-    <div class="row"><label>不跟随系统缩放</label>
-      <input type="checkbox" id="set-ignore-dpi" ${s.ignoreDpiScale ? "checked" : ""} />
-      <span class="hint">界面固定按 100% 显示，Windows 调缩放后窗口与布局不再跟着变（含托盘菜单）。关掉则恢复正常跟随</span></div>`;
+  return [
+    block(
+      "主题",
+      rowCtl(
+        "深浅模式",
+        "「系统」跟随 Windows 的深浅色设置；侧栏底部也有一键切换",
+        `<div class="seg" id="set-theme">
+          <button type="button" data-theme="light" ${s.themeMode === "light" ? 'class="on"' : ""}>浅色</button>
+          <button type="button" data-theme="dark" ${s.themeMode === "dark" ? 'class="on"' : ""}>深色</button>
+          <button type="button" data-theme="system" ${(s.themeMode || "system") === "system" ? 'class="on"' : ""}>系统</button>
+        </div>`
+      )
+    ),
+    block(
+      "窗口",
+      rowCtl(
+        "材质浓度",
+        "越高越厚实 · 越低越通透",
+        `<input type="range" id="set-material" min="10" max="90" value="${s.materialAlpha ?? 50}" /><span class="hint" id="material-val">${s.materialAlpha ?? 50}%</span>`
+      ) +
+        rowCheck(
+          "set-round",
+          "圆角模式",
+          "圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感",
+          s.roundMode
+        )
+    ),
+    block(
+      "显示",
+      rowCheck(
+        "set-ignore-dpi",
+        "不跟随系统缩放",
+        "界面固定按 100% 显示。Windows 调整缩放后窗口与布局不再跟着变（含托盘菜单）；关掉则恢复跟随",
+        s.ignoreDpiScale
+      )
+    ),
+  ].join("");
 }
 
 // 「保留 N 天 / 永久保存」的展示文案。0 在语义上是「永久保留」，
@@ -2026,40 +2288,93 @@ function retentionLabel(days) {
   return n === 0 ? "永久保存" : `仅保留近 ${n} 天内容`;
 }
 
-// 「记录」与「数据与缓存」合并后的一页，按同一条链路排列：
-// 记什么 → 留多久 → 存在哪 → 怎么清。
+// 数据页按同一条链路排：记什么 → 留多久 → 存在哪 → 怎么清 → 删条目的连带动作。
+// 最后「危险操作」单独成块并用红色标题隔离 —— 清空全部历史与「文件复制」这种
+// 普通开关并列时，视觉上完全分不出哪一个是不可撤销的。
 function settingsDataHtml(s) {
-  return `
-    <div class="row"><label>文件复制</label>
-      <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
-      <span class="hint">记录资源管理器里复制的文件（默认关闭，关闭时不采集）</span></div>
-    <div class="row"><label>保留天数</label>
-      <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
-      <span class="hint">0 表示永久保留</span></div>
-    <div class="cache-box">
-      <div class="cache-title">缓存目录 <span class="hint">${retentionLabel(s.retentionDays)}</span></div>
-      <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
-      <div class="cache-stats" id="cache-stats"></div>
-      <div class="btn-row">
-        <button class="btn-ghost" id="btn-pick-dir">更改目录</button>
-        <button class="btn-ghost" id="btn-open-dir">打开目录</button>
-        <button class="btn-ghost" id="btn-open-log">日志目录</button>
-      </div>
-      <div class="cache-log-hint"><b>缓存与日志相互独立</b>：清空、保留天数、退出清理都不会影响日志，日志仅能手动删除。</div>
-    </div>
-    <div class="row"><label>关闭时清理缓存</label>
-      <input type="checkbox" id="set-clean" ${s.cleanOnClose ? "checked" : ""} />
-      <span class="hint">退出时清理缓存与历史（默认保留置顶/收藏）</span></div>
-    <div class="row"><label>　└ 同时清理置顶/收藏</label>
-      <input type="checkbox" id="set-clean-pinned" ${s.cleanIncludePinned ? "checked" : ""} />
-      <span class="hint">不勾选则置顶/收藏不受清理影响</span></div>
-    <div class="row"><label>　└ 退出前弹窗提醒</label>
-      <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
-      <span class="hint">退出前弹窗确认</span></div>
-    <div class="btn-row">
-      <button class="btn-ghost" id="clear-missing">清空已失效条目</button>
-      <button class="btn-danger" id="clear-all">清空全部历史</button>
-    </div>`;
+  return [
+    block(
+      "记录",
+      rowCheck(
+        "set-file-copy",
+        "文件复制",
+        "记录资源管理器里复制的文件（默认关闭，关闭时不采集）",
+        s.fileCopy
+      ) +
+        rowCtl(
+          "保留天数",
+          "到期自动清理，<b>默认 3 天</b>；填 0 表示永久保存",
+          `<input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" /><span class="hint">0 = 永久保存</span>`,
+          false,
+          "set-retention"
+        )
+    ),
+    block(
+      "存储位置",
+      `<div class="cache-box">
+        <div class="cache-title">缓存目录 <span class="hint">${retentionLabel(s.retentionDays)}</span></div>
+        <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
+        <div class="cache-stats" id="cache-stats"></div>
+        <div class="btn-row">
+          <button class="btn-ghost" id="btn-pick-dir">更改目录</button>
+          <button class="btn-ghost" id="btn-open-dir">打开目录</button>
+          <button class="btn-ghost" id="btn-open-log">日志目录</button>
+        </div>
+        <div class="cache-log-hint"><b>缓存与日志相互独立</b>：清空、保留天数、退出清理都不会影响日志，日志仅能手动删除。</div>
+      </div>`
+    ),
+    block(
+      "清理",
+      rowCheck(
+        "set-clean",
+        "关闭时清理缓存",
+        "退出时清理缓存与历史（默认保留置顶/收藏）",
+        s.cleanOnClose
+      ) +
+        rowCheck(
+          "set-clean-pinned",
+          "同时清理置顶/收藏",
+          "不勾选则置顶/收藏不受清理影响",
+          s.cleanIncludePinned,
+          true
+        ) +
+        rowCheck(
+          "set-clean-confirm",
+          "退出前弹窗提醒",
+          "退出前先确认一次",
+          s.cleanConfirmExit,
+          true
+        )
+    ),
+    block(
+      "删除文件条目",
+      rowCheck(
+        "set-delete-files",
+        "同时处理本地文件",
+        "文件条目只是<b>路径引用</b>。关闭（默认）时删条目只删记录，磁盘上的文件不动；开启后删除会先把本地文件移入回收站，<b>每次都先弹窗确认</b>",
+        s.deleteFilesWithItem
+      ) +
+        rowCtl(
+          "处理方式",
+          "回收站可还原；永久删除不可恢复",
+          `<div class="seg" id="set-delete-mode" ${s.deleteFilesWithItem ? "" : "data-disabled"}>
+            <button type="button" data-perm="0" ${s.deleteFilesPermanent ? "" : 'class="on"'}>移入回收站</button>
+            <button type="button" data-perm="1" ${s.deleteFilesPermanent ? 'class="on"' : ""}>永久删除</button>
+          </div>`,
+          true
+        )
+    ),
+    block(
+      "危险操作",
+      `<div class="row"><div class="row-text"><span class="row-title">删除条目</span>
+         <div class="row-desc">这两个操作无法撤销。开了「同时处理本地文件」时，清空已失效不会碰文件（它们本来就不存在）</div></div>
+         <div class="row-ctrl">
+           <button class="btn-ghost" id="clear-missing">清空已失效</button>
+           <button class="btn-danger" id="clear-all">清空全部历史</button>
+         </div></div>`,
+      { danger: true }
+    ),
+  ].join("");
 }
 
 // ── 关于页 ────────────────────────────────────────────────────────────────
@@ -2074,13 +2389,8 @@ const TIER_LABEL = {
 };
 
 // 关于页会渲染缓存目录、Release 更新说明等外部文本，统一转义后再插 innerHTML。
-function esc(s) {
-  return String(s ?? "").replace(
-    /[&<>"']/g,
-    (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
-  );
-}
+// 转义统一走 formats.js（渲染模块自己也要用同一份，不能各写一遍）
+const esc = escFmt;
 
 // ── 极简 Markdown 渲染 ──────────────────────────────────────────────────
 // Release 说明是 Markdown，纯文本显示会满屏 ** 和 -。不引第三方库（项目取向是
@@ -2193,8 +2503,18 @@ function settingsAboutHtml() {
           <button class="btn-ghost" id="btn-check-update">${updateBtnLabel()}</button>
           <button class="btn-ghost" id="btn-repo">项目主页</button>
           <button class="btn-ghost" id="btn-feedback">问题反馈</button>
+          <button class="btn-ghost" id="btn-diag" title="复制版本、系统、材质、数据目录等排查信息">复制诊断信息</button>
         </div>
       </div>
+    </div>
+
+    <!-- 隐私承诺集中在一条：这软件的核心卖点就是「只在你自己的机器上」，
+         但原来的关于页一个字都没讲，用户只能靠 README 猜。 -->
+    <div class="about-privacy">
+      <span class="about-privacy-i">只存本机</span>
+      <span class="about-privacy-i">Windows 账户级加密</span>
+      <span class="about-privacy-i">无账号 · 不上传</span>
+      <span class="about-privacy-i">剪贴板正文不进日志</span>
     </div>
 
     <div class="about-facts">
@@ -2807,17 +3127,24 @@ function bindSettings(view) {
     };
   });
 
+  /// 开关类设置的统一绑定。
+  ///
+  /// 提示文案从**行标题**取（`.row-title`），而不是写死「已开启/已关闭」——
+  /// 八个开关共用一条绑定，写死的话用户只看到「已关闭」，根本不知道关的是哪个
+  /// （用户实测反馈）。取标题还有个好处：以后新增开关不用再改文案。
   const bindCheck = (id, cmd) => {
     const el = view.querySelector("#" + id);
     if (!el) return;
     el.onchange = async () => {
+      const title =
+        el.closest(".row")?.querySelector(".row-title")?.textContent?.trim() || "设置";
       try {
         await invoke(cmd, { value: el.checked });
         // 同步本地缓存（退出弹窗文案等依赖最新配置）
         settings = await invoke("get_settings");
-        toast(el.checked ? "已开启" : "已关闭");
+        toast(`${title}已${el.checked ? "开启" : "关闭"}`);
       } catch (e) {
-        toast("保存失败：" + e);
+        toast(`${title}保存失败：${e}`);
         el.checked = !el.checked;
       }
     };
@@ -2825,6 +3152,32 @@ function bindSettings(view) {
   bindCheck("set-autostart", "set_autostart");
   bindCheck("set-tray", "set_tray_on_close");
   bindCheck("set-file-copy", "set_file_copy");
+  bindCheck("set-delete-files", "set_delete_files_with_item");
+
+  // 「处理方式」是从属选项：主开关关着时整组置灰且不可点（CSS 里 pointer-events: none 兜底）。
+  // 视觉禁用而不禁用行为是最糟的组合——灰着却点得动，用户会以为开关自己坏了。
+  const delMode = view.querySelector("#set-delete-mode");
+  const delFilesChk = view.querySelector("#set-delete-files");
+  if (delMode && delFilesChk) {
+    const syncDelMode = () => delMode.toggleAttribute("data-disabled", !delFilesChk.checked);
+    syncDelMode();
+    delFilesChk.addEventListener("change", syncDelMode);
+    delMode.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-perm]");
+      if (!btn || !delFilesChk.checked) return;
+      const perm = btn.dataset.perm === "1";
+      try {
+        await invoke("set_delete_files_permanent", { value: perm });
+        settings = await invoke("get_settings");
+        delMode
+          .querySelectorAll("button[data-perm]")
+          .forEach((b) => b.classList.toggle("on", b === btn));
+        toast(perm ? "已改为永久删除（不可恢复）" : "已改为移入回收站");
+      } catch (err) {
+        toast("保存失败：" + err);
+      }
+    });
+  }
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
   bindCheck("set-clean-confirm", "set_clean_confirm_exit");
@@ -2888,8 +3241,10 @@ function bindSettings(view) {
   const material = view.querySelector("#set-material");
   if (material) {
     const label = view.querySelector("#material-val");
+    // 只显示百分比：括号里的说明与上方「越高越厚实 · 越低越通透」重复，
+    // 而且拖动时文字长度跳动，视觉上像"突然冒出一串括号"（用户实测反馈）。
     const show = (v) => {
-      if (label) label.textContent = `${v}%（越高越厚实 · 越低越通透）`;
+      if (label) label.textContent = `${v}%`;
     };
     // 拖动中：只改观感与本地状态，不落盘（高频写 config.json 没必要）。
     // 关键是同步模块级 settings —— settingsHtml() 读的就是它，
@@ -2997,6 +3352,19 @@ function bindSettings(view) {
   const btnFeedback = view.querySelector("#btn-feedback");
   if (btnFeedback) btnFeedback.onclick = aboutFeedback;
 
+  // 一键复制诊断信息：报障时用户最缺的就是「版本/系统/材质/数据在哪」，
+  // 让他一条条截图远不如点一下粘贴。
+  const btnDiag = view.querySelector("#btn-diag");
+  if (btnDiag)
+    btnDiag.onclick = async () => {
+      try {
+        await invoke("copy_diagnostics");
+        toast("诊断信息已复制，可直接粘贴到反馈里");
+      } catch (e) {
+        toast("复制失败：" + e);
+      }
+    };
+
   // 更新日志里的链接：用事件委托交给系统浏览器打开。
   // WebView 内的 <a href> 会被当作应用内导航（点了直接白屏），所以必须拦下。
   const notesBox = view.querySelector("#about-notes");
@@ -3033,6 +3401,7 @@ async function main() {
   bindExitModal();
   bindClearAllModal();
   bindClearMissingModal();
+  bindPurgeModal();
   bindFeatureTour();
   bindClearView();
   bindSelectBar();

@@ -105,11 +105,14 @@ pub struct Config {
     /// 老用户就会再看到一次「新功能导览」；布尔值只能二选一，要么永久不再提示，
     /// 要么得手动重置。
     ///
-    /// **默认值刻意分两处**，用来区分「全新安装」与「老配置升级」：
-    ///   - 走 `impl Default`（没有 config.json）→ 0 → 会弹；
-    ///   - 走 serde 缺字段默认（有 config.json 但没这个字段）→ 当前版本 → 不弹。
-    /// 老用户升级时被弹一次功能导览是纯打扰，他们早就摸索过了。
-    #[serde(default = "tour_version_now")]
+    /// **默认一律是 0（= 没看过）**，也包括「有 config.json 但缺这个字段」的老配置。
+    /// 早先这里刻意让老配置视为「已看过」，理由是「老用户早就摸索过了，弹窗是打扰」——
+    /// 但导览的价值恰恰是让人知道**有哪些功能**，而升级上来的老用户正是最该看一遍的人；
+    /// 让他们因为「配置文件里没有这个字段」而永远看不到，等于把这功能只做给了
+    /// 人数最少的全新安装用户。用户明确要求「更新到这版都得默认弹一次」。
+    ///
+    /// 弹过之后 `dismiss_onboarding` 会写入当前版本号，此后不再出现。
+    #[serde(default = "default_tour_seen")]
     pub tour_seen_version: u32,
     /// 不跟随 Windows 缩放比例：界面固定按 **100%** 渲染（**默认开启**）。
     ///
@@ -129,14 +132,39 @@ pub struct Config {
     /// 里挡掉，读的时候一律按 `system` 处理（见 `theme_is_dark`）。
     #[serde(default = "default_theme_mode")]
     pub theme_mode: String,
+    /// 删除文件条目时，是否同时处理它引用的**本地文件**（默认**关闭**）。
+    ///
+    /// 文件条目记的是路径引用而非副本，删除条目本身只删记录（本地文件不受影响）；
+    /// 打开这一项才表示「我要连磁盘上的文件一起处理」。默认关是刻意的：
+    /// 这是会动用户真实文件的操作，必须是用户自己到设置里点开，程序不替他决定。
+    #[serde(default)]
+    pub delete_files_with_item: bool,
+    /// 本地文件的处理方式：`false` = 移入回收站（可还原，默认），`true` = 永久删除。
+    ///
+    /// 单独一项而不是跟上面合成枚举：两个都是布尔语义，存起来最省事；
+    /// 合并成枚举还要为旧配置写兼容。默认 false 保证「即使误开主开关」也不会
+    /// 造成不可恢复的后果。
+    #[serde(default)]
+    pub delete_files_permanent: bool,
+    /// 「链接 / 代码」识别规则的版本号。
+    ///
+    /// 识别是启发式的，规则改了之后**存量条目必须重算**，否则用户看到的还是旧结论
+    /// （比如不带 http 的裸域名仍然是「文本」）。条目本身没有地方存规则版本，
+    /// 所以记在配置里：`< 当前版本` 时把存量文本的 subtype 全部重置、再跑一遍判定。
+    /// 只在规则变更时递增，正常运行不会触发。
+    #[serde(default)]
+    pub subtype_version: u32,
 }
 
 /// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次增量。
 pub const TOUR_VERSION: u32 = 1;
 
-/// serde 缺字段时用当前版本 —— 等价于「老用户视为已看过」。
-fn tour_version_now() -> u32 {
-    TOUR_VERSION
+/// serde 缺字段时的默认值：**0 = 没看过**。
+///
+/// 即「有 config.json 但没这个字段」的老配置也视为没看过 —— 升级到本版的用户
+/// 会看到一次功能导览。写入时机在 `dismiss_onboarding`，弹过一次之后不再出现。
+fn default_tour_seen() -> u32 {
+    0
 }
 
 /// 一次成功的 `releases/latest` 查询结果。
@@ -196,7 +224,7 @@ fn default_alpha_round() -> u32 {
 }
 
 /// 浓度的合法区间（前端滑块 40–90，后端一律夹到这个范围）
-pub const ALPHA_MIN: u32 = 40;
+pub const ALPHA_MIN: u32 = 10;
 pub const ALPHA_MAX: u32 = 90;
 
 impl Config {
@@ -249,6 +277,12 @@ impl Default for Config {
             asked_tray_on_close: false,
             round_mode: false,
             file_copy: false, // 默认关闭：不记录文件复制
+            // 默认关闭：删条目只删记录，不碰磁盘上的真实文件
+            delete_files_with_item: false,
+            // 默认回收站（可还原）
+            delete_files_permanent: false,
+            // 0 = 尚未按当前规则算过，首次启动会重算一遍存量
+            subtype_version: 0,
             pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
             pin_cancel_on_disable: true, // 默认开启：关掉互通即撤销它铺开的置顶
             cache_dir: None,
@@ -265,39 +299,117 @@ impl Default for Config {
 static CONFIG: OnceLock<Mutex<Config>> = OnceLock::new();
 static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
+/// 配置文件的默认位置：`%APPDATA%\<bundle identifier>\config.json`
+/// —— 与 Tauri 的 `app_data_dir()` 同构，但不依赖 `AppHandle`。
+///
+/// 为什么要这个：`run()` 在 `setup` 之前就要打日志（单实例检测、启动横幅前半段），
+/// 而那时拿不到 `AppHandle`。日志系统需要提前知道 `cache_dir` 才能把这几行写进
+/// 用户真正在看的那个 log，否则它们会落到 %LOCALAPPDATA% 下的另一份文件里。
+pub fn default_config_path() -> Option<PathBuf> {
+    std::env::var("APPDATA")
+        .ok()
+        .map(|p| PathBuf::from(p).join("com.kunge.selfclipboard").join("config.json"))
+}
+
 pub fn init(app: &tauri::AppHandle) {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let _ = CONFIG_PATH.set(dir.join("config.json"));
+    let path = default_config_path().unwrap_or_else(|| {
+        let dir = app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("."));
+        dir.join("config.json")
+    });
+    let _ = CONFIG_PATH.set(path);
 
     let cfg = load();
-    crate::log_print!("[settings] 已加载配置：{:?}", cfg);
+    // 启动快照：只打诊断需要的字段，**不 Debug 整份**。
+    // 原因：`update_cache.notes` 装着整篇 release notes（几 KB），
+    // 用 `{:?}` 打一份配置就等于每次启动往日志里灌一篇文案。
+    // 用户在意的定位信息是「数据在哪、留多久、开了哪些开关」。
+    crate::log_print!(
+        "[settings] 配置就绪：缓存={} 保留={}天 主题={} 缩放跟随={} 文件复制={} 圆角={} 材质={}/{}",
+        cfg.cache_dir.as_deref().unwrap_or("(默认 %APPDATA%)"),
+        cfg.retention_days,
+        cfg.theme_mode,
+        !cfg.ignore_dpi_scale,
+        cfg.file_copy,
+        cfg.round_mode,
+        cfg.alpha_straight,
+        cfg.alpha_round
+    );
     let _ = CONFIG.set(Mutex::new(cfg));
+}
+
+/// 落盘配置。**原子写 + 失败必报**。
+///
+/// 两件事都不能省：
+/// 1. 原子性：配置文件里有 `cache_dir` —— 它一丢，程序就回默认目录，
+///    用户看到的是「记录全没了」（其实都在旧目录里）。`fs::write` 直接覆盖是
+///    非原子的，强杀/断电会留下半截 JSON，下次解析失败直接回落默认值。
+/// 2. 可观测性：以前是 `let _ = fs::write(...)`，写失败一个字都不记 ——
+///    用户改完设置、重启回退，日志里查不出任何痕迹，是最难定位的一类问题。
+fn persist(path: &std::path::Path, cfg: &Config) {
+    let s = match serde_json::to_string_pretty(cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::log_err!("settings", "配置序列化失败：{e}");
+            return;
+        }
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = fs::write(&tmp, s.as_bytes()) {
+        crate::log_err!("settings", "配置写入失败（{}）：{e}", tmp.display());
+        let _ = fs::remove_file(&tmp);
+        return;
+    }
+    if let Err(e) = fs::rename(&tmp, path) {
+        crate::log_err!("settings", "配置原子替换失败（{}）：{e}", path.display());
+        let _ = fs::remove_file(&tmp);
+    }
 }
 
 fn load() -> Config {
     let Some(path) = CONFIG_PATH.get() else {
+        crate::log_warn!("[settings] 配置路径未初始化，使用默认配置");
         return Config::default();
     };
-    match fs::read_to_string(path) {
-        Ok(s) => {
-            let mut cfg: Config = serde_json::from_str(&s).unwrap_or_else(|e| {
-                crate::log_warn!("[settings] config.json 解析失败：{e}，使用默认配置");
-                Config::default()
-            });
-            // 老配置的单一浓度归进对应模式那一档，并立刻回写 ——
-            // 否则每次启动都做一遍同样的迁移（虽然结果一致，但没必要）。
-            if cfg.migrate() {
-                if let Ok(out) = serde_json::to_string_pretty(&cfg) {
-                    let _ = fs::write(path, out);
-                }
+    let raw = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                crate::log_print!("[settings] 无 config.json（首次运行），使用默认配置");
+            } else {
+                // 读不动 ≠ 没有：权限、被占用、磁盘错误都会走到这里，
+                // 以前一律静默回落默认值，用户会发现「所有设置都重置了」却查不到原因。
+                crate::log_err!("settings", "配置读取失败（{}）：{e}", path.display());
             }
-            cfg
+            return Config::default();
         }
-        Err(_) => Config::default(),
+    };
+    let mut cfg: Config = serde_json::from_str(&raw).unwrap_or_else(|e| {
+        // 损坏的配置必须留一份：里面带着 cache_dir、保留天数等用户数据定位信息，
+        // 就地回落默认值等于把「为什么找不到历史」的唯一线索也删了。
+        let dst = path.with_extension("json.corrupt");
+        match fs::write(&dst, &raw) {
+            Ok(()) => crate::log_err!(
+                "settings",
+                "config.json 解析失败：{e}；原文件已另存为 {}（本次使用默认配置）",
+                dst.display()
+            ),
+            Err(err) => crate::log_err!(
+                "settings",
+                "config.json 解析失败：{e}；备份也失败：{err}（本次使用默认配置）"
+            ),
+        }
+        Config::default()
+    });
+    // 老配置的单一浓度归进对应模式那一档，并立刻回写 ——
+    // 否则每次启动都做一遍同样的迁移（虽然结果一致，但没必要）。
+    if cfg.migrate() {
+        crate::log_print!("[settings] 已迁移旧版材质浓度字段，回写配置");
+        persist(path, &cfg);
     }
+    cfg
 }
 
 pub fn get() -> Config {
@@ -316,9 +428,7 @@ pub fn update<F: FnOnce(&mut Config)>(f: F) -> Config {
             f(&mut c);
             let snapshot = c.clone();
             if let Some(path) = CONFIG_PATH.get() {
-                if let Ok(s) = serde_json::to_string_pretty(&snapshot) {
-                    let _ = fs::write(path, s);
-                }
+                persist(path, &snapshot);
             }
             snapshot
         })
@@ -346,6 +456,8 @@ pub fn get_settings() -> serde_json::Value {
         "alphaRound": cfg.alpha_round,
         "roundMode": cfg.round_mode,
         "fileCopy": cfg.file_copy,
+        "deleteFilesWithItem": cfg.delete_files_with_item,
+        "deleteFilesPermanent": cfg.delete_files_permanent,
         "pinGlobal": cfg.pin_global,
         "pinCancelOnDisable": cfg.pin_cancel_on_disable,
         "cacheDir": cfg.cache_dir,
@@ -396,6 +508,30 @@ pub fn set_clean_on_close(value: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn set_file_copy(value: bool) -> Result<(), String> {
     update(|c| c.file_copy = value);
+    Ok(())
+}
+
+/// 开关「删除文件条目时同时处理本地文件」。默认关闭，必须用户到设置里主动打开。
+#[tauri::command]
+pub fn set_delete_files_with_item(value: bool) -> Result<(), String> {
+    // 这一项动的是用户磁盘上的真实文件，开关本身值得留一条日志：
+    // 以后若出现「文件怎么没了」，一眼能看出是不是这个开关被打开过。
+    crate::log_print!(
+        "[settings] 「删除时同时删本地文件」已{}",
+        if value { "开启" } else { "关闭" }
+    );
+    update(|c| c.delete_files_with_item = value);
+    Ok(())
+}
+
+/// 本地文件处理方式：`false` = 回收站（默认），`true` = 永久删除。
+#[tauri::command]
+pub fn set_delete_files_permanent(value: bool) -> Result<(), String> {
+    crate::log_print!(
+        "[settings] 本地文件处理方式：{}",
+        if value { "永久删除（不可恢复）" } else { "移入回收站（可还原）" }
+    );
+    update(|c| c.delete_files_permanent = value);
     Ok(())
 }
 
@@ -489,30 +625,47 @@ pub fn set_retention_days(days: u32) -> Result<(), String> {
 
 #[tauri::command]
 pub fn set_autostart(value: bool) -> Result<(), String> {
-    autostart::set_enabled(value)
+    // 开关是「界面显示的状态」，注册表才是「真正生效的状态」。两者一旦不一致
+    // （注册表被安全软件拦、权限不足），用户只会觉得「开了但不开机启动」——
+    // 必须在日志里留下到底是写失败还是读失败。
+    match autostart::set_enabled(value) {
+        Ok(()) => {
+            crate::log_print!("[settings] 开机自启已{}", if value { "开启" } else { "关闭" });
+            Ok(())
+        }
+        Err(e) => {
+            crate::log_err!("settings", "设置开机自启失败（目标={value}）：{e}");
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 功能导览的「新装弹、升级不弹」全靠两处默认值分开，这里把它钉住。
+    /// 功能导览的判定：**新装与升级都要弹一次**，弹过之后不再弹。
     ///
-    /// 判错的两种后果都很糟：默认值写反 → 所有老用户升级后被弹一次导览；
-    /// 或者新装也不弹 → 这个功能等于没做。
+    /// 曾经的设计是「老用户视为已看过」（缺字段默认给当前版本），当时怕打扰；
+    /// 但导览讲的是「这软件有什么功能」，升级上来的老用户才是最需要这份说明的人。
+    /// 用户明确要求改成「更新到这版的都得默认弹一次」。
     #[test]
-    fn tour_version_defaults_split_new_install_and_upgrade() {
+    fn tour_pops_once_for_both_new_install_and_upgrade() {
         // 全新安装（没有 config.json）走 impl Default → 0 → 小于当前版本 → 会弹
         assert_eq!(Config::default().tour_seen_version, 0);
 
-        // 老配置：文件在、但没这个字段 → serde 缺字段默认给当前版本 → 不弹
+        // 老配置：文件在、但没这个字段 → 同样视为 0 → 也会弹
         let upgraded: Config = serde_json::from_str("{}").expect("老 config.json 必须能解析");
-        assert_eq!(upgraded.tour_seen_version, TOUR_VERSION);
+        assert_eq!(upgraded.tour_seen_version, 0);
 
-        // 已经记过的值原样保留（将来 TOUR_VERSION 提升后，小于新值就会再弹一次）
+        // 弹过之后：`dismiss_onboarding` 写入当前版本号，此后不再弹
         let seen = format!(r#"{{"tour_seen_version":{}}}"#, TOUR_VERSION);
         let cfg: Config = serde_json::from_str(&seen).unwrap();
         assert_eq!(cfg.tour_seen_version, TOUR_VERSION);
+        assert!(
+            cfg.tour_seen_version >= TOUR_VERSION,
+            "看过之后必须满足 >= 当前版本，否则会重复弹"
+        );
     }
 }
 

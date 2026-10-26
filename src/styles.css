@@ -32,11 +32,21 @@
   --radius: 20px;
   --radius-sm: 8px;
 
+  /* 等宽字体：代码 / Markdown 预览与详情正文共用。原本详情页里内联了一串
+     ui-monospace 列表，两处各写一遍就会漂移，抽成变量。 */
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
   --font: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
     "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
 
   /* 玻璃叠加层（light） */
   --glass: rgba(255, 255, 255, 0.16);
+  /* 条目卡片底色。比 --glass 实得多，理由：浅色材质底（Mica 白灰）上叠 16% 白，
+     卡片与背景几乎同色，整块看起来「发灰」、分不出层次（用户实测反馈）。
+     --glass 还要服务侧栏与按钮，那些地方需要更透，所以这里单独一个变量。 */
+  --card-bg: rgba(255, 255, 255, 0.55);
+  /* 悬停态：比常态略亮。不能沿用 --glass-hover（那是 10% 的通用悬停层），
+     否则鼠标一移上去，实心卡片会瞬间变透明、像被"挖"了一下。 */
+  --card-hover: rgba(255, 255, 255, 0.72);
   --glass-strong: rgba(255, 255, 255, 0.28);
   --glass-hover: rgba(255, 255, 255, 0.24);
   /* 悬浮浮层**自己的**材质，与窗口那套（--glass / --material-rgb / 设置里的
@@ -91,6 +101,33 @@
   --tag-kind-image-bg: rgba(124, 58, 237, 0.12);
   --tag-kind-files-fg: #0d9488;
   --tag-kind-files-bg: rgba(13, 148, 136, 0.13);
+  /* 文本子类型徽章：链接（天蓝）与代码（石板灰）。
+     必须与已有的七个徽章都不同色相 —— 黄绿(文本) 紫(图片) 青绿(文件) 蓝(置顶)
+     琥珀(收藏) 绿(已编辑) 红(失效)，剩下天蓝与中性石板两个空位。 */
+  --tag-link-fg: #0369a1;
+  --tag-link-bg: rgba(3, 105, 161, 0.12);
+  --tag-code-fg: #475569;
+  --tag-code-bg: rgba(71, 85, 105, 0.14);
+  /* 设置页区块底与行分隔线：区块要能从页面底色里浮出来，但不能抢内容。
+     浅色用半透明白（压在材质上仍透出壁纸），深色用极低比例白。 */
+  /* 中性线：面板描边与行分隔线共用。
+     与 --stroke 不是重复 —— --stroke 在浅色下是**白色高光边**（毛玻璃卡片的
+     边缘反光），压在浅底上做分组边界根本看不见；这里要的是「深一点的分隔」。
+     一个变量管两处（边框 + 分隔线），不再各造一个。 */
+  --line: rgba(0, 0, 0, 0.09);
+  /* 代码着色：四类 token + Markdown 标记。
+     只做「一眼分得出是代码」，不做主题级配色；色相与徽章错开，
+     避免正文里的紫色和图片徽章的紫色混为一谈。 */
+  --tok-kw: #7c3aed;
+  --tok-str: #15803d;
+  --tok-num: #b45309;
+  --tok-cmt: #94a3b8;
+  --tok-md: #94a3b8;
+  /* 浮层实底：右键菜单 / 弹窗 / toast 共用。
+     与面板的 --glass-strong 不是一回事 —— 浮层必须**盖住**背后的内容，
+     半透明会把下面的字透出来。三处原本各写一遍 rgba(252,252,252,0.9x)，
+     深色再各补一个覆盖，共 6 份；现在只有这一份。 */
+  --solid-bg: rgba(252, 252, 252, 0.96);
   --tag-pinned-bg: rgba(47, 107, 255, 0.12);
   --tag-fav-bg: rgba(186, 117, 23, 0.15);
   --tag-edited-bg: rgba(26, 127, 55, 0.14);
@@ -120,6 +157,8 @@ body.dark {
      3. hover/strong 同比例下调，保证「越上层越亮」的层次还在，
         但整体保持在黑调里。 */
   --glass: rgba(255, 255, 255, 0.05);
+  --card-bg: rgba(255, 255, 255, 0.05);
+  --card-hover: rgba(255, 255, 255, 0.09);
   --glass-strong: rgba(255, 255, 255, 0.09);
   --glass-hover: rgba(255, 255, 255, 0.07);
   /* 深色浮层：同样不跟窗口浓度走。上端比下端亮一档才浮得起来，
@@ -149,6 +188,17 @@ body.dark {
   --tag-kind-image-bg: rgba(160, 130, 255, 0.2);
   --tag-kind-files-fg: #5fd6c8;
   --tag-kind-files-bg: rgba(95, 214, 200, 0.2);
+  --tag-link-fg: #7dd3fc;
+  --tag-link-bg: rgba(56, 189, 248, 0.18);
+  --tag-code-fg: #cbd5e1;
+  --tag-code-bg: rgba(203, 213, 225, 0.16);
+  --line: rgba(255, 255, 255, 0.09);
+  --solid-bg: rgba(40, 40, 44, 0.96);
+  --tok-kw: #c4b5fd;
+  --tok-str: #86efac;
+  --tok-num: #fcd34d;
+  --tok-cmt: #7c8496;
+  --tok-md: #7c8496;
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
   --tag-edited-bg: rgba(74, 194, 107, 0.2);
@@ -166,6 +216,8 @@ body.dark {
 /* 兜底档：没有真材质时不透明，观感不能崩 */
 body.tier-solid {
   --glass: rgba(246, 247, 249, 0.97);
+  --card-bg: rgba(255, 255, 255, 0.98);
+  --card-hover: #ffffff;
   --glass-strong: rgba(255, 255, 255, 0.98);
   --glass-hover: rgba(0, 0, 0, 0.05);
   --stroke: rgba(0, 0, 0, 0.08);
@@ -176,6 +228,8 @@ body.tier-solid {
 body.dark.tier-solid {
   /* 兜底档没有 acrylic，本就是实色 —— 与真材质档对齐到同一档黑 */
   --glass: rgba(255, 255, 255, 0.05);
+  --card-bg: rgba(255, 255, 255, 0.05);
+  --card-hover: rgba(255, 255, 255, 0.09);
   --glass-strong: rgba(255, 255, 255, 0.09);
   --glass-hover: rgba(255, 255, 255, 0.07);
   --stroke: rgba(255, 255, 255, 0.08);
@@ -270,6 +324,12 @@ html:not(.hovers-off) body.round .nav-item:hover {
 }
 
 body.round .cache-box {
+  box-shadow: var(--card-shadow);
+}
+
+/* 圆角模式下没有背景模糊，面板靠阴影立层次 —— 与关于页的 hero/facts/log 同一套。
+   设置页的区块是「面板」，理应与它们一致；内层元素（如缓存块）由下面那条规则清阴影。 */
+body.round .settings .block {
   box-shadow: var(--card-shadow);
 }
 
@@ -612,6 +672,14 @@ body.dark #theme-toggle .i-sun {
   background: var(--track-bg);
 }
 
+/* 从属选项：主开关关闭时整组置灰且不可点。
+   只做视觉禁用而没有 pointer-events 的话，点下去仍会触发命令，
+   用户会看到「明明灰着却改成功了」这种自相矛盾的行为。 */
+.seg[data-disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 .seg button {
   padding: 5px 14px;
   border: 0;
@@ -843,7 +911,7 @@ html:not(.hovers-off) .btn-primary:hover {
 
 .empty-sub {
   font-size: 12px;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   opacity: 0.8;
 }
 
@@ -887,8 +955,10 @@ html:not(.hovers-off) .btn-primary:hover {
   gap: 10px;
   padding: 10px;
   border-radius: var(--radius-sm);
-  background: var(--glass);
-  border: 1px solid var(--stroke);
+  background: var(--card-bg);
+  /* 用中性线而不是 --stroke：浅色下 --stroke 是白色高光边，压在白卡片上等于隐形，
+     卡片的轮廓就只剩阴影一条线索 —— 这正是「看着发灰、没有边界」的来源。 */
+  border: 1px solid var(--line);
   /* 高浓度下描边会与窗口底色糊在一起，靠阴影保证卡片可识别 */
   box-shadow: var(--card-shadow);
   cursor: default;
@@ -896,7 +966,7 @@ html:not(.hovers-off) .btn-primary:hover {
 }
 
 html:not(.hovers-off) .card:hover {
-  background: var(--glass-hover);
+  background: var(--card-hover);
 }
 
 .card.is-pinned {
@@ -917,6 +987,62 @@ html:not(.hovers-off) .card:hover {
 .card.is-missing .card-preview {
   color: var(--text-dim);
 }
+/* 代码：等宽字体。字号比正文小一档 —— 等宽字宽更大，
+   保持 13px 会让两行只装得下十几个字符。 */
+.card-preview.is-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Markdown：**渲染后**是正文流（标题加粗、列表换圆点、去掉 `#` `-`），
+   所以用正文字体，不再等宽 —— 等宽会让「渲染过的内容」看起来仍像源码。 */
+.card-preview.is-markdown {
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* Markdown 的列表点与引用竖线：次要色，不抢正文 */
+.card-preview .md-bullet,
+.card-preview .md-quote {
+  color: var(--text-dim);
+  margin-right: 2px;
+}
+
+/* 行内代码：卡片里也要有底色，否则和普通文字混在一起 */
+.card-preview code.md-inline,
+.detail-body.is-rich code.md-inline {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--glass-strong);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+/* 链接：整体染成链接色。不拆开只染域名 —— 拆分会在文本中间产生断点，
+   中文与长路径混排时反而更乱。 */
+.card-preview.is-link {
+  color: var(--tag-link-fg);
+}
+
+/* token 着色只作用于代码/Markdown 预览，不影响普通文本 */
+.tok-kw {
+  color: var(--tok-kw);
+}
+.tok-str {
+  color: var(--tok-str);
+}
+.tok-num {
+  color: var(--tok-num);
+}
+.tok-cmt {
+  color: var(--tok-cmt);
+}
+.tok-md {
+  color: var(--tok-md);
+}
+
 
 /* 卡片 meta 行的徽章：几何统一（沿用原先「已失效」徽章的尺寸），颜色按语义区分
    —— 类型=中性、置顶=accent 蓝、收藏=琥珀、失效=红。 */
@@ -964,6 +1090,17 @@ html:not(.hovers-off) .card:hover {
 .tag-kind-files {
   color: var(--tag-kind-files-fg);
   background: var(--tag-kind-files-bg);
+}
+
+/* 文本子类型：链接 / 代码 */
+.tag-link {
+  color: var(--tag-link-fg);
+  background: var(--tag-link-bg);
+}
+
+.tag-code {
+  color: var(--tag-code-fg);
+  background: var(--tag-code-bg);
 }
 
 .tag-pinned {
@@ -1047,13 +1184,9 @@ body.round .tag {
   flex-direction: column;
   border-radius: var(--radius-sm);
   /* 右键菜单要贴着内容读：用高不透明底色，不吃玻璃透（需求 #8） */
-  background: rgba(252, 252, 252, 0.94);
+  background: var(--solid-bg);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
-}
-
-body.dark .ctx-menu {
-  background: rgba(40, 40, 44, 0.95);
 }
 
 .ctx-item {
@@ -1138,9 +1271,9 @@ html:not(.hovers-off) .ctx-item.danger:hover {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  max-width: 520px;
-  /* 撑满 .view 的高度：内容是 .settings-body 在滚，标题与标签栏固定不随之滚走。
-     不撑满的话 flex:1 的内容区算不出可用高度，overflow 也就无从谈起。 */
+  /* **不限制整列宽度**：滚动条要落在窗口右缘，而不是贴在 520px 内容列的边上
+     —— 那样一条竖线横在页面中间，看着像把内容切断了（用户实测反馈）。
+     阅读宽度限制下移到 .settings-body 的子项上。 */
   height: 100%;
   /* 设置页隐藏了工具栏，标题需与搜索栏距离顶部一致（52-32)/2 = 10px */
   padding-top: 10px;
@@ -1202,24 +1335,100 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
      12px 与 .view 的 padding-right 相等，两者一减滚动条正好落在内容与窗框中间。 */
   scrollbar-gutter: stable;
   padding-right: 12px;
+  /* 滚到底时最后一行不贴边：底部按钮（清空全部历史）原来会被窗口下缘切掉一截 */
+  padding-bottom: 16px;
   display: flex;
   flex-direction: column;
   gap: 18px;
 }
 
+/* 正文与滚动条同步撑满：滚动条已在窗口右缘，内容却卡在 520 宽的话，
+   右边会留出一大片空白，"拉到最右"这件事就只做了一半。 */
+.settings-body > * {
+  max-width: none;
+}
+
+/* ── 区块（卡片）─────────────────────────────────────────────────────────
+   设置页的骨架：一页 = 若干区块，区块 = 一组同类设置。
+   没有区块时，十几行平铺、视觉权重全一样，用户找不到重点（上一版就是这样）。 */
+.settings .block {
+  padding: 4px 16px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  /* 底色复用 --glass-strong：关于页、缓存块、右键菜单都是它。
+     面板的透明度只有这一个来源，改一处全局一致，不再各页各调。 */
+  background: var(--glass-strong);
+}
+
+.settings .block-h {
+  padding: 12px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+/* 危险区块：顶部红线 + 红标题。清空全部历史与普通开关并列时，
+   光靠按钮颜色不够 —— 区块本身要一眼可辨。 */
+.settings .block.is-danger {
+  border-top: 2px solid var(--danger);
+}
+
+.settings .block.is-danger .block-h {
+  color: var(--danger);
+}
+
+/* ── 一行：标题 + 说明在左，控件在右 ──────────────────────────────────────
+   老布局是「label 定宽 160 + 控件 + 说明」挤一行，长说明被压成一段（
+   「删除时同时删本地文件」那段 60 多字），而且各行的控件起始位置随标题长度漂移。 */
 .settings .row {
   display: flex;
-  align-items: center;
-  /* 窗口变窄时允许换行：否则说明文字会被挤成一列竖排（用户截图） */
-  flex-wrap: wrap;
-  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 0;
   font-size: 13px;
   color: var(--text);
 }
 
-.settings .row label {
-  flex: 0 0 160px;
+/* 行之间一条极淡的线：靠间距也能分开，但有了它更接近系统设置的观感 */
+.settings .row + .row {
+  border-top: 1px solid var(--line);
+}
+
+/* 子项：从属于上一项。用缩进 + 左侧竖线表达层级，
+   取代原来用全角空格「　└ 」伪装的做法。 */
+.settings .row.is-sub {
+  margin-left: 6px;
+  padding-left: 14px;
+  border-left: 2px solid var(--line);
+}
+
+.settings .row-text {
+  flex: 1;
   min-width: 0;
+}
+
+.settings .row-title {
+  display: block;
+  line-height: 1.5;
+  cursor: default;
+}
+
+.settings .row-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.settings .row-ctrl {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 控件的基线对齐标题第一行，而不是跟着说明文字往下掉 */
+  min-height: 20px;
 }
 
 .settings input[type="number"] {
@@ -1244,20 +1453,6 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 .settings .hint {
   font-size: 12px;
   color: var(--text-dim);
-  /* 至少留 150px 宽，放不下就整块换到下一行，避免文字被压成竖排 */
-  flex: 1 1 150px;
-  min-width: 0;
-}
-
-/* 材质浓度：标签 + 滑块 + 百分比固定排成一行。
-   .hint 默认 flex-basis:150px 会把 160+180+150 撑破容器导致换行，
-   这里改成按内容宽度、不参与换行（nowrap 兜底）。 */
-.settings .row:has(#set-material) {
-  flex-wrap: nowrap;
-}
-
-.settings .row:has(#set-material) .hint {
-  flex: 0 0 auto;
   white-space: nowrap;
 }
 
@@ -1266,6 +1461,17 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   height: 16px;
   accent-color: var(--accent);
   cursor: default;
+}
+
+/* 缓存块嵌在「存储位置」区块里，去掉它自己的外框、底色与阴影 ——
+   否则区块里又浮出一张卡片，看着是「框里有框」（用户截图反馈，只在圆角模式出现：
+   因为 `body.round .cache-box` 会给它加 --card-shadow，而原先这里只清了边框与底色）。 */
+.settings .block .cache-box {
+  padding: 4px 0 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  gap: 6px;
 }
 
 /* 缓存目录块（迁移自 v1 缓存信息区） */
@@ -1486,16 +1692,12 @@ html:not(.hovers-off) .statusbar-clear:hover {
   max-width: 320px;
   padding: 18px 20px;
   border-radius: var(--radius-sm);
-  background: rgba(252, 252, 252, 0.97);
+  background: var(--solid-bg);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-body.dark .modal {
-  background: rgba(40, 40, 44, 0.97);
 }
 
 .modal-title {
@@ -1507,6 +1709,8 @@ body.dark .modal {
 .modal-text {
   font-size: 13px;
   color: var(--text-dim);
+  /* 文件清单要按行显示（每行一个文件名），默认会把换行压成空格 */
+  white-space: pre-line;
 }
 
 .modal-actions {
@@ -1979,8 +2183,7 @@ body.dark .tour-dot.is-on {
   border-radius: var(--radius-sm);
   /* 比窗口底稍深一点，让正文区看起来是「一块内容」而不是浮在玻璃上 */
   background: rgba(0, 0, 0, 0.04);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, "Microsoft YaHei UI",
-    monospace;
+  font-family: var(--font-mono);
   /* 15px：比列表正文（13px）明显大一档，长文本连读不费眼。
      查看态与编辑态共用这个类，所以两边字号永远一致。 */
   font-size: 15px;
@@ -1993,6 +2196,134 @@ body.dark .tour-dot.is-on {
   /* 明确允许选中与光标样式：这个弹窗的主要用途就是「挑一段复制」 */
   user-select: text;
   cursor: text;
+}
+
+/* 富文本 / Markdown 排版态：容器换成正文排版规则，块元素自己负责换行与间距。
+   纯文本态仍走上面的 pre-wrap + 等宽字体，观感与改版前一致。 */
+.detail-body.is-rich {
+  white-space: normal;
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.detail-body.is-rich > :first-child {
+  margin-top: 0;
+}
+
+.detail-body.is-rich > :last-child {
+  margin-bottom: 0;
+}
+
+.detail-body.is-rich p {
+  margin: 0 0 10px;
+}
+
+.detail-body.is-rich h1,
+.detail-body.is-rich h2,
+.detail-body.is-rich h3,
+.detail-body.is-rich h4,
+.detail-body.is-rich h5,
+.detail-body.is-rich h6 {
+  margin: 16px 0 8px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.detail-body.is-rich h1 {
+  font-size: 20px;
+}
+.detail-body.is-rich h2 {
+  font-size: 17px;
+}
+.detail-body.is-rich h3 {
+  font-size: 15px;
+}
+.detail-body.is-rich h4,
+.detail-body.is-rich h5,
+.detail-body.is-rich h6 {
+  font-size: 14px;
+}
+
+.detail-body.is-rich ul,
+.detail-body.is-rich ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+
+.detail-body.is-rich li {
+  margin: 3px 0;
+}
+
+.detail-body.is-rich blockquote {
+  margin: 0 0 10px;
+  padding: 6px 12px;
+  border-left: 3px solid var(--line);
+  color: var(--text-dim);
+}
+
+.detail-body.is-rich hr {
+  margin: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.detail-body.is-rich a.md-link {
+  color: var(--tag-link-fg);
+  cursor: default;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.detail-body.is-rich code,
+.detail-body.is-rich .md-inline {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--glass-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.detail-body.is-rich pre.md-code {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.detail-body.is-rich pre.md-code code {
+  padding: 0;
+  background: none;
+  font-size: inherit;
+}
+
+.detail-body.is-rich table.md-table {
+  margin: 0 0 12px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.detail-body.is-rich table.md-table th,
+.detail-body.is-rich table.md-table td {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  text-align: left;
+}
+
+.detail-body.is-rich table.md-table th {
+  font-weight: 600;
+  background: var(--glass-strong);
+}
+
+/* 富文本里的图片一律丢弃（外链会发请求、data URI 可能撑爆内存），
+   这里保留一条占位提示，让人知道原文里有图而不是内容缺失。 */
+.detail-body.is-rich img {
+  display: none;
 }
 
 .detail-body:focus-visible {
@@ -2081,7 +2412,7 @@ html:not(.hovers-off) .btn-danger:hover {
   transform: translateX(-50%) translateY(10px);
   padding: 8px 18px;
   border-radius: var(--radius-sm);
-  background: rgba(252, 252, 252, 0.94);
+  background: var(--solid-bg);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
   color: var(--text);
@@ -2089,10 +2420,6 @@ html:not(.hovers-off) .btn-danger:hover {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.18s ease, transform 0.18s ease;
-}
-
-body.dark .toast {
-  background: rgba(40, 40, 44, 0.95);
 }
 
 .toast.show {
@@ -2235,7 +2562,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   justify-content: space-between;
   gap: 32px;
   padding: 20px 24px;
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
@@ -2323,11 +2650,28 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 }
 
 /* ── 事实表：列排（标签在左、值在右），对齐 Windows 设置的「属性表」 ── */
+/* 隐私承诺：一排小胶囊。比写在段落里更容易被读到，
+   也符合「这几条是并列的保证」这个语义。 */
+.about-privacy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.about-privacy-i {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
 .about-facts {
   display: flex;
   flex-direction: column;
   padding: 4px 0;
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
@@ -2370,7 +2714,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   flex-direction: column;
   gap: 10px;
   padding: 16px 20px 18px;
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
