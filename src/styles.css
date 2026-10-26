@@ -98,6 +98,13 @@
   --tag-link-bg: rgba(3, 105, 161, 0.12);
   --tag-code-fg: #475569;
   --tag-code-bg: rgba(71, 85, 105, 0.14);
+  /* 设置页区块底与行分隔线：区块要能从页面底色里浮出来，但不能抢内容。
+     浅色用半透明白（压在材质上仍透出壁纸），深色用极低比例白。 */
+  --block-bg: rgba(255, 255, 255, 0.8);
+  /* 区块外框：比 --stroke 明确一档。半透明白卡片压在同样浅的材质上，
+     只靠 0.55 的底色根本看不出分组边界（实测截图确认过）。 */
+  --block-border: rgba(0, 0, 0, 0.1);
+  --row-divider: rgba(0, 0, 0, 0.07);
   --tag-pinned-bg: rgba(47, 107, 255, 0.12);
   --tag-fav-bg: rgba(186, 117, 23, 0.15);
   --tag-edited-bg: rgba(26, 127, 55, 0.14);
@@ -160,6 +167,9 @@ body.dark {
   --tag-link-bg: rgba(56, 189, 248, 0.18);
   --tag-code-fg: #cbd5e1;
   --tag-code-bg: rgba(203, 213, 225, 0.16);
+  --block-bg: rgba(255, 255, 255, 0.05);
+  --block-border: rgba(255, 255, 255, 0.1);
+  --row-divider: rgba(255, 255, 255, 0.08);
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
   --tag-edited-bg: rgba(74, 194, 107, 0.2);
@@ -1245,19 +1255,85 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   max-width: none;
 }
 
+/* ── 区块（卡片）─────────────────────────────────────────────────────────
+   设置页的骨架：一页 = 若干区块，区块 = 一组同类设置。
+   没有区块时，十几行平铺、视觉权重全一样，用户找不到重点（上一版就是这样）。 */
+.settings .block {
+  padding: 4px 16px 8px;
+  border: 1px solid var(--block-border);
+  border-radius: var(--radius-sm);
+  background: var(--block-bg);
+}
+
+.settings .block-h {
+  padding: 12px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+/* 危险区块：顶部红线 + 红标题。清空全部历史与普通开关并列时，
+   光靠按钮颜色不够 —— 区块本身要一眼可辨。 */
+.settings .block.is-danger {
+  border-top: 2px solid var(--danger);
+}
+
+.settings .block.is-danger .block-h {
+  color: var(--danger);
+}
+
+/* ── 一行：标题 + 说明在左，控件在右 ──────────────────────────────────────
+   老布局是「label 定宽 160 + 控件 + 说明」挤一行，长说明被压成一段（
+   「删除时同时删本地文件」那段 60 多字），而且各行的控件起始位置随标题长度漂移。 */
 .settings .row {
   display: flex;
-  align-items: center;
-  /* 窗口变窄时允许换行：否则说明文字会被挤成一列竖排（用户截图） */
-  flex-wrap: wrap;
-  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 0;
   font-size: 13px;
   color: var(--text);
 }
 
-.settings .row label {
-  flex: 0 0 160px;
+/* 行之间一条极淡的线：靠间距也能分开，但有了它更接近系统设置的观感 */
+.settings .row + .row {
+  border-top: 1px solid var(--row-divider);
+}
+
+/* 子项：从属于上一项。用缩进 + 左侧竖线表达层级，
+   取代原来用全角空格「　└ 」伪装的做法。 */
+.settings .row.is-sub {
+  margin-left: 6px;
+  padding-left: 14px;
+  border-left: 2px solid var(--block-border);
+}
+
+.settings .row-text {
+  flex: 1;
   min-width: 0;
+}
+
+.settings .row-title {
+  display: block;
+  line-height: 1.5;
+  cursor: default;
+}
+
+.settings .row-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.settings .row-ctrl {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 控件的基线对齐标题第一行，而不是跟着说明文字往下掉 */
+  min-height: 20px;
 }
 
 .settings input[type="number"] {
@@ -1282,20 +1358,6 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 .settings .hint {
   font-size: 12px;
   color: var(--text-dim);
-  /* 至少留 150px 宽，放不下就整块换到下一行，避免文字被压成竖排 */
-  flex: 1 1 150px;
-  min-width: 0;
-}
-
-/* 材质浓度：标签 + 滑块 + 百分比固定排成一行。
-   .hint 默认 flex-basis:150px 会把 160+180+150 撑破容器导致换行，
-   这里改成按内容宽度、不参与换行（nowrap 兜底）。 */
-.settings .row:has(#set-material) {
-  flex-wrap: nowrap;
-}
-
-.settings .row:has(#set-material) .hint {
-  flex: 0 0 auto;
   white-space: nowrap;
 }
 
@@ -1304,6 +1366,15 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   height: 16px;
   accent-color: var(--accent);
   cursor: default;
+}
+
+/* 缓存块嵌在「存储位置」区块里，去掉它自己的外框与底色 ——
+   双层边框 + 两层底色会让这一块看起来「框里有框」。 */
+.settings .block .cache-box {
+  padding: 4px 0 0;
+  border: 0;
+  background: transparent;
+  gap: 6px;
 }
 
 /* 缓存目录块（迁移自 v1 缓存信息区） */
@@ -2363,6 +2434,23 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 }
 
 /* ── 事实表：列排（标签在左、值在右），对齐 Windows 设置的「属性表」 ── */
+/* 隐私承诺：一排小胶囊。比写在段落里更容易被读到，
+   也符合「这几条是并列的保证」这个语义。 */
+.about-privacy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.about-privacy-i {
+  padding: 3px 10px;
+  border: 1px solid var(--block-border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
 .about-facts {
   display: flex;
   flex-direction: column;

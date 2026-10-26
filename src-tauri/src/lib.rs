@@ -264,6 +264,7 @@ pub fn run() {
             effects::drag_start,
             effects::resize_start,
             clipboard::get_history,
+            clipboard::copy_diagnostics,
             clipboard::delete_item,
             clipboard::delete_items,
             clipboard::toggle_pin,

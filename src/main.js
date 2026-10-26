@@ -2007,9 +2007,9 @@ function toast(msg) {
 // 「记录」已并入「记录与缓存」：记什么（文件复制）→ 留多久（保留天数）→ 存在哪
 // （缓存目录）→ 怎么清（清理缓存 / 清空全部），本就是同一条链路，拆成两页反而跳。
 const SETTINGS_TABS = [
-  { id: "general", label: "通用" },
+  { id: "general", label: "常规" },
   { id: "appearance", label: "外观" },
-  { id: "data", label: "记录与缓存" },
+  { id: "data", label: "数据" },
   { id: "about", label: "关于" },
 ];
 
@@ -2047,43 +2047,111 @@ function settingsHtml() {
   </div>`;
 }
 
+// ── 设置页的排版基元 ──────────────────────────────────────────────────────
+// 设置页一律「区块（卡片）→ 行 → 标题 + 说明 + 右侧控件」三段式。
+// 抽成这三个函数而不是每个模板手写：一页十几行，手写必然出现某行少了 row-text、
+// 某个 label 忘了 for、某个子项忘了 is-sub —— 这类不一致正是上一版看起来"乱"的原因。
+//
+// `sub = true` 表示这一项从属于上一项（缩进 + 左侧竖线），取代原来用全角空格
+// 「　└ 」伪装层级的写法。
+function rowText(title, desc, id) {
+  const t = id
+    ? `<label class="row-title" for="${id}">${title}</label>`
+    : `<span class="row-title">${title}</span>`;
+  return `<div class="row-text">${t}${desc ? `<div class="row-desc">${desc}</div>` : ""}</div>`;
+}
+
+function rowCheck(id, title, desc, checked, sub = false) {
+  return `<div class="row${sub ? " is-sub" : ""}">${rowText(title, desc, id)}<div class="row-ctrl"><input type="checkbox" id="${id}" ${checked ? "checked" : ""} /></div></div>`;
+}
+
+/// 右侧是自定义控件（分段控件 / 按钮 / 数字框 / 滑块）的行
+function rowCtl(title, desc, ctl, sub = false, id) {
+  return `<div class="row${sub ? " is-sub" : ""}">${rowText(title, desc, id)}<div class="row-ctrl">${ctl}</div></div>`;
+}
+
+function block(title, inner, opts = {}) {
+  const cls = ["block", opts.danger ? "is-danger" : ""].filter(Boolean).join(" ");
+  return `<section class="${cls}">${title ? `<h3 class="block-h">${title}</h3>` : ""}${inner}</section>`;
+}
+
 function settingsGeneralHtml(s) {
-  return `
-    <div class="row"><label>开机自启</label>
-      <input type="checkbox" id="set-autostart" ${s.autoStart ? "checked" : ""} />
-      <span class="hint">开机后自动运行</span></div>
-    <div class="row"><label>关闭时后台运行</label>
-      <input type="checkbox" id="set-tray" ${s.trayOnClose ? "checked" : ""} />
-      <span class="hint">关闭时收进托盘，继续在后台记录（右键托盘可开菜单）</span></div>
-    <div class="row"><label>置顶互通</label>
-      <input type="checkbox" id="set-pin-global" ${s.pinGlobal ? "checked" : ""} />
-      <span class="hint">任一分类置顶或取消，其它分类同步；关闭后各分类独立记录</span></div>
-    <div class="row"><label>　└ 关闭时取消同步置顶</label>
-      <input type="checkbox" id="set-pin-cancel" ${s.pinCancelOnDisable ? "checked" : ""} />
-      <span class="hint">勾选则关掉互通时连同它产生的同步置顶一起取消（置顶回到当初的分类）；不勾选则同步置顶永久保留</span></div>
-    <div class="row"><label>外观主题</label>
-      <div class="seg" id="set-theme">
-        <button type="button" data-theme="light" ${s.themeMode === "light" ? 'class="on"' : ""}>浅色</button>
-        <button type="button" data-theme="dark" ${s.themeMode === "dark" ? 'class="on"' : ""}>深色</button>
-        <button type="button" data-theme="system" ${(s.themeMode || "system") === "system" ? 'class="on"' : ""}>系统</button>
-      </div>
-      <span class="hint">「系统」跟随 Windows 的深浅色设置；侧栏底部另有一个深浅切换按钮</span></div>
-    <div class="btn-row">
-      <button class="btn-ghost" id="replay-tour">重新查看功能引导</button>
-    </div>`;
+  return [
+    block(
+      "启动",
+      rowCheck("set-autostart", "开机自启", "开机后自动运行", s.autoStart) +
+        rowCheck(
+          "set-tray",
+          "关闭时收进托盘",
+          "关掉窗口后在后台继续记录；右键托盘图标可打开菜单",
+          s.trayOnClose
+        )
+    ),
+    block(
+      "置顶",
+      rowCheck(
+        "set-pin-global",
+        "置顶互通",
+        "任一分类置顶或取消，其它分类同步；关闭后各分类独立记录",
+        s.pinGlobal
+      ) +
+        rowCheck(
+          "set-pin-cancel",
+          "关闭互通时取消同步置顶",
+          "勾选则关掉互通时连同它产生的同步置顶一起取消；不勾选则永久保留",
+          s.pinCancelOnDisable,
+          true
+        )
+    ),
+    block(
+      "帮助",
+      rowCtl(
+        "功能导览",
+        "随时可以再看一遍这 7 步说明",
+        `<button class="btn-ghost" id="replay-tour">重新查看</button>`
+      )
+    ),
+  ].join("");
 }
 
 function settingsAppearanceHtml(s) {
-  return `
-    <div class="row"><label>材质浓度</label>
-      <input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 50}" />
-      <span class="hint" id="material-val">${s.materialAlpha ?? 50}%（越高越厚实 · 越低越通透）</span></div>
-    <div class="row"><label>圆角模式</label>
-      <input type="checkbox" id="set-round" ${s.roundMode ? "checked" : ""} />
-      <span class="hint">圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感</span></div>
-    <div class="row"><label>不跟随系统缩放</label>
-      <input type="checkbox" id="set-ignore-dpi" ${s.ignoreDpiScale ? "checked" : ""} />
-      <span class="hint">界面固定按 100% 显示，Windows 调缩放后窗口与布局不再跟着变（含托盘菜单）。关掉则恢复正常跟随</span></div>`;
+  return [
+    block(
+      "主题",
+      rowCtl(
+        "深浅模式",
+        "「系统」跟随 Windows 的深浅色设置；侧栏底部也有一键切换",
+        `<div class="seg" id="set-theme">
+          <button type="button" data-theme="light" ${s.themeMode === "light" ? 'class="on"' : ""}>浅色</button>
+          <button type="button" data-theme="dark" ${s.themeMode === "dark" ? 'class="on"' : ""}>深色</button>
+          <button type="button" data-theme="system" ${(s.themeMode || "system") === "system" ? 'class="on"' : ""}>系统</button>
+        </div>`
+      )
+    ),
+    block(
+      "窗口",
+      rowCtl(
+        "材质浓度",
+        "越高越厚实 · 越低越通透",
+        `<input type="range" id="set-material" min="40" max="90" value="${s.materialAlpha ?? 50}" /><span class="hint" id="material-val">${s.materialAlpha ?? 50}%</span>`
+      ) +
+        rowCheck(
+          "set-round",
+          "圆角模式",
+          "圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感",
+          s.roundMode
+        )
+    ),
+    block(
+      "显示",
+      rowCheck(
+        "set-ignore-dpi",
+        "不跟随系统缩放",
+        "界面固定按 100% 显示。Windows 调整缩放后窗口与布局不再跟着变（含托盘菜单）；关掉则恢复跟随",
+        s.ignoreDpiScale
+      )
+    ),
+  ].join("");
 }
 
 // 「保留 N 天 / 永久保存」的展示文案。0 在语义上是「永久保留」，
@@ -2093,49 +2161,93 @@ function retentionLabel(days) {
   return n === 0 ? "永久保存" : `仅保留近 ${n} 天内容`;
 }
 
-// 「记录」与「数据与缓存」合并后的一页，按同一条链路排列：
-// 记什么 → 留多久 → 存在哪 → 怎么清。
+// 数据页按同一条链路排：记什么 → 留多久 → 存在哪 → 怎么清 → 删条目的连带动作。
+// 最后「危险操作」单独成块并用红色标题隔离 —— 清空全部历史与「文件复制」这种
+// 普通开关并列时，视觉上完全分不出哪一个是不可撤销的。
 function settingsDataHtml(s) {
-  return `
-    <div class="row"><label>文件复制</label>
-      <input type="checkbox" id="set-file-copy" ${s.fileCopy ? "checked" : ""} />
-      <span class="hint">记录资源管理器里复制的文件（默认关闭，关闭时不采集）</span></div>
-    <div class="row"><label>保留天数</label>
-      <input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" />
-      <span class="hint">0 表示永久保留</span></div>
-    <div class="cache-box">
-      <div class="cache-title">缓存目录 <span class="hint">${retentionLabel(s.retentionDays)}</span></div>
-      <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
-      <div class="cache-stats" id="cache-stats"></div>
-      <div class="btn-row">
-        <button class="btn-ghost" id="btn-pick-dir">更改目录</button>
-        <button class="btn-ghost" id="btn-open-dir">打开目录</button>
-        <button class="btn-ghost" id="btn-open-log">日志目录</button>
-      </div>
-      <div class="cache-log-hint"><b>缓存与日志相互独立</b>：清空、保留天数、退出清理都不会影响日志，日志仅能手动删除。</div>
-    </div>
-    <div class="row"><label>关闭时清理缓存</label>
-      <input type="checkbox" id="set-clean" ${s.cleanOnClose ? "checked" : ""} />
-      <span class="hint">退出时清理缓存与历史（默认保留置顶/收藏）</span></div>
-    <div class="row"><label>　└ 同时清理置顶/收藏</label>
-      <input type="checkbox" id="set-clean-pinned" ${s.cleanIncludePinned ? "checked" : ""} />
-      <span class="hint">不勾选则置顶/收藏不受清理影响</span></div>
-    <div class="row"><label>　└ 退出前弹窗提醒</label>
-      <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
-      <span class="hint">退出前弹窗确认</span></div>
-    <div class="row"><label>删除时同时删本地文件</label>
-      <input type="checkbox" id="set-delete-files" ${s.deleteFilesWithItem ? "checked" : ""} />
-      <span class="hint">文件条目只是<b>路径引用</b>。关闭（默认）时删条目只删记录，磁盘上的文件不动；开启后删除会先把本地文件移入回收站，<b>每次都先弹窗确认</b></span></div>
-    <div class="row"><label>　└ 处理方式</label>
-      <div class="seg" id="set-delete-mode" ${s.deleteFilesWithItem ? "" : "data-disabled"}>
-        <button type="button" data-perm="0" ${s.deleteFilesPermanent ? "" : 'class="on"'}>移入回收站</button>
-        <button type="button" data-perm="1" ${s.deleteFilesPermanent ? 'class="on"' : ""}>永久删除</button>
-      </div>
-      <span class="hint">回收站可还原；永久删除不可恢复，请确认后再选</span></div>
-    <div class="btn-row">
-      <button class="btn-ghost" id="clear-missing">清空已失效条目</button>
-      <button class="btn-danger" id="clear-all">清空全部历史</button>
-    </div>`;
+  return [
+    block(
+      "记录",
+      rowCheck(
+        "set-file-copy",
+        "文件复制",
+        "记录资源管理器里复制的文件（默认关闭，关闭时不采集）",
+        s.fileCopy
+      ) +
+        rowCtl(
+          "保留天数",
+          "到期自动清理，<b>默认 3 天</b>；填 0 表示永久保存",
+          `<input type="number" id="set-retention" min="0" value="${s.retentionDays ?? 3}" /><span class="hint">0 = 永久保存</span>`,
+          false,
+          "set-retention"
+        )
+    ),
+    block(
+      "存储位置",
+      `<div class="cache-box">
+        <div class="cache-title">缓存目录 <span class="hint">${retentionLabel(s.retentionDays)}</span></div>
+        <div class="cache-path" id="cache-path">${s.cacheDir || "加载中…"}</div>
+        <div class="cache-stats" id="cache-stats"></div>
+        <div class="btn-row">
+          <button class="btn-ghost" id="btn-pick-dir">更改目录</button>
+          <button class="btn-ghost" id="btn-open-dir">打开目录</button>
+          <button class="btn-ghost" id="btn-open-log">日志目录</button>
+        </div>
+        <div class="cache-log-hint"><b>缓存与日志相互独立</b>：清空、保留天数、退出清理都不会影响日志，日志仅能手动删除。</div>
+      </div>`
+    ),
+    block(
+      "清理",
+      rowCheck(
+        "set-clean",
+        "关闭时清理缓存",
+        "退出时清理缓存与历史（默认保留置顶/收藏）",
+        s.cleanOnClose
+      ) +
+        rowCheck(
+          "set-clean-pinned",
+          "同时清理置顶/收藏",
+          "不勾选则置顶/收藏不受清理影响",
+          s.cleanIncludePinned,
+          true
+        ) +
+        rowCheck(
+          "set-clean-confirm",
+          "退出前弹窗提醒",
+          "退出前先确认一次",
+          s.cleanConfirmExit,
+          true
+        )
+    ),
+    block(
+      "删除文件条目",
+      rowCheck(
+        "set-delete-files",
+        "同时处理本地文件",
+        "文件条目只是<b>路径引用</b>。关闭（默认）时删条目只删记录，磁盘上的文件不动；开启后删除会先把本地文件移入回收站，<b>每次都先弹窗确认</b>",
+        s.deleteFilesWithItem
+      ) +
+        rowCtl(
+          "处理方式",
+          "回收站可还原；永久删除不可恢复",
+          `<div class="seg" id="set-delete-mode" ${s.deleteFilesWithItem ? "" : "data-disabled"}>
+            <button type="button" data-perm="0" ${s.deleteFilesPermanent ? "" : 'class="on"'}>移入回收站</button>
+            <button type="button" data-perm="1" ${s.deleteFilesPermanent ? 'class="on"' : ""}>永久删除</button>
+          </div>`,
+          true
+        )
+    ),
+    block(
+      "危险操作",
+      `<div class="row"><div class="row-text"><span class="row-title">删除条目</span>
+         <div class="row-desc">这两个操作无法撤销。开了「同时处理本地文件」时，清空已失效不会碰文件（它们本来就不存在）</div></div>
+         <div class="row-ctrl">
+           <button class="btn-ghost" id="clear-missing">清空已失效</button>
+           <button class="btn-danger" id="clear-all">清空全部历史</button>
+         </div></div>`,
+      { danger: true }
+    ),
+  ].join("");
 }
 
 // ── 关于页 ────────────────────────────────────────────────────────────────
@@ -2269,8 +2381,18 @@ function settingsAboutHtml() {
           <button class="btn-ghost" id="btn-check-update">${updateBtnLabel()}</button>
           <button class="btn-ghost" id="btn-repo">项目主页</button>
           <button class="btn-ghost" id="btn-feedback">问题反馈</button>
+          <button class="btn-ghost" id="btn-diag" title="复制版本、系统、材质、数据目录等排查信息">复制诊断信息</button>
         </div>
       </div>
+    </div>
+
+    <!-- 隐私承诺集中在一条：这软件的核心卖点就是「只在你自己的机器上」，
+         但原来的关于页一个字都没讲，用户只能靠 README 猜。 -->
+    <div class="about-privacy">
+      <span class="about-privacy-i">只存本机</span>
+      <span class="about-privacy-i">Windows 账户级加密</span>
+      <span class="about-privacy-i">无账号 · 不上传</span>
+      <span class="about-privacy-i">剪贴板正文不进日志</span>
     </div>
 
     <div class="about-facts">
@@ -3098,6 +3220,19 @@ function bindSettings(view) {
       });
   const btnFeedback = view.querySelector("#btn-feedback");
   if (btnFeedback) btnFeedback.onclick = aboutFeedback;
+
+  // 一键复制诊断信息：报障时用户最缺的就是「版本/系统/材质/数据在哪」，
+  // 让他一条条截图远不如点一下粘贴。
+  const btnDiag = view.querySelector("#btn-diag");
+  if (btnDiag)
+    btnDiag.onclick = async () => {
+      try {
+        await invoke("copy_diagnostics");
+        toast("诊断信息已复制，可直接粘贴到反馈里");
+      } catch (e) {
+        toast("复制失败：" + e);
+      }
+    };
 
   // 更新日志里的链接：用事件委托交给系统浏览器打开。
   // WebView 内的 <a href> 会被当作应用内导航（点了直接白屏），所以必须拦下。

@@ -189,6 +189,52 @@ pub struct HistoryItem {
 // 对外命令
 // ---------------------------------------------------------------------------
 
+/// 复制一份诊断信息到剪贴板（给用户报障用）。
+///
+/// 为什么需要：用户反馈问题时，最常缺的就是「版本 / 系统 / 材质 / 数据在哪」这四项，
+/// 每次都要来回追问、截图。这里一次性拼好，用户点一下粘贴就能发出来。
+///
+/// 内容**只含元数据**，不含任何剪贴板正文 —— 与日志同一条红线。
+/// 写剪贴板会走 `mark_skip()`，所以这条诊断文本不会被记成一条历史。
+#[tauri::command]
+pub fn copy_diagnostics() -> Result<String, String> {
+    let info = crate::about::about_info();
+    let s = crate::settings::get();
+    let cache = cache_info();
+    let items = HISTORY
+        .get()
+        .and_then(|m| m.lock().ok().map(|g| g.len()))
+        .unwrap_or(0);
+    let get = |k: &str| info.get(k).and_then(|v| v.as_str()).unwrap_or("—").to_string();
+
+    let text = format!(
+        "轻贴 {}（{}）\n系统：{}\n材质档位：{}\n界面缩放：{}\n主题：{}\n保留天数：{}\n历史条目：{} 条\n缓存目录：{}\n缓存占用：{} 个文件 / {:.1} MB",
+        get("version"),
+        if get("debug") == "true" { "debug" } else { "release" },
+        get("osDisplay"),
+        get("tier"),
+        if s.ignore_dpi_scale {
+            "固定 100%（不跟随系统）"
+        } else {
+            "跟随系统"
+        },
+        s.theme_mode,
+        if s.retention_days == 0 {
+            "永久保存".to_string()
+        } else {
+            format!("{} 天", s.retention_days)
+        },
+        items,
+        cache.dir,
+        cache.count,
+        cache.size as f64 / 1024.0 / 1024.0
+    );
+
+    unsafe { write_text_to_clipboard(&text)? };
+    crate::log_print!("[clipboard] 已复制诊断信息到剪贴板（不含任何正文）");
+    Ok(text)
+}
+
 #[tauri::command]
 pub fn get_history() -> Vec<HistoryItem> {
     HISTORY
