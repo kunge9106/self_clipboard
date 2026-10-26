@@ -749,7 +749,10 @@ function filtered() {
         // 也不在 i.files 里。把中文标签（图片/文本/文件）与英文 kind（image/text/files）
         // 都纳入后，「图片」和「image」就都能搜出图片条目。
         (KIND_LABEL[i.kind] || "").toLowerCase().includes(query) ||
-        (i.kind || "").toLowerCase().includes(query)
+        (i.kind || "").toLowerCase().includes(query) ||
+        // 子类型也参与匹配：搜「代码」/「code」、「链接」/「link」都应命中
+        (SUBTYPE_LABEL[i.subtype] || "").toLowerCase().includes(query) ||
+        (i.subtype || "").toLowerCase().includes(query)
     );
   }
   // 置顶优先，其余按时间倒序。置顶是**按分类独立**的：只在当前这个分类里置顶过的
@@ -797,6 +800,9 @@ function startTimeTicker() {
 }
 
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
+// 文本的子类型标签：只用于卡片徽章与搜索匹配，**不是分类**
+// （链接/代码仍然是文本条目，侧栏里不会单独出现）
+const SUBTYPE_LABEL = { link: "链接", code: "代码" };
 
 /**
  * 重绘列表。
@@ -998,6 +1004,13 @@ function cardEl(item) {
     (hideKind
       ? ""
       : `<span class="tag tag-kind tag-kind-${item.kind}">${KIND_LABEL[item.kind] || item.kind}</span>`) +
+    // 子类型徽章：任何视图都显示（它不是分类，而是「这条内容是什么」的提示，
+    // 在「文本」视图里尤其有用 —— 那里所有条目都叫文本，靠它才分得出代码和链接）
+    (item.subtype === "link"
+      ? '<span class="tag tag-link">链接</span>'
+      : item.subtype === "code"
+      ? '<span class="tag tag-code">代码</span>'
+      : "") +
     (pinned ? '<span class="tag tag-pinned">已置顶</span>' : "") +
     (item.favorite && !hideFav ? '<span class="tag tag-fav">已收藏</span>' : "") +
     // 「已编辑」= 在全文编辑里改过并保存后落成的新条目。原文条目始终保留不动，

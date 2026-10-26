@@ -970,6 +970,8 @@ pub fn init(app: &AppHandle) {
     // 规则改成「开头最多 2 行」后必须**重算存量**，否则用户看到的还是旧预览，
     // 会以为修复没生效。
     let refreshed = refresh_text_previews(&dir, &mut hist);
+    // 存量条目补算「链接 / 代码」子类型（只在升级后首次启动真正干活）
+    let subtyped = refresh_text_subtypes(&dir, &mut hist);
     if backfilled > 0 {
         crate::log_print!("[clipboard] 已为 {backfilled} 条历史文件条目补写 files/ 清单");
     }
@@ -979,7 +981,10 @@ pub fn init(app: &AppHandle) {
     if refreshed > 0 {
         crate::log_print!("[clipboard] 已按新规则重算 {refreshed} 条文本条目的预览");
     }
-    if backfilled > 0 || refreshed > 0 {
+    if subtyped > 0 {
+        crate::log_print!("[clipboard] 已为 {subtyped} 条存量文本判定「链接 / 代码」子类型");
+    }
+    if backfilled > 0 || refreshed > 0 || subtyped > 0 {
         save_index(&dir, &hist);
     }
 
@@ -2208,6 +2213,29 @@ fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usi
     changed
 }
 
+/// 给存量文本条目补算 `subtype`（链接 / 代码），返回处理条数。
+///
+/// 只处理 `subtype.is_none()` 的条目 —— 已判定过的（包括「判过但两类都不是」的空串）
+/// 一律跳过，所以这个函数**天然只跑一次**：升级后首次启动扫一遍，之后每次启动
+/// 都不会再解密几百条正文。这也是用空串而不是 None 表示「无子类型」的原因。
+fn refresh_text_subtypes(dir: &PathBuf, hist: &mut [HistoryItem]) -> usize {
+    let mut changed = 0usize;
+    for item in hist.iter_mut() {
+        if item.kind != "text" || item.subtype.is_some() {
+            continue;
+        }
+        let Some(rel) = item.text_path.as_ref() else {
+            continue;
+        };
+        let Ok(text) = read_text_entity(dir, rel) else {
+            continue;
+        };
+        item.subtype = Some(detect_subtype(&text).unwrap_or("").to_string());
+        changed += 1;
+    }
+    changed
+}
+
 fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
     let dir = DIR.get().unwrap().clone();
     let ts = now_ms();
@@ -3094,6 +3122,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
             pinned_views: Vec::new(),
             favorite: false,
             edited: false,
+            subtype: Some(detect_subtype(&text).unwrap_or("").to_string()),
             preview,
             preview_truncated,
             size: text.len() as u64,
@@ -3159,6 +3188,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 pinned_views: Vec::new(),
                 favorite: false,
                 edited: false,
+                subtype: None,
                 preview: if files.len() == 1 {
                     name
                 } else {
@@ -3201,6 +3231,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 pinned_views: Vec::new(),
                 favorite: false,
                 edited: false,
+                subtype: None,
                 preview: "[图片]".into(),
                 preview_truncated: false,
                 size,
@@ -4274,6 +4305,49 @@ mod tests {
     }
 
     /// 预览：最多 2 行，且**被丢弃内容时必须补省略号**。
+    /// 子类型判定：链接只认「整条就是一个网址」。
+    #[test]
+    fn subtype_link_requires_whole_content_to_be_a_url() {
+        assert_eq!(detect_subtype("https://example.com/a?b=1"), Some("link"));
+        assert_eq!(detect_subtype("  https://example.com  "), Some("link"));
+        assert_eq!(detect_subtype("www.example.com"), Some("link"));
+
+        // 夹在一句话里的链接仍然是普通文本 —— 标成「链接」会误导
+        assert_eq!(detect_subtype("看这个 https://example.com"), None);
+        assert_eq!(detect_subtype("https://example.com\n第二行"), None);
+    }
+
+    /// 子类型判定：代码要能认出来，且**不能把中文文档误判成代码**。
+    ///
+    /// 误判的代价比漏判大：漏了只是少一个徽章，误了会让用户对整列徽章失去信任。
+    #[test]
+    fn subtype_code_detected_without_false_positives() {
+        // 典型代码：有围栏
+        assert_eq!(
+            detect_subtype("```rust\nfn main() {}\n```"),
+            Some("code")
+        );
+        // 无围栏但有缩进 + 关键字 + 结构符号
+        assert_eq!(
+            detect_subtype("fn main() {\n    let x = 1;\n    println!(\"{}\", x);\n}"),
+            Some("code")
+        );
+        // JSON / 配置片段
+        assert_eq!(detect_subtype("{\n  \"name\": \"qingtie\"\n}"), Some("code"));
+
+        // 中文正文：带分号、带冒号、多行缩进，都不该被认成代码
+        assert_eq!(
+            detect_subtype("注意事项：\n- 先退出软件；\n- 再重新安装；"),
+            None
+        );
+        assert_eq!(
+            detect_subtype("这是一段普通说明。\n第二行继续说明，没有代码特征。"),
+            None
+        );
+        // 单行代码不判定：与普通句子在统计上没有区别
+        assert_eq!(detect_subtype("const x = 1;"), None);
+    }
+
     /// 改动前按 120 字硬截且没有省略号，视觉上像「话说半截断掉」——
     /// 用户反馈「这两行为什么显示不全」就是这个。
     #[test]

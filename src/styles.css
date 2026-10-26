@@ -91,6 +91,13 @@
   --tag-kind-image-bg: rgba(124, 58, 237, 0.12);
   --tag-kind-files-fg: #0d9488;
   --tag-kind-files-bg: rgba(13, 148, 136, 0.13);
+  /* 文本子类型徽章：链接（天蓝）与代码（石板灰）。
+     必须与已有的七个徽章都不同色相 —— 黄绿(文本) 紫(图片) 青绿(文件) 蓝(置顶)
+     琥珀(收藏) 绿(已编辑) 红(失效)，剩下天蓝与中性石板两个空位。 */
+  --tag-link-fg: #0369a1;
+  --tag-link-bg: rgba(3, 105, 161, 0.12);
+  --tag-code-fg: #475569;
+  --tag-code-bg: rgba(71, 85, 105, 0.14);
   --tag-pinned-bg: rgba(47, 107, 255, 0.12);
   --tag-fav-bg: rgba(186, 117, 23, 0.15);
   --tag-edited-bg: rgba(26, 127, 55, 0.14);
@@ -149,6 +156,10 @@ body.dark {
   --tag-kind-image-bg: rgba(160, 130, 255, 0.2);
   --tag-kind-files-fg: #5fd6c8;
   --tag-kind-files-bg: rgba(95, 214, 200, 0.2);
+  --tag-link-fg: #7dd3fc;
+  --tag-link-bg: rgba(56, 189, 248, 0.18);
+  --tag-code-fg: #cbd5e1;
+  --tag-code-bg: rgba(203, 213, 225, 0.16);
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
   --tag-edited-bg: rgba(74, 194, 107, 0.2);
@@ -972,6 +983,17 @@ html:not(.hovers-off) .card:hover {
 .tag-kind-files {
   color: var(--tag-kind-files-fg);
   background: var(--tag-kind-files-bg);
+}
+
+/* 文本子类型：链接 / 代码 */
+.tag-link {
+  color: var(--tag-link-fg);
+  background: var(--tag-link-bg);
+}
+
+.tag-code {
+  color: var(--tag-code-fg);
+  background: var(--tag-code-bg);
 }
 
 .tag-pinned {
