@@ -2663,7 +2663,16 @@ function renderUpdatePanels() {
   if (has) {
     renderNotes(info.latest, info.notes);
   } else if (info?.localNotes) {
-    renderNotes(info.localTag || cur, info.localNotes);
+    // 跨版本升级：标题显示区间（`v2.3.0 → v2.4.1`），一眼看出这次跨了几版。
+    // 没有起点时（老配置里没这个字段）后端会退化为「最近几节」，
+    // 标题相应写成 `v2.4.1 及之前 3 个版本`，免得只写一个版本号却列了好几节。
+    const from = info.localNotesFrom;
+    const to = info.localTag || cur;
+    const count = info.localNotesCount || 1;
+    let tag = to;
+    if (from && from !== to) tag = `${from} → ${to}`;
+    else if (count > 1) tag = `${to} 及之前 ${count - 1} 个版本`;
+    renderNotes(tag, info.localNotes);
   } else {
     renderNotes(info?.latest || "", info?.notes || "");
   }

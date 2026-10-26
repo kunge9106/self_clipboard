@@ -88,10 +88,50 @@ fn mem_mb() -> u64 {
 // ---------------------------------------------------------------------------
 
 fn parse_version(v: &str) -> Vec<u64> {
+    // 只取**核心段**（`2.4.1-beta.2` → [2,4,1]）。
+    // 原来把 `-` 也当分隔符，于是 `2.4.1-beta.2` 变成 [2,4,1,0,2] ——
+    // 多出来的 `2` 让它比 `2.4.1` 还大，预发布版被误判成「更新的版本」。
     v.trim_start_matches('v')
-        .split(['.', '-'])
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .split('.')
         .map(|p| p.parse::<u64>().unwrap_or(0))
         .collect()
+}
+
+/// 预发布标识（`2.4.1-beta.2` → `["beta","2"]`），没有则 `None`。
+fn prerelease(v: &str) -> Option<Vec<&str>> {
+    let parts: Vec<&str> = v.trim_start_matches('v').splitn(2, '-').collect();
+    match parts.as_slice() {
+        [_, pre] if !pre.is_empty() => Some(pre.split('.').collect()),
+        _ => None,
+    }
+}
+
+/// 按 semver 比较预发布标识：数字段按数值、字符串段按字典序、数字段小于字符串段，
+/// 前缀相同时更长的那一方更大（`-alpha < -alpha.1`）。
+fn cmp_prerelease(a: &[&str], b: &[&str]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for i in 0..a.len().max(b.len()) {
+        match (a.get(i), b.get(i)) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let ord = match (x.parse::<u64>().ok(), y.parse::<u64>().ok()) {
+                    (Some(p), Some(q)) => p.cmp(&q),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => x.cmp(y),
+                };
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
+    Ordering::Equal
 }
 
 /// 数字段逐位比较；数字段完全相同、只有一方带预发布后缀（`-beta`）时，
@@ -109,9 +149,15 @@ fn is_newer(latest: &str, current: &str) -> bool {
             return a > b;
         }
     }
-    let l_pre = latest.trim_start_matches('v').contains('-');
-    let c_pre = current.trim_start_matches('v').contains('-');
-    c_pre && !l_pre
+    // 数字段相同才轮到预发布比较。原来只判「有没有 `-`」，`-beta.2` 这种带序号的
+    // 后缀会被当成比正式版更新（`parse_version` 把 `2` 也吃进去了），已由
+    // `parse_version` + `cmp_prerelease` 一并修正。
+    match (prerelease(latest), prerelease(current)) {
+        (None, None) => false,
+        (None, Some(_)) => true,  // 正式版高于自己的预发布
+        (Some(_), None) => false,
+        (Some(a), Some(b)) => cmp_prerelease(&a, &b) == std::cmp::Ordering::Greater,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -569,29 +615,87 @@ fn fetch_release() -> Result<Release, String> {
 /// 内置一份就没这个问题：本机跑的是哪一版，就显示哪一版的说明。
 const CHANGELOG: &str = include_str!("../../CHANGELOG.md");
 
-/// 从 CHANGELOG 里取出版本 `v` 那一节（`## v` 到下一个 `## ` 之间）。
+/// 关于页最多一次显示几节更新日志。
 ///
-/// 忽略大小写与前后空白，兼容 `## 2.1.9-beta` / `## v2.1.9-beta` 两种写法。
-/// 找不到就返回空串，由调用方回退去显示远端版本说明。
-fn changelog_section(v: &str) -> String {
-    let want = v.trim().trim_start_matches('v').to_lowercase();
-    let mut out: Vec<&str> = Vec::new();
-    let mut inside = false;
+/// 用户从很老的版本升上来时（比如 2.2 → 2.4.1），把中间每一节全列出来会把关于页
+/// 变成一篇长文。取最近 8 节已经能覆盖几个月的跨度；更早的说明在项目主页看。
+const MAX_NOTE_SECTIONS: usize = 8;
+
+/// 没有「升级起点」时显示几节。
+///
+/// 起点字段是本版才加的，**现有用户升级上来时配置里没有它** —— 无法知道确切跨度。
+/// 这种情况下退化为「最近 N 节」，而不是只显示当前一节：否则正是最需要看更新的
+/// 这批老用户，反而只看到一屏说明。N=4 能覆盖绝大多数升级跨度（一般人不会连跳
+/// 四五个版本）。
+const FALLBACK_NOTE_SECTIONS: usize = 4;
+
+/// 把 CHANGELOG 拆成 `(版本号, 正文)`，保持文件里的顺序（新 → 旧）。
+fn changelog_sections() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut cur: Option<(String, Vec<&str>)> = None;
     for line in CHANGELOG.lines() {
         if let Some(rest) = line.strip_prefix("## ") {
-            if inside {
-                break; // 遇到下一个版本标题，本节结束
+            if let Some((v, body)) = cur.take() {
+                out.push((v, body.join("\n").trim().to_string()));
             }
-            let tag = rest.trim().trim_start_matches('v').to_lowercase();
-            inside = tag == want;
+            cur = Some((
+                rest.trim().trim_start_matches('v').to_string(),
+                Vec::new(),
+            ));
             continue;
         }
-        if inside {
-            out.push(line);
+        if let Some((_, body)) = cur.as_mut() {
+            body.push(line);
         }
     }
-    out.join("\n").trim().to_string()
+    if let Some((v, body)) = cur.take() {
+        out.push((v, body.join("\n").trim().to_string()));
+    }
+    out
 }
+
+/// 取「`from` 之后、到 `upto` 为止」的所有版本节，拼成一段 Markdown。
+///
+/// 跨版本升级时只看当前那一节是不够的 —— 用户从 2.3.0 升到 2.4.1，中间 2.4.0 改了什么
+/// 同样是「这次更新带来的变化」，漏掉就不知道新增了哪些功能。
+///
+/// `from` 为空（首次安装 / 配置里没有记录）时只返回 `upto` 这一节。
+/// 返回 `(拼接后的 Markdown, 实际包含的版本号列表)`，后者供前端显示区间标题。
+fn changelog_since(from: &str, upto: &str) -> (String, Vec<String>) {
+    let to = upto.trim().trim_start_matches('v');
+    let from = from.trim().trim_start_matches('v');
+    let has_origin = !from.is_empty();
+    let picked: Vec<(String, String)> = changelog_sections()
+        .into_iter()
+        // 比当前版本还新的节不显示：CHANGELOG 里可能已经写好了尚未发布的版本
+        .filter(|(v, _)| !is_newer(v, to))
+        .filter(|(v, _)| {
+            if has_origin {
+                // **含起点**：用户未必真的打开过关于页，漏掉「他当前那版」的说明
+                // 比多显示一节糟得多。所以取「起点 ≤ 版本 ≤ 当前」。
+                !is_newer(from, v)
+            } else {
+                true // 无起点：由下面的 take 决定显示几节
+            }
+        })
+        .take(if has_origin {
+            MAX_NOTE_SECTIONS
+        } else {
+            FALLBACK_NOTE_SECTIONS
+        })
+        .collect();
+
+    let versions: Vec<String> = picked.iter().map(|(v, _)| v.clone()).collect();
+    // 节标题保留 CHANGELOG 原来的写法（`## 2.4.0`），前端 md() 会渲染成小标题，
+    // 多节并列时靠它分段。
+    let body = picked
+        .iter()
+        .map(|(v, text)| format!("## {v}\n\n{text}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (body, versions)
+}
+
 
 /// 统一的结果 payload（`check_update` 与 `update_state` 返回同一个形状）。
 fn payload(rel: &Release) -> serde_json::Value {
@@ -605,6 +709,10 @@ fn payload(rel: &Release) -> serde_json::Value {
         let p = crate::clipboard::cache_dir().join("update").join(&c.asset_name);
         p.is_file().then(|| p.to_string_lossy().to_string())
     });
+    // 跨版本升级：`upgraded_from` 是本次启动前运行的那一版，空表示首次安装
+    let local_from = crate::settings::get().upgraded_from;
+    let (local_notes, versions) = changelog_since(&local_from, cur);
+
     json!({
         "hasUpdate": is_newer(&rel.latest, cur),
         "latest": rel.latest,
@@ -617,10 +725,15 @@ fn payload(rel: &Release) -> serde_json::Value {
         "assetName": rel.asset_name,
         "assetSize": rel.asset_size,
         "downloadedPath": downloaded,
-        // 本机这版的说明（随包内置）。没有新版本时前端显示它，
-        // 这样 beta / 未发布版本也能看到自己的更新日志。
+        // 本机这版（**含跨过的中间版本**）的说明，随包内置。
+        // 没有新版本时前端显示它，这样 beta / 未发布版本也能看到自己的更新日志；
+        // 跨版本升级时一次列出中间所有节（见 `changelog_since`）。
         "localTag": cur,
-        "localNotes": changelog_section(cur),
+        "localNotesFrom": local_from,
+        // 节数给前端用：没有起点时标题写「及之前 N 个版本」，避免只写一个版本号
+        // 却列了好几节
+        "localNotesCount": versions.len(),
+        "localNotes": local_notes,
     })
 }
 
@@ -1048,4 +1161,74 @@ pub fn install_downloaded(app: tauri::AppHandle, path: String) -> Result<(), Str
         app.exit(0);
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 跨版本升级要一次显示中间所有版本的说明。
+    ///
+    /// 只看当前那一节是不够的：用户从 2.3.0 升到 2.4.1，2.4.0 改了什么同样是
+    /// 「这次更新带来的变化」。这条测试对着真实的 CHANGELOG 跑 —— 所以它同时
+    /// 保证了「节解析没错行、没把下一个标题吃进来」。
+    #[test]
+    fn changelog_since_includes_intermediate_versions() {
+        let (notes, versions) = changelog_since("2.3.0", "2.4.1");
+        assert!(versions.contains(&"2.4.1".to_string()), "当前版本必须有: {versions:?}");
+        assert!(versions.contains(&"2.4.0".to_string()), "中间跨过的版本必须有: {versions:?}");
+        assert!(
+            versions.contains(&"2.3.0".to_string()),
+            "起点也要显示 —— 用户未必看过自己那版的说明: {versions:?}"
+        );
+        // 两节的正文都要在，且各自带标题，前端靠标题分段
+        assert!(notes.contains("## 2.4.0"));
+        assert!(notes.contains("## 2.4.1"));
+    }
+
+    /// 用户马上会遇到的场景：从 2.4.0 升到 2.4.1，两节都要给。
+    #[test]
+    fn changelog_since_one_version_jump_shows_both() {
+        let (_, versions) = changelog_since("2.4.0", "2.4.1");
+        assert_eq!(
+            versions,
+            vec!["2.4.1".to_string(), "2.4.0".to_string()],
+            "跨一版也要把起点那版带上"
+        );
+    }
+
+    /// 没有起点时退化为「最近 N 节」而不是只显示一节。
+    ///
+    /// 这是为**现有老用户**准备的：升级起点字段是本版才加的，他们配置里没有，
+    /// 若不兜底，恰是最需要看更新的这批人只看到一屏说明。
+    #[test]
+    fn changelog_since_without_origin_falls_back_to_recent() {
+        let (notes, versions) = changelog_since("", "2.4.1");
+        assert_eq!(versions.first().map(|s| s.as_str()), Some("2.4.1"), "第一节必须是当前版本");
+        assert!(versions.len() > 1, "老用户升级也要能看到前几版: {versions:?}");
+        assert!(versions.len() <= FALLBACK_NOTE_SECTIONS);
+        assert!(notes.contains("## 2.4.0"), "兜底时也要带上中间版本");
+        // 不能把比当前版本更新的节混进来
+        assert!(!versions.iter().any(|v| is_newer(v, "2.4.1")));
+    }
+
+    /// 节数有上限：从很老的版本升上来时全列会把关于页变成一篇长文。
+    #[test]
+    fn changelog_sections_are_capped() {
+        let (_, versions) = changelog_since("0.0.1", "9.9.9");
+        assert!(versions.len() <= MAX_NOTE_SECTIONS, "节数超上限: {}", versions.len());
+        assert!(versions.len() > 1, "这条用例的前提是 CHANGELOG 里有多节");
+    }
+
+    /// 版本比较的两个坑：两位补丁号、预发布后缀。
+    ///
+    /// 按字符串比会把 `2.4.10` 判成小于 `2.4.9`，跨版本日志就会漏节。
+    #[test]
+    fn version_compare_handles_multi_digit_and_prerelease() {
+        assert!(is_newer("2.4.10", "2.4.9"), "两位补丁号不能按字符串比");
+        assert!(is_newer("2.4.1", "2.4.1-beta.2"), "正式版高于自己的预发布");
+        assert!(!is_newer("2.4.1-beta.2", "2.4.1"), "预发布低于正式版");
+        assert!(is_newer("2.4.0", "2.3.9"));
+        assert!(!is_newer("2.4.0", "2.4.0"), "同版本不算更新");
+    }
 }
