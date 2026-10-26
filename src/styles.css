@@ -100,13 +100,16 @@
   --tag-code-bg: rgba(71, 85, 105, 0.14);
   /* 设置页区块底与行分隔线：区块要能从页面底色里浮出来，但不能抢内容。
      浅色用半透明白（压在材质上仍透出壁纸），深色用极低比例白。 */
-  /* 区块底要与整个窗口的材质一致地「透」：用户对比关于页后指出，
-     实心白卡片在毛玻璃窗口里像贴了张纸。靠边框 + 区块标题分组，不靠底色压。 */
-  --block-bg: rgba(255, 255, 255, 0.38);
-  /* 区块外框：比 --stroke 明确一档。半透明白卡片压在同样浅的材质上，
-     只靠 0.55 的底色根本看不出分组边界（实测截图确认过）。 */
-  --block-border: rgba(0, 0, 0, 0.1);
-  --row-divider: rgba(0, 0, 0, 0.07);
+  /* 中性线：面板描边与行分隔线共用。
+     与 --stroke 不是重复 —— --stroke 在浅色下是**白色高光边**（毛玻璃卡片的
+     边缘反光），压在浅底上做分组边界根本看不见；这里要的是「深一点的分隔」。
+     一个变量管两处（边框 + 分隔线），不再各造一个。 */
+  --line: rgba(0, 0, 0, 0.09);
+  /* 浮层实底：右键菜单 / 弹窗 / toast 共用。
+     与面板的 --glass-strong 不是一回事 —— 浮层必须**盖住**背后的内容，
+     半透明会把下面的字透出来。三处原本各写一遍 rgba(252,252,252,0.9x)，
+     深色再各补一个覆盖，共 6 份；现在只有这一份。 */
+  --solid-bg: rgba(252, 252, 252, 0.96);
   --tag-pinned-bg: rgba(47, 107, 255, 0.12);
   --tag-fav-bg: rgba(186, 117, 23, 0.15);
   --tag-edited-bg: rgba(26, 127, 55, 0.14);
@@ -169,9 +172,8 @@ body.dark {
   --tag-link-bg: rgba(56, 189, 248, 0.18);
   --tag-code-fg: #cbd5e1;
   --tag-code-bg: rgba(203, 213, 225, 0.16);
-  --block-bg: rgba(255, 255, 255, 0.04);
-  --block-border: rgba(255, 255, 255, 0.1);
-  --row-divider: rgba(255, 255, 255, 0.08);
+  --line: rgba(255, 255, 255, 0.09);
+  --solid-bg: rgba(40, 40, 44, 0.96);
   --tag-pinned-bg: rgba(91, 140, 255, 0.2);
   --tag-fav-bg: rgba(239, 159, 39, 0.2);
   --tag-edited-bg: rgba(74, 194, 107, 0.2);
@@ -1089,13 +1091,9 @@ body.round .tag {
   flex-direction: column;
   border-radius: var(--radius-sm);
   /* 右键菜单要贴着内容读：用高不透明底色，不吃玻璃透（需求 #8） */
-  background: rgba(252, 252, 252, 0.94);
+  background: var(--solid-bg);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
-}
-
-body.dark .ctx-menu {
-  background: rgba(40, 40, 44, 0.95);
 }
 
 .ctx-item {
@@ -1262,9 +1260,11 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
    没有区块时，十几行平铺、视觉权重全一样，用户找不到重点（上一版就是这样）。 */
 .settings .block {
   padding: 4px 16px 8px;
-  border: 1px solid var(--block-border);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: var(--block-bg);
+  /* 底色复用 --glass-strong：关于页、缓存块、右键菜单都是它。
+     面板的透明度只有这一个来源，改一处全局一致，不再各页各调。 */
+  background: var(--glass-strong);
 }
 
 .settings .block-h {
@@ -1300,7 +1300,7 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 
 /* 行之间一条极淡的线：靠间距也能分开，但有了它更接近系统设置的观感 */
 .settings .row + .row {
-  border-top: 1px solid var(--row-divider);
+  border-top: 1px solid var(--line);
 }
 
 /* 子项：从属于上一项。用缩进 + 左侧竖线表达层级，
@@ -1308,7 +1308,7 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 .settings .row.is-sub {
   margin-left: 6px;
   padding-left: 14px;
-  border-left: 2px solid var(--block-border);
+  border-left: 2px solid var(--line);
 }
 
 .settings .row-text {
@@ -1597,16 +1597,12 @@ html:not(.hovers-off) .statusbar-clear:hover {
   max-width: 320px;
   padding: 18px 20px;
   border-radius: var(--radius-sm);
-  background: rgba(252, 252, 252, 0.97);
+  background: var(--solid-bg);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-body.dark .modal {
-  background: rgba(40, 40, 44, 0.97);
 }
 
 .modal-title {
@@ -2194,7 +2190,7 @@ html:not(.hovers-off) .btn-danger:hover {
   transform: translateX(-50%) translateY(10px);
   padding: 8px 18px;
   border-radius: var(--radius-sm);
-  background: rgba(252, 252, 252, 0.94);
+  background: var(--solid-bg);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
   color: var(--text);
@@ -2202,10 +2198,6 @@ html:not(.hovers-off) .btn-danger:hover {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.18s ease, transform 0.18s ease;
-}
-
-body.dark .toast {
-  background: rgba(40, 40, 44, 0.95);
 }
 
 .toast.show {
@@ -2348,7 +2340,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   justify-content: space-between;
   gap: 32px;
   padding: 20px 24px;
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
@@ -2446,7 +2438,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 
 .about-privacy-i {
   padding: 3px 10px;
-  border: 1px solid var(--block-border);
+  border: 1px solid var(--line);
   border-radius: 999px;
   font-size: 12px;
   color: var(--text-dim);
@@ -2457,7 +2449,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   display: flex;
   flex-direction: column;
   padding: 4px 0;
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
@@ -2500,7 +2492,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   flex-direction: column;
   gap: 10px;
   padding: 16px 20px 18px;
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
