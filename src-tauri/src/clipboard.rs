@@ -187,23 +187,77 @@ pub fn get_history() -> Vec<HistoryItem> {
         .unwrap_or_default()
 }
 
+/// 处理条目引用的本地文件（回收站 / 永久删除），返回给前端的提示串。
+///
+/// **两道闸**，缺一不可：
+///   1. 前端必须显式要求（`delete_local_files = true`）—— 它来自用户在弹窗里的确认；
+///   2. 设置里必须已开启 `delete_files_with_item` —— 防止前端 bug 或误调用直接把
+///      用户的真实文件带走。
+/// 所以后端不信任任何一侧，两边都满足才动手。
+///
+/// 日志只记**数量**，不记路径：路径里带着文件名，属于内容级信息。
+fn purge_local_files(items: &[HistoryItem]) -> Option<String> {
+    let cfg = crate::settings::get();
+    if !cfg.delete_files_with_item {
+        return None;
+    }
+    let paths: Vec<String> = items
+        .iter()
+        .filter(|i| i.kind == "files")
+        .filter_map(|i| i.files.clone())
+        .flatten()
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+
+    let total = paths.len();
+    let (ok, failed) = crate::purge::purge(&paths, cfg.delete_files_permanent);
+    let how = if cfg.delete_files_permanent {
+        "永久删除"
+    } else {
+        "移入回收站"
+    };
+    if failed.is_empty() {
+        crate::log_print!("[clipboard] 已{how} {ok} 个本地文件");
+        Some(format!("已{how} {ok} 个本地文件"))
+    } else {
+        crate::log_warn!(
+            "[clipboard] {how}本地文件：成功 {ok}/{total}，失败 {} 个（详见界面提示）",
+            failed.len()
+        );
+        Some(format!(
+            "已{how} {ok} 个，{} 个未能处理（可能被占用或已不存在）",
+            failed.len()
+        ))
+    }
+}
+
 #[tauri::command]
-pub fn delete_item(id: String) -> Result<(), String> {
+pub fn delete_item(id: String, delete_local_files: Option<bool>) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
     if let Some(pos) = hist.iter().position(|i| i.id == id) {
         let item = hist.remove(pos);
         let kind = item.kind.clone();
         drop(hist);
+        // 先处理本地文件，再删记录与缓存实体：即便文件处理失败，条目也该删掉
+        // （用户要的是「这条记录不要了」），失败的个体会在提示里说清楚。
+        let note = if delete_local_files.unwrap_or(false) {
+            purge_local_files(std::slice::from_ref(&item))
+        } else {
+            None
+        };
         remove_item_files(&dir, &item);
         save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
         // 只记 id / kind 等元数据，不含内容。
         crate::log_print!("[clipboard] 删除条目 {id} kind={kind}");
+        Ok(note)
     } else {
         // 前端理论上不会删不存在的条目；真出现说明前后端状态不同步，值得记一笔。
         crate::log_warn!("[clipboard] 删除失败：条目不存在 {id}（前后端状态不同步）");
+        Ok(None)
     }
-    Ok(())
 }
 
 /// `pinned_views` 里的通配项：**同步置顶的永久标记**，表示在所有分类里置顶。
@@ -664,9 +718,24 @@ pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn delete_items(ids: Vec<String>) -> Result<(), String> {
+pub fn delete_items(
+    ids: Vec<String>,
+    delete_local_files: Option<bool>,
+) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    // 先把待处理的目标捞出来：`retain` 里拿不到可变借用之外的东西，
+    // 而本地文件必须在条目被移除**之前**按它自己记录的路径处理。
+    let purge_targets: Vec<HistoryItem> = if delete_local_files.unwrap_or(false) {
+        hist.iter()
+            .filter(|i| ids.iter().any(|id| id == &i.id))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let note = purge_local_files(&purge_targets);
+
     let mut removed = 0usize;
     hist.retain(|i| {
         if ids.iter().any(|id| id == &i.id) {
@@ -680,7 +749,7 @@ pub fn delete_items(ids: Vec<String>) -> Result<(), String> {
     drop(hist);
     save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
     crate::log_print!("[clipboard] 批量删除 {removed} 条");
-    Ok(())
+    Ok(note)
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,8 @@ mod settings;
 mod autostart;
 mod tray;
 mod logger;
+#[cfg(windows)]
+mod purge;
 
 /// 前端启动时调用，拿到实际生效的材质档位与圆角上限。
 /// 注意：返回的是「实际生效」而非「尝试应用」的档位——这是 v1 静默失败的直接教训。
@@ -263,6 +265,8 @@ pub fn run() {
             settings::set_retention_days,
             settings::set_autostart,
             settings::set_file_copy,
+            settings::set_delete_files_with_item,
+            settings::set_delete_files_permanent,
             settings::set_pin_global,
             settings::set_pin_cancel_on_disable,
             settings::set_ignore_dpi_scale,

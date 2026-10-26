@@ -129,6 +129,20 @@ pub struct Config {
     /// 里挡掉，读的时候一律按 `system` 处理（见 `theme_is_dark`）。
     #[serde(default = "default_theme_mode")]
     pub theme_mode: String,
+    /// 删除文件条目时，是否同时处理它引用的**本地文件**（默认**关闭**）。
+    ///
+    /// 文件条目记的是路径引用而非副本，删除条目本身只删记录（本地文件不受影响）；
+    /// 打开这一项才表示「我要连磁盘上的文件一起处理」。默认关是刻意的：
+    /// 这是会动用户真实文件的操作，必须是用户自己到设置里点开，程序不替他决定。
+    #[serde(default)]
+    pub delete_files_with_item: bool,
+    /// 本地文件的处理方式：`false` = 移入回收站（可还原，默认），`true` = 永久删除。
+    ///
+    /// 单独一项而不是跟上面合成枚举：两个都是布尔语义，存起来最省事；
+    /// 合并成枚举还要为旧配置写兼容。默认 false 保证「即使误开主开关」也不会
+    /// 造成不可恢复的后果。
+    #[serde(default)]
+    pub delete_files_permanent: bool,
 }
 
 /// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次增量。
@@ -249,6 +263,10 @@ impl Default for Config {
             asked_tray_on_close: false,
             round_mode: false,
             file_copy: false, // 默认关闭：不记录文件复制
+            // 默认关闭：删条目只删记录，不碰磁盘上的真实文件
+            delete_files_with_item: false,
+            // 默认回收站（可还原）
+            delete_files_permanent: false,
             pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
             pin_cancel_on_disable: true, // 默认开启：关掉互通即撤销它铺开的置顶
             cache_dir: None,
@@ -346,6 +364,8 @@ pub fn get_settings() -> serde_json::Value {
         "alphaRound": cfg.alpha_round,
         "roundMode": cfg.round_mode,
         "fileCopy": cfg.file_copy,
+        "deleteFilesWithItem": cfg.delete_files_with_item,
+        "deleteFilesPermanent": cfg.delete_files_permanent,
         "pinGlobal": cfg.pin_global,
         "pinCancelOnDisable": cfg.pin_cancel_on_disable,
         "cacheDir": cfg.cache_dir,
@@ -396,6 +416,30 @@ pub fn set_clean_on_close(value: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn set_file_copy(value: bool) -> Result<(), String> {
     update(|c| c.file_copy = value);
+    Ok(())
+}
+
+/// 开关「删除文件条目时同时处理本地文件」。默认关闭，必须用户到设置里主动打开。
+#[tauri::command]
+pub fn set_delete_files_with_item(value: bool) -> Result<(), String> {
+    // 这一项动的是用户磁盘上的真实文件，开关本身值得留一条日志：
+    // 以后若出现「文件怎么没了」，一眼能看出是不是这个开关被打开过。
+    crate::log_print!(
+        "[settings] 「删除时同时删本地文件」已{}",
+        if value { "开启" } else { "关闭" }
+    );
+    update(|c| c.delete_files_with_item = value);
+    Ok(())
+}
+
+/// 本地文件处理方式：`false` = 回收站（默认），`true` = 永久删除。
+#[tauri::command]
+pub fn set_delete_files_permanent(value: bool) -> Result<(), String> {
+    crate::log_print!(
+        "[settings] 本地文件处理方式：{}",
+        if value { "永久删除（不可恢复）" } else { "移入回收站（可还原）" }
+    );
+    update(|c| c.delete_files_permanent = value);
     Ok(())
 }
 

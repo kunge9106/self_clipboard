@@ -612,6 +612,14 @@ body.dark #theme-toggle .i-sun {
   background: var(--track-bg);
 }
 
+/* 从属选项：主开关关闭时整组置灰且不可点。
+   只做视觉禁用而没有 pointer-events 的话，点下去仍会触发命令，
+   用户会看到「明明灰着却改成功了」这种自相矛盾的行为。 */
+.seg[data-disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 .seg button {
   padding: 5px 14px;
   border: 0;
@@ -1507,6 +1515,8 @@ body.dark .modal {
 .modal-text {
   font-size: 13px;
   color: var(--text-dim);
+  /* 文件清单要按行显示（每行一个文件名），默认会把换行压成空格 */
+  white-space: pre-line;
 }
 
 .modal-actions {

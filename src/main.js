@@ -434,6 +434,51 @@ async function openClearMissingModal() {
   document.getElementById("clear-missing-modal").hidden = false;
 }
 
+// ── 删除文件条目时的「本地文件」确认窗 ────────────────────────────────────
+// 删除对象是用户磁盘上的真实文件，所以：
+//   · 只在设置里开了「删除时同时删本地文件」之后才可能弹（默认关，文件不被动）
+//   · 每次删除都弹，不做「不再询问」——误点一次就是真删了一次
+//   · 文案必须写清「几个文件 + 用什么方式」，回收站与永久删除的后果完全不同
+let purgeResolve = null;
+
+/// 返回 true 表示「用户确认要连本地文件一起处理」。
+/// 返回 false 的两条路径（设置没开 / 没有文件条目）都不弹窗，直接按旧行为删记录。
+function askPurgeFiles(targets) {
+  if (!settings?.deleteFilesWithItem) return Promise.resolve(false);
+  const files = targets
+    .filter((i) => i.kind === "files")
+    .flatMap((i) => i.files || []);
+  if (files.length === 0) return Promise.resolve(false);
+
+  const perm = !!settings.deleteFilesPermanent;
+  const how = perm ? "永久删除" : "移入回收站";
+  const tail = perm ? "（不可恢复）" : "（之后可从回收站还原）";
+  const names = files.map((p) => p.split(/[\\/]/).pop() || p);
+  const head = names.slice(0, 4).map((n) => `· ${n}`).join("\n");
+  const more = names.length > 4 ? `\n…另有 ${names.length - 4} 个` : "";
+
+  document.getElementById("purge-modal-text").textContent =
+    `将${how} ${files.length} 个本地文件${tail}：\n\n${head}${more}`;
+  document.getElementById("purge-confirm").textContent = perm ? "永久删除" : "移入回收站";
+  document.getElementById("purge-modal").hidden = false;
+  return new Promise((resolve) => {
+    purgeResolve = resolve;
+  });
+}
+
+function bindPurgeModal() {
+  const modal = document.getElementById("purge-modal");
+  const done = (v) => {
+    modal.hidden = true;
+    // 先清空再 resolve：避免回调里再次弹窗时旧的 resolve 被覆盖
+    const r = purgeResolve;
+    purgeResolve = null;
+    r?.(v);
+  };
+  document.getElementById("purge-cancel").onclick = () => done(false);
+  document.getElementById("purge-confirm").onclick = () => done(true);
+}
+
 // 与清空全部历史弹窗同理：常驻元素，只绑一次，切分类重绘不会丢绑定
 function bindClearMissingModal() {
   const modal = document.getElementById("clear-missing-modal");
@@ -447,7 +492,7 @@ function bindClearMissingModal() {
     clearMissingIds = [];
     if (ids.length === 0) return;
     try {
-      await invoke("delete_items", { ids });
+      await invoke("delete_items", { ids, deleteLocalFiles: false });
       const drop = new Set(ids);
       items = items.filter((i) => !drop.has(i.id));
       // 失效集合整体作废，让下次渲染重新检测，避免残留已删除条目的 id
@@ -508,8 +553,12 @@ function syncSelectBar() {
 async function deleteSelected() {
   const ids = [...selectedIds];
   if (ids.length === 0) return;
+  // 先问「要不要连本地文件一起处理」——它是异步的，必须放在拿 ids 之后、
+  // 调删除之前；用户取消就退化成普通删除（只删记录）。
+  const purge = await askPurgeFiles(items.filter((i) => ids.includes(i.id)));
   try {
-    await invoke("delete_items", { ids });
+    const note = await invoke("delete_items", { ids, deleteLocalFiles: purge });
+    if (note) toast(note);
   } catch (e) {
     toast("删除失败：" + e);
     return;
@@ -561,7 +610,7 @@ async function doClearView(ids) {
     return;
   }
   try {
-    await invoke("delete_items", { ids: uniq });
+    await invoke("delete_items", { ids: uniq, deleteLocalFiles: false });
     const drop = new Set(uniq);
     items = items.filter((i) => !drop.has(i.id));
     render({ keepScroll: true });
@@ -1874,9 +1923,14 @@ function openContextMenu(x, y, item) {
       icon: CTX_ICONS.trash,
       danger: true,
       act: async () => {
-        await invoke("delete_item", { id: item.id });
+        const purge = await askPurgeFiles([item]);
+        const note = await invoke("delete_item", {
+          id: item.id,
+          deleteLocalFiles: purge,
+        });
         items = items.filter((i) => i.id !== item.id);
         render({ keepScroll: true });
+        if (note) toast(note);
       },
     }
   );
@@ -2056,6 +2110,15 @@ function settingsDataHtml(s) {
     <div class="row"><label>　└ 退出前弹窗提醒</label>
       <input type="checkbox" id="set-clean-confirm" ${s.cleanConfirmExit ? "checked" : ""} />
       <span class="hint">退出前弹窗确认</span></div>
+    <div class="row"><label>删除时同时删本地文件</label>
+      <input type="checkbox" id="set-delete-files" ${s.deleteFilesWithItem ? "checked" : ""} />
+      <span class="hint">文件条目只是<b>路径引用</b>。关闭（默认）时删条目只删记录，磁盘上的文件不动；开启后删除会先把本地文件移入回收站，<b>每次都先弹窗确认</b></span></div>
+    <div class="row"><label>　└ 处理方式</label>
+      <div class="seg" id="set-delete-mode" ${s.deleteFilesWithItem ? "" : "data-disabled"}>
+        <button type="button" data-perm="0" ${s.deleteFilesPermanent ? "" : 'class="on"'}>移入回收站</button>
+        <button type="button" data-perm="1" ${s.deleteFilesPermanent ? 'class="on"' : ""}>永久删除</button>
+      </div>
+      <span class="hint">回收站可还原；永久删除不可恢复，请确认后再选</span></div>
     <div class="btn-row">
       <button class="btn-ghost" id="clear-missing">清空已失效条目</button>
       <button class="btn-danger" id="clear-all">清空全部历史</button>
@@ -2825,6 +2888,32 @@ function bindSettings(view) {
   bindCheck("set-autostart", "set_autostart");
   bindCheck("set-tray", "set_tray_on_close");
   bindCheck("set-file-copy", "set_file_copy");
+  bindCheck("set-delete-files", "set_delete_files_with_item");
+
+  // 「处理方式」是从属选项：主开关关着时整组置灰且不可点（CSS 里 pointer-events: none 兜底）。
+  // 视觉禁用而不禁用行为是最糟的组合——灰着却点得动，用户会以为开关自己坏了。
+  const delMode = view.querySelector("#set-delete-mode");
+  const delFilesChk = view.querySelector("#set-delete-files");
+  if (delMode && delFilesChk) {
+    const syncDelMode = () => delMode.toggleAttribute("data-disabled", !delFilesChk.checked);
+    syncDelMode();
+    delFilesChk.addEventListener("change", syncDelMode);
+    delMode.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-perm]");
+      if (!btn || !delFilesChk.checked) return;
+      const perm = btn.dataset.perm === "1";
+      try {
+        await invoke("set_delete_files_permanent", { value: perm });
+        settings = await invoke("get_settings");
+        delMode
+          .querySelectorAll("button[data-perm]")
+          .forEach((b) => b.classList.toggle("on", b === btn));
+        toast(perm ? "已改为永久删除（不可恢复）" : "已改为移入回收站");
+      } catch (err) {
+        toast("保存失败：" + err);
+      }
+    });
+  }
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
   bindCheck("set-clean-confirm", "set_clean_confirm_exit");
@@ -3033,6 +3122,7 @@ async function main() {
   bindExitModal();
   bindClearAllModal();
   bindClearMissingModal();
+  bindPurgeModal();
   bindFeatureTour();
   bindClearView();
   bindSelectBar();
