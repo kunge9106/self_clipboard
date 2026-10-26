@@ -169,6 +169,12 @@ pub struct HistoryItem {
     pub size: u64,
     /// 长文本落盘路径（相对 DIR/data/）
     pub text_path: Option<String>,
+    /// 富文本实体：`data/<id>.html`（CF_HTML 原文）与 `data/<id>.rtf`。
+    /// 仅当复制源提供了对应格式时才存在；两者都没有就是纯文本条目。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtf_path: Option<String>,
     /// 图片落盘路径（相对 DIR/images/）
     pub img_path: Option<String>,
     /// 文件路径清单落盘路径（相对 DIR/files/，每行一个完整路径）
@@ -578,7 +584,7 @@ pub fn set_clipboard_text(text: String, changed: bool) -> Result<(), String> {
             // 本次自写在「事件」与「兜底轮询」两条通道上都会被认出并跳过，
             // 所以不会出现「系统自读一条 + 手动入库一条」变成两条。
             if changed {
-                dispatch_raw(RawClip::Text(text), true);
+                dispatch_raw(RawClip::Text { text, html: None, rtf: None }, true);
             }
             Ok(())
         }
@@ -628,7 +634,7 @@ const PASTE_MAX_SIDE: u32 = 8192;
 /// 返回 Ok(Some(提示)) 时前端用该提示替代默认的「已复制到剪贴板」——
 /// 目前只有文件条目会用到（部分原文件已失效、已跳过）。
 #[tauri::command]
-pub fn copy_back(id: String) -> Result<Option<String>, String> {
+pub fn copy_back(id: String, plain: Option<bool>) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let hist = HISTORY.get().unwrap().lock().unwrap();
     let item = hist
@@ -649,6 +655,22 @@ pub fn copy_back(id: String) -> Result<Option<String>, String> {
                     Some(rel) => read_text_entity(&dir, rel)?,
                     None => item.preview.clone(),
                 };
+                // 默认**保留格式**（用户复制的是带格式的内容，粘回去也该带格式）；
+                // 想要纯文本走右键菜单里的「粘贴为纯文本」。
+                if !plain.unwrap_or(false) {
+                    if let Some(rel) = &item.html_path {
+                        if let Ok(cf) = read_text_entity(&dir, rel) {
+                            unsafe { write_html_to_clipboard(&cf, &text)? };
+                            return Ok(Some("已按原格式复制".into()));
+                        }
+                    }
+                    if let Some(rel) = &item.rtf_path {
+                        if let Ok(rtf) = read_text_entity(&dir, rel) {
+                            unsafe { write_rtf_to_clipboard(&rtf, &text)? };
+                            return Ok(Some("已按原格式复制（RTF）".into()));
+                        }
+                    }
+                }
                 unsafe { write_text_to_clipboard(&text) }.map(|_| None)
             }
             "files" => {
@@ -1477,7 +1499,15 @@ fn content_hash(bytes: &[u8]) -> u64 {
 // ---------------------------------------------------------------------------
 
 enum RawClip {
-    Text(String),
+    Text {
+        /// 纯文本（CF_UNICODETEXT 解密后的内容）—— 唯一必有的部分
+        text: String,
+        /// `HTML Format` 原文。它本身就是**带 Version/StartHTML 头的 CF_HTML**，
+        /// 所以能原样存、原样写回，不需要自己拼头部（拼错就是「粘到 Word 里变源码」）。
+        html: Option<String>,
+        /// `Rich Text Format` 原文（部分老应用只给 RTF，不给 HTML）
+        rtf: Option<String>,
+    },
     Image(Vec<u8>), // DIB 字节
     Files(Vec<String>),
     /// CF_HDROP 给的图片**原文件路径**（尚未读取）。
@@ -1641,6 +1671,62 @@ unsafe fn read_clipboard() -> (Option<RawClip>, String) {
 /// 「可疑」= 至少一种目标格式 `IsClipboardFormatAvailable` 为真、但 `GetClipboardData`
 /// 拿到 NULL —— 这是延迟渲染 / 分次写入的典型症状，值得松锁退避后重读；
 /// 若压根没有目标格式，说明这次真没有可记录的东西，重读没有意义。
+/// 富文本寄存器的体积上限。
+///
+/// `HTML Format` 经常内联 base64 图片（一张截图就能顶到几 MB），而我们要的只是
+/// 「文字带格式」。超过这个量级就**放弃富文本、只留纯文本** —— 宁可少一点保真，
+/// 也不能让一次复制往磁盘里塞几 MB、还拖慢启动时的索引重建。
+const RICH_MAX_BYTES: usize = 512 * 1024;
+
+/// 读一个**注册剪贴板格式**的文本内容（如 `HTML Format` / `Rich Text Format`）。
+///
+/// 必须在 `OpenClipboard` 期间调用。
+unsafe fn read_clip_text_format(name: &str) -> Option<String> {
+    unsafe fn inner(name: &str) -> Option<String> {
+        // 注册格式的 ID 由系统分配，每次启动/每次调用都要现问
+        let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let fmt = RegisterClipboardFormatW(wide_name.as_ptr());
+        if fmt == 0 || IsClipboardFormatAvailable(fmt) == 0 {
+            return None;
+        }
+        let h = GetClipboardData(fmt);
+        if h == 0 {
+            return None;
+        }
+        let p = GlobalLock(h) as *const u8;
+        if p.is_null() {
+            return None;
+        }
+        let size = GlobalSize(h);
+        if size == 0 || size > RICH_MAX_BYTES * 4 {
+            GlobalUnlock(h);
+            crate::log_warn!("[clipboard] {name} 体积 {} 字节，超出可读范围，已忽略", size);
+            return None;
+        }
+        let mut buf = vec![0u8; size];
+        std::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), size);
+        GlobalUnlock(h);
+        // 去掉尾部补的 NUL（有些应用会补 1~2 个）
+        while buf.last() == Some(&0) {
+            buf.pop();
+        }
+        if buf.is_empty() {
+            return None;
+        }
+        if buf.len() > RICH_MAX_BYTES {
+            crate::log_warn!(
+                "[clipboard] {name} 体积 {}KB 超过 {}KB 上限，本条只保留纯文本",
+                buf.len() / 1024,
+                RICH_MAX_BYTES / 1024
+            );
+            return None;
+        }
+        // HTML Format 是 UTF-8；RTF 是 ANSI/ASCII 超集，按 lossy 处理不会损坏结构
+        Some(String::from_utf8_lossy(&buf).to_string())
+    }
+    inner(name)
+}
+
 unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool) {
     const CF_UNICODETEXT: u32 = 13;
     const CF_DIB: u32 = 8;
@@ -1680,7 +1766,19 @@ unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool
                 }
                 GlobalUnlock(h);
                 diag.push_str(&format!("len={} ", v.len()));
-                return Some(RawClip::Text(String::from_utf16_lossy(&v)));
+                let text = String::from_utf16_lossy(&v);
+                // 富文本：Word / 浏览器 / 微信通常同时给出 HTML Format 或 RTF。
+                // 两个都读，回贴时优先用 HTML（保真度更高）。
+                // 必须在同一个 OpenClipboard 窗口内读 —— 关掉再开，owner 可能已改内容。
+                let html = read_clip_text_format("HTML Format");
+                let rtf = read_clip_text_format("Rich Text Format");
+                if html.is_some() {
+                    diag.push_str("html:yes ");
+                }
+                if rtf.is_some() {
+                    diag.push_str("rtf:yes ");
+                }
+                return Some(RawClip::Text { text, html, rtf });
             } else {
                 // 格式存在但取不到句柄：典型「延迟渲染未就绪」——owner 还没通过
                 // WM_RENDERFORMAT 把数据交出来，或 owner 拒绝渲染。这是微信等应用
@@ -2299,13 +2397,15 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
         preview_truncated: false,
         size: 0,
         text_path: None,
+        html_path: None,
+        rtf_path: None,
         img_path: None,
         files_path: None,
         files: None,
     };
 
     match raw {
-        RawClip::Text(text) => {
+        RawClip::Text { text, html, rtf } => {
             item.kind = "text".into();
             // 子类型只用于卡片徽章（链接 / 代码），不参与分类
             item.subtype = detect_subtype(&text).map(str::to_string);
@@ -2318,6 +2418,18 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
             let rel = format!("data/{}.txt", id);
             write_text_entity(&dir, &rel, &text);
             item.text_path = Some(rel);
+            // 富文本实体单独落盘（一样加密）：纯文本永远是主数据，
+            // 富文本只是「回贴时可以更保真」的附加信息，缺了不影响使用。
+            if let Some(h) = html {
+                let hrel = format!("data/{id}.html");
+                write_text_entity(&dir, &hrel, &h);
+                item.html_path = Some(hrel);
+            }
+            if let Some(r) = rtf {
+                let rrel = format!("data/{id}.rtf");
+                write_text_entity(&dir, &rrel, &r);
+                item.rtf_path = Some(rrel);
+            }
         }
         RawClip::Files(files) => {
             item.kind = "files".into();
@@ -2696,6 +2808,122 @@ unsafe fn write_text_to_clipboard(text: &str) -> Result<(), String> {
     }
     mark_skip();
     Ok(())
+}
+
+/// 把字符串转成剪贴板要的「UTF-16LE + 结尾 NUL」字节序列。
+fn utf16_bytes(s: &str) -> Vec<u8> {
+    let mut v: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut out = Vec::with_capacity(v.len() * 2);
+    for u in v.drain(..) {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+    out
+}
+
+/// 一次写入多个剪贴板格式。
+///
+/// 为什么必须一次写完：每次写入都要 `EmptyClipboard`，分三次调就是「后写的把
+/// 先写的清掉」—— 最后只剩一种格式，用户粘到 Word 里还是没有格式。
+unsafe fn write_clipboard_formats(items: &[(u32, Vec<u8>)]) -> Result<(), String> {
+    if items.is_empty() {
+        return Err("没有可写入的格式".into());
+    }
+    let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+    if OpenClipboard(hwnd) == 0 {
+        return Err("OpenClipboard 失败".into());
+    }
+    EmptyClipboard();
+    for (fmt, data) in items {
+        let h = GlobalAlloc(0x0002, data.len()); // GMEM_MOVEABLE
+        if h == 0 {
+            CloseClipboard();
+            return Err("GlobalAlloc 失败".into());
+        }
+        let p = GlobalLock(h) as *mut u8;
+        if p.is_null() {
+            CloseClipboard();
+            return Err("GlobalLock 失败".into());
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), p, data.len());
+        GlobalUnlock(h);
+        if SetClipboardData(*fmt, h) == 0 {
+            CloseClipboard();
+            return Err(format!("SetClipboardData 失败（格式 {fmt}）"));
+        }
+    }
+    CloseClipboard();
+    mark_skip();
+    Ok(())
+}
+
+/// 给裸 HTML 补上 `HTML Format` 所需的头。
+///
+/// 从应用复制来的 `HTML Format` 本身就带这个头（所以正常路径是「原样写回」）；
+/// 这个函数只是兜底：万一拿到的是一段裸 HTML，不补头的话 Word / 邮件客户端
+/// 会把它当成**纯文本**贴出来，也就是用户看到的「粘出来是源码」。
+fn build_cf_html(body: &str) -> String {
+    const PREFIX: &str = "<html><body><!--StartFragment-->";
+    const SUFFIX: &str = "<!--EndFragment--></body></html>";
+    // 头部各偏移量都是 10 位数字，长度固定 —— 先算出来再填值
+    let head_len = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n".len();
+    let start_html = head_len;
+    let start_frag = head_len + PREFIX.len();
+    let end_frag = start_frag + body.len();
+    let end_html = end_frag + SUFFIX.len();
+    format!(
+        "Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\nStartFragment:{start_frag:010}\r\nEndFragment:{end_frag:010}\r\n{PREFIX}{body}{SUFFIX}"
+    )
+}
+
+/// 内容是否已经是带头的 CF_HTML。
+///
+/// 从 Word / 浏览器 / 微信复制来的 `HTML Format` **本来就有头**，直接原样写回即可；
+/// 再套一层会让四个偏移全错，粘到 Word 里就成了一坨源码。
+fn is_cf_html(s: &str) -> bool {
+    s.trim_start().starts_with("Version:")
+}
+
+/// 写回带格式的文本：HTML 优先，外加纯文本兜底。
+///
+/// 一定同时写 `CF_UNICODETEXT` —— 记事本、终端、多数输入框只认纯文本，
+/// 只写 HTML 会表现成「粘到一半应用里什么都没有」。
+unsafe fn write_html_to_clipboard(cf_html: &str, plain: &str) -> Result<(), String> {
+    let payload = if is_cf_html(cf_html) {
+        cf_html.to_string()
+    } else {
+        build_cf_html(cf_html)
+    };
+    let html_fmt = unsafe {
+        let name: Vec<u16> = "HTML Format".encode_utf16().chain(std::iter::once(0)).collect();
+        RegisterClipboardFormatW(name.as_ptr())
+    };
+    if html_fmt == 0 {
+        // 拿不到 HTML 格式就直接退回纯文本，而不是让回贴整个失败
+        return unsafe { write_text_to_clipboard(plain) };
+    }
+    unsafe {
+        write_clipboard_formats(&[
+            (html_fmt, payload.into_bytes()),
+            (13u32, utf16_bytes(plain)),
+        ])
+    }
+}
+
+/// 写回 RTF（`HTML Format` 缺失时的次选），同样附纯文本。
+unsafe fn write_rtf_to_clipboard(rtf: &str, plain: &str) -> Result<(), String> {
+    let rtf_fmt = unsafe {
+        let name: Vec<u16> = "Rich Text Format".encode_utf16().chain(std::iter::once(0)).collect();
+        RegisterClipboardFormatW(name.as_ptr())
+    };
+    if rtf_fmt == 0 {
+        return unsafe { write_text_to_clipboard(plain) };
+    }
+    unsafe {
+        write_clipboard_formats(&[
+            (rtf_fmt, rtf.as_bytes().to_vec()),
+            (13u32, utf16_bytes(plain)),
+        ])
+    }
 }
 
 unsafe fn write_files_to_clipboard(files: &[String]) -> Result<(), String> {
@@ -3140,6 +3368,15 @@ fn count_entities(dir: &PathBuf) -> usize {
     count_in("data", Some("txt")) + count_in("files", Some("txt")) + count_in("images", None)
 }
 
+/// 实体文件存在则返回它的相对路径（用于重建时恢复可选关联，如富文本实体）。
+fn has_entity(dir: &PathBuf, rel: &str) -> Option<String> {
+    if dir.join(rel).is_file() {
+        Some(rel.to_string())
+    } else {
+        None
+    }
+}
+
 /// 索引不可用（丢失/被截断）时，按落盘文件重建条目，返回新增条数。
 ///
 /// 为什么需要：内容实体是**逐个文件**落的，索引只是它们的目录。索引坏了不等于
@@ -3173,6 +3410,10 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
             preview_truncated,
             size: text.len() as u64,
             text_path: Some(format!("data/{id}.txt")),
+            // 索引丢了但富文本实体还在：按文件存在与否重建关联，
+            // 否则重建出来的条目会「格式凭空消失」。
+            html_path: has_entity(dir, &format!("data/{id}.html")),
+            rtf_path: has_entity(dir, &format!("data/{id}.rtf")),
             img_path: None,
             files_path: None,
             files: None,
@@ -3243,6 +3484,8 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 preview_truncated: false,
                 size: files.iter().map(|f| f.len()).sum::<usize>() as u64,
                 text_path: None,
+                html_path: None,
+                rtf_path: None,
                 img_path: None,
                 files_path: Some(format!("files/{id}.txt")),
                 files: Some(files),
@@ -3282,6 +3525,8 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 preview_truncated: false,
                 size,
                 text_path: None,
+                html_path: None,
+                rtf_path: None,
                 img_path: Some(format!("images/{id}.{ext}")),
                 files_path: None,
                 files: None,
@@ -3329,6 +3574,14 @@ fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
 fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
     let mut rels: Vec<&str> = Vec::new();
     if let Some(rel) = &item.text_path {
+        rels.push(rel);
+    }
+    // 富文本实体与纯文本同生命周期：只删记录不删实体，等于把「带格式的正文」
+    // 留在磁盘上 —— 用户以为删干净了，其实没有（隐私问题）。
+    if let Some(rel) = &item.html_path {
+        rels.push(rel);
+    }
+    if let Some(rel) = &item.rtf_path {
         rels.push(rel);
     }
     if let Some(rel) = &item.img_path {
@@ -3821,6 +4074,8 @@ extern "system" {
     fn GlobalLock(handle: isize) -> *mut std::ffi::c_void;
     fn GlobalUnlock(handle: isize) -> i32;
     fn GlobalSize(handle: isize) -> usize;
+    /// 把 `HTML Format` / `Rich Text Format` 这类名字换成系统分配的格式 ID
+    fn RegisterClipboardFormatW(name: *const u16) -> u32;
 
     fn DragQueryFileW(hdrop: isize, i: u32, buf: *mut u16, buflen: u32) -> u32;
     // 注意：这里**故意不声明 DragFinish**。它只适用于 WM_DROPFILES 的临时 HDROP，
@@ -3896,6 +4151,8 @@ mod tests {
             favorite: false,
             edited: false,
             subtype: None,
+            html_path: None,
+            rtf_path: None,
             preview: preview.to_string(),
             preview_truncated: false,
             size: 1,
@@ -4351,6 +4608,41 @@ mod tests {
     }
 
     /// 预览：最多 2 行，且**被丢弃内容时必须补省略号**。
+    /// CF_HTML 的四个偏移必须精确指向片段边界。
+    ///
+    /// 拼错的表现很典型：粘到 Word / 邮件客户端里是**一坨 HTML 源码**，
+    /// 而不是带格式的段落。所以用中文内容（UTF-8 多字节）来测 ——
+    /// 按字符数算偏移的实现会在这里立刻露馅。
+    #[test]
+    fn cf_html_offsets_point_exactly_at_fragment() {
+        let body = "<b>你好，世界</b>";
+        let html = build_cf_html(body);
+        let field = |key: &str| -> usize {
+            html.lines()
+                .find(|l| l.starts_with(key))
+                .unwrap_or_else(|| panic!("缺少 {key}"))
+                [key.len()..]
+                .trim()
+                .parse()
+                .expect("偏移量必须是数字")
+        };
+        let (sf, ef) = (field("StartFragment:"), field("EndFragment:"));
+        assert_eq!(&html[sf..ef], body, "片段必须正好是原文");
+        assert_eq!(&html[field("StartHTML:")..][..5], "<html", "StartHTML 指向文档开头");
+        assert_eq!(ef, field("EndHTML:") - "<!--EndFragment--></body></html>".len());
+    }
+
+    /// 判断「已经是 CF_HTML」的能力必须可靠 —— 它决定回贴时原样写回还是套头。
+    /// 套错的后果是把带格式的内容粘成源码。
+    #[test]
+    fn cf_html_detection() {
+        let proper = "Version:0.9\r\nStartHTML:0000000105\r\nEndHTML:0000000200\r\nStartFragment:0000000141\r\nEndFragment:0000000180\r\n<html><body><!--StartFragment-->x<!--EndFragment--></body></html>";
+        assert!(is_cf_html(proper), "带头的必须识别为 CF_HTML");
+        assert!(is_cf_html("\r\n  Version:0.9\r\n..."), "前导空白不能影响判断");
+        assert!(!is_cf_html("<b>裸 HTML 片段</b>"), "裸片段要走套头分支");
+        assert!(!is_cf_html(""), "空内容不当作 CF_HTML");
+    }
+
     /// 子类型判定：链接只认「整条就是一个网址」。
     #[test]
     fn subtype_link_requires_whole_content_to_be_a_url() {

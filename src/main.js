@@ -1439,10 +1439,14 @@ async function showHoverPreview(card, item) {
   placePreview(box, card);
 }
 
-async function copyBack(item) {
+/// `plain = true` 表示「只要文字、不要格式」。
+///
+/// 默认 `false` 走原格式：用户当初复制的是带格式的内容，粘回去理应是带格式的。
+/// 纯文本入口放在右键菜单里（记事本、终端、代码编辑器这类场景才需要）。
+async function copyBack(item, plain = false) {
   try {
-    // copy_back 返回可选的提示串（目前只有文件条目会返回：部分原文件已失效、已跳过）
-    const warn = await invoke("copy_back", { id: item.id });
+    // copy_back 返回可选的提示串（文件条目：部分原文件已失效；文本条目：用了哪种格式）
+    const warn = await invoke("copy_back", { id: item.id, plain });
     toast(warn || "已复制到剪贴板");
   } catch (e) {
     toast("复制失败：" + e);
@@ -1812,7 +1816,7 @@ function bindDetailModal() {
     try {
       // ⚠️ 走 copy_back：它在 Rust 侧**直接读盘**写剪贴板，不经过前端，
       // 所以即使上面的正文因为超长被截断显示，复制出去的仍是**完整原文**。
-      const hint = await invoke("copy_back", { id });
+      const hint = await invoke("copy_back", { id, plain: false });
       toast(hint || "已复制全文");
       closeDetail();
     } catch (err) {
@@ -1893,7 +1897,23 @@ function openContextMenu(x, y, item) {
     });
   }
   // 「复制」对所有类型都有意义，永远排在阅读项之后、置顶之前。
-  entries.push({ label: "复制", icon: CTX_ICONS.copy, act: () => copyBack(item) });
+  // 文本条目如果带富文本，就同时给出「保留格式」与「纯文本」两条路 ——
+  // 只给一条的话，用户要么粘出来丢了格式，要么没法贴进代码编辑器。
+  const rich = item.kind === "text" && (item.html_path || item.rtf_path);
+  if (rich) {
+    entries.push({
+      label: "复制（保留格式）",
+      icon: CTX_ICONS.copy,
+      act: () => copyBack(item, false),
+    });
+    entries.push({
+      label: "复制为纯文本",
+      icon: CTX_ICONS.copy,
+      act: () => copyBack(item, true),
+    });
+  } else {
+    entries.push({ label: "复制", icon: CTX_ICONS.copy, act: () => copyBack(item) });
+  }
   // 「编辑」只给文本条目。
   // 文件条目的内容是**路径清单**，编辑它再写回剪贴板会退化成一段纯文本
   // （文件语义丢失，粘贴出去不再是文件）—— 那不是用户要的。
