@@ -289,39 +289,117 @@ impl Default for Config {
 static CONFIG: OnceLock<Mutex<Config>> = OnceLock::new();
 static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
+/// 配置文件的默认位置：`%APPDATA%\<bundle identifier>\config.json`
+/// —— 与 Tauri 的 `app_data_dir()` 同构，但不依赖 `AppHandle`。
+///
+/// 为什么要这个：`run()` 在 `setup` 之前就要打日志（单实例检测、启动横幅前半段），
+/// 而那时拿不到 `AppHandle`。日志系统需要提前知道 `cache_dir` 才能把这几行写进
+/// 用户真正在看的那个 log，否则它们会落到 %LOCALAPPDATA% 下的另一份文件里。
+pub fn default_config_path() -> Option<PathBuf> {
+    std::env::var("APPDATA")
+        .ok()
+        .map(|p| PathBuf::from(p).join("com.kunge.selfclipboard").join("config.json"))
+}
+
 pub fn init(app: &tauri::AppHandle) {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let _ = CONFIG_PATH.set(dir.join("config.json"));
+    let path = default_config_path().unwrap_or_else(|| {
+        let dir = app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("."));
+        dir.join("config.json")
+    });
+    let _ = CONFIG_PATH.set(path);
 
     let cfg = load();
-    crate::log_print!("[settings] 已加载配置：{:?}", cfg);
+    // 启动快照：只打诊断需要的字段，**不 Debug 整份**。
+    // 原因：`update_cache.notes` 装着整篇 release notes（几 KB），
+    // 用 `{:?}` 打一份配置就等于每次启动往日志里灌一篇文案。
+    // 用户在意的定位信息是「数据在哪、留多久、开了哪些开关」。
+    crate::log_print!(
+        "[settings] 配置就绪：缓存={} 保留={}天 主题={} 缩放跟随={} 文件复制={} 圆角={} 材质={}/{}",
+        cfg.cache_dir.as_deref().unwrap_or("(默认 %APPDATA%)"),
+        cfg.retention_days,
+        cfg.theme_mode,
+        !cfg.ignore_dpi_scale,
+        cfg.file_copy,
+        cfg.round_mode,
+        cfg.alpha_straight,
+        cfg.alpha_round
+    );
     let _ = CONFIG.set(Mutex::new(cfg));
+}
+
+/// 落盘配置。**原子写 + 失败必报**。
+///
+/// 两件事都不能省：
+/// 1. 原子性：配置文件里有 `cache_dir` —— 它一丢，程序就回默认目录，
+///    用户看到的是「记录全没了」（其实都在旧目录里）。`fs::write` 直接覆盖是
+///    非原子的，强杀/断电会留下半截 JSON，下次解析失败直接回落默认值。
+/// 2. 可观测性：以前是 `let _ = fs::write(...)`，写失败一个字都不记 ——
+///    用户改完设置、重启回退，日志里查不出任何痕迹，是最难定位的一类问题。
+fn persist(path: &std::path::Path, cfg: &Config) {
+    let s = match serde_json::to_string_pretty(cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::log_err!("settings", "配置序列化失败：{e}");
+            return;
+        }
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = fs::write(&tmp, s.as_bytes()) {
+        crate::log_err!("settings", "配置写入失败（{}）：{e}", tmp.display());
+        let _ = fs::remove_file(&tmp);
+        return;
+    }
+    if let Err(e) = fs::rename(&tmp, path) {
+        crate::log_err!("settings", "配置原子替换失败（{}）：{e}", path.display());
+        let _ = fs::remove_file(&tmp);
+    }
 }
 
 fn load() -> Config {
     let Some(path) = CONFIG_PATH.get() else {
+        crate::log_warn!("[settings] 配置路径未初始化，使用默认配置");
         return Config::default();
     };
-    match fs::read_to_string(path) {
-        Ok(s) => {
-            let mut cfg: Config = serde_json::from_str(&s).unwrap_or_else(|e| {
-                crate::log_warn!("[settings] config.json 解析失败：{e}，使用默认配置");
-                Config::default()
-            });
-            // 老配置的单一浓度归进对应模式那一档，并立刻回写 ——
-            // 否则每次启动都做一遍同样的迁移（虽然结果一致，但没必要）。
-            if cfg.migrate() {
-                if let Ok(out) = serde_json::to_string_pretty(&cfg) {
-                    let _ = fs::write(path, out);
-                }
+    let raw = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                crate::log_print!("[settings] 无 config.json（首次运行），使用默认配置");
+            } else {
+                // 读不动 ≠ 没有：权限、被占用、磁盘错误都会走到这里，
+                // 以前一律静默回落默认值，用户会发现「所有设置都重置了」却查不到原因。
+                crate::log_err!("settings", "配置读取失败（{}）：{e}", path.display());
             }
-            cfg
+            return Config::default();
         }
-        Err(_) => Config::default(),
+    };
+    let mut cfg: Config = serde_json::from_str(&raw).unwrap_or_else(|e| {
+        // 损坏的配置必须留一份：里面带着 cache_dir、保留天数等用户数据定位信息，
+        // 就地回落默认值等于把「为什么找不到历史」的唯一线索也删了。
+        let dst = path.with_extension("json.corrupt");
+        match fs::write(&dst, &raw) {
+            Ok(()) => crate::log_err!(
+                "settings",
+                "config.json 解析失败：{e}；原文件已另存为 {}（本次使用默认配置）",
+                dst.display()
+            ),
+            Err(err) => crate::log_err!(
+                "settings",
+                "config.json 解析失败：{e}；备份也失败：{err}（本次使用默认配置）"
+            ),
+        }
+        Config::default()
+    });
+    // 老配置的单一浓度归进对应模式那一档，并立刻回写 ——
+    // 否则每次启动都做一遍同样的迁移（虽然结果一致，但没必要）。
+    if cfg.migrate() {
+        crate::log_print!("[settings] 已迁移旧版材质浓度字段，回写配置");
+        persist(path, &cfg);
     }
+    cfg
 }
 
 pub fn get() -> Config {
@@ -340,9 +418,7 @@ pub fn update<F: FnOnce(&mut Config)>(f: F) -> Config {
             f(&mut c);
             let snapshot = c.clone();
             if let Some(path) = CONFIG_PATH.get() {
-                if let Ok(s) = serde_json::to_string_pretty(&snapshot) {
-                    let _ = fs::write(path, s);
-                }
+                persist(path, &snapshot);
             }
             snapshot
         })
@@ -539,7 +615,19 @@ pub fn set_retention_days(days: u32) -> Result<(), String> {
 
 #[tauri::command]
 pub fn set_autostart(value: bool) -> Result<(), String> {
-    autostart::set_enabled(value)
+    // 开关是「界面显示的状态」，注册表才是「真正生效的状态」。两者一旦不一致
+    // （注册表被安全软件拦、权限不足），用户只会觉得「开了但不开机启动」——
+    // 必须在日志里留下到底是写失败还是读失败。
+    match autostart::set_enabled(value) {
+        Ok(()) => {
+            crate::log_print!("[settings] 开机自启已{}", if value { "开启" } else { "关闭" });
+            Ok(())
+        }
+        Err(e) => {
+            crate::log_err!("settings", "设置开机自启失败（目标={value}）：{e}");
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]

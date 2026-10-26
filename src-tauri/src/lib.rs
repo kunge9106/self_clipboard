@@ -83,6 +83,25 @@ fn set_material_alpha(app: tauri::AppHandle, value: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// 启动横幅：一行把「跑的是哪个版本、哪个 exe、数据在哪」钉进日志。
+///
+/// 用户报障时最常需要确认的就是这三件事：机器上装了两份（Program Files 与
+/// debug 目录）、版本对不上、数据其实在另一个缓存目录。没有这条横幅，
+/// 只能靠来回追问；有了它，用户把日志一贴就能定位。
+fn log_startup_banner() {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "(取不到)".into());
+    let dir = clipboard::cache_info().dir;
+    crate::log_print!(
+        "===== 轻贴 v{} 启动 | 构建={} | exe={} | 数据目录={} =====",
+        env!("CARGO_PKG_VERSION"),
+        if cfg!(debug_assertions) { "debug" } else { "release" },
+        exe,
+        if dir.trim().is_empty() { "(未初始化)" } else { dir.as_str() }
+    );
+}
+
 #[cfg(windows)]
 fn setup_effects(app: &tauri::AppHandle) {
     // —— 诊断：确认运行时配置与窗口实际状态是否一致 ——
@@ -202,6 +221,12 @@ fn setup_effects(app: &tauri::AppHandle) {
 pub fn run() {
     // panic 钩子最先装上：这样连「单实例检测阶段的崩溃」也能落进日志。
     logger::install_hook();
+    // 紧接着告诉日志系统配置文件在哪 —— 下面这两条日志（单实例、启动横幅）
+    // 都发生在 `setup` 之前，那时缓存目录还没初始化。不知道 `cache_dir` 的话，
+    // 它们会落到 %LOCALAPPDATA% 下的另一份 log 里，「启动即崩溃」的现场就被劈成两半。
+    if let Some(p) = settings::default_config_path() {
+        logger::hint_config_file(p);
+    }
 
     // 单实例：同一版本只允许一个实例；测试版(debug)与正式版(release)锁名不同，可共存。
     // 检测到同版本已在运行 → **只给它发一条消息**，由它自己唤回窗口 + 弹应用内提示
@@ -278,8 +303,15 @@ pub fn run() {
 
     #[cfg(windows)]
     let builder = builder.setup(|app| {
+        // 先告诉日志系统配置文件在哪：这样「配置就绪」「实例锁」这些
+        // 启动最早期（缓存目录还没确定）的日志也会落到用户真正在看的
+        // 那个 log 目录里，而不是 %LOCALAPPDATA% 下的另一份。
+        if let Ok(p) = app.path().app_data_dir() {
+            logger::hint_config_file(p.join("config.json"));
+        }
         settings::init(app.handle());
         clipboard::init(app.handle());
+        log_startup_banner();
         // 自愈：旧版本把自启值按 UTF-8 写进宽字符 API，注册表里是乱码路径，
         // 开机启动失败。这里每次启动比对一次，内容不符就重写。
         autostart::repair_if_needed();

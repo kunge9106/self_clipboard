@@ -915,9 +915,19 @@ pub fn init(app: &AppHandle) {
             .join("clipboard"),
     };
 
-    let _ = fs::create_dir_all(dir.join("data"));
-    let _ = fs::create_dir_all(dir.join("images"));
-    let _ = fs::create_dir_all(dir.join("files"));
+    // 这三个目录是「记录能不能落盘」的前提。创建失败（磁盘满、路径只读、
+    // 被安全软件拦）之后每一次复制都会失败，而用户看到的只是「复制了没反应」。
+    // 以前是 `let _ =`，等于把根因咽掉，只剩一个空列表可看。
+    for sub in ["data", "images", "files"] {
+        let p = dir.join(sub);
+        if let Err(e) = fs::create_dir_all(&p) {
+            crate::log_err!(
+                "clipboard",
+                "缓存子目录创建失败（{}）：{e} —— 该类型内容将无法记录",
+                p.display()
+            );
+        }
+    }
     // 缩略图目录从旧的顶层 `thumbs/` 迁到 `images/thumbs/`（与图片放一起）。
     // 一次性、幂等：老目录在、新目录不在时才搬；搬不动也不影响后续按需生成。
     let old_thumbs = dir.join("thumbs");
@@ -930,6 +940,26 @@ pub fn init(app: &AppHandle) {
     let _ = DIR.set(dir.clone());
 
     let mut hist = load_index(&dir);
+    // 索引条目数明显少于缓存目录里的内容文件 → 索引坏了，按文件补齐。
+    //
+    // 不只看「索引为空」：用户实测的损坏形态是索引被截断、只剩最后几条
+    // （写入途中被强杀），如果只判空就永远不会触发，列表会永远少掉几百条。
+    // 判据用「文件数 > 索引条数」而不是「>=」：正常状态下两者相等（清空、删除都会
+    // 连实体一起删），只有索引丢条目时才会出现文件多于条目。
+    // 重建本身只补不删（已有 id 跳过），因此即便判据误触发也不会破坏现有数据。
+    let entity_count = count_entities(&dir);
+    if entity_count > hist.len() {
+        let before = hist.len();
+        let rebuilt = rebuild_index_from_files(&dir, &mut hist);
+        if rebuilt > 0 {
+            crate::log_warn!(
+                "[clipboard] 索引只有 {before} 条、缓存目录有 {entity_count} 个内容文件 → 判为索引损坏，已补回 {rebuilt} 条（共 {} 条）；旧索引备份为 index.json.corrupt",
+                hist.len()
+            );
+            let _ = fs::copy(dir.join("index.json"), dir.join("index.json.corrupt"));
+            save_index(&dir, &hist);
+        }
+    }
     // 老版本 index.json 把文件路径内联在 files 里、没有落盘清单 → 补一份，
     // 让历史文件条目在缓存目录里也有实体（返回补了几条）
     let backfilled = backfill_files(&dir, &mut hist);
@@ -2880,23 +2910,57 @@ fn encrypt_legacy_entities(dir: &PathBuf) -> usize {
     n
 }
 
+/// 索引读不出来时，把损坏的文件原样留一份再返回空。
+///
+/// 为什么必须留：`load_index` 返回空之后，用户随手复制一条就会触发 `save_index`，
+/// 把损坏文件**就地覆盖**成一个看起来正常的小索引 —— 事故现场彻底消失，事后
+/// 谁也无法判断是截断、解密失败还是解析失败。用户实测那次就是这样丢的证据。
+fn keep_corrupt(dir: &PathBuf, raw: &[u8], why: &str) {
+    let dst = dir.join("index.json.corrupt");
+    match fs::write(&dst, raw) {
+        Ok(()) => crate::log_err!(
+            "clipboard",
+            "index.json {why}；损坏文件 {} 字节已另存为 index.json.corrupt",
+            raw.len()
+        ),
+        Err(e) => crate::log_err!("clipboard", "index.json {why}，且备份失败：{e}"),
+    }
+}
+
 fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     let path = dir.join("index.json");
     // 按**字节**读，不按字符串：新格式是 DPAPI 密文（带 ENC_MAGIC），不是 UTF-8 JSON。
-    let Ok(raw) = fs::read(&path) else {
-        return Vec::new();
+    let raw = match fs::read(&path) {
+        Ok(v) => v,
+        Err(e) => {
+            // 曾经这里直接 `return Vec::new()` —— **一行日志都没有**。于是
+            // 「记录全没了」成了唯一线索，连「索引文件到底在不在」都查不出来。
+            // 用户实测那次日志里恰好就是这种真空。
+            if e.kind() == std::io::ErrorKind::NotFound {
+                crate::log_warn!(
+                    "[clipboard] 没有 index.json（首次运行，或索引已被删除/改名）—— 历史列表为空"
+                );
+            } else {
+                crate::log_err!("clipboard", "index.json 读取失败：{e}");
+            }
+            return Vec::new();
+        }
     };
+    if raw.is_empty() {
+        crate::log_err!(
+            "clipboard",
+            "index.json 是空文件（0 字节）—— 上次写入被中断（强杀/崩溃/断电）的特征，历史列表将为空"
+        );
+        return Vec::new();
+    }
     // decode_text_bytes 同时兼容老版本的明文 JSON（没有魔数 → 原样返回），
     // 老用户升级后历史不会因为格式切换而清空。
     let Some(json) = decode_text_bytes(&raw) else {
-        crate::log_err!(
-            "clipboard",
-            "index.json 解密失败（可能换了 Windows 账户或机器），历史列表读不出来"
-        );
+        keep_corrupt(dir, &raw, "解密失败（可能换了 Windows 账户或机器）");
         return Vec::new();
     };
     let mut v: Vec<HistoryItem> = serde_json::from_str(&json).unwrap_or_else(|e| {
-        crate::log_warn!("[clipboard] index.json 解析失败：{e}，返回空（历史清空）");
+        keep_corrupt(dir, &raw, &format!("解析失败：{e}"));
         Vec::new()
     });
     // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
@@ -2911,6 +2975,13 @@ fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     if migrated > 0 {
         crate::log_print!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
     }
+    // 成功加载也要记一条：否则「索引读到了几条、文件多大」只能靠 init 里那句
+    // 间接推断。事故复盘时最有用的是「改动前后的两条读数」，而不是只剩一条。
+    crate::log_print!(
+        "[clipboard] 索引加载成功：{} 条，{} 字节",
+        v.len(),
+        raw.len()
+    );
     v
 }
 
@@ -2930,17 +3001,224 @@ fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
 /// 宁可少一层保护，也不能因为 DPAPI 异常把整份历史弄丢。读出时靠魔数区分。
 fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
     let path = dir.join("index.json");
+    // 先写临时文件、再原子替换。
+    //
+    // 直接 `fs::write` 覆盖是**非原子**的：进程若在写入中途被强杀（taskkill、
+    // 崩溃、关机），index.json 会被截断成半截甚至 0 字节，下次启动解析失败
+    // → 历史全没。用户实测过一次：列表只剩 4 条，而 data/ 下 300 多个正文文件
+    // 都在 —— 正是这种损坏形态。rename 在同一分区上是原子的，要么是旧的完整
+    // 索引，要么是新的完整索引，不存在半截状态。
+    let tmp = dir.join("index.json.tmp");
     match serde_json::to_string_pretty(hist) {
         Ok(s) => {
             // 写失败要记：index.json 是重启后恢复历史/置顶/收藏的唯一依据，
             // 静默失败会表现为「重启后记录全没了」却查无实据。
-            if let Err(e) = fs::write(&path, encrypt_text(&s)) {
+            if let Err(e) = fs::write(&tmp, encrypt_text(&s)) {
                 crate::log_err!("clipboard", "index.json 写入失败：{e}");
+                let _ = fs::remove_file(&tmp);
+                return;
+            }
+            if let Err(e) = fs::rename(&tmp, &path) {
+                crate::log_err!("clipboard", "index.json 原子替换失败：{e}");
+                let _ = fs::remove_file(&tmp);
             }
         }
         Err(e) => crate::log_err!("clipboard", "index.json 序列化失败：{e}"),
     }
 }
+
+/// 从 id（`{:x}-{counter}`）里取回毫秒时间戳。取不到返回 None。
+fn ts_from_id(id: &str) -> Option<u64> {
+    id.split('-')
+        .next()
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+        .filter(|&ms| ms > 1_500_000_000_000) // 粗校验：2017 年之前的值视为不可信
+}
+
+fn mtime_secs(p: &Path) -> u64 {
+    fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        * 1000
+}
+
+/// 统计缓存目录里的内容实体数（正文 + 图片 + 文件清单），用来判断索引是否漏条。
+/// 只数实体文件，不数 `images/thumbs/`（缩略图不是条目）。
+fn count_entities(dir: &PathBuf) -> usize {
+    let count_in = |sub: &str, want_ext: Option<&str>| -> usize {
+        fs::read_dir(dir.join(sub))
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| {
+                        let p = e.path();
+                        p.is_file()
+                            && want_ext
+                                .map(|x| p.extension().and_then(|s| s.to_str()) == Some(x))
+                                .unwrap_or(true)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    count_in("data", Some("txt")) + count_in("files", Some("txt")) + count_in("images", None)
+}
+
+/// 索引不可用（丢失/被截断）时，按落盘文件重建条目，返回新增条数。
+///
+/// 为什么需要：内容实体是**逐个文件**落的，索引只是它们的目录。索引坏了不等于
+/// 数据没了 —— 重建能把记录一条不少地找回来（正文预览要解密读原文）。
+///
+/// 只补不删：索引里已有的 id 一律跳过，所以可以在「索引为空」时无条件调用。
+fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
+    let known: std::collections::HashSet<String> =
+        hist.iter().map(|i| i.id.clone()).collect();
+    let mut found: Vec<HistoryItem> = Vec::new();
+
+    let push_text = |found: &mut Vec<HistoryItem>, id: &str, p: &Path| {
+        let Ok(raw) = fs::read(p) else { return };
+        let Some(text) = decode_text_bytes(&raw) else {
+            return; // 解不开（换了账户）就跳过，不要用空内容污染列表
+        };
+        if text.is_empty() {
+            return;
+        }
+        let (preview, preview_truncated) = text_preview_parts(&text);
+        found.push(HistoryItem {
+            id: id.to_string(),
+            kind: "text".into(),
+            ts: ts_from_id(id).unwrap_or_else(|| mtime_secs(p)),
+            pinned: false,
+            pinned_views: Vec::new(),
+            favorite: false,
+            edited: false,
+            preview,
+            preview_truncated,
+            size: text.len() as u64,
+            text_path: Some(format!("data/{id}.txt")),
+            img_path: None,
+            files_path: None,
+            files: None,
+        });
+    };
+
+    // 正文 → 文本条目
+    if let Ok(rd) = fs::read_dir(dir.join("data")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("txt") {
+                continue;
+            }
+            let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+                continue;
+            };
+            if known.contains(&id) {
+                continue;
+            }
+            push_text(&mut found, &id, &p);
+        }
+    }
+
+    // 文件清单 → 文件条目
+    if let Ok(rd) = fs::read_dir(dir.join("files")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("txt") {
+                continue;
+            }
+            let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+                continue;
+            };
+            if known.contains(&id) {
+                continue;
+            }
+            let Ok(raw) = fs::read(&p) else { continue };
+            let Some(body) = decode_text_bytes(&raw) else {
+                continue;
+            };
+            let files: Vec<String> = body
+                .split(['\r', '\n'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            if files.is_empty() {
+                continue;
+            }
+            let name = Path::new(&files[0])
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            found.push(HistoryItem {
+                id: id.clone(),
+                kind: "files".into(),
+                ts: ts_from_id(&id).unwrap_or_else(|| mtime_secs(&p)),
+                pinned: false,
+                pinned_views: Vec::new(),
+                favorite: false,
+                edited: false,
+                preview: if files.len() == 1 {
+                    name
+                } else {
+                    format!("{} 等 {} 个文件", name, files.len())
+                },
+                preview_truncated: false,
+                size: files.iter().map(|f| f.len()).sum::<usize>() as u64,
+                text_path: None,
+                img_path: None,
+                files_path: Some(format!("files/{id}.txt")),
+                files: Some(files),
+            });
+        }
+    }
+
+    // 图片 → 图片条目（跳过 thumbs 子目录：那不是条目实体）
+    if let Ok(rd) = fs::read_dir(dir.join("images")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+                continue;
+            };
+            if known.contains(&id) || p.extension().and_then(|s| s.to_str()) == Some("txt") {
+                continue;
+            }
+            let size = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            let ext = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("bmp")
+                .to_string();
+            found.push(HistoryItem {
+                id: id.clone(),
+                kind: "image".into(),
+                ts: ts_from_id(&id).unwrap_or_else(|| mtime_secs(&p)),
+                pinned: false,
+                pinned_views: Vec::new(),
+                favorite: false,
+                edited: false,
+                preview: "[图片]".into(),
+                preview_truncated: false,
+                size,
+                text_path: None,
+                img_path: Some(format!("images/{id}.{ext}")),
+                files_path: None,
+                files: None,
+            });
+        }
+    }
+
+    let n = found.len();
+    hist.extend(found);
+    // 列表约定：新→旧。重建出来的条目顺序取自 read_dir（不确定），必须重排。
+    hist.sort_by(|a, b| b.ts.cmp(&a.ts));
+    n
+}
+
 
 /// 为「内联了 files、但缺 files_path」的历史文件条目补写 `files/<id>.txt`，
 /// 返回补写的条数。老版本 index.json 是这么存的，不补的话缓存目录里看不到这些条目。
@@ -2966,17 +3244,36 @@ fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
     n
 }
 
+/// 删除条目对应的落盘实体。
+///
+/// 以前全用 `let _ =`：删失败（文件被占用、被设为只读、路径失效）就静默留下——
+/// 用户以为敏感内容已经删掉，磁盘上其实还在。这是**隐私相关**的静默失败，
+/// 必须记 ERROR；`NotFound` 不算失败（重复删除、实体本就不存在）。
 fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
+    let mut rels: Vec<&str> = Vec::new();
     if let Some(rel) = &item.text_path {
-        let _ = fs::remove_file(dir.join(rel));
+        rels.push(rel);
     }
     if let Some(rel) = &item.img_path {
-        let _ = fs::remove_file(dir.join(rel));
-        // 缩略图与原图同生命周期，一并清掉
-        let _ = fs::remove_file(dir.join(thumb_rel(&item.id)));
+        rels.push(rel);
     }
     if let Some(rel) = &item.files_path {
-        let _ = fs::remove_file(dir.join(rel));
+        rels.push(rel);
+    }
+    for rel in rels {
+        let p = dir.join(rel);
+        if let Err(e) = fs::remove_file(&p) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                crate::log_err!("clipboard", "删除实体失败（{}）：{e}", p.display());
+            }
+        }
+    }
+    // 缩略图与原图同生命周期，一并清掉
+    let thumb = dir.join(thumb_rel(&item.id));
+    if let Err(e) = fs::remove_file(&thumb) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            crate::log_err!("clipboard", "删除缩略图失败（{}）：{e}", thumb.display());
+        }
     }
 }
 
@@ -3014,9 +3311,11 @@ pub fn prune_retention(days: u32) {
 /// 纯函数版本：过滤 + 删文件 + 存索引
 fn prune_history(hist: Vec<HistoryItem>, dir: &PathBuf, days: u32) -> Vec<HistoryItem> {
     if days == 0 {
+        crate::log_print!("[clipboard] 保留策略：永久保存，不清理");
         return hist;
     }
     let deadline = now_ms().saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
+    let before = hist.len();
     let kept: Vec<HistoryItem> = hist
         .into_iter()
         .filter(|i| {
@@ -3028,6 +3327,21 @@ fn prune_history(hist: Vec<HistoryItem>, dir: &PathBuf, days: u32) -> Vec<Histor
             }
         })
         .collect();
+    // 这条日志以前**不存在**，而它删的是用户数据（连同落盘文件）。
+    //
+    // 踩过的坑：`config.json` 解析失败会回落默认配置，而默认保留天数是 3 天，
+    // 于是启动时按 3 天把几百条历史连文件一起删掉 —— 日志里一个字都没有，
+    // 现场只剩「记录全没了」。凡是「按策略自动删除用户数据」的地方，
+    // 必须留下「按什么规则、删了多少、剩多少」。
+    let removed = before - kept.len();
+    if removed > 0 {
+        crate::log_warn!(
+            "[clipboard] 保留策略：按 {days} 天清掉 {removed} 条（剩 {} 条）——若不是预期，检查设置里的保留天数",
+            kept.len()
+        );
+    } else {
+        crate::log_print!("[clipboard] 保留策略：{days} 天，无需清理（共 {} 条）", kept.len());
+    }
     save_index(dir, &kept);
     kept
 }
