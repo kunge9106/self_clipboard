@@ -2714,23 +2714,57 @@ fn encrypt_legacy_entities(dir: &PathBuf) -> usize {
     n
 }
 
+/// 索引读不出来时，把损坏的文件原样留一份再返回空。
+///
+/// 为什么必须留：`load_index` 返回空之后，用户随手复制一条就会触发 `save_index`，
+/// 把损坏文件**就地覆盖**成一个看起来正常的小索引 —— 事故现场彻底消失，事后
+/// 谁也无法判断是截断、解密失败还是解析失败。用户实测那次就是这样丢的证据。
+fn keep_corrupt(dir: &PathBuf, raw: &[u8], why: &str) {
+    let dst = dir.join("index.json.corrupt");
+    match fs::write(&dst, raw) {
+        Ok(()) => crate::log_err!(
+            "clipboard",
+            "index.json {why}；损坏文件 {} 字节已另存为 index.json.corrupt",
+            raw.len()
+        ),
+        Err(e) => crate::log_err!("clipboard", "index.json {why}，且备份失败：{e}"),
+    }
+}
+
 fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     let path = dir.join("index.json");
     // 按**字节**读，不按字符串：新格式是 DPAPI 密文（带 ENC_MAGIC），不是 UTF-8 JSON。
-    let Ok(raw) = fs::read(&path) else {
-        return Vec::new();
+    let raw = match fs::read(&path) {
+        Ok(v) => v,
+        Err(e) => {
+            // 曾经这里直接 `return Vec::new()` —— **一行日志都没有**。于是
+            // 「记录全没了」成了唯一线索，连「索引文件到底在不在」都查不出来。
+            // 用户实测那次日志里恰好就是这种真空。
+            if e.kind() == std::io::ErrorKind::NotFound {
+                crate::log_warn!(
+                    "[clipboard] 没有 index.json（首次运行，或索引已被删除/改名）—— 历史列表为空"
+                );
+            } else {
+                crate::log_err!("clipboard", "index.json 读取失败：{e}");
+            }
+            return Vec::new();
+        }
     };
+    if raw.is_empty() {
+        crate::log_err!(
+            "clipboard",
+            "index.json 是空文件（0 字节）—— 上次写入被中断（强杀/崩溃/断电）的特征，历史列表将为空"
+        );
+        return Vec::new();
+    }
     // decode_text_bytes 同时兼容老版本的明文 JSON（没有魔数 → 原样返回），
     // 老用户升级后历史不会因为格式切换而清空。
     let Some(json) = decode_text_bytes(&raw) else {
-        crate::log_err!(
-            "clipboard",
-            "index.json 解密失败（可能换了 Windows 账户或机器），历史列表读不出来"
-        );
+        keep_corrupt(dir, &raw, "解密失败（可能换了 Windows 账户或机器）");
         return Vec::new();
     };
     let mut v: Vec<HistoryItem> = serde_json::from_str(&json).unwrap_or_else(|e| {
-        crate::log_warn!("[clipboard] index.json 解析失败：{e}，返回空（历史清空）");
+        keep_corrupt(dir, &raw, &format!("解析失败：{e}"));
         Vec::new()
     });
     // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
@@ -2745,6 +2779,13 @@ fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
     if migrated > 0 {
         crate::log_print!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
     }
+    // 成功加载也要记一条：否则「索引读到了几条、文件多大」只能靠 init 里那句
+    // 间接推断。事故复盘时最有用的是「改动前后的两条读数」，而不是只剩一条。
+    crate::log_print!(
+        "[clipboard] 索引加载成功：{} 条，{} 字节",
+        v.len(),
+        raw.len()
+    );
     v
 }
 
