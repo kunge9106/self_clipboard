@@ -105,11 +105,14 @@ pub struct Config {
     /// 老用户就会再看到一次「新功能导览」；布尔值只能二选一，要么永久不再提示，
     /// 要么得手动重置。
     ///
-    /// **默认值刻意分两处**，用来区分「全新安装」与「老配置升级」：
-    ///   - 走 `impl Default`（没有 config.json）→ 0 → 会弹；
-    ///   - 走 serde 缺字段默认（有 config.json 但没这个字段）→ 当前版本 → 不弹。
-    /// 老用户升级时被弹一次功能导览是纯打扰，他们早就摸索过了。
-    #[serde(default = "tour_version_now")]
+    /// **默认一律是 0（= 没看过）**，也包括「有 config.json 但缺这个字段」的老配置。
+    /// 早先这里刻意让老配置视为「已看过」，理由是「老用户早就摸索过了，弹窗是打扰」——
+    /// 但导览的价值恰恰是让人知道**有哪些功能**，而升级上来的老用户正是最该看一遍的人；
+    /// 让他们因为「配置文件里没有这个字段」而永远看不到，等于把这功能只做给了
+    /// 人数最少的全新安装用户。用户明确要求「更新到这版都得默认弹一次」。
+    ///
+    /// 弹过之后 `dismiss_onboarding` 会写入当前版本号，此后不再出现。
+    #[serde(default = "default_tour_seen")]
     pub tour_seen_version: u32,
     /// 不跟随 Windows 缩放比例：界面固定按 **100%** 渲染（**默认开启**）。
     ///
@@ -148,9 +151,12 @@ pub struct Config {
 /// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次增量。
 pub const TOUR_VERSION: u32 = 1;
 
-/// serde 缺字段时用当前版本 —— 等价于「老用户视为已看过」。
-fn tour_version_now() -> u32 {
-    TOUR_VERSION
+/// serde 缺字段时的默认值：**0 = 没看过**。
+///
+/// 即「有 config.json 但没这个字段」的老配置也视为没看过 —— 升级到本版的用户
+/// 会看到一次功能导览。写入时机在 `dismiss_onboarding`，弹过一次之后不再出现。
+fn default_tour_seen() -> u32 {
+    0
 }
 
 /// 一次成功的 `releases/latest` 查询结果。
@@ -540,23 +546,28 @@ pub fn set_autostart(value: bool) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// 功能导览的「新装弹、升级不弹」全靠两处默认值分开，这里把它钉住。
+    /// 功能导览的判定：**新装与升级都要弹一次**，弹过之后不再弹。
     ///
-    /// 判错的两种后果都很糟：默认值写反 → 所有老用户升级后被弹一次导览；
-    /// 或者新装也不弹 → 这个功能等于没做。
+    /// 曾经的设计是「老用户视为已看过」（缺字段默认给当前版本），当时怕打扰；
+    /// 但导览讲的是「这软件有什么功能」，升级上来的老用户才是最需要这份说明的人。
+    /// 用户明确要求改成「更新到这版的都得默认弹一次」。
     #[test]
-    fn tour_version_defaults_split_new_install_and_upgrade() {
+    fn tour_pops_once_for_both_new_install_and_upgrade() {
         // 全新安装（没有 config.json）走 impl Default → 0 → 小于当前版本 → 会弹
         assert_eq!(Config::default().tour_seen_version, 0);
 
-        // 老配置：文件在、但没这个字段 → serde 缺字段默认给当前版本 → 不弹
+        // 老配置：文件在、但没这个字段 → 同样视为 0 → 也会弹
         let upgraded: Config = serde_json::from_str("{}").expect("老 config.json 必须能解析");
-        assert_eq!(upgraded.tour_seen_version, TOUR_VERSION);
+        assert_eq!(upgraded.tour_seen_version, 0);
 
-        // 已经记过的值原样保留（将来 TOUR_VERSION 提升后，小于新值就会再弹一次）
+        // 弹过之后：`dismiss_onboarding` 写入当前版本号，此后不再弹
         let seen = format!(r#"{{"tour_seen_version":{}}}"#, TOUR_VERSION);
         let cfg: Config = serde_json::from_str(&seen).unwrap();
         assert_eq!(cfg.tour_seen_version, TOUR_VERSION);
+        assert!(
+            cfg.tour_seen_version >= TOUR_VERSION,
+            "看过之后必须满足 >= 当前版本，否则会重复弹"
+        );
     }
 }
 
