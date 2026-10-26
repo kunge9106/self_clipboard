@@ -1111,8 +1111,8 @@ pub fn init(app: &AppHandle) {
     }
 
     // 保留策略：按配置天数清理过期条目（0 = 永久保留）
-    let days = crate::settings::get().retention_days;
-    let hist = prune_history(hist, &dir, days);
+    let cfg = crate::settings::get();
+    let hist = prune_history(hist, &dir, cfg.retention_days, cfg.prune_include_pinned);
 
     let _ = HISTORY.set(Mutex::new(hist));
 
@@ -4027,13 +4027,14 @@ fn patch_item<F: FnOnce(&mut HistoryItem)>(id: &str, f: F) -> Result<(), String>
 // ---------------------------------------------------------------------------
 
 /// 按天数清理过期条目（0 = 不清理），返回清理后的历史。
-/// v1 语义：严格按时间戳过滤，不豁免置顶/收藏。
+/// 默认豁免置顶/收藏（见 `prune_history` 与 `settings.prune_include_pinned`）。
 /// 只删过期条目自己的实体文件，**不碰 `log/`**（见 CONTENT_DIRS 注释）。
 pub fn prune_retention(days: u32) {
     if let Some(dir) = DIR.get() {
+        let include_pinned = crate::settings::get().prune_include_pinned;
         let mut hist = HISTORY.get().unwrap().lock().unwrap();
         let before = hist.len();
-        *hist = prune_history(hist.clone(), dir, days);
+        *hist = prune_history(hist.clone(), dir, days, include_pinned);
         let removed = before - hist.len();
         if removed > 0 {
             crate::log_print!("[clipboard] 保留策略清理 {removed} 条过期条目");
@@ -4041,18 +4042,42 @@ pub fn prune_retention(days: u32) {
     }
 }
 
+/// 这条记录是否受保护（置顶或收藏）。
+///
+/// 单独抽出来是因为**所有自动清理路径都要用它**：退出清理、保留期清理。
+/// 上一版只有退出清理判断了，保留期清理严格按时间戳过滤 —— 于是「置顶了三年」的
+/// 条目会悄无声息地到期被删，用户以为置顶就是长期保存（实测反馈）。
+fn is_protected(item: &HistoryItem) -> bool {
+    // 不用再判 `item.pinned`：那个 v2.0 早期的全局置顶字段已废弃，
+    // `load_index` 载入时就会迁移进 `pinned_views`，而所有清理都发生在载入之后。
+    !item.pinned_views.is_empty() || item.favorite
+}
+
 /// 纯函数版本：过滤 + 删文件 + 存索引
-fn prune_history(hist: Vec<HistoryItem>, dir: &PathBuf, days: u32) -> Vec<HistoryItem> {
+///
+/// `include_pinned = false`（默认）时，置顶/收藏**不受保留期影响** —— 它们被用户
+/// 主动标记为「要留着」，到期自动删掉等于违背这个意图。
+fn prune_history(
+    hist: Vec<HistoryItem>,
+    dir: &PathBuf,
+    days: u32,
+    include_pinned: bool,
+) -> Vec<HistoryItem> {
     if days == 0 {
         crate::log_print!("[clipboard] 保留策略：永久保存，不清理");
         return hist;
     }
     let deadline = now_ms().saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
     let before = hist.len();
+    let mut kept_protected = 0usize;
     let kept: Vec<HistoryItem> = hist
         .into_iter()
         .filter(|i| {
             if i.ts >= deadline {
+                true
+            } else if !include_pinned && is_protected(i) {
+                // 过期但被标记为「要留着」：豁免，不计入删除数
+                kept_protected += 1;
                 true
             } else {
                 remove_item_files(dir, i);
@@ -4074,6 +4099,13 @@ fn prune_history(hist: Vec<HistoryItem>, dir: &PathBuf, days: u32) -> Vec<Histor
         );
     } else {
         crate::log_print!("[clipboard] 保留策略：{days} 天，无需清理（共 {} 条）", kept.len());
+    }
+    // 豁免了几条也要记：用户若觉得「怎么老有旧记录」，一查就知道是被保护下来的，
+    // 而不是清理逻辑没跑。
+    if kept_protected > 0 {
+        crate::log_print!(
+            "[clipboard] 保留策略：{kept_protected} 条过期记录因置顶/收藏被保留（include_pinned={include_pinned}）"
+        );
     }
     save_index(dir, &kept);
     kept
@@ -4369,7 +4401,7 @@ pub fn on_app_exit() {
             // 保留置顶/收藏：只删普通条目的内容文件
             let mut hist = HISTORY.get().unwrap().lock().unwrap();
             hist.retain(|i| {
-                if !i.pinned_views.is_empty() || i.favorite {
+                if is_protected(i) {
                     true
                 } else {
                     remove_item_files(dir, i);
@@ -4564,6 +4596,75 @@ mod tests {
             files_path: None,
             files: None,
         }
+    }
+
+    /// 保留期清理**默认不碰置顶/收藏**。
+    ///
+    /// 用户实测反馈：置顶/收藏是「我要留着」的明确标记，到期自动删掉等于违背它，
+    /// 而且删除发生在后台 —— 用户只会在发现记录没了的时候才察觉。
+    #[test]
+    fn retention_keeps_pinned_and_favorite_by_default() {
+        let dir = std::env::temp_dir().join("qingtie_test_prune_default");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let now = now_ms();
+        let old = now - 10 * 24 * 3600 * 1000; // 10 天前，默认 3 天保留下已过期
+        let mut plain = sample_item("plain", "普通过期");
+        plain.ts = old;
+        let mut pinned = sample_item("pinned", "置顶过期");
+        pinned.ts = old;
+        pinned.pinned_views = vec!["text".into()];
+        let mut fav = sample_item("fav", "收藏过期");
+        fav.ts = old;
+        fav.favorite = true;
+        let mut fresh = sample_item("fresh", "未过期");
+        fresh.ts = now;
+
+        let hist = vec![plain, pinned, fav, fresh];
+        let kept = prune_history(hist, &dir, 3, false);
+        let ids: Vec<&str> = kept.iter().map(|i| i.id.as_str()).collect();
+        assert!(!ids.contains(&"plain"), "过期普通条目应被清掉");
+        assert!(ids.contains(&"pinned"), "过期但置顶的必须保留");
+        assert!(ids.contains(&"fav"), "过期但收藏的必须保留");
+        assert!(ids.contains(&"fresh"), "未过期的必须保留");
+        assert_eq!(ids.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 勾选「到期清理也清置顶/收藏」后，置顶/收藏才会被清掉。
+    #[test]
+    fn retention_drops_pinned_only_when_explicitly_enabled() {
+        let dir = std::env::temp_dir().join("qingtie_test_prune_include");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let now = now_ms();
+        let old = now - 10 * 24 * 3600 * 1000;
+        let mut pinned = sample_item("pinned", "置顶过期");
+        pinned.ts = old;
+        pinned.favorite = true;
+        let mut fresh = sample_item("fresh", "未过期");
+        fresh.ts = now;
+
+        let kept = prune_history(vec![pinned, fresh], &dir, 3, true);
+        assert_eq!(kept.len(), 1, "显式开启后置顶/收藏也应被清掉");
+        assert_eq!(kept[0].id, "fresh");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 保留天数 0 = 永久保存，任何条目都不该动（含普通条目）。
+    #[test]
+    fn retention_zero_days_keeps_everything() {
+        let dir = std::env::temp_dir().join("qingtie_test_prune_zero");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let mut ancient = sample_item("ancient", "很久以前");
+        ancient.ts = 1;
+        let kept = prune_history(vec![ancient], &dir, 0, true);
+        assert_eq!(kept.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 索引必须**整份加密**落盘。

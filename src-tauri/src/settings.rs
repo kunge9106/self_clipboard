@@ -29,6 +29,14 @@ pub struct Config {
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
+    /// 保留期到期清理时，是否连置顶/收藏一起删。**默认 false = 置顶/收藏永不到期**。
+    ///
+    /// 与 `clean_include_pinned` 分开而不是合并：两者风险等级不同。
+    /// 退出清理是用户主动退出触发的；保留期清理是**后台自动、用户无感知**的，
+    /// 一旦连置顶一起删，用户只能在「记录怎么没了」之后才发现。
+    /// 绑成一个开关会让「想让退出清理也清置顶」的人，在不知情下让后台也清置顶。
+    #[serde(default)]
+    pub prune_include_pinned: bool,
     /// **直角模式**下的材质浓度（窗口主体层不透明度百分比，40–90）
     ///
     /// 两个模式**各记一档**、互不影响：切换圆角模式只是换用另一档的值，
@@ -270,6 +278,8 @@ impl Default for Config {
             clean_include_pinned: false,
             clean_confirm_exit: false,
             retention_days: default_retention(),
+            // 置顶/收藏默认不受保留期影响
+            prune_include_pinned: false,
             alpha_straight: default_alpha_straight(),
             alpha_round: default_alpha_round(),
             legacy_alpha: None,
@@ -449,6 +459,7 @@ pub fn get_settings() -> serde_json::Value {
         "cleanIncludePinned": cfg.clean_include_pinned,
         "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
+        "pruneIncludePinned": cfg.prune_include_pinned,
         // 当前模式生效的那一档（前端滑块直接用这个）
         "materialAlpha": cfg.alpha(),
         // 两档原值：前端切换模式后可以立刻更新界面，不必再拉一次配置
@@ -589,6 +600,16 @@ pub fn set_pin_cancel_on_disable(value: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn set_clean_include_pinned(value: bool) -> Result<(), String> {
     update(|c| c.clean_include_pinned = value);
+    Ok(())
+}
+
+/// 保留期到期清理是否连置顶/收藏一起删。
+///
+/// **刻意不在这里立刻执行一次清理**：勾上开关就立即删掉一批置顶条目，是很惊悚的
+/// 交互。开关只决定「下次清理用什么规则」，启动时与改保留天数时才会真正跑。
+#[tauri::command]
+pub fn set_prune_include_pinned(value: bool) -> Result<(), String> {
+    update(|c| c.prune_include_pinned = value);
     Ok(())
 }
 
