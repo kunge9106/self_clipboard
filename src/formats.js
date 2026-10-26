@@ -62,18 +62,36 @@ export function highlightCode(text) {
   return out + esc(src.slice(last));
 }
 
-// ── Markdown 着色（卡片用，只染色不排版）────────────────────────────────
-// 卡片只有两行高，排版成标题/列表反而看不清结构；这里只把标记符号染成次要色，
-// 让人一眼认出「这是 Markdown 源码」。
-export function markdownTint(text) {
+// ── 卡片用的 Markdown「扁平化」渲染 ─────────────────────────────────────
+/// 卡片只有两行高，不能出现块级元素（标题放大、列表缩进会把内容挤没）。
+/// 所以这里**只做「去标记 + 行内样式」**：
+///   标题 → 去掉 `#`、整行加粗
+///   列表 → 换成圆点、去掉 `- `
+///   引用 → 换成竖线、去掉 `> `
+///   表格 → 竖线换成间隔点
+///   围栏 → 整行去掉（代码本身仍在下一行显示）
+/// 出来的仍是纯文字流，`-webkit-line-clamp: 2` 依然生效。
+export function cardMarkdown(text) {
   return String(text ?? "")
     .split("\n")
     .map((line) => {
-      const m = line.match(/^(\s*)(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|\|\s*)/);
-      if (!m) return esc(line);
-      const head = m[0];
-      return `<span class="tok-md">${esc(head)}</span>${esc(line.slice(head.length))}`;
+      if (/^\s*```/.test(line)) return ""; // 围栏行不要
+      const h = line.match(/^\s*#{1,6}\s+(.*)$/);
+      if (h) return `<strong>${inlineFormat(h[1])}</strong>`;
+      const ul = line.match(/^(\s*)[-*+]\s+(.*)$/);
+      if (ul) return `${ul[1]}<span class="md-bullet">•</span> ${inlineFormat(ul[2])}`;
+      const ol = line.match(/^(\s*)(\d+\.)\s+(.*)$/);
+      if (ol) return `${ol[1]}<span class="md-bullet">${ol[2]}</span> ${inlineFormat(ol[3])}`;
+      const bq = line.match(/^\s*>\s?(.*)$/);
+      if (bq) return `<span class="md-quote">│</span> ${inlineFormat(bq[1])}`;
+      if (/^\s*\|/.test(line)) {
+        const cells = line.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+        if (cells.every((c) => /^:?-{2,}:?$/.test(c))) return ""; // 分隔行不要
+        return inlineFormat(cells.join("  ·  "));
+      }
+      return inlineFormat(line);
     })
+    .filter((l) => l.trim() !== "")
     .join("\n");
 }
 
@@ -81,7 +99,7 @@ export function markdownTint(text) {
 /// 按子类型返回卡片正文的 HTML。调用方直接赋给 innerHTML 即可（内容已全部转义）。
 export function cardPreviewHtml(text, subtype) {
   if (subtype === "code") return highlightCode(text);
-  if (subtype === "markdown") return markdownTint(text);
+  if (subtype === "markdown") return cardMarkdown(text);
   return esc(text);
 }
 
@@ -112,7 +130,8 @@ export function hostOf(text) {
 const MD_BLOCK_START = /^(#{1,6}\s|\s*[-*+]\s|\s*\d+\.\s|\s*>|\s*\||\s*```)/;
 
 /// 行内格式。入参是**原始文本**，内部先转义再替换标记。
-function inline(text) {
+/// 导出给卡片用：卡片与详情的行内规则必须一致，否则同一段在列表里和弹窗里长得不一样。
+export function inlineFormat(text) {
   let h = esc(text);
   // 行内代码优先：里面的 `*` `[` 不该再被解析
   h = h.replace(/`([^`\n]+)`/g, (_, c) => `<code class="md-inline">${c}</code>`);
@@ -161,7 +180,7 @@ export function renderMarkdown(text) {
     if (h) {
       closeList();
       const lv = Math.min(h[1].length, 6);
-      out.push(`<h${lv}>${inline(h[2])}</h${lv}>`);
+      out.push(`<h${lv}>${inlineFormat(h[2])}</h${lv}>`);
       i++;
       continue;
     }
@@ -182,7 +201,7 @@ export function renderMarkdown(text) {
         buf.push(lines[i].replace(/^\s*>\s?/, ""));
         i++;
       }
-      out.push(`<blockquote>${inline(buf.join("\n")).replace(/\n/g, "<br>")}</blockquote>`);
+      out.push(`<blockquote>${inlineFormat(buf.join("\n")).replace(/\n/g, "<br>")}</blockquote>`);
       continue;
     }
 
@@ -200,9 +219,9 @@ export function renderMarkdown(text) {
       }
       out.push(
         `<table class="md-table"><thead><tr>${head
-          .map((c) => `<th>${inline(c)}</th>`)
+          .map((c) => `<th>${inlineFormat(c)}</th>`)
           .join("")}</tr></thead><tbody>${rows
-          .map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`)
+          .map((r) => `<tr>${r.map((c) => `<td>${inlineFormat(c)}</td>`).join("")}</tr>`)
           .join("")}</tbody></table>`
       );
       continue;
@@ -218,7 +237,7 @@ export function renderMarkdown(text) {
         out.push(`<${want}>`);
         list = want;
       }
-      out.push(`<li>${inline((ul || ol)[1])}</li>`);
+      out.push(`<li>${inlineFormat((ul || ol)[1])}</li>`);
       i++;
       continue;
     }
@@ -238,7 +257,7 @@ export function renderMarkdown(text) {
       buf.push(lines[i]);
       i++;
     }
-    out.push(`<p>${inline(buf.join("\n")).replace(/\n/g, "<br>")}</p>`);
+    out.push(`<p>${inlineFormat(buf.join("\n")).replace(/\n/g, "<br>")}</p>`);
   }
 
   closeList();

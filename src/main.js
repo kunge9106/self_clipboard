@@ -1730,6 +1730,7 @@ function setDetailMode(mode) {
   // 不可编辑的条目连「编辑」按钮都不给，且**退出编辑态时也不能重新冒出来**
   $detail("detail-edit").hidden = editing || !canEditDetail();
   $detail("detail-copy").hidden = editing;
+  $detail("detail-copy-plain").hidden = editing;
   $detail("detail-close").hidden = editing;
   $detail("detail-revert").hidden = !editing;
   $detail("detail-save").hidden = !editing;
@@ -1899,6 +1900,18 @@ function bindDetailModal() {
     e.stopPropagation();
     invoke("open_external", { url: a.dataset.ext });
   });
+
+  // 「复制纯文本」：与右键菜单里的同名项走**同一条命令**（copy_back + plain），
+  // 不另写一套读写逻辑 —— 否则格式处理规则会在两处漂移。
+  document.getElementById("detail-copy-plain").onclick = async () => {
+    if (!detailItem) return;
+    try {
+      await invoke("copy_back", { id: detailItem.id, plain: true });
+      toast("已复制纯文本");
+    } catch (e) {
+      toast("复制失败：" + e);
+    }
+  };
 
   document.getElementById("detail-copy").onclick = async () => {
     if (!detailItem) return;

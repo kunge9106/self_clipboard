@@ -966,13 +966,37 @@ html:not(.hovers-off) .card:hover {
 .card.is-missing .card-preview {
   color: var(--text-dim);
 }
-/* 代码 / Markdown：等宽字体。字号比正文小一档 —— 等宽字宽更大，
+/* 代码：等宽字体。字号比正文小一档 —— 等宽字宽更大，
    保持 13px 会让两行只装得下十几个字符。 */
-.card-preview.is-code,
-.card-preview.is-markdown {
+.card-preview.is-code {
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* Markdown：**渲染后**是正文流（标题加粗、列表换圆点、去掉 `#` `-`），
+   所以用正文字体，不再等宽 —— 等宽会让「渲染过的内容」看起来仍像源码。 */
+.card-preview.is-markdown {
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* Markdown 的列表点与引用竖线：次要色，不抢正文 */
+.card-preview .md-bullet,
+.card-preview .md-quote {
+  color: var(--text-dim);
+  margin-right: 2px;
+}
+
+/* 行内代码：卡片里也要有底色，否则和普通文字混在一起 */
+.card-preview code.md-inline,
+.detail-body.is-rich code.md-inline {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--glass-strong);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
 }
 
 /* 链接：整体染成链接色。不拆开只染域名 —— 拆分会在文本中间产生断点，
