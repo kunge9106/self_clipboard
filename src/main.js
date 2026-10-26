@@ -2312,7 +2312,7 @@ function settingsDataHtml(s) {
         // 等于违背这个意图。要连它们一起清，必须在这里显式勾选。
         rowCheck(
           "set-prune-pinned",
-          "到期清理也清置顶/收藏",
+          "到期清理置顶/收藏",
           "不勾选（默认）则置顶与收藏<b>不会</b>因到期被删；勾选后到期一并清理（不可恢复）",
           s.pruneIncludePinned,
           true
