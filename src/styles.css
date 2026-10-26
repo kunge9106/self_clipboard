@@ -40,6 +40,13 @@
 
   /* 玻璃叠加层（light） */
   --glass: rgba(255, 255, 255, 0.16);
+  /* 条目卡片底色。比 --glass 实得多，理由：浅色材质底（Mica 白灰）上叠 16% 白，
+     卡片与背景几乎同色，整块看起来「发灰」、分不出层次（用户实测反馈）。
+     --glass 还要服务侧栏与按钮，那些地方需要更透，所以这里单独一个变量。 */
+  --card-bg: rgba(255, 255, 255, 0.55);
+  /* 悬停态：比常态略亮。不能沿用 --glass-hover（那是 10% 的通用悬停层），
+     否则鼠标一移上去，实心卡片会瞬间变透明、像被"挖"了一下。 */
+  --card-hover: rgba(255, 255, 255, 0.72);
   --glass-strong: rgba(255, 255, 255, 0.28);
   --glass-hover: rgba(255, 255, 255, 0.24);
   /* 悬浮浮层**自己的**材质，与窗口那套（--glass / --material-rgb / 设置里的
@@ -150,6 +157,8 @@ body.dark {
      3. hover/strong 同比例下调，保证「越上层越亮」的层次还在，
         但整体保持在黑调里。 */
   --glass: rgba(255, 255, 255, 0.05);
+  --card-bg: rgba(255, 255, 255, 0.05);
+  --card-hover: rgba(255, 255, 255, 0.09);
   --glass-strong: rgba(255, 255, 255, 0.09);
   --glass-hover: rgba(255, 255, 255, 0.07);
   /* 深色浮层：同样不跟窗口浓度走。上端比下端亮一档才浮得起来，
@@ -207,6 +216,8 @@ body.dark {
 /* 兜底档：没有真材质时不透明，观感不能崩 */
 body.tier-solid {
   --glass: rgba(246, 247, 249, 0.97);
+  --card-bg: rgba(255, 255, 255, 0.98);
+  --card-hover: #ffffff;
   --glass-strong: rgba(255, 255, 255, 0.98);
   --glass-hover: rgba(0, 0, 0, 0.05);
   --stroke: rgba(0, 0, 0, 0.08);
@@ -217,6 +228,8 @@ body.tier-solid {
 body.dark.tier-solid {
   /* 兜底档没有 acrylic，本就是实色 —— 与真材质档对齐到同一档黑 */
   --glass: rgba(255, 255, 255, 0.05);
+  --card-bg: rgba(255, 255, 255, 0.05);
+  --card-hover: rgba(255, 255, 255, 0.09);
   --glass-strong: rgba(255, 255, 255, 0.09);
   --glass-hover: rgba(255, 255, 255, 0.07);
   --stroke: rgba(255, 255, 255, 0.08);
@@ -942,8 +955,10 @@ html:not(.hovers-off) .btn-primary:hover {
   gap: 10px;
   padding: 10px;
   border-radius: var(--radius-sm);
-  background: var(--glass);
-  border: 1px solid var(--stroke);
+  background: var(--card-bg);
+  /* 用中性线而不是 --stroke：浅色下 --stroke 是白色高光边，压在白卡片上等于隐形，
+     卡片的轮廓就只剩阴影一条线索 —— 这正是「看着发灰、没有边界」的来源。 */
+  border: 1px solid var(--line);
   /* 高浓度下描边会与窗口底色糊在一起，靠阴影保证卡片可识别 */
   box-shadow: var(--card-shadow);
   cursor: default;
@@ -951,7 +966,7 @@ html:not(.hovers-off) .btn-primary:hover {
 }
 
 html:not(.hovers-off) .card:hover {
-  background: var(--glass-hover);
+  background: var(--card-hover);
 }
 
 .card.is-pinned {
