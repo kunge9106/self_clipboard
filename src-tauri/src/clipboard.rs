@@ -199,6 +199,12 @@ pub struct HistoryItem {
     pub html_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtf_path: Option<String>,
+    /// 富文本里拆出来单独落盘的内联图（相对路径）。
+    ///
+    /// 下标 == HTML 里 `data-qt-img="n"` 的 n。与 `html_path` 同生命周期：
+    /// 删条目时整个 `images/rich/<id>/` 目录一起删。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rich_images: Vec<String>,
     /// 图片落盘路径（相对 DIR/images/）
     pub img_path: Option<String>,
     /// 文件路径清单落盘路径（相对 DIR/files/，每行一个完整路径）
@@ -489,16 +495,8 @@ pub fn get_image(id: String) -> Result<String, String> {
     }
     let bytes = fs::read(&path).map_err(|e| e.to_string())?;
     let b64 = base64_encode(&bytes);
-    // MIME 按扩展名给。改动前硬编码 `image/bmp` —— 那时落盘的都是 BMP 转换结果，
-    // 现在存的是原图（多为 JPEG），继续硬编码会让浏览器按错误类型解码。
-    let mime = match rel.rsplit('.').next().unwrap_or("") {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        _ => "image/bmp",
-    };
-    Ok(format!("data:{mime};base64,{}", b64))
+    // MIME 走 `mime_for`：富文本内联图也要用同一份映射，不能各写一遍。
+    Ok(format!("data:{};base64,{}", mime_for(&rel), b64))
 }
 
 /// 详情弹窗显示正文时的**字符上限**。
@@ -525,6 +523,11 @@ pub struct FullContent {
     /// 详情弹窗拿它做「按格式查看」；不参与搜索、不进列表，只在这一刻读一次。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
+    /// 富文本里的内联图，键是 `data-qt-img="n"` 里的 n，值是 data URL。
+    ///
+    /// 只在这一刻读一次：图片平时是独立文件，渲染时才转成 data URL 交给前端。
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub rich_images: std::collections::HashMap<usize, String>,
     /// 是否因过长而被截断（前端据此提示用户）
     pub truncated: bool,
     /// 完整内容的字符总数
@@ -565,6 +568,28 @@ pub fn get_full_content(id: String) -> Result<FullContent, String> {
             ),
         }
     }
+    // 内联图：平时是独立文件，只在这一刻转成 data URL 交给前端渲染。
+    // 有总量预算 —— 一张 3MB 的图转成 base64 就是 4MB，几张叠加会把 IPC 拖死。
+    if !item.rich_images.is_empty() {
+        const TOTAL_CHARS: usize = 12 * 1024 * 1024;
+        let mut used = 0usize;
+        for (n, rel) in item.rich_images.iter().enumerate() {
+            let Some(url) = image_data_url(&dir, rel) else {
+                crate::log_warn!("[clipboard] 详情：内联图缺失 {rel}（该图不显示）");
+                continue;
+            };
+            if used + url.len() > TOTAL_CHARS {
+                crate::log_warn!(
+                    "[clipboard] 详情：内联图总量超过 {}MB，后续 {} 张不显示",
+                    TOTAL_CHARS / 1024 / 1024,
+                    item.rich_images.len() - n
+                );
+                break;
+            }
+            used += url.len();
+            full.rich_images.insert(n, url);
+        }
+    }
     Ok(full)
 }
 
@@ -587,6 +612,7 @@ fn summarize_content(raw: String) -> FullContent {
     FullContent {
         text,
         html: None,
+        rich_images: std::collections::HashMap::new(),
         truncated,
         total_chars,
         total_lines,
@@ -700,7 +726,19 @@ pub fn copy_back(id: String, plain: Option<bool>) -> Result<Option<String>, Stri
                 if !plain.unwrap_or(false) {
                     if let Some(rel) = &item.html_path {
                         if let Ok(cf) = read_text_entity(&dir, rel) {
-                            unsafe { write_html_to_clipboard(&cf, &text)? };
+                            // 没有拆出图片的条目：原样写回那段 CF_HTML 字节，零风险。
+                            // 有图片的条目：图片存放时是独立文件，这里必须塞回 base64
+                            // 并**重建**头部 —— 旧头里的偏移在还原后全错了，
+                            // 直接用会让 Word 粘出一坨源码。
+                            let html = if item.rich_images.is_empty() {
+                                cf
+                            } else {
+                                let frag = cf_html_fragment(&cf).to_string();
+                                let restored =
+                                    inline_images_back(&frag, &dir, &item.rich_images);
+                                build_cf_html(&restored)
+                            };
+                            unsafe { write_html_to_clipboard(&html, &text)? };
                             return Ok(Some("已按原格式复制".into()));
                         }
                     }
@@ -1530,9 +1568,9 @@ fn replace_latest_text(text: &str, html: &Option<String>, rtf: &Option<String>) 
     last.subtype = Some(detect_subtype(text).unwrap_or("").to_string());
     // 富文本一并换掉（第二次往往才带格式）
     if let Some(h) = html {
-        let hrel = format!("data/{id}.html");
-        write_text_entity(&dir, &hrel, h);
+        let (hrel, imgs) = store_rich_html(&dir, &id, h.as_str());
         last.html_path = Some(hrel);
+        last.rich_images = imgs;
     }
     if let Some(r) = rtf {
         let rrel = format!("data/{id}.rtf");
@@ -1570,9 +1608,9 @@ fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
     let mut changed = false;
     if last.html_path.is_none() {
         if let Some(h) = html {
-            let rel = format!("data/{id}.html");
-            write_text_entity(&dir, &rel, h);
+            let (rel, imgs) = store_rich_html(&dir, &id, h.as_str());
             last.html_path = Some(rel);
+            last.rich_images = imgs;
             changed = true;
         }
     }
@@ -2797,6 +2835,7 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
         text_path: None,
         html_path: None,
         rtf_path: None,
+        rich_images: Vec::new(),
         img_path: None,
         files_path: None,
         files: None,
@@ -2819,9 +2858,9 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
             // 富文本实体单独落盘（一样加密）：纯文本永远是主数据，
             // 富文本只是「回贴时可以更保真」的附加信息，缺了不影响使用。
             if let Some(h) = html {
-                let hrel = format!("data/{id}.html");
-                write_text_entity(&dir, &hrel, &h);
+                let (hrel, imgs) = store_rich_html(&dir, &id, h.as_str());
                 item.html_path = Some(hrel);
+                item.rich_images = imgs;
             }
             if let Some(r) = rtf {
                 let rrel = format!("data/{id}.rtf");
@@ -3775,6 +3814,41 @@ fn count_entities(dir: &PathBuf) -> usize {
     count_in("data", Some("txt")) + count_in("files", Some("txt")) + count_in("images", None)
 }
 
+/// 富文本实体落盘：把内联图拆出去单独存，HTML 只保留占位。
+///
+/// 三处写 html 的地方（新建条目 / 同源替换 / 补格式）都走这里 —— 漏掉任何一处，
+/// 那条记录的 HTML 就会带着 base64，体积问题又回来了。
+///
+/// 返回 `(html 相对路径, 图片相对路径列表)`。
+fn store_rich_html(dir: &PathBuf, id: &str, html: &str) -> (String, Vec<String>) {
+    let (stripped, imgs) = extract_inline_images(html, dir, id);
+    let rel = format!("data/{id}.html");
+    write_text_entity(dir, &rel, &stripped);
+    (rel, imgs)
+}
+
+/// 列出某个条目已落盘的内联图，按序号排好（重建索引时用）。
+fn list_rich_images(dir: &PathBuf, id: &str) -> Vec<String> {
+    let sub = dir.join(format!("images/rich/{id}"));
+    let Ok(rd) = fs::read_dir(&sub) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort_by_key(|n| {
+        n.split('.')
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(usize::MAX)
+    });
+    names
+        .into_iter()
+        .map(|n| format!("images/rich/{id}/{n}"))
+        .collect()
+}
+
 /// 实体文件存在则返回它的相对路径（用于重建时恢复可选关联，如富文本实体）。
 fn has_entity(dir: &PathBuf, rel: &str) -> Option<String> {
     if dir.join(rel).is_file() {
@@ -3821,6 +3895,8 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
             // 否则重建出来的条目会「格式凭空消失」。
             html_path: has_entity(dir, &format!("data/{id}.html")),
             rtf_path: has_entity(dir, &format!("data/{id}.rtf")),
+            // 索引丢了但图片还在：按目录内容恢复，否则回贴时图会凭空消失
+            rich_images: list_rich_images(dir, id),
             img_path: None,
             files_path: None,
             files: None,
@@ -3893,6 +3969,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 text_path: None,
                 html_path: None,
                 rtf_path: None,
+                rich_images: Vec::new(),
                 img_path: None,
                 files_path: Some(format!("files/{id}.txt")),
                 files: Some(files),
@@ -3934,6 +4011,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 text_path: None,
                 html_path: None,
                 rtf_path: None,
+                rich_images: Vec::new(),
                 img_path: Some(format!("images/{id}.{ext}")),
                 files_path: None,
                 files: None,
@@ -4003,6 +4081,13 @@ fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 crate::log_err!("clipboard", "删除实体失败（{}）：{e}", p.display());
             }
+        }
+    }
+    // 富文本拆出来的内联图：整目录删。放在 rels 之外，因为它是目录而不是文件。
+    let rich_dir = dir.join(format!("images/rich/{}", item.id));
+    if rich_dir.exists() {
+        if let Err(e) = fs::remove_dir_all(&rich_dir) {
+            crate::log_err!("clipboard", "删除富文本图片目录失败（{}）：{e}", rich_dir.display());
         }
     }
     // 缩略图与原图同生命周期，一并清掉
@@ -4454,6 +4539,226 @@ where
     }
 }
 
+/// base64 解码。只处理标准字母表，忽略 `=`, 空白与换行。
+///
+/// 用在「从 HTML 里拆内联图」这一条路上：拿到的都是浏览器/Word 生成的规范 base64，
+/// 不需要容错各种奇葩变体，遇到非法字符直接返回 `None`（那张图就按丢弃处理）。
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a') as u32 + 26),
+            b'0'..=b'9' => Some((c - b'0') as u32 + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in s.as_bytes() {
+        if b == b'=' || b.is_ascii_whitespace() {
+            continue;
+        }
+        acc = (acc << 6) | val(b)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// 扩展名 → MIME。图片条目的 `get_image` 与富文本内联图共用同一份映射。
+fn mime_for(rel: &str) -> &'static str {
+    match rel.rsplit('.').next().unwrap_or("") {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "image/bmp",
+    }
+}
+
+/// 把磁盘上的图片读成 data URL（供详情渲染与内联图还原共用）。
+fn image_data_url(dir: &PathBuf, rel: &str) -> Option<String> {
+    let bytes = fs::read(dir.join(rel)).ok()?;
+    Some(format!(
+        "data:{};base64,{}",
+        mime_for(rel),
+        base64_encode(&bytes)
+    ))
+}
+
+/// 单张内联图允许拆出来落盘的上限（原始字节）。
+///
+/// 一张 3MB 的图已经很夸张了（通常是扫描件或截图原图）。超过就丢弃那张图，
+/// 但**保留文字格式** —— 一条记录不该因为一张巨图占掉几十 MB。
+const RICH_IMG_MAX_BYTES: usize = 3 * 1024 * 1024;
+
+/// `data:image/<mime>;base64,` 后的 mime 是否允许落盘。
+fn rich_img_ext(mime: &str) -> Option<&'static str> {
+    match mime.to_ascii_lowercase().as_str() {
+        "png" => Some("png"),
+        "jpeg" | "jpg" => Some("jpg"),
+        "gif" => Some("gif"),
+        "webp" => Some("webp"),
+        "bmp" => Some("bmp"),
+        // 刻意不含 svg：SVG 能内嵌脚本，落盘后再显示等于把脚本带进渲染层
+        _ => None,
+    }
+}
+
+/// 把 HTML 里的内联 base64 图片拆出来**单独落盘**，`src` 换成占位
+/// `data-qt-img="<序号>"`。
+///
+/// 为什么值得这么做：一页带插图的 Word，HTML 里 `data:` 图能占掉 1~2MB，
+/// 于是整条记录卡在体积上限、甚至降级成纯文本。拆开后 HTML 只剩几十 KB，
+/// 图片走已有的图片目录（同样加密落盘），显示时再读回来。
+///
+/// 返回 `(替换后的 HTML, 图片相对路径列表)`，列表下标即占位里的序号。
+/// 提取失败的图（格式不认识 / 解码失败 / 超过 `RICH_IMG_MAX_BYTES`）替换成
+/// `data-qt-img="drop"`，前端跳过，回贴时也不会塞回去。
+fn extract_inline_images(html: &str, dir: &PathBuf, id: &str) -> (String, Vec<String>) {
+    let mut paths: Vec<String> = Vec::new();
+    let mut out = String::with_capacity(html.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel) = html[cursor..].find("data:image/") {
+        let pos = cursor + rel;
+        // 属性值必须被引号包住，向前找最近的那个引号
+        let Some(qpos) = html[..pos].rfind(|c| c == '"' || c == '\'') else {
+            break;
+        };
+        let quote = html.as_bytes()[qpos];
+        let Some(vend_rel) = html[qpos + 1..].find(quote as char) else {
+            break;
+        };
+        let vend = qpos + 1 + vend_rel; // 结束引号的位置
+        let value = &html[qpos + 1..vend];
+
+        // 必须是 `src="…"` 这个属性，否则不认识，跳过本次匹配
+        let head = &html[..qpos];
+        if !head.ends_with("src=") && !head.ends_with("SRC=") {
+            cursor = pos + "data:image/".len();
+            continue;
+        }
+        let attr_start = qpos - 4;
+
+        // data:image/<mime>;base64,<data>
+        let placeholder = (|| -> Option<usize> {
+            let after = value.strip_prefix("data:image/")?;
+            let (mime, rest) = after.split_once(';')?;
+            let ext = rich_img_ext(mime)?;
+            let b64 = rest.strip_prefix("base64,")?;
+            let bytes = base64_decode(b64)?;
+            if bytes.is_empty() || bytes.len() > RICH_IMG_MAX_BYTES {
+                return None;
+            }
+            let n = paths.len();
+            let rel_path = format!("images/rich/{id}/{n}.{ext}");
+            let full = dir.join(&rel_path);
+            if let Some(parent) = full.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(e) = fs::write(&full, &bytes) {
+                crate::log_err!("clipboard", "内联图落盘失败：{e}");
+                return None;
+            }
+            paths.push(rel_path);
+            Some(n)
+        })();
+
+        out.push_str(&html[cursor..attr_start]);
+        match placeholder {
+            Some(n) => out.push_str(&format!("data-qt-img=\"{n}\"")),
+            None => out.push_str("data-qt-img=\"drop\""),
+        }
+        cursor = vend + 1;
+    }
+
+    out.push_str(&html[cursor..]);
+    (out, paths)
+}
+
+/// 回贴前把占位换回 `src="data:…"`，让图片重新变成自包含的 HTML。
+///
+/// 回贴是「把原文还给用户」，图片必须以 base64 形式跟着走 —— 否则粘到 Word
+/// 里就只剩一个指向本机的占位。
+fn inline_images_back(frag: &str, dir: &PathBuf, paths: &[String]) -> String {
+    let mut out = String::with_capacity(frag.len() + 64 * 1024);
+    let mut cursor = 0usize;
+
+    while let Some(rel) = frag[cursor..].find("data-qt-img=") {
+        let pos = cursor + rel;
+        let Some(qpos) = frag[pos..].find(|c| c == '"' || c == '\'').map(|r| pos + r) else {
+            break;
+        };
+        let quote = frag.as_bytes()[qpos];
+        let Some(vend_rel) = frag[qpos + 1..].find(quote as char) else {
+            break;
+        };
+        let vend = qpos + 1 + vend_rel;
+        let token = &frag[qpos + 1..vend];
+
+        let url = token
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| paths.get(n))
+            .and_then(|p| image_data_url(dir, p));
+
+        match url {
+            Some(u) => {
+                // 文件还在：还原成内联图，粘出去就是原样
+                out.push_str(&frag[cursor..pos]);
+                out.push_str(&format!("src=\"{u}\""));
+                cursor = vend + 1;
+            }
+            None => {
+                // 图没了（提取时被丢弃 / 文件被删）：把整个 `<img …>` 删掉。
+                // 留一个没有 src 的 img，粘到 Word 里是个破图占位，比没有更难看。
+                let tag_start = frag[..pos]
+                    .rfind("<img")
+                    .or_else(|| frag[..pos].rfind("<IMG"))
+                    .unwrap_or(pos);
+                let tag_end = frag[vend..]
+                    .find('>')
+                    .map(|i| vend + i + 1)
+                    .unwrap_or(vend + 1);
+                out.push_str(&frag[cursor..tag_start]);
+                cursor = tag_end;
+            }
+        }
+    }
+    out.push_str(&frag[cursor..]);
+    out
+}
+
+/// 从 CF_HTML 里取出正文片段（按字节偏移）。
+///
+/// 与前端 `formats.js` 的 `cfHtmlFragment` 是同一套规则。回贴需要「重建」时，
+/// 必须先把片段从旧头里取出来 —— 旧头里的偏移在图片还原后就全错了。
+fn cf_html_fragment(raw: &str) -> &str {
+    fn offset(raw: &str, key: &str) -> Option<usize> {
+        let i = raw.find(key)?;
+        raw[i + key.len()..].lines().next()?.trim().parse().ok()
+    }
+    if let (Some(sf), Some(ef)) = (offset(raw, "StartFragment:"), offset(raw, "EndFragment:")) {
+        // `get` 会顺带校验是否落在字符边界上：偏移错位时返回 None，走下面兜底
+        if let Some(frag) = raw.get(sf..ef) {
+            if !frag.trim().is_empty() {
+                return frag;
+            }
+        }
+    }
+    match raw.find('<') {
+        Some(i) => &raw[i..],
+        None => "",
+    }
+}
+
 fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity((data.len() + 2) / 3 * 4);
@@ -4592,6 +4897,7 @@ mod tests {
             subtype: None,
             html_path: None,
             rtf_path: None,
+            rich_images: Vec::new(),
             preview: preview.to_string(),
             preview_truncated: false,
             size: 1,
@@ -4669,6 +4975,103 @@ mod tests {
         assert_eq!(kept.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 1x1 透明 PNG，用来测「拆分 → 还原」的完整往返。
+    const PNG_1X1: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    /// base64 编解码互为逆运算（含 `=` 填充的三种长度）。
+    #[test]
+    fn base64_roundtrip() {
+        for len in [0usize, 1, 2, 3, 4, 5, 6, 100] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 37 % 251) as u8).collect();
+            let enc = base64_encode(&data);
+            assert_eq!(base64_decode(&enc).unwrap(), data, "len={len}");
+        }
+        assert_eq!(base64_decode("!!!").is_none(), true, "非法字符返回 None");
+    }
+
+    /// 内联图要能从 HTML 里拆出来落盘，且**占位编号与路径下标一致**。
+    #[test]
+    fn inline_images_are_extracted_and_reversible() {
+        let dir = std::env::temp_dir().join("qingtie_test_rich_extract");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let html = format!(
+            r#"<p>前文</p><img src="data:image/png;base64,{PNG_1X1}" alt="图一"><p>后文</p>"#
+        );
+        let (stripped, paths) = extract_inline_images(&html, &dir, "1a2b-0");
+
+        assert_eq!(paths.len(), 1, "应拆出一张图");
+        assert!(stripped.contains(r#"data-qt-img="0""#), "占位编号应为 0");
+        assert!(!stripped.contains("base64"), "HTML 里不该再留 base64");
+        assert!(stripped.contains("前文") && stripped.contains("后文"), "正文不能丢");
+        assert!(stripped.contains(r#"alt="图一""#), "其它属性要保留");
+
+        let saved = dir.join(&paths[0]);
+        assert!(saved.is_file(), "图片应已落盘：{}", saved.display());
+        assert_eq!(fs::read(&saved).unwrap(), base64_decode(PNG_1X1).unwrap());
+
+        // 关键：还原回去必须能拿回原图
+        let back = inline_images_back(&stripped, &dir, &paths);
+        assert!(back.contains("src=\"data:image/png;base64,"), "应还原成内联图");
+        assert!(!back.contains("data-qt-img"), "占位应全部替换掉");
+        assert!(base64_decode(PNG_1X1).is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 外链图**不碰**：不下载、不占位，原样留在 HTML 里交给渲染层丢弃并提示。
+    #[test]
+    fn external_images_are_left_alone() {
+        let dir = std::env::temp_dir().join("qingtie_test_rich_external");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let html = r#"<img src="https://example.com/a.png"><img src="file:///D:/b.png">"#;
+        let (stripped, paths) = extract_inline_images(html, &dir, "x-0");
+        assert_eq!(paths.len(), 0);
+        assert!(stripped.contains("https://example.com/a.png"), "外链保持原样");
+        assert!(stripped.contains("file:///D:/b.png"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 不支持的格式（SVG）与大图都替换成 `drop`，不落盘、也不污染 HTML。
+    #[test]
+    fn unsupported_and_oversized_images_are_dropped() {
+        let dir = std::env::temp_dir().join("qingtie_test_rich_drop");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let svg = r#"<img src="data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=">"#;
+        let (stripped, paths) = extract_inline_images(svg, &dir, "s-0");
+        assert_eq!(paths.len(), 0, "SVG 不许落盘（可内嵌脚本）");
+        assert!(stripped.contains(r#"data-qt-img="drop""#));
+
+        // 超过单图上限：用超长 base64 模拟（解码后 > RICH_IMG_MAX_BYTES）
+        let huge = format!(
+            r#"<img src="data:image/png;base64,{}">"#,
+            "A".repeat(RICH_IMG_MAX_BYTES / 3 * 4 + 8)
+        );
+        let (stripped2, paths2) = extract_inline_images(&huge, &dir, "h-0");
+        assert_eq!(paths2.len(), 0, "超限图不落盘");
+        assert!(stripped2.contains(r#"data-qt-img="drop""#));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 从 CF_HTML 取片段：偏移按字节算，中文不能切歪。
+    #[test]
+    fn cf_html_fragment_respects_byte_offsets() {
+        let body = "<p>西安飞蝶 · 专利分析</p>";
+        let cf = build_cf_html(body);
+        assert_eq!(cf_html_fragment(&cf), body, "片段应与原文完全一致");
+
+        // 没有偏移头：退化为「从第一个 < 开始」
+        let naked = "Version:1.0\r\nStartHTML:0\r\n\r\n<p>x</p>";
+        assert_eq!(cf_html_fragment(naked), "<p>x</p>");
     }
 
     /// 索引必须**整份加密**落盘。

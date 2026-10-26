@@ -2294,6 +2294,30 @@ body.dark .tour-dot.is-on {
   transform: rotate(45deg);
 }
 
+/* 图片未显示的说明条：贴在正文最前面。
+   左侧一道强调色竖线足够把它和正文分开，不需要再加边框 —— 详情区本来就窄。 */
+.detail-body.is-rich .detail-note {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.detail-body.is-rich .detail-note strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.detail-body.is-rich .detail-note-why {
+  color: var(--text-dim);
+}
+
 /* 富文本里的内联图片：宽度跟着正文走，不按原图尺寸铺开。
    只约束显示尺寸，不改动数据本身（原图仍完整存着，复制回去还是原样）。 */
 .detail-body.is-rich img {

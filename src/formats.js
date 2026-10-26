@@ -397,7 +397,7 @@ export function richImgVerdict(src, usedChars = 0) {
 
 /// 把一段 HTML 过滤成可安全插入 DOM 的节点树。
 /// `onDrop(kind)` 用来把「丢了什么」报给日志（复用现有前端日志通道，不另造一套）。
-export function sanitizeRichHtml(html, onDrop) {
+export function sanitizeRichHtml(html, onDrop, richImages) {
   let doc;
   try {
     // 先剥掉 CF_HTML 封装头：否则 `Version:1.0 StartHTML:…` 会被 DOMParser
@@ -447,6 +447,23 @@ export function sanitizeRichHtml(html, onDrop) {
 
       // 图片单独处理：只放行内联 data: 位图，且受单张与合计两道预算约束
       if (tag === "IMG") {
+        // 富文本内联图：存储时已拆成独立文件，这里按占位编号取回 data URL。
+        // 取不到（文件被删 / 提取时被丢弃）就跳过，不摆一个破图。
+        const qt = node.getAttribute?.("data-qt-img");
+        if (qt != null) {
+          const url = richImages?.get(String(qt));
+          if (!url) {
+            onDrop?.(qt === "drop" ? "drop-img:too-large" : "drop-img:missing");
+            continue;
+          }
+          const img = document.createElement("img");
+          img.src = url;
+          const alt0 = node.getAttribute?.("alt");
+          if (alt0) img.alt = String(alt0).slice(0, 200);
+          img.loading = "lazy";
+          dst.appendChild(img);
+          continue;
+        }
         const src = (node.getAttribute?.("src") || "").trim();
         const verdict = richImgVerdict(src, imgChars);
         if (verdict !== "ok") {

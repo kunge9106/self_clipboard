@@ -1684,6 +1684,45 @@ let detailCtx = null;
 ///   Markdown 排版 > 富文本白名单 > 代码高亮 > 纯文本
 /// Markdown 条目即使带着 html 也优先排版源码 —— 用户的原话是「查看里怎么还是一堆
 /// markdown 原符号」，他要的就是渲染后的样子。
+/// 图片未显示时的说明条。
+///
+/// 三种原因分开讲，因为用户的处置方式完全不同：
+///   external —— 网页外链图，我们不替用户发请求（隐私）；想保留就回原网页另存为
+///   too-large —— 单张太大，超过保留上限
+///   missing   —— 文件丢了（被清理或手动删过）
+function richImageNote(drops) {
+  const count = (k) => drops.filter((d) => d === k).length;
+  const ext = count("drop-img:external");
+  const big = count("drop-img:too-large");
+  const lost = count("drop-img:missing");
+  if (!ext && !big && !lost) return null;
+
+  const box = document.createElement("div");
+  box.className = "detail-note";
+
+  const head = document.createElement("strong");
+  const facts = [];
+  if (ext) facts.push(`${ext} 张外链图片未显示`);
+  if (big) facts.push(`${big} 张图片体积过大未保留`);
+  if (lost) facts.push(`${lost} 张图片文件已不存在`);
+  head.textContent = facts.join("，").trim();
+  box.appendChild(head);
+
+  const why = document.createElement("div");
+  why.className = "detail-note-why";
+  const lines = [];
+  if (ext) {
+    lines.push("外链图片来自网页。轻贴不会替你访问这些地址——那样等于告诉对方服务器你在读什么。");
+    lines.push("需要这些图时：在原网页上右键图片 →「图片另存为」保存到本地，再把本地文件复制进轻贴。");
+  }
+  if (big) lines.push("过大的图片不落盘（单张上限约 3MB），以免一条记录占掉几十 MB。");
+  if (lost) lines.push("图片文件可能已被清理或手动删除；文字与排版仍在，复制出去不会带图。");
+  why.textContent = lines.join(" ");
+  box.appendChild(why);
+
+  return box;
+}
+
 function renderDetailBody(item, data) {
   const body = $detail("detail-body");
   if (!body || !data) return false;
@@ -1701,7 +1740,9 @@ function renderDetailBody(item, data) {
 
   if (data.html) {
     const drops = [];
-    const frag = sanitizeRichHtml(data.html, (kind) => drops.push(kind));
+    // 内联图在存储时被拆成独立文件（`data-qt-img="n"`），这里按编号取回 data URL
+    const richMap = new Map(Object.entries(data.rich_images || {}));
+    const frag = sanitizeRichHtml(data.html, (kind) => drops.push(kind), richMap);
     // 丢弃项汇总成一条日志（复用现成的前端上报通道，不另造一套）。
     // 逐项上报会让一条内容刷几十行，把真正有用的上下文挤掉。
     if (drops.length) {
@@ -1714,6 +1755,10 @@ function renderDetailBody(item, data) {
     if (frag.childNodes.length > 0) {
       body.classList.add("is-rich");
       body.appendChild(frag);
+      // 有图没显示出来，要说明「为什么」以及「怎么办」——
+      // 否则用户只会觉得「这软件把图弄丢了」。
+      const note = richImageNote(drops);
+      if (note) body.insertBefore(note, body.firstChild);
       return true;
     }
   }
