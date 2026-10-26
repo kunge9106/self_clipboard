@@ -836,9 +836,19 @@ pub fn init(app: &AppHandle) {
             .join("clipboard"),
     };
 
-    let _ = fs::create_dir_all(dir.join("data"));
-    let _ = fs::create_dir_all(dir.join("images"));
-    let _ = fs::create_dir_all(dir.join("files"));
+    // 这三个目录是「记录能不能落盘」的前提。创建失败（磁盘满、路径只读、
+    // 被安全软件拦）之后每一次复制都会失败，而用户看到的只是「复制了没反应」。
+    // 以前是 `let _ =`，等于把根因咽掉，只剩一个空列表可看。
+    for sub in ["data", "images", "files"] {
+        let p = dir.join(sub);
+        if let Err(e) = fs::create_dir_all(&p) {
+            crate::log_err!(
+                "clipboard",
+                "缓存子目录创建失败（{}）：{e} —— 该类型内容将无法记录",
+                p.display()
+            );
+        }
+    }
     // 缩略图目录从旧的顶层 `thumbs/` 迁到 `images/thumbs/`（与图片放一起）。
     // 一次性、幂等：老目录在、新目录不在时才搬；搬不动也不影响后续按需生成。
     let old_thumbs = dir.join("thumbs");
@@ -3048,17 +3058,36 @@ fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
     n
 }
 
+/// 删除条目对应的落盘实体。
+///
+/// 以前全用 `let _ =`：删失败（文件被占用、被设为只读、路径失效）就静默留下——
+/// 用户以为敏感内容已经删掉，磁盘上其实还在。这是**隐私相关**的静默失败，
+/// 必须记 ERROR；`NotFound` 不算失败（重复删除、实体本就不存在）。
 fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
+    let mut rels: Vec<&str> = Vec::new();
     if let Some(rel) = &item.text_path {
-        let _ = fs::remove_file(dir.join(rel));
+        rels.push(rel);
     }
     if let Some(rel) = &item.img_path {
-        let _ = fs::remove_file(dir.join(rel));
-        // 缩略图与原图同生命周期，一并清掉
-        let _ = fs::remove_file(dir.join(thumb_rel(&item.id)));
+        rels.push(rel);
     }
     if let Some(rel) = &item.files_path {
-        let _ = fs::remove_file(dir.join(rel));
+        rels.push(rel);
+    }
+    for rel in rels {
+        let p = dir.join(rel);
+        if let Err(e) = fs::remove_file(&p) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                crate::log_err!("clipboard", "删除实体失败（{}）：{e}", p.display());
+            }
+        }
+    }
+    // 缩略图与原图同生命周期，一并清掉
+    let thumb = dir.join(thumb_rel(&item.id));
+    if let Err(e) = fs::remove_file(&thumb) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            crate::log_err!("clipboard", "删除缩略图失败（{}）：{e}", thumb.display());
+        }
     }
 }
 
@@ -3096,9 +3125,11 @@ pub fn prune_retention(days: u32) {
 /// 纯函数版本：过滤 + 删文件 + 存索引
 fn prune_history(hist: Vec<HistoryItem>, dir: &PathBuf, days: u32) -> Vec<HistoryItem> {
     if days == 0 {
+        crate::log_print!("[clipboard] 保留策略：永久保存，不清理");
         return hist;
     }
     let deadline = now_ms().saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
+    let before = hist.len();
     let kept: Vec<HistoryItem> = hist
         .into_iter()
         .filter(|i| {
@@ -3110,6 +3141,21 @@ fn prune_history(hist: Vec<HistoryItem>, dir: &PathBuf, days: u32) -> Vec<Histor
             }
         })
         .collect();
+    // 这条日志以前**不存在**，而它删的是用户数据（连同落盘文件）。
+    //
+    // 踩过的坑：`config.json` 解析失败会回落默认配置，而默认保留天数是 3 天，
+    // 于是启动时按 3 天把几百条历史连文件一起删掉 —— 日志里一个字都没有，
+    // 现场只剩「记录全没了」。凡是「按策略自动删除用户数据」的地方，
+    // 必须留下「按什么规则、删了多少、剩多少」。
+    let removed = before - kept.len();
+    if removed > 0 {
+        crate::log_warn!(
+            "[clipboard] 保留策略：按 {days} 天清掉 {removed} 条（剩 {} 条）——若不是预期，检查设置里的保留天数",
+            kept.len()
+        );
+    } else {
+        crate::log_print!("[clipboard] 保留策略：{days} 天，无需清理（共 {} 条）", kept.len());
+    }
     save_index(dir, &kept);
     kept
 }

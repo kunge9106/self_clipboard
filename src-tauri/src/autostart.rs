@@ -132,7 +132,11 @@ pub fn repair_if_needed() {
     match read_value() {
         Some(v) if v != expected => {
             crate::log_print!("[autostart] 自启项内容不是当前 exe 路径，重写修复");
-            let _ = set_enabled(true);
+            // 修复失败必须留痕：否则「开关显示已开启、开机却不启动」永远查不出
+            // 是注册表没写进去（权限/安全软件拦截），还是路径本身取错。
+            if let Err(e) = set_enabled(true) {
+                crate::log_err!("autostart", "自启项修复失败：{e}（开关会显示已开启但开机不生效）");
+            }
         }
         _ => {}
     }

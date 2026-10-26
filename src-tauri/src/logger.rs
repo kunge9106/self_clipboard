@@ -10,13 +10,11 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-/// 日志文件上限：到 64MB 时按半量截断，保留最早的内容。
-/// 不整份清空——异常前后的上下文往往都在同一个文件里。
+/// 日志文件上限：到 64MB 时轮转 —— 当前文件 rename 成 `Clipboard.prev.log`，
+/// 新文件继续写。不整份清空：异常前后的上下文分别落在两代文件里，都还在。
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
-/// 保留多少：截断后留下尾部这么多
-const KEEP_BYTES: u64 = MAX_BYTES / 2;
 
 /// 安装 panic 钩子。
 ///
@@ -72,14 +70,44 @@ pub fn write_raw_warn(line: &str) {
     eprintln!("{line}");
 }
 
+/// 配置文件路径（`config.json`）。启动最早期由 `lib.rs` 告诉我们，
+/// 因为那时 `clipboard` 还没初始化，取不到缓存目录。
+///
+/// 为什么必须提前知道：日志原本要等 `clipboard::init` 之后才知道缓存目录，
+/// 于是**启动最初那几条日志会落到 `%LOCALAPPDATA%\轻贴\log`** ——
+/// 恰恰是「启动即崩溃」最需要的那段现场，却和主日志分在两个文件里，
+/// 用户按「缓存目录/log」去找只能看到半截。
+static CONFIG_HINT: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn hint_config_file(p: PathBuf) {
+    let _ = CONFIG_HINT.set(p);
+}
+
+/// 从 config.json 里直接抠 `cache_dir`（不经过 settings 模块，避免初始化顺序耦合）。
+fn cache_dir_from_config() -> Option<PathBuf> {
+    let p = CONFIG_HINT.get()?;
+    let s = std::fs::read_to_string(p).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    let d = v.get("cache_dir")?.as_str()?;
+    if d.trim().is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(d))
+    }
+}
+
 fn log_dir() -> PathBuf {
-    // 缓存目录可能还没初始化（panic 快照就发生在初始化之前），
-    // 这时退回 %LOCALAPPDATA%\轻贴\log，避免把日志写到奇怪的工作目录里。
     let dir = crate::clipboard::cache_info().dir;
     let base = if dir.trim().is_empty() {
-        std::env::var("LOCALAPPDATA")
-            .map(|p| PathBuf::from(p).join("轻贴"))
-            .unwrap_or_else(|_| PathBuf::from("."))
+        // 缓存目录还没初始化（启动早期 / panic 就发生在这里）：
+        // 先从配置文件里找用户自定义的目录，找不到才退回 LOCALAPPDATA。
+        if let Some(custom) = cache_dir_from_config() {
+            custom
+        } else {
+            std::env::var("LOCALAPPDATA")
+                .map(|p| PathBuf::from(p).join("轻贴"))
+                .unwrap_or_else(|_| PathBuf::from("."))
+        }
     } else {
         PathBuf::from(&dir)
     };
@@ -102,22 +130,42 @@ pub fn write_line(level: &str, tag: &str, msg: &str) {
     let path = log_file();
     let line = format!("[{ts}] {level:<5} [{tag}] {msg}\n", ts = stamp());
 
-    // 超限则截断保尾：ring buffer 语义，异常前后的日志都还在
+    // 超限则截断保尾：ring buffer 语义，异常前后的日志都还在。
+    //
+    // 老实现是「读整个 64MB → 截掉前半 → 整体重写」：单次轮转就要读 64MB 进内存
+    // 再写 32MB，恰好发生在出问题、日志最密集的时候，会把界面卡住。改成 rename
+    // 留一代旧文件：O(1)、不动内存，异常前后的内容分别在 Clipboard.prev.log 与
+    // Clipboard.log 里，反而更容易翻。
     if let Ok(md) = std::fs::metadata(&path) {
         if md.len() > MAX_BYTES {
-            if let Ok(data) = std::fs::read(&path) {
-                let keep = data[data.len().saturating_sub(KEEP_BYTES as usize)..].to_vec();
-                let _ = std::fs::write(&path, &keep);
+            let prev = path.with_file_name("Clipboard.prev.log");
+            let _ = std::fs::remove_file(&prev);
+            if let Err(e) = std::fs::rename(&path, &prev) {
+                // 轮转失败不能让日志断掉：继续往原文件追加即可，但必须留痕
+                eprintln!("[logger] 日志轮转失败：{e}");
             }
         }
     }
 
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    let opened = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
-    {
-        let _ = f.write_all(line.as_bytes());
+        .open(&path);
+    match opened {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                // 磁盘满 / 文件被占用时会走到这里。以前是彻底静默 ——
+                // 日志系统自己坏掉，用户却以为「没什么异常」，是最后的盲区。
+                eprintln!("[logger] 日志写入失败（{}）：{e}", path.display());
+                eprintln!("{}", line.trim_end());
+            }
+        }
+        Err(e) => {
+            // 连文件都打不开（目录不可写、被安全软件拦截）：至少让 stderr 有内容，
+            // 用户从终端启动或在开发机上仍能看到。
+            eprintln!("[logger] 日志文件打开失败（{}）：{e}", path.display());
+            eprintln!("{}", line.trim_end());
+        }
     }
 }
 
