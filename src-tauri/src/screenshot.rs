@@ -829,45 +829,35 @@ unsafe fn grab(left: i32, top: i32, w: i32, h: i32) -> Option<Vec<u8>> {
 ///
 /// 单独抽出来是为了能扔进 `spawn_blocking`：这一步 300ms 上下，绝不能占主线程。
 fn encode_preview(pixels: &[u8], w: u32, h: u32) -> Option<String> {
-    // 预览用 **JPEG** 而不是 PNG：1080p 的 PNG 编码实测 143–203ms，占了
-    // 「按下快捷键 → 看到画面」的大头，而这段时间里用户的鼠标已经在按了 ——
-    // 画面晚到一步，第一下就落在下层窗口上，表现为「还得再点一次」。
+    // 预览用 **JPEG**：PNG 无损但编码慢、体积大。最终裁的是 `shot.pixels` 里的
+    // 原始像素，预览只负责让人看清「框在哪」，不参与出图。
     //
-    // 画质不受影响：**最终裁的是 `shot.pixels` 里的原始像素**，预览图只负责
-    // 给用户看「我在哪、框哪块」，不参与出图。
-    let count = w as usize * h as usize;
-    let mut rgb = Vec::with_capacity(count * 3);
+    // **必须全尺寸**：降采样后画面糊（用户明确反馈），不能拿画质换速度。
+    // 速度交给下面的 GDI+ 编码器，不靠缩图。
+    if let Some(jpg) = gdiplus_jpeg(pixels, w, h) {
+        return Some(jpeg_data_url(&jpg));
+    }
+    // 兜底：`image` crate 的纯 Rust 编码（1080p 约 300ms）。GDI+ 极少失败，
+    // 但不能让预览图完全出不来。
+    crate::log_print!("[shot] GDI+ 编码不可用，退回 image crate");
+    let mut rgb = Vec::with_capacity(w as usize * h as usize * 3);
     for px in pixels.chunks_exact(4) {
-        // BGRA → RGB：JPEG 没有 alpha 通道，少转一个也少占 1/4 内存
+        // BGRA → RGB：JPEG 没有 alpha 通道
         rgb.push(px[2]);
         rgb.push(px[1]);
         rgb.push(px[0]);
     }
-    // **预览降到 1280 宽**。全尺寸 1080p 的 JPEG 编码实测 300ms，是「按下快捷键
-    // 到看见画面」的大头；降到 1280×720（面积 44%）后约 130ms。
-    // 画质不受影响：最终裁的是 `pixels` 里的原始像素，预览只负责让用户看清
-    // 「框在哪」；坐标一律走 `imgScale()` 换算，1:1 与缩放两种情形都算得对。
-    const MAX_W: u32 = 1280;
-    let (tw, th) = if w > MAX_W {
-        (MAX_W, (h * MAX_W / w).max(1))
-    } else {
-        (w, h)
-    };
-    let src = image::RgbImage::from_raw(w, h, rgb)?;
-    let (buf, bw, bh) = if tw != w {
-        let small = image::imageops::resize(&src, tw, th, image::imageops::FilterType::Triangle);
-        (small.into_raw(), tw, th)
-    } else {
-        (src.into_raw(), w, h)
-    };
     let mut out = Vec::new();
     let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 88);
-    enc.encode(&buf, bw, bh, image::ExtendedColorType::Rgb8)
-        .ok()?;
-    Some(format!(
+    enc.encode(&rgb, w, h, image::ExtendedColorType::Rgb8).ok()?;
+    Some(jpeg_data_url(&out))
+}
+
+fn jpeg_data_url(bytes: &[u8]) -> String {
+    format!(
         "data:image/jpeg;base64,{}",
-        crate::clipboard::base64_encode(&out)
-    ))
+        crate::clipboard::base64_encode(bytes)
+    )
 }
 
 /// 把选区从冻结的位图里裁出来，拼成 CF_DIB（BITMAPINFOHEADER + 自下而上 BGRA）。
@@ -1217,9 +1207,230 @@ fn close(app: &AppHandle, reason: u8) {
     }
 }
 
+// ── GDI+ JPEG 编码 ──────────────────────────────────────────────────────
+//
+// 预览图**必须全尺寸**（降采样后画面糊，用户明确反馈），而 `image` crate 的纯
+// Rust JPEG 编码 1080p 要 300ms，是「按快捷键到看见画面」的大头。GDI+ 的编码器
+// 是系统自带的 SIMD 实现，同样 1080p 只要 30–50ms，而且直接吃 BGRA 像素 ——
+// 连 BGRA→RGB 的转换都省了。失败时退回 `image`，慢一点但一定出图。
+
+type GpStatus = i32;
+
+#[repr(C)]
+struct GdiplusStartupInput {
+    version: u32,
+    debug_event_proc: *const std::ffi::c_void,
+    suppress_background_thread: i32,
+    suppress_external_codecs: i32,
+}
+
+#[repr(C)]
+struct Guid {
+    d1: u32,
+    d2: u16,
+    d3: u16,
+    d4: [u8; 8],
+}
+
+#[repr(C)]
+struct EncoderParameter {
+    guid: Guid,
+    count: u32,
+    value_type: u32,
+    value: *mut std::ffi::c_void,
+}
+
+#[repr(C)]
+struct EncoderParameters {
+    count: u32,
+    parameter: EncoderParameter,
+}
+
+const CLSID_JPEG: Guid = Guid {
+    d1: 0x557C_F401,
+    d2: 0x1A04,
+    d3: 0x11D3,
+    d4: [0x9A, 0x73, 0x00, 0x00, 0xF8, 0x1E, 0xF3, 0x2E],
+};
+
+const ENCODER_QUALITY: Guid = Guid {
+    d1: 0x1D5B_E4B5,
+    d2: 0xFA4A,
+    d3: 0x452D,
+    d4: [0x9C, 0xDD, 0x5D, 0xB3, 0x51, 0x05, 0xE7, 0xEB],
+};
+
+/// `PixelFormat32bppRGB`：虽然像素是 BGRA，但 alpha 通道被忽略
+const PIXEL_FORMAT_32BPP_RGB: u32 = 0x0002_2009;
+/// `EncoderParameterValueTypeLong`
+const ENCODER_VALUE_LONG: u32 = 4;
+
+#[link(name = "gdiplus")]
+extern "system" {
+    // `token` 是 **ULONG_PTR**（64 位），不是 u32 —— 按 u32 声明会栈溢出直接崩
+    // （实测 STATUS_ACCESS_VIOLATION）。
+    fn GdiplusStartup(
+        token: *mut usize,
+        input: *const GdiplusStartupInput,
+        output: *mut std::ffi::c_void,
+    ) -> GpStatus;
+    fn GdipCreateBitmapFromScan0(
+        w: i32,
+        h: i32,
+        stride: i32,
+        format: u32,
+        scan0: *mut u8,
+        bitmap: *mut *mut std::ffi::c_void,
+    ) -> GpStatus;
+    fn GdipSaveImageToStream(
+        image: *mut std::ffi::c_void,
+        stream: *mut std::ffi::c_void,
+        clsid: *const Guid,
+        params: *const EncoderParameters,
+    ) -> GpStatus;
+    fn GdipDisposeImage(image: *mut std::ffi::c_void) -> GpStatus;
+}
+
+#[link(name = "ole32")]
+extern "system" {
+    fn CreateStreamOnHGlobal(
+        hglobal: isize,
+        delete_on_release: i32,
+        stream: *mut *mut std::ffi::c_void,
+    ) -> i32;
+    fn GetHGlobalFromStream(stream: *mut std::ffi::c_void, hglobal: *mut isize) -> i32;
+}
+
+extern "system" {
+    fn GlobalLock(hglobal: isize) -> *mut std::ffi::c_void;
+    fn GlobalSize(hglobal: isize) -> usize;
+    fn GlobalUnlock(hglobal: isize) -> i32;
+}
+
+/// GDI+ 全程只初始化一次，首次约 1ms。
+fn gdiplus_ready() -> bool {
+    use std::sync::OnceLock;
+    static TOKEN: OnceLock<usize> = OnceLock::new();
+    if TOKEN.get().is_some() {
+        return true;
+    }
+    let mut token = 0usize;
+    let input = GdiplusStartupInput {
+        version: 1,
+        debug_event_proc: std::ptr::null(),
+        suppress_background_thread: 0,
+        suppress_external_codecs: 0,
+    };
+    let status = unsafe { GdiplusStartup(&mut token, &input, std::ptr::null_mut()) };
+    if status != 0 {
+        crate::log_warn!("[shot] GDI+ 初始化失败：{status}");
+        return false;
+    }
+    TOKEN.set(token).is_ok()
+}
+
+/// `IStream` 是 COM 对象，走 vtable 的第三个槽位释放。
+unsafe fn iunknown_release(punk: *mut std::ffi::c_void) {
+    if punk.is_null() {
+        return;
+    }
+    let vtable = *(punk as *const *const usize);
+    // **必须读出槽位里存的函数地址**，不能把槽位自己的地址当函数指针用 ——
+    // 少这一层解引用就是直接跳到数据区执行，Windows 报 STATUS_ACCESS_VIOLATION
+    // （实测踩过：崩溃恰好在编码成功之后的释放环节，最难想到）。
+    let release_addr = *(vtable.add(2));
+    let release: extern "system" fn(*mut std::ffi::c_void) -> u32 =
+        std::mem::transmute(release_addr);
+    release(punk);
+}
+
+/// 用 GDI+ 把 BGRA 像素编码成 JPEG。全尺寸、不降采样。
+fn gdiplus_jpeg(pixels: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    if !gdiplus_ready() {
+        return None;
+    }
+    let stride = (w * 4) as i32;
+    unsafe {
+        let mut bmp: *mut std::ffi::c_void = std::ptr::null_mut();
+        // scan0 直接指向抓屏缓冲：GDI+ 自己拷一份，省掉 BGRA→RGB 的转换
+        let status = GdipCreateBitmapFromScan0(
+            w as i32,
+            h as i32,
+            stride,
+            PIXEL_FORMAT_32BPP_RGB,
+            pixels.as_ptr() as *mut u8,
+            &mut bmp,
+        );
+        if status != 0 || bmp.is_null() {
+            crate::log_warn!("[shot] GDI+ 创建位图失败：{status}");
+            return None;
+        }
+        let mut stream: *mut std::ffi::c_void = std::ptr::null_mut();
+        if CreateStreamOnHGlobal(0, 1, &mut stream) != 0 || stream.is_null() {
+            GdipDisposeImage(bmp);
+            crate::log_warn!("[shot] GDI+ 内存流创建失败");
+            return None;
+        }
+        let mut quality = 88u32;
+        let params = EncoderParameters {
+            count: 1,
+            parameter: EncoderParameter {
+                guid: ENCODER_QUALITY,
+                count: 1,
+                value_type: ENCODER_VALUE_LONG,
+                value: &mut quality as *mut u32 as *mut std::ffi::c_void,
+            },
+        };
+        let status = GdipSaveImageToStream(bmp, stream, &CLSID_JPEG, &params);
+        GdipDisposeImage(bmp);
+        if status != 0 {
+            crate::log_warn!("[shot] GDI+ 存 JPEG 失败：{status}");
+            iunknown_release(stream);
+            return None;
+        }
+        let mut hg = 0isize;
+        if GetHGlobalFromStream(stream, &mut hg) != 0 || hg == 0 {
+            iunknown_release(stream);
+            return None;
+        }
+        let len = GlobalSize(hg);
+        let ptr = GlobalLock(hg);
+        if ptr.is_null() || len == 0 {
+            if !ptr.is_null() {
+                GlobalUnlock(hg);
+            }
+            iunknown_release(stream);
+            return None;
+        }
+        let out = std::slice::from_raw_parts(ptr as *const u8, len).to_vec();
+        GlobalUnlock(hg);
+        iunknown_release(stream);
+        Some(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GDI+ 编码必须真的跑通：编译通过不代表编码器在目标机器上可用。
+    /// 没有这一条，GDI+ 失败就只能悄悄退回慢速路径，没人会注意到。
+    #[test]
+    fn gdiplus_jpeg_produces_a_jpeg() {
+        // 逐段打印，崩溃时能定位到哪一步
+        eprintln!("step: ready");
+        assert!(gdiplus_ready(), "GDI+ 初始化应成功");
+        eprintln!("step: encode");
+        let (w, h) = (64u32, 64u32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for i in 0..(w * h) as usize {
+            px[i * 4] = 200; // 蓝色，顺带验证 BGRA 顺序没有被颠倒成解不开的图
+        }
+        let out = gdiplus_jpeg(&px, w, h).expect("GDI+ 编码应成功");
+        eprintln!("step: done len={}", out.len());
+        assert!(out.len() > 50, "JPEG 不应只有几十字节");
+        assert_eq!(&out[..2], &[0xFFu8, 0xD8], "应以 JPEG 头开始");
+    }
 
     fn fake(w: u32, h: u32) -> Shot {
         Shot {
