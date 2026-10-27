@@ -1061,6 +1061,83 @@ pub fn ignore_dpi() -> bool {
 ///
 /// 传 `None` 就是「跟随系统」—— Tauri 会继续监听系统主题变化并派发事件，
 /// 前端的 `onThemeChanged` 因此不用改，三档切换共用同一条链路。
+/// 当前界面是不是深色。
+///
+/// light / dark 直接取设置；system 读系统的「应用主题」（注册表
+/// `HKCU\...\Themes\Personalize\AppsUseLightTheme`）。
+///
+/// 注册表是这里唯一可靠的来源 —— 截图提示这类没有 Tauri 窗口的场合拿不到
+/// 系统主题消息，而系统主题变化也不会有窗口消息可听。
+pub fn is_dark_now() -> bool {
+    match crate::settings::get().theme_mode.as_str() {
+        "dark" => true,
+        "light" => false,
+        _ => !apps_use_light_theme(),
+    }
+}
+
+/// 读系统的应用主题：true = 浅色，false = 深色。读不到按浅色处理。
+fn apps_use_light_theme() -> bool {
+    unsafe {
+        extern "system" {
+            fn RegOpenKeyExW(
+                hkey: isize,
+                subkey: *const u16,
+                opts: u32,
+                sam: u32,
+                out: *mut isize,
+            ) -> i32;
+            // 签名必须与 about.rs 里的声明逐字一致：同一个 C 符号在同一个 crate
+            // 里声明成两种样子，Rust 会报 clashing_extern_declarations；
+            // 而参数个数写错更是直接错位调用。
+            fn RegGetValueW(
+                hkey: isize,
+                subkey: *const u16,
+                value: *const u16,
+                flags: u32,
+                out_type: *mut u32,
+                data: *mut std::ffi::c_void,
+                data_size: *mut u32,
+            ) -> i32;
+            fn RegCloseKey(hkey: isize) -> i32;
+        }
+        const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as isize;
+        const KEY_READ: u32 = 0x20019;
+        /// REG_DWORD 的类型码。`RegGetValueW` 通过 `out_type` **输出**实际类型，
+        /// `flags` 传 0 表示不限类型。
+        const REG_DWORD: u32 = 4;
+
+        let sub: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let name: Vec<u16> = "AppsUseLightTheme".encode_utf16().chain(std::iter::once(0)).collect();
+
+        let mut hkey: isize = 0;
+        if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+            return true;
+        }
+        let mut val: u32 = 1;
+        let mut out_type: u32 = 0;
+        let mut len = std::mem::size_of::<u32>() as u32;
+        let rc = RegGetValueW(
+            hkey,
+            // 键已经用 RegOpenKeyExW 打开了，这里不再指定子键
+            std::ptr::null(),
+            name.as_ptr(),
+            0,
+            &mut out_type,
+            &mut val as *mut u32 as *mut std::ffi::c_void,
+            &mut len,
+        );
+        RegCloseKey(hkey);
+        if rc != 0 || out_type != REG_DWORD {
+            return true;
+        }
+        val != 0
+    }
+}
+
 pub fn apply_theme_mode(window: &tauri::WebviewWindow) {
     let theme = match crate::settings::get().theme_mode.as_str() {
         "light" => Some(tauri::Theme::Light),
