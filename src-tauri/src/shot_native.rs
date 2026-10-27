@@ -1141,6 +1141,8 @@ fn on_mouse_up(hwnd: isize, x: i32, y: i32) {
 const BAR_W: i32 = 76;
 const BAR_H: i32 = 38;
 const BAR_GAP: i32 = 8;
+/// 悬停底色的方块边长。图标臂长 7（即 14×14），四周各留 6 → 26。
+const HOVER_BOX: f32 = 26.0;
 
 /// 工具条位置：默认贴选区右下外侧；底部放不下翻到上方；再不行压到屏幕内。
 fn toolbar_rect(sel: &Sel, sw: i32, sh: i32) -> Sel {
@@ -1290,9 +1292,6 @@ unsafe fn draw_handles(hdc: isize, sel: &Sel) {
 /// 选区上方的「宽 × 高」角标（物理像素）。贴顶边时压到选区内部顶端。
 unsafe fn draw_size_label(hdc: isize, sel: &Sel) {
     let text = format!("{} × {}", sel.w(), sel.h());
-    let mut buf: Vec<u16> = text.encode_utf16().collect();
-    buf.push(0);
-
     let box_w = (text.chars().count() as i32) * 8 + 12;
     let box_h = 20;
     let mut top = sel.top - box_h - 4;
@@ -1307,16 +1306,9 @@ unsafe fn draw_size_label(hdc: isize, sel: &Sel) {
     };
 
     fill_rect(hdc, &r, 0x0020_2020);
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, 0x00FF_FFFF);
-    let mut wr = r.to_win();
-    DrawTextW(
-        hdc,
-        buf.as_ptr(),
-        -1,
-        &mut wr,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
+    // 沿用 DC 默认字体：尺寸角标一直就是这么画的，不要顺手换成 13px 雅黑，
+    // 那会改变既有观感。
+    draw_white_text(hdc, &r, &text);
 }
 
 /// 工具条：白底圆角，左半红叉取消、右半绿勾完成。
@@ -1423,20 +1415,16 @@ fn build_tip_pixels(w: i32, h: i32) -> Vec<u8> {
     let mut px = vec![0u8; (w * h * 4) as usize];
     let radius = 7.0f32;
     // 0.88 不透明度：压在截图内容上要读得清，又不能像实心块那样突兀
-    let alpha = 224u32;
-    let base = 28u32;
+    let alpha = 0.88f32;
+    let base = 28.0f32;
     for y in 0..h {
         for x in 0..w {
             let cover = round_cover(x as f32 + 0.5, y as f32 + 0.5, w as f32, h as f32, radius);
             if cover <= 0.0 {
                 continue;
             }
-            let a = (cover * alpha as f32).round() as u32;
             let i = ((y * w + x) * 4) as usize;
-            px[i] = ((base * a + 127) / 255) as u8;
-            px[i + 1] = ((base * a + 127) / 255) as u8;
-            px[i + 2] = ((base * a + 127) / 255) as u8;
-            px[i + 3] = a as u8;
+            put_premultiplied(&mut px, i, base, base, base, cover * alpha);
         }
     }
     px
@@ -1447,11 +1435,11 @@ fn tip_pixels() -> &'static [u8] {
     CACHE.get_or_init(|| build_tip_pixels(TIP_W, TIP_H))
 }
 
-/// 画按钮文字。气泡底色是逐像素生成的，文字只能交给 GDI 排版 ——
-/// 中文字形没法像线段那样自己算覆盖率。
-unsafe fn draw_tip_text(hdc: isize, tip: &Sel, text: &str) {
+/// 建一个小字号界面字体（微软雅黑）。失败返回 0。
+///
+/// 高度取负值 = 字符高度（不含内部行距），比正值更接近「字号」的直觉。
+unsafe fn create_ui_font(px: i32) -> isize {
     unsafe extern "system" {
-        #[allow(clippy::too_many_arguments)]
         fn CreateFontW(
             height: i32,
             width: i32,
@@ -1468,44 +1456,30 @@ unsafe fn draw_tip_text(hdc: isize, tip: &Sel, text: &str) {
             pitch_family: u32,
             face: *const u16,
         ) -> isize;
-        fn SetTextColor(hdc: isize, color: u32) -> u32;
-        fn SetBkMode(hdc: isize, mode: i32) -> i32;
-        fn DrawTextW(
-            hdc: isize,
-            text: *const u16,
-            len: i32,
-            rect: *mut crate::effects::Rect,
-            format: u32,
-        ) -> i32;
     }
     let face: Vec<u16> = "Microsoft YaHei UI"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    // -13：12px 在这个尺寸下偏小，两个汉字容易挤成一团
-    let font = CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr());
-    if font == 0 {
-        return;
-    }
-    let old = SelectObject(hdc, font);
-    SetBkMode(hdc, 1); // TRANSPARENT：否则文字背后会刷一块底色
+    // 400 = FW_NORMAL，1 = DEFAULT_CHARSET，5 = CLEARTYPE_QUALITY
+    CreateFontW(-px, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr())
+}
+
+/// 在矩形内居中画一行白字，用 DC 的**当前字体**。
+/// 要指定字号就先 `create_ui_font` + `SelectObject`，画完恢复并删除。
+unsafe fn draw_white_text(hdc: isize, r: &Sel, text: &str) {
+    let mut units: Vec<u16> = text.encode_utf16().collect();
+    units.push(0); // DrawTextW 传 -1 时需要 0 结尾
+    SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, 0x00FF_FFFF); // 白。COLORREF 是 0x00BBGGRR
-    let mut rc = crate::effects::Rect {
-        left: tip.left,
-        top: tip.top,
-        right: tip.right,
-        bottom: tip.bottom,
-    };
-    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut wr = r.to_win();
     DrawTextW(
         hdc,
         units.as_ptr(),
-        units.len() as i32,
-        &mut rc,
+        -1,
+        &mut wr,
         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     );
-    SelectObject(hdc, old);
-    DeleteObject(font);
 }
 
 /// 悬停气泡：先铺底色再画字，顺序不能反。
@@ -1520,7 +1494,18 @@ unsafe fn draw_bar_tip(hdc: isize, s: &Session) {
         return;
     }
     let text = if s.hover_bar == 1 { "取消" } else { "完成" };
-    draw_tip_text(hdc, &tip, text);
+    // 13px：12px 在这个尺寸下偏小，两个汉字容易挤成一团
+    let font = create_ui_font(13);
+    let old = if font != 0 {
+        SelectObject(hdc, font)
+    } else {
+        0
+    };
+    draw_white_text(hdc, &tip, text);
+    if font != 0 {
+        SelectObject(hdc, old);
+        DeleteObject(font);
+    }
 }
 
 /// 工具条图像按三种悬停状态各生成一次：内容全是常量，尺寸也固定。
@@ -1562,16 +1547,18 @@ fn build_toolbar_pixels(w: i32, h: i32, hover: u8) -> Vec<u8> {
 
             let (mut r, mut g, mut b) = (255.0f32, 255.0f32, 255.0f32);
 
-            // 悬停底色：只铺在被悬停的那半区，左右各内缩 3px、圆角 6。
-            // 色值取 236 而不是更深的灰 —— 图标本身是饱和红/绿，底色再重会抢掉它；
-            // 同时 236 与纯白（255）的差在压暗背景上仍然一眼可辨。
+            // 悬停底色：贴着图标的一个圆角方块，不铺满半区。
+            // 铺满半区时它从面板边缘一直顶到中缝，面积是图标的三倍多，
+            // 看起来像「整块按钮变了色」而不是「鼠标停在这个图标上」。
             if hover != 0 {
-                let (hl, hr) = if hover == 1 {
-                    (3.0f32, mid - 1.5)
-                } else {
-                    (mid + 1.5, w as f32 - 3.0)
-                };
-                let c = round_cover(fx - hl, fy - 3.0, hr - hl, (h - 6) as f32, 6.0);
+                let cx = if hover == 1 { lx } else { rx };
+                let c = round_cover(
+                    fx - (cx - HOVER_BOX / 2.0),
+                    fy - (cy - HOVER_BOX / 2.0),
+                    HOVER_BOX,
+                    HOVER_BOX,
+                    6.0,
+                );
                 if c > 0.0 {
                     r = lerp(r, 236.0, c);
                     g = lerp(g, 236.0, c);
@@ -1621,18 +1608,27 @@ fn build_toolbar_pixels(w: i32, h: i32, hover: u8) -> Vec<u8> {
             }
 
             let i = ((y * w + x) * 4) as usize;
-            // **GDI 的 AlphaBlend 按「预乘 alpha」解释源位图**：RGB 必须先乘上 alpha。
+            // GDI 的 AlphaBlend 按「预乘 alpha」解释源位图：RGB 必须先乘上 alpha。
             // 直接给 straight alpha（RGB 保持原值、alpha 单独给）时，边缘那些
             // alpha=0.5 的像素会被当成「已经预乘过」的亮值参与合成 —— 在深色背景上
             // 就是一圈黑边/暗晕。同理，全透明区域必须 RGB 清零。
-            let a = (cover * 255.0).round() as u32;
-            px[i] = ((b as u32 * a + 127) / 255) as u8;
-            px[i + 1] = ((g as u32 * a + 127) / 255) as u8;
-            px[i + 2] = ((r as u32 * a + 127) / 255) as u8;
-            px[i + 3] = a as u8;
+            put_premultiplied(&mut px, i, r, g, b, cover);
         }
     }
     px
+}
+
+/// 写入一个预乘 alpha 的 BGRA 像素。工具条与气泡共用。
+///
+/// GDI 的 `AlphaBlend` 按**预乘**语义读源位图，这一步写错就是边缘黑边 ——
+/// 已经踩过两轮，集中到一处，别在各处自己拼。
+fn put_premultiplied(px: &mut [u8], i: usize, r: f32, g: f32, b: f32, alpha: f32) {
+    let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let ch = |v: f32| ((v.clamp(0.0, 255.0) as u32 * a + 127) / 255) as u8;
+    px[i] = ch(b);
+    px[i + 1] = ch(g);
+    px[i + 2] = ch(r);
+    px[i + 3] = a as u8;
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
