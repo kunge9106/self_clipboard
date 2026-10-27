@@ -45,6 +45,27 @@ body {
   display: none;
 }
 
+/* 悬停高亮：鼠标停在某个窗口上时先框出来，点一下就直接截它。
+   层级刻意放在选区**下面**（z-index 1 < 选区的 2）：一旦开始拖动，选区自己就把它
+   盖住了，不用额外写「拖拽时隐藏高亮」的判断。 */
+.hover {
+  position: fixed;
+  border: 1px solid #4a9eff;
+  background: rgba(74, 158, 255, 0.08);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.hover[hidden] {
+  display: none;
+}
+
+/* 高亮贴到屏幕顶端时，角标翻到下沿（同选区的处理） */
+.hover.is-tight .sel-size {
+  top: auto;
+  bottom: -26px;
+}
+
 /* 八个调整手柄。命中区域做到 12px（视觉 6px），贴着边缘拖的时候不用瞄准 */
 .h {
   position: absolute;

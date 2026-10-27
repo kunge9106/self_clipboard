@@ -86,22 +86,20 @@ extern "system" {
     fn CallNextHookEx(hook: isize, code: i32, w: usize, l: isize) -> isize;
     fn GetModuleHandleW(name: *const u16) -> isize;
     fn GetLastError() -> u32;
-    fn GetForegroundWindow() -> isize;
-    fn SetForegroundWindow(hwnd: isize) -> i32;
-    fn BringWindowToTop(hwnd: isize) -> i32;
-    fn IsWindowVisible(hwnd: isize) -> i32;
+    /// 64 位必须用 Ptr 版本：`SetWindowLongW` 只能改 32 位，窗口样式会被截断
+    fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+    fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
 }
 
 const SRCCOPY: u32 = 0x00CC_0020;
 const DIB_RGB_COLORS: u32 = 0;
 
 const WH_KEYBOARD_LL: i32 = 13;
-const WH_MOUSE_LL: i32 = 14;
 const HC_ACTION: i32 = 0;
 const WM_KEYDOWN: usize = 0x0100;
 const WM_SYSKEYDOWN: usize = 0x0104;
-const WM_LBUTTONDOWN: usize = 0x0201;
 const VK_ESCAPE: u32 = 0x1B;
+const VK_RETURN: u32 = 0x0D;
 
 /// 让热键线程装上 Esc 兜底钩子（`WM_APP + 4`）
 pub const WM_SHOT_GUARD_ON: u32 = 0x8000 + 4;
@@ -139,6 +137,11 @@ struct Shot {
     /// 编码后的 PNG data URL。**同一张图只编一次**：1080p 的 PNG 压缩要几十毫秒，
     /// 而前端为了防「事件早于页面加载」会主动拉一次图，可能连拉两次。
     png: Option<String>,
+    /// 光标下可选的顶层窗口矩形（虚拟屏物理坐标，按 z 序从高到低）。
+    ///
+    /// **必须在覆盖层显示之前枚举**：覆盖层一铺满整屏，
+    /// `WindowFromPoint` 就只会返回它自己，之后再也问不出底下是谁。
+    windows: Vec<[i32; 4]>,
 }
 
 static LAST: Mutex<Option<Shot>> = Mutex::new(None);
@@ -188,6 +191,9 @@ pub fn start(app: &AppHandle) {
     }
     guard_on();
 
+    // 赶在覆盖层显示之前把窗口列表取下来（见 `Shot::windows` 的说明）
+    let windows = unsafe { list_windows() };
+    crate::log_print!("[shot] 可识别的窗口 {} 个", windows.len());
     if let Ok(mut g) = LAST.lock() {
         *g = Some(Shot {
             w: w as u32,
@@ -196,6 +202,7 @@ pub fn start(app: &AppHandle) {
             top,
             pixels,
             png: None,
+            windows,
         });
     }
 
@@ -281,11 +288,36 @@ fn prepare_overlay(app: &AppHandle, left: i32, top: i32, w: i32, h: i32, scale: 
     // 1 CSS px = 1 物理 px，前端算出的选区坐标就等同于像素坐标
     let _ = win.set_zoom(1.0 / scale);
     disable_window_transitions(&win);
-    // 记下窗口句柄：鼠标钩子要在「第一次点击」时立刻激活它（见 `mouse_proc`）
-    SHOT_HWND.store(
-        win.hwnd().map(|h| h.0 as isize).unwrap_or(0),
-        Ordering::SeqCst,
-    );
+    if let Ok(h) = win.hwnd() {
+        never_focus(h.0 as isize);
+    }
+}
+
+/// 让覆盖层**永远不被激活**（`WS_EX_NOACTIVATE` + `WS_EX_TOOLWINDOW`）。
+///
+/// 这是「点一次才能开始框选」的终极解法：不再和系统争前台，而是让窗口根本不需要前台。
+///
+/// 之前的思路全是「把前台抢过来」—— `set_focus`、`AttachThreadInput`、注入 Alt，
+/// 但 `SetForegroundWindow` 对后台进程本就是**静默拒绝**，没有一条能保证。而窗口只要
+/// 不是前台，第一次 `pointerdown` 就会被系统拿去激活，拖动自然没反应。
+///
+/// `WS_EX_NOACTIVATE` 是窗口**属性**而不是显示时的参数：系统从此不再激活它，
+/// **连点击也不激活**。于是第一次点击直接变成 `pointerdown`，不再被吃掉。
+/// 同类工具（winshotx 的 `TRAMPAS.md` 第 9 条）走的就是这条路。
+///
+/// 代价：永不获焦也就收不到键盘。Esc / Enter 因此下沉到 `key_proc`（全局键盘钩子），
+/// 不依赖窗口焦点 —— 这本来也是「逃生通道不依赖最易坏链路」的同一条原则。
+fn never_focus(hwnd: isize) {
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_NOACTIVATE: isize = 0x0800_0000;
+    const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+    unsafe {
+        let cur = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let next = cur | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        if next != cur {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+        }
+    }
 }
 
 /// 创建（或取出）覆盖层窗口。
@@ -306,7 +338,9 @@ fn build_overlay(app: &AppHandle) -> Option<tauri::WebviewWindow> {
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
-        .focused(true);
+        // 构造期不抢焦点。真正的保证在 `never_focus()`（窗口样式），这一项只在
+        // 首次创建时起作用，复用窗口时无效 —— 所以不能只靠它。
+        .focused(false);
     if let Some(args) = crate::popup::browser_args(app) {
         b = b.additional_browser_args(&args);
     }
@@ -429,50 +463,14 @@ fn reveal(app: &AppHandle) {
     let Some(win) = app.get_webview_window(SHOT_LABEL) else {
         return;
     };
+    // **只显示，不激活**。窗口带 `WS_EX_NOACTIVATE`（见 `never_focus`），所以：
+    // - 前台仍是用户原来的窗口，截完图不用再把焦点还回去；
+    // - 第一次点击不会被系统拿去激活，直接就是 `pointerdown`。
+    // 这里若再调 `set_focus` / `SetForegroundWindow`，就会把 NOACTIVATE 的好处抵消掉
+    // 一半（NOACTIVATE 窗口仍可被程序显式激活），等于走回老路。
     let _ = win.show();
-    let _ = win.set_focus();
-    // 抢前台**必须切到主线程**：`force_foreground` 靠 `AttachThreadInput` 把当前线程的
-    // 输入队列挂到前台线程上，而 `shot_show` 是命令、跑在异步运行时线程里 ——
-    // 挂错线程等于没挂，「点了第一下才开始框选」就是这么来的（面板那边早已踩过同一条）。
-    let app2 = app.clone();
-    if let Err(e) = app.run_on_main_thread(move || steal_foreground(&app2)) {
-        crate::log_warn!("[shot] 切到主线程失败：{e}");
-    }
     let elapsed = now_ms().saturating_sub(START_MS.load(Ordering::SeqCst));
-    crate::log_print!("[shot] 从按下快捷键到覆盖层可见：{elapsed}ms");
-}
-
-/// 主线程上抢一次前台，并把结果写进日志。
-///
-/// 日志带上窗口的**扩展样式**：`skip_taskbar(true)` 在 Windows 上会给窗口挂
-/// `WS_EX_TOOLWINDOW`（0x80），工具窗口不进 Alt+Tab、任务栏也不显示 —— 万一它同时
-/// 影响了激活，看这一行就能定位，不用再猜。
-fn steal_foreground(app: &AppHandle) {
-    let Some(win) = app.get_webview_window(SHOT_LABEL) else {
-        return;
-    };
-    let Ok(h) = win.hwnd() else {
-        return;
-    };
-    let target = h.0 as isize;
-    let before = unsafe { GetForegroundWindow() };
-    let ok = unsafe { crate::panel::force_foreground(target) };
-    let after = unsafe { GetForegroundWindow() };
-    let ex = unsafe { GetWindowLongW(target, GWL_EXSTYLE) };
-    crate::log_print!(
-        "[shot] 覆盖层已显示，前台 {before:#x} → {after:#x}（目标 {target:#x}，exstyle {ex:#x}）{}",
-        if ok {
-            ""
-        } else {
-            " ⚠ 焦点没抢到，第一次点击会被系统拿去激活窗口"
-        }
-    );
-}
-
-const GWL_EXSTYLE: i32 = -20;
-
-extern "system" {
-    fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
+    crate::log_print!("[shot] 从按下快捷键到覆盖层可见：{elapsed}ms（不激活窗口）");
 }
 
 /// 本次截图开始的时刻（Unix 毫秒）。跨线程只能用整数时间戳，
@@ -494,9 +492,6 @@ fn guard_off() {
     crate::hotkey::post_msg(WM_SHOT_GUARD_OFF);
 }
 
-/// 本次截图的覆盖层窗口句柄。鼠标钩子要用它判断「第一次点击是否落在没激活的窗口上」。
-static SHOT_HWND: AtomicIsize = AtomicIsize::new(0);
-
 /// 装上 **Esc 兜底**钩子：截图期间无论前端是否正常，按 Esc 都能退出。
 ///
 /// 为什么必须有这一条：取消逻辑本来完全在前端（`keydown` → `shot_cancel`）。
@@ -517,8 +512,7 @@ pub fn guard_install() {
         }
         GUARD.store(h, Ordering::SeqCst);
     }
-    crate::log_print!("[shot] Esc 兜底已启用");
-    click_guard_install();
+    crate::log_print!("[shot] Esc / Enter 兜底已启用");
 }
 
 pub fn guard_uninstall() {
@@ -529,54 +523,6 @@ pub fn guard_uninstall() {
         }
         crate::log_print!("[shot] Esc 兜底已卸载");
     }
-    let m = MOUSE_GUARD.swap(0, Ordering::SeqCst);
-    if m != 0 {
-        unsafe {
-            UnhookWindowsHookEx(m);
-        }
-        crate::log_print!("[shot] 首次点击接管已卸载");
-    }
-    SHOT_HWND.store(0, Ordering::SeqCst);
-}
-
-/// 鼠标钩子句柄（首次点击接管），与 `GUARD`（键盘）成对装卸。
-static MOUSE_GUARD: AtomicIsize = AtomicIsize::new(0);
-
-/// 装上**首次点击接管**：覆盖层若还没拿到前台，用户第一次按下时立刻激活它。
-///
-/// 为什么还要这一条：`SetForegroundWindow` 在后台进程上会被系统静默拒绝，前面
-/// 的主线程重试与 Alt 注入都只是「提高成功率」，没有一条能保证。而这里恰好是
-/// 系统认定的「本进程刚收到输入」时刻 —— 此时激活最容易成功。
-///
-/// **不吞这次点击**（返回 `CallNextHookEx`）：激活完成后消息照常投递给覆盖层，
-/// 于是这第一次按下同时完成了「激活」与「开始框选」，用户不会再觉得要点两下。
-pub fn click_guard_install() {
-    if MOUSE_GUARD.load(Ordering::SeqCst) != 0 {
-        return;
-    }
-    unsafe {
-        let h = SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, GetModuleHandleW(std::ptr::null()), 0);
-        if h == 0 {
-            crate::log_warn!("[shot] 首次点击接管安装失败（错误码 {}）", GetLastError());
-            return;
-        }
-        MOUSE_GUARD.store(h, Ordering::SeqCst);
-    }
-    crate::log_print!("[shot] 首次点击接管已启用");
-}
-
-unsafe extern "system" fn mouse_proc(code: i32, w: usize, l: isize) -> isize {
-    if code == HC_ACTION && w == WM_LBUTTONDOWN {
-        let hwnd = SHOT_HWND.load(Ordering::SeqCst);
-        // 必须**可见**才接管：覆盖层在「抓屏 + 编码」这几百毫秒里还是隐藏的，
-        // 那时用户点在别的窗口上，抢焦点只会把人家正在用的窗口挤掉。
-        if hwnd != 0 && IsWindowVisible(hwnd) != 0 && GetForegroundWindow() != hwnd {
-            BringWindowToTop(hwnd);
-            SetForegroundWindow(hwnd);
-            crate::log_print!("[shot] 首次点击：就地激活覆盖层 {hwnd:#x}");
-        }
-    }
-    CallNextHookEx(MOUSE_GUARD.load(Ordering::SeqCst), code, w, l)
 }
 
 unsafe extern "system" fn key_proc(code: i32, w: usize, l: isize) -> isize {
@@ -592,6 +538,16 @@ unsafe extern "system" fn key_proc(code: i32, w: usize, l: isize) -> isize {
                 });
             }
             // 吞掉这次 Esc：别让它同时落到下层窗口（比如编辑器里退出全屏）
+            return 1;
+        }
+        // Enter 也得走这里：覆盖层是 `WS_EX_NOACTIVATE`，永远拿不到焦点，前端收不到
+        // keydown。**只转发不裁决** —— 有没有选区、选区多小，都是前端更清楚，让它
+        // 决定提交还是忽略。
+        if kb.vk_code == VK_RETURN {
+            let app = SHOT_APP.lock().ok().and_then(|g| g.clone());
+            if let Some(app) = app {
+                let _ = app.emit_to(SHOT_LABEL, "shot-enter", ());
+            }
             return 1;
         }
     }
@@ -747,6 +703,130 @@ pub fn shot_image() -> Result<String, String> {
     Ok(encoded)
 }
 
+/// 光标下的窗口候选列表（给前端做「悬停高亮、单击截整窗」）。
+///
+/// 返回虚拟屏**物理**坐标，按 z 序从高到低；前端用几何判断命中了哪个，
+/// 而不是逐次问后端 —— 鼠标移动是每秒上百次的事件，一次 IPC 往返就够掉帧了。
+#[tauri::command]
+pub fn shot_windows() -> Result<(i32, i32, Vec<[i32; 4]>), String> {
+    let g = LAST.lock().map_err(|_| "截图状态锁失效")?;
+    let shot = g.as_ref().ok_or("没有待处理的截图")?;
+    Ok((shot.left, shot.top, shot.windows.clone()))
+}
+
+// ── 窗口枚举 ────────────────────────────────────────────────────────────
+
+const GWL_EXSTYLE: i32 = -20;
+const WS_EX_TOOLWINDOW: isize = 0x0080;
+const DWMWA_CLOAKED: u32 = 14;
+const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+
+/// 与 `singleton` 里那份声明保持**同一签名**：同一个符号用两种类型声明，
+/// 链接时只会给一条 "redeclared with a different signature" 警告，容易淹没真问题。
+type EnumProc = extern "system" fn(isize, isize) -> i32;
+
+extern "system" {
+    fn EnumWindows(proc: EnumProc, param: isize) -> i32;
+    fn IsWindowVisible(hwnd: isize) -> i32;
+    fn IsIconic(hwnd: isize) -> i32;
+    fn GetWindowTextLengthW(hwnd: isize) -> i32;
+    fn GetClassNameW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
+    fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+    fn GetCurrentProcessId() -> u32;
+    fn GetWindowRect(hwnd: isize, rect: *mut crate::effects::Rect) -> i32;
+    fn DwmGetWindowAttribute(
+        hwnd: isize,
+        attribute: u32,
+        value: *mut std::ffi::c_void,
+        size: u32,
+    ) -> i32;
+}
+
+/// 枚举「用户看得见、点得到」的顶层窗口。
+///
+/// 过滤掉的东西，每一条都对应一种会让高亮框乱跳的情况：
+/// - 不可见 / 最小化 → 矩形还在，但屏幕上看不到；
+/// - `WS_EX_TOOLWINDOW` → 输入法候选框、悬浮工具条之类，不是用户想截的「窗口」；
+/// - UWP 的 cloaked 窗口 → 系统保留的幽灵窗口，矩形能覆盖半个屏幕；
+/// - 本进程自己的窗口 → 覆盖层自己和轻贴主窗口，选中它们毫无意义；
+/// - 没有标题 → 大量隐藏的宿主窗口都是无标题的。
+unsafe fn list_windows() -> Vec<[i32; 4]> {
+    let mut out: Vec<[i32; 4]> = Vec::new();
+    EnumWindows(
+        enum_proc,
+        &mut out as *mut Vec<[i32; 4]> as isize,
+    );
+    out
+}
+
+extern "system" fn enum_proc(hwnd: isize, param: isize) -> i32 {
+    unsafe {
+        let out = &mut *(param as *mut Vec<[i32; 4]>);
+        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+            return 1;
+        }
+        if GetWindowTextLengthW(hwnd) == 0 {
+            return 1;
+        }
+        if GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW != 0 {
+            return 1;
+        }
+        // 桌面和任务栏也是「有标题的可见顶层窗口」，但高亮它们没有意义 ——
+        // 光标停在桌面空白处就会框住整个屏幕，点一下变成截全屏，和你想要的
+        // 「点一下不截」正相反。
+        let mut buf = [0u16; 64];
+        let n = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if n > 0 {
+            let class = String::from_utf16_lossy(&buf[..n as usize]);
+            if matches!(
+                class.as_str(),
+                "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+            ) {
+                return 1;
+            }
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == GetCurrentProcessId() {
+            return 1;
+        }
+        let mut cloaked = 0u32;
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut std::ffi::c_void,
+            4,
+        ) == 0
+            && cloaked != 0
+        {
+            return 1;
+        }
+        // 优先用 DWM 的可见边框：`GetWindowRect` 会把 Win10+ 那圈不可见的
+        // 缩放边框和阴影一起算进去，截出来四周多几条边。
+        let mut r = crate::effects::Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let ok = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut r as *mut crate::effects::Rect as *mut std::ffi::c_void,
+            16,
+        ) == 0;
+        if !ok && GetWindowRect(hwnd, &mut r) == 0 {
+            return 1;
+        }
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        if w <= 0 || h <= 0 {
+            return 1;
+        }
+        out.push([r.left, r.top, r.right, r.bottom]);
+        1 // 继续枚举
+    }
+}
+
 /// 前端把截图**解码完成**后调用，这时才显示窗口。
 ///
 /// 顺序反了会闪：先 show 再加载图，用户按下快捷键的第一眼是白底或黑底，
@@ -843,6 +923,7 @@ mod tests {
             top: 0,
             pixels: vec![7u8; (w as usize) * (h as usize) * 4],
             png: None,
+            windows: Vec::new(),
         }
     }
 
