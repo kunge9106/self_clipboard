@@ -615,7 +615,17 @@ pub fn guard_uninstall() {
         unsafe {
             UnhookWindowsHookEx(h);
         }
-        crate::log_print!("[shot] Esc 兜底已卸载");
+        crate::log_print!("[shot] Esc / Enter 兜底已卸载");
+    }
+    // 鼠标钩子也必须在这里卸。漏掉它的后果是：截图结束之后，用户**每一次左键点击**
+    // 都会被当成「本次截图的第一下」转发给前端，前端据此又建出一个选区 ——
+    // 表现就是「点完完成/取消，却又回到截图状态」。
+    let m = MOUSE_GUARD.swap(0, Ordering::SeqCst);
+    if m != 0 {
+        unsafe {
+            UnhookWindowsHookEx(m);
+        }
+        crate::log_print!("[shot] 首次按下补偿已卸载");
     }
 }
 
@@ -1031,7 +1041,11 @@ fn end_reason_name(code: u8) -> &'static str {
 fn close(app: &AppHandle, reason: u8) {
     LAST_END.store(reason, Ordering::SeqCst);
     if let Some(w) = app.get_webview_window(SHOT_LABEL) {
-        let _ = w.hide();
+        // 收起失败必须记下来：窗口是全屏不透明且置顶的，一旦没藏住，
+        // 用户看到的就是「截完了却还停在冻结画面」，和「退不出去」一模一样。
+        if let Err(e) = w.hide() {
+            crate::log_err!("screenshot", "收起覆盖层失败：{e}");
+        }
     }
     guard_off();
     // 抓屏缓冲有几 MB（1080p 约 8MB），不用了立刻放掉
