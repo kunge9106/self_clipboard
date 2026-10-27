@@ -182,6 +182,24 @@ static LAST: Mutex<Option<Shot>> = Mutex::new(None);
 
 /// `Alt+Q` 的入口：抓屏 → 铺满鼠标所在显示器 → 通知前端画图。
 pub fn start(app: &AppHandle) {
+    // ── 连按/重复触发的防抖 ───────────────────────────────────────────
+    // 从按下到画面出现要 200–400ms，用户等不到就会再按一次（日志里实测出现过
+    // 一秒内三次触发）。而每次触发都会先把覆盖层藏起来重新抓屏 —— 画面就成了
+    // 「出现→消失→再出现」，用户更确信「没生效」，继续按，恶性循环。
+    //
+    // 判据用 Win32 的 `IsWindowVisible` 而不是 Tauri 的 `is_visible()`：后者在
+    // 非主线程上是**无超时地等事件循环**（winshotx 的 TRAMPAS#34），而这里正是
+    // 热键线程，卡一下就是几秒的空白。
+    let hwnd = SHOT_HWND.load(Ordering::SeqCst);
+    let showing = hwnd != 0 && unsafe { IsWindowVisible(hwnd) } != 0;
+    let since = now_ms().saturating_sub(START_MS.load(Ordering::SeqCst));
+    let pending = LAST.lock().map(|g| g.is_some()).unwrap_or(false);
+    if showing || (pending && since < 800) {
+        crate::log_print!("[shot] 忽略重复触发（可见={showing}，待处理={pending}，距上次 {since}ms）");
+        return;
+    }
+
+    // 走到这里才算真的开始，这一刻才开始计「按下 → 可见」的耗时
     START_MS.store(now_ms(), Ordering::SeqCst);
     // 新会话：把「上次怎么结束的」归零，否则重复提交的判据会把这一次也当成已提交
     LAST_END.store(END_NONE, Ordering::SeqCst);
@@ -825,9 +843,27 @@ fn encode_preview(pixels: &[u8], w: u32, h: u32) -> Option<String> {
         rgb.push(px[1]);
         rgb.push(px[0]);
     }
+    // **预览降到 1280 宽**。全尺寸 1080p 的 JPEG 编码实测 300ms，是「按下快捷键
+    // 到看见画面」的大头；降到 1280×720（面积 44%）后约 130ms。
+    // 画质不受影响：最终裁的是 `pixels` 里的原始像素，预览只负责让用户看清
+    // 「框在哪」；坐标一律走 `imgScale()` 换算，1:1 与缩放两种情形都算得对。
+    const MAX_W: u32 = 1280;
+    let (tw, th) = if w > MAX_W {
+        (MAX_W, (h * MAX_W / w).max(1))
+    } else {
+        (w, h)
+    };
+    let src = image::RgbImage::from_raw(w, h, rgb)?;
+    let (buf, bw, bh) = if tw != w {
+        let small = image::imageops::resize(&src, tw, th, image::imageops::FilterType::Triangle);
+        (small.into_raw(), tw, th)
+    } else {
+        (src.into_raw(), w, h)
+    };
     let mut out = Vec::new();
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
-    enc.encode(&rgb, w, h, image::ExtendedColorType::Rgb8).ok()?;
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 88);
+    enc.encode(&buf, bw, bh, image::ExtendedColorType::Rgb8)
+        .ok()?;
     Some(format!(
         "data:image/jpeg;base64,{}",
         crate::clipboard::base64_encode(&out)
@@ -959,10 +995,15 @@ pub fn shot_pointer() -> Option<(i32, i32, u64, bool)> {
 /// 返回虚拟屏**物理**坐标，按 z 序从高到低；前端用几何判断命中了哪个，
 /// 而不是逐次问后端 —— 鼠标移动是每秒上百次的事件，一次 IPC 往返就够掉帧了。
 #[tauri::command]
-pub fn shot_windows() -> Result<(i32, i32, Vec<[i32; 4]>), String> {
+/// 返回值：`(left, top, 抓屏宽, 抓屏高, 窗口列表)`。
+///
+/// **必须把抓屏的物理尺寸给前端**：预览图是降采样过的（1280 宽），前端若拿
+/// `naturalWidth` 当屏幕宽度，CSS 坐标换算成物理像素时会小一圈，截出来的区域
+/// 整体缩小且偏移 —— 这种错只在粘贴出去后才发现，肉眼在框选时看不出来。
+pub fn shot_windows() -> Result<(i32, i32, u32, u32, Vec<[i32; 4]>), String> {
     let g = LAST.lock().map_err(|_| "截图状态锁失效")?;
     let shot = g.as_ref().ok_or("没有待处理的截图")?;
-    Ok((shot.left, shot.top, shot.windows.clone()))
+    Ok((shot.left, shot.top, shot.w, shot.h, shot.windows.clone()))
 }
 
 // ── 窗口枚举 ────────────────────────────────────────────────────────────
