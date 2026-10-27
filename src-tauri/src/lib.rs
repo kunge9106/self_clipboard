@@ -20,6 +20,11 @@ mod popup;
 mod panel;
 mod input;
 mod screenclip;
+mod shot_native;
+// 旧的 WebView 截图实现：原生版实测通过后，连同 shot.html / src/shot.js / src/shot.css
+// 与 5 个 shot_* 命令一起删掉。暂时留着，出问题时可把 hotkey.rs 里的
+// `shot_native::start` 换回 `screenshot::start`，一行完成回退。
+#[allow(dead_code)]
 mod screenshot;
 #[cfg(windows)]
 mod purge;
@@ -353,10 +358,8 @@ pub fn run() {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
         }
-        // 预热截图覆盖层：首次截图现建 WebView 要 1–2 秒，用户会以为「按了没反应」
-        // 甚至被兜底逻辑取消。只在内置模式下做（默认走系统截图时用不到覆盖层）；
-        // 用户在设置里切到内置的那一次由 `set_screenshot_mode` 立刻补预热。
-        screenshot::prewarm_delayed(app.handle().clone());
+        // 截图覆盖层不再需要预热：原生实现是新建一个普通窗口，创建耗时在毫秒级，
+        // 不存在旧版「首次要现建 WebView，1–2 秒没画面」的问题。
         Ok(())
     });
 

@@ -42,7 +42,7 @@ static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static PENDING: Mutex<Option<(Vec<(i32, String)>, Sender<Result<(), String>>)>> = Mutex::new(None);
 
 #[repr(C)]
-struct Msg {
+pub(crate) struct Msg {
     hwnd: isize,
     message: u32,
     w_param: usize,
@@ -89,7 +89,8 @@ pub fn init(app: tauri::AppHandle) {
                         if mode == "system" {
                             crate::screenclip::launch();
                         } else {
-                            crate::screenshot::start(&app);
+                            // 原生覆盖层：不经过渲染进程，输入与重绘都在自己的消息循环里
+                            crate::shot_native::start(&app);
                         }
                     }
                     other => crate::log_warn!("[hotkey] 未知热键 ID {other}"),

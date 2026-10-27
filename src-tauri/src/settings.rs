@@ -815,12 +815,9 @@ pub fn set_screenshot_mode(app: tauri::AppHandle, value: String) -> Result<(), S
         "[settings] 截图方式：{}",
         if value == "system" { "系统截图" } else { "内置覆盖层" }
     );
-    // 先取判断再存：`update` 会把 `value` 移进闭包，之后就读不到了
-    let want_builtin = value == "builtin";
     update(|c| c.screenshot_mode = value);
-    if want_builtin {
-        crate::screenshot::prewarm_now(&app);
-    }
+    // 原生覆盖层不需要预热，`app` 参数保留只为不改变命令签名
+    let _ = &app;
     Ok(())
 }
 
