@@ -409,8 +409,17 @@ pub fn prewarm(app: &AppHandle) {
     if app.get_webview_window(SHOT_LABEL).is_some() {
         return;
     }
-    if build_overlay(app).is_some() {
-        crate::log_print!("[shot] 覆盖层已预热（隐藏待命）");
+    if let Some(w) = build_overlay(app) {
+        // 预热时就把窗口铺到主屏大小。否则首次截图要做一次 800×600 → 1920×1080
+        // 的调整，WebView2 会重排整页 —— 实测这一下能吃掉一两秒，比别人慢一个量级。
+        // 这里只定尺寸、不动位置，窗口还隐藏着，代价几乎为零。
+        if let Ok(Some(mon)) = app.primary_monitor() {
+            let s = mon.size();
+            let _ = w.set_size(tauri::PhysicalSize::new(s.width, s.height));
+            crate::log_print!("[shot] 覆盖层已预热（隐藏待命，{}×{}）", s.width, s.height);
+        } else {
+            crate::log_print!("[shot] 覆盖层已预热（隐藏待命）");
+        }
     }
 }
 
@@ -723,16 +732,19 @@ unsafe fn grab(left: i32, top: i32, w: i32, h: i32) -> Option<Vec<u8>> {
 ///
 /// 走 data URL 而不是临时文件：省掉「写盘 → 权限 → 清理」三件事，
 /// 也不会在用户磁盘上留一堆截图残片。代价是 IPC 会传一段 base64（1080p 约 1–2MB）。
-fn preview_data_url(shot: &Shot) -> Option<String> {
+/// 把一帧 BGRA 编码成 JPEG data URL（**纯 CPU 活，不碰任何锁**）。
+///
+/// 单独抽出来是为了能扔进 `spawn_blocking`：这一步 300ms 上下，绝不能占主线程。
+fn encode_preview(pixels: &[u8], w: u32, h: u32) -> Option<String> {
     // 预览用 **JPEG** 而不是 PNG：1080p 的 PNG 编码实测 143–203ms，占了
     // 「按下快捷键 → 看到画面」的大头，而这段时间里用户的鼠标已经在按了 ——
     // 画面晚到一步，第一下就落在下层窗口上，表现为「还得再点一次」。
     //
     // 画质不受影响：**最终裁的是 `shot.pixels` 里的原始像素**，预览图只负责
     // 给用户看「我在哪、框哪块」，不参与出图。
-    let pixels = shot.w as usize * shot.h as usize;
-    let mut rgb = Vec::with_capacity(pixels * 3);
-    for px in shot.pixels.chunks_exact(4) {
+    let count = w as usize * h as usize;
+    let mut rgb = Vec::with_capacity(count * 3);
+    for px in pixels.chunks_exact(4) {
         // BGRA → RGB：JPEG 没有 alpha 通道，少转一个也少占 1/4 内存
         rgb.push(px[2]);
         rgb.push(px[1]);
@@ -740,8 +752,7 @@ fn preview_data_url(shot: &Shot) -> Option<String> {
     }
     let mut out = Vec::new();
     let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
-    enc.encode(&rgb, shot.w, shot.h, image::ExtendedColorType::Rgb8)
-        .ok()?;
+    enc.encode(&rgb, w, h, image::ExtendedColorType::Rgb8).ok()?;
     Some(format!(
         "data:image/jpeg;base64,{}",
         crate::clipboard::base64_encode(&out)
@@ -785,22 +796,29 @@ fn crop_to_dib(shot: &Shot, x: i32, y: i32, w: i32, h: i32) -> Result<Vec<u8>, S
 }
 
 /// 前端就绪后拉取本次截图的位图。
+///
+/// **`async` 不是为了并发，是为了别占主线程**：Tauri 的**同步**命令跑在主线程上，
+/// 而这里要做 300ms 上下的 JPEG 编码 —— 期间事件循环被堵死，窗口的尺寸调整、
+/// 显示、收起全部排队。日志里「按下快捷键 → 覆盖层可见 2473ms」的那两秒空白，
+/// 就是这么来的：用户等不到画面，手先动了。
 #[tauri::command]
-pub fn shot_image() -> Result<String, String> {
-    let mut g = LAST.lock().map_err(|_| "截图状态锁失效")?;
-    let shot = g.as_mut().ok_or("没有待处理的截图")?;
-    if let Some(p) = shot.preview.clone() {
-        crate::log_print!("[shot] 前端取图（命中缓存，{} KB）", p.len() / 1024);
-        return Ok(p);
-    }
+pub async fn shot_image() -> Result<String, String> {
+    // 取数据这一段很快（8MB 拷贝 1–2ms），留在原线程，避免把锁带进阻塞线程
+    let (w, h, pixels) = {
+        let mut g = LAST.lock().map_err(|_| "截图状态锁失效")?;
+        let shot = g.as_mut().ok_or("没有待处理的截图")?;
+        if let Some(p) = shot.preview.clone() {
+            crate::log_print!("[shot] 前端取图（命中缓存，{} KB）", p.len() / 1024);
+            return Ok(p);
+        }
+        (shot.w, shot.h, shot.pixels.clone())
+    };
     let t0 = std::time::Instant::now();
-    let Some(encoded) = preview_data_url(shot) else {
-        crate::log_warn!(
-            "[shot] 预览编码失败（{}×{}，原始 {} 字节）",
-            shot.w,
-            shot.h,
-            shot.pixels.len()
-        );
+    let encoded = tauri::async_runtime::spawn_blocking(move || encode_preview(&pixels, w, h))
+        .await
+        .map_err(|e| format!("预览编码线程失败：{e}"))?;
+    let Some(encoded) = encoded else {
+        crate::log_warn!("[shot] 预览编码失败（{w}×{h}）");
         return Err("截图编码失败".into());
     };
     crate::log_print!(
@@ -808,7 +826,11 @@ pub fn shot_image() -> Result<String, String> {
         encoded.len() / 1024,
         t0.elapsed().as_millis()
     );
-    shot.preview = Some(encoded.clone());
+    if let Ok(mut g) = LAST.lock() {
+        if let Some(shot) = g.as_mut() {
+            shot.preview = Some(encoded.clone());
+        }
+    }
     Ok(encoded)
 }
 
@@ -972,15 +994,20 @@ extern "system" fn enum_proc(hwnd: isize, param: isize) -> i32 {
 /// 第二眼才变成桌面 —— 看起来像卡了一下。
 #[tauri::command]
 pub fn shot_show(app: AppHandle) {
-    let app2 = app.clone();
-    let _ = app.run_on_main_thread(move || reveal(&app2));
+    // 同步命令本身就在主线程执行，直接调用即可。早先这里多转了一次
+    // `run_on_main_thread`，等于把「显示」推迟到事件循环的下一拍 ——
+    // 用户等画面的时候，这一拍也算在延迟里。
+    reveal(&app);
 }
 
 /// 双击 / `Enter`：裁图 → 写剪贴板（会被采集线程记成一条图片）→ 收起覆盖层。
 #[tauri::command]
-pub fn shot_commit(app: AppHandle, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
+pub async fn shot_commit(app: AppHandle, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
     // 顺带把「抓的是哪块屏」记进日志：多屏下选区坐标看着正常但内容错位时，
     // 第一个要排除的就是「抓屏原点不对」
+    // 裁剪要搬几 MB 像素，写剪贴板又要等别的程序响应 —— 两件都放后台线程。
+    // 同步命令会把它俩压在主线程上，用户点完绿勾看到的是「窗口一动不动」，
+    // 于是再点一次、再点一次。
     let framed = {
         let g = LAST.lock().map_err(|_| "截图状态锁失效")?;
         match g.as_ref() {
@@ -1003,7 +1030,9 @@ pub fn shot_commit(app: AppHandle, x: i32, y: i32, w: i32, h: i32) -> Result<(),
         crate::log_print!("[shot] 重复提交，已忽略（图已在剪贴板）");
         return Ok(());
     };
-    crate::clipboard::write_shot_to_clipboard(&dib)?;
+    tauri::async_runtime::spawn_blocking(move || crate::clipboard::write_shot_to_clipboard(&dib))
+        .await
+        .map_err(|e| format!("写剪贴板线程失败：{e}"))??;
     crate::log_print!("[shot] 已复制选区 {w}×{h}（屏幕原点 {left},{top}）");
     close(&app, END_COMMIT);
     Ok(())

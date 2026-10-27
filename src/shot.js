@@ -382,7 +382,9 @@ async function load() {
   armed = false;
   try {
     // 窗口列表与图一起取：两者都来自这次抓屏，缺一个就没法做悬停高亮
+    const t0 = performance.now();
     const [url, win] = await Promise.all([invoke("shot_image"), invoke("shot_windows")]);
+    const t1 = performance.now();
     screenLeft = win[0];
     screenTop = win[1];
     winRects = win[2];
@@ -395,7 +397,13 @@ async function load() {
     } catch (e) {
       console.warn("img.decode failed", e);
     }
+    const t2 = performance.now();
     await invoke("shot_show");
+    const t3 = performance.now();
+    // 分段计时：取图 / 解码 / 显示三段，哪一段慢一看就知道，不用再靠猜
+    trace(
+      `load 分段：取图 ${Math.round(t1 - t0)}ms · 解码 ${Math.round(t2 - t1)}ms · 显示 ${Math.round(t3 - t2)}ms`
+    );
     armed = true;
     // 用户按下快捷键后往往已经在拖了，而画面要 150–300ms 才出来 —— 那一下按在
     // 下层窗口上，等于白按，感觉就是「还得再点一次」。这里问一句「左键还按着吗」，
