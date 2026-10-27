@@ -24,6 +24,12 @@
     <div id="hint" class="hint">
       <b>拖动</b>选择区域 · <b>双击 / 回车</b>复制 · <b>右键 / Esc</b>取消
     </div>
+    <!-- 选区工具条：跟着选区走。S1 只放「完成 / 取消」两个按钮 —— 标注工具是 S2 的事，
+         但「不知道怎么结束」是基础可用性问题，必须现在解决。 -->
+    <div id="sel-bar" class="bar" hidden>
+      <button type="button" id="btn-ok" class="bar-btn is-primary">✓ 完成 <kbd>Enter</kbd></button>
+      <button type="button" id="btn-cancel" class="bar-btn">✕ 取消 <kbd>Esc</kbd></button>
+    </div>
     <script type="module" src="/src/shot.js"></script>
   </body>
 </html>

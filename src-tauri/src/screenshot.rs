@@ -15,7 +15,7 @@
 //! 3. **窗口按物理像素铺满该显示器**，并把 webview 缩放设成 `1/scale`，
 //!    使 1 CSS px = 1 物理 px —— 前端算出来的选区坐标才能直接当像素坐标用。
 
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use tauri::{
@@ -76,6 +76,7 @@ extern "system" {
     fn CallNextHookEx(hook: isize, code: i32, w: usize, l: isize) -> isize;
     fn GetModuleHandleW(name: *const u16) -> isize;
     fn GetLastError() -> u32;
+    fn GetForegroundWindow() -> isize;
 }
 
 const SRCCOPY: u32 = 0x00CC_0020;
@@ -129,6 +130,7 @@ static LAST: Mutex<Option<Shot>> = Mutex::new(None);
 
 /// `Alt+Q` 的入口：抓屏 → 铺满鼠标所在显示器 → 通知前端画图。
 pub fn start(app: &AppHandle) {
+    START_MS.store(now_ms(), Ordering::SeqCst);
     // 抓屏前确保覆盖层是隐藏的：它平时就该是隐藏的，但万一上一次异常退出没收拾
     // 干净，这里先收一下，避免把「自己的残影」截进图里。
     if let Some(w) = app.get_webview_window(SHOT_LABEL) {
@@ -315,6 +317,10 @@ fn fit_client_to_screen(win: &tauri::WebviewWindow, left: i32, top: i32, w: i32,
 }
 
 /// 真正把覆盖层亮出来并抢焦点。由前端在截图解码完成后调用（见 `shot_show`）。
+///
+/// 「按了快捷键，要再点一下鼠标才能框选」的两种可能：窗口出得慢（用户等不及先点了），
+/// 或者窗口出来了但不是前台（第一次点击被系统拿去激活）。日志把两件事都记下来，
+/// 下次再遇到直接看数据，不用猜。
 fn reveal(app: &AppHandle) {
     let Some(win) = app.get_webview_window(SHOT_LABEL) else {
         return;
@@ -322,9 +328,29 @@ fn reveal(app: &AppHandle) {
     let _ = win.show();
     let _ = win.set_focus();
     if let Ok(h) = win.hwnd() {
+        let target = h.0 as isize;
         // 后台进程直接 SetForegroundWindow 会被系统拒绝，必须走 AttachThreadInput
-        unsafe { crate::panel::force_foreground(h.0 as isize) };
+        let before = unsafe { GetForegroundWindow() };
+        unsafe { crate::panel::force_foreground(target) };
+        let after = unsafe { GetForegroundWindow() };
+        crate::log_print!(
+            "[shot] 覆盖层已显示，前台 {before:#x} → {after:#x}（目标 {target:#x}）{}",
+            if after == target { "" } else { " ⚠ 焦点没抢到，首次点击可能被吞" }
+        );
     }
+    let elapsed = now_ms().saturating_sub(START_MS.load(Ordering::SeqCst));
+    crate::log_print!("[shot] 从按下快捷键到覆盖层可见：{elapsed}ms");
+}
+
+/// 本次截图开始的时刻（Unix 毫秒）。跨线程只能用整数时间戳，
+/// `Instant` 不是 `Sync` 的全局可共享类型。
+static START_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn guard_on() {
@@ -493,7 +519,8 @@ fn crop_to_dib(shot: &Shot, x: i32, y: i32, w: i32, h: i32) -> Result<Vec<u8>, S
     dib.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
     dib.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
     dib.extend_from_slice(&0u32.to_le_bytes()); // biCompression = BI_RGB
-    dib.extend_from_slice(&size_image.to_le_bytes()); // biSizeImage    dib.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerMeter
+    dib.extend_from_slice(&size_image.to_le_bytes()); // biSizeImage
+    dib.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerMeter
     dib.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerMeter
     dib.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
     dib.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
@@ -578,5 +605,36 @@ fn close(app: &AppHandle) {
     // 抓屏缓冲有几 MB（1080p 约 8MB），不用了立刻放掉
     if let Ok(mut g) = LAST.lock() {
         *g = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake(w: u32, h: u32) -> Shot {
+        Shot {
+            w,
+            h,
+            left: 0,
+            top: 0,
+            pixels: vec![7u8; (w as usize) * (h as usize) * 4],
+            png: None,
+        }
+    }
+
+    /// 裁出来的 DIB 必须与头部声明的 `biSizeImage` 严格一致。
+    ///
+    /// 实测踩过：落盘的 BMP 比头部少了 4 字节，缩略图解码直接 `failed to fill
+    /// whole buffer`，用户在列表里看到的是灰色占位图标。尺寸差一个像素就整张图作废。
+    #[test]
+    fn crop_matches_declared_size() {
+        let s = fake(1920, 1080);
+        for (x, y, w, h) in [(0, 0, 685, 289), (300, 250, 280, 200), (0, 0, 1920, 1080)] {
+            let dib = crop_to_dib(&s, x, y, w, h).expect("裁剪应成功");
+            let declared = u32::from_le_bytes([dib[20], dib[21], dib[22], dib[23]]) as usize;
+            assert_eq!(declared, w as usize * h as usize * 4, "biSizeImage 与像素数不符");
+            assert_eq!(dib.len(), 40 + w as usize * h as usize * 4, "DIB 实际长度不符");
+        }
     }
 }

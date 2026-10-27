@@ -19,6 +19,7 @@ const img = document.getElementById("shot-img");
 const sel = document.getElementById("sel");
 const sizeEl = document.getElementById("sel-size");
 const hint = document.getElementById("hint");
+const bar = document.getElementById("sel-bar");
 
 /** 当前选区；null = 还没框（或刚清空） */
 let rect = null;
@@ -56,6 +57,7 @@ function boxOf(x1, y1, x2, y2) {
 function render() {
   if (!rect || rect.w < 1 || rect.h < 1) {
     sel.hidden = true;
+    bar.hidden = true;
     hint.hidden = false;
     return;
   }
@@ -70,6 +72,23 @@ function render() {
   // 角标显示的是**将要从图里裁出的像素**，不是屏幕上的 CSS 尺寸
   const { sx, sy } = imgScale();
   sizeEl.textContent = `${Math.round(rect.w * sx)} × ${Math.round(rect.h * sy)}`;
+  placeBar();
+}
+
+/// 工具条贴着选区：优先右下外侧，放不下就翻到上面，再不行压在选区底部内侧。
+/// 不能让它盖住选区 —— 用户框住的最后一行被按钮挡住，粘贴出来会莫名觉得「少了一块」。
+function placeBar() {
+  bar.hidden = false;
+  const bw = bar.offsetWidth || 200;
+  const bh = bar.offsetHeight || 40;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let left = clamp(rect.x + rect.w - bw, 4, Math.max(4, vw - bw - 4));
+  let top = rect.y + rect.h + 8;
+  if (top + bh > vh - 4) top = rect.y - bh - 8;      // 下面放不下 → 上面
+  if (top < 4) top = clamp(rect.y + rect.h - bh - 4, 4, vh - bh - 4); // 都放不下 → 压在内侧
+  bar.style.left = `${left}px`;
+  bar.style.top = `${top}px`;
 }
 
 function reset() {
@@ -104,6 +123,9 @@ function resizeBy(base, handle, dx, dy) {
 
 document.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return; // 右键交给 contextmenu 处理（取消）
+  // 点在工具条上：交给按钮自己处理，否则会被当成「在空白处重新框选」，
+  // 表现为「按钮按下去选区就没了」
+  if (e.target.closest(".bar")) return;
   e.preventDefault();
 
   const handle = e.target.dataset?.h;
@@ -169,6 +191,17 @@ document.addEventListener("keydown", (e) => {
 
 document.addEventListener("contextmenu", (e) => {
   e.preventDefault();
+  // 在工具条上右击不该取消整次截图，避免误触
+  if (e.target.closest(".bar")) return;
+  cancel();
+});
+
+document.getElementById("btn-ok").addEventListener("click", (e) => {
+  e.stopPropagation();
+  commit();
+});
+document.getElementById("btn-cancel").addEventListener("click", (e) => {
+  e.stopPropagation();
   cancel();
 });
 
@@ -208,8 +241,17 @@ async function cancel() {
 async function load() {
   reset();
   try {
-    img.src = await invoke("shot_image");
-    invoke("frontend_log", { level: "INFO", tag: "shot", msg: "已取到位图，等待解码" }).catch(() => {});
+    const url = await invoke("shot_image");
+    img.src = url;
+    // **等解码完成再让窗口出现**。只等 `load` 事件是不够的：那时图片还没解码成
+    // 可绘制的位图，窗口先出来后必定有一帧黑底/空白 —— 用户看到的就是「按快捷键
+    // 屏幕闪一下」。`decode()` 返回时首帧已经可以画了。
+    try {
+      await img.decode();
+    } catch (e) {
+      console.warn("img.decode failed", e);
+    }
+    await invoke("shot_show");
   } catch (e) {
     console.error("shot_image failed", e);
     invoke("frontend_log", { level: "ERROR", tag: "shot", msg: `取图失败：${e}` }).catch(() => {});
@@ -218,7 +260,7 @@ async function load() {
   }
 }
 
-img.addEventListener("load", () => invoke("shot_show").catch(() => {}));
+// 只保留 error 兜底：正常路径由 `load()` 里 `decode()` 之后调 `shot_show`
 img.addEventListener("error", () => invoke("shot_show").catch(() => {}));
 
 // 两种进入方式都要覆盖：

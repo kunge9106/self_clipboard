@@ -109,3 +109,55 @@ body {
 .hint[hidden] {
   display: none;
 }
+
+/* 选区工具条。浮在选区外侧（右下优先），不压住选区内容，
+   否则用户框住的最后一行正好被按钮挡住，截图出来却带着按钮的位置感。 */
+.bar {
+  position: fixed;
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 8px;
+  background: rgba(28, 28, 30, 0.92);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  z-index: 5;
+}
+
+.bar[hidden] {
+  display: none;
+}
+
+.bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f2f2f5;
+  font: 500 13px/1.2 "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+}
+
+.bar-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.bar-btn.is-primary {
+  border-color: #2f7dff;
+  background: #2f7dff;
+  color: #fff;
+}
+
+.bar-btn.is-primary:hover {
+  background: #4a8dff;
+}
+
+.bar-btn kbd {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.22);
+  font: 500 11px/1.4 inherit;
+  opacity: 0.85;
+}
