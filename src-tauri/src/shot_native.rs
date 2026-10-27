@@ -440,6 +440,9 @@ struct Session {
     down_window: Option<Sel>,
     /// 当前悬停的窗口（客户区坐标）。
     hover_window: Option<Sel>,
+    /// 工具条上悬停的按钮：0 无、1 取消（左半）、2 完成（右半）。
+    /// 悬停时该半区加底色并在工具条外侧显示气泡提示。
+    hover_bar: u8,
 
     /// 已提交，防止 GUI 绿勾与 Enter 同时触发写两次剪贴板。
     committed: bool,
@@ -763,6 +766,7 @@ unsafe fn build_session(
         down_y: 0,
         down_window: None,
         hover_window: None,
+        hover_bar: 0,
         committed: false,
     })
 }
@@ -980,17 +984,35 @@ fn on_mouse_move(hwnd: isize, x: i32, y: i32) {
                 true
             }
             DragMode::Idle => {
-                // 空闲时更新悬停窗口，供「单击选中整个窗口」
-                let sx = s.origin_x + x;
-                let sy = s.origin_y + y;
-                let hit = s
-                    .windows
-                    .iter()
-                    .find(|r| sx >= r[0] && sx < r[2] && sy >= r[1] && sy < r[3])
-                    .map(|r| Sel::from_rect(*r, s.origin_x, s.origin_y));
-                let changed = hit != s.hover_window;
-                s.hover_window = hit;
-                changed
+                if s.sel.valid() {
+                    // 已有选区时鼠标可能落在工具条上：更新按钮悬停态，驱动底色与气泡。
+                    // 这时不再高亮悬停窗口 —— 选区已定，再高亮只会分散注意。
+                    let bar = toolbar_rect(&s.sel, s.width, s.height);
+                    let hb = if bar.contains(x, y) {
+                        if x < (bar.left + bar.right) / 2 {
+                            1
+                        } else {
+                            2
+                        }
+                    } else {
+                        0
+                    };
+                    let changed = hb != s.hover_bar;
+                    s.hover_bar = hb;
+                    changed
+                } else {
+                    // 空闲时更新悬停窗口，供「单击选中整个窗口」
+                    let sx = s.origin_x + x;
+                    let sy = s.origin_y + y;
+                    let hit = s
+                        .windows
+                        .iter()
+                        .find(|r| sx >= r[0] && sx < r[2] && sy >= r[1] && sy < r[3])
+                        .map(|r| Sel::from_rect(*r, s.origin_x, s.origin_y));
+                    let changed = hit != s.hover_window;
+                    s.hover_window = hit;
+                    changed
+                }
             }
         }
     }) else {
@@ -1200,7 +1222,8 @@ unsafe fn draw_frame(hdc: isize, s: &Session) {
         stroke_rect(s.mem_dc, &s.sel, 5, 0x0000_7AFF);
         draw_handles(s.mem_dc, &s.sel);
         draw_size_label(s.mem_dc, &s.sel);
-        draw_toolbar(s.mem_dc, &s.sel, s.width, s.height);
+        draw_toolbar(s.mem_dc, &s.sel, s.width, s.height, s.hover_bar);
+        draw_bar_tip(s.mem_dc, s);
     }
 
     // ── 4. 一次性贴到窗口 ──
@@ -1301,15 +1324,21 @@ unsafe fn draw_size_label(hdc: isize, sel: &Sel) {
 /// 整张图**逐像素生成**（含抗锯齿）后用 `AlphaBlend` 贴上去。
 /// 不用 GDI 的 `RoundRect` + `LineTo`：这两条 API 都没有抗锯齿，圆角与 45° 斜线
 /// 全是硬边，在 76×38 这个小尺寸上就是「歪歪斜斜、锯齿很重」的来源。
-unsafe fn draw_toolbar(hdc: isize, sel: &Sel, sw: i32, sh: i32) {
-    let bar = toolbar_rect(sel, sw, sh);
-    let (w, h) = (bar.w(), bar.h());
-    let pixels = toolbar_pixels();
-
+/// 把一张**预乘 alpha** 的 BGRA 图混合到目标 DC 的指定矩形。失败返回 false。
+///
+/// 预乘是硬要求：GDI 的 `AlphaBlend` 按预乘语义解释源位图，给 straight alpha
+/// 会在边缘带出一圈黑边。目标必须是 DDB —— 32bpp DIB 目标会让 `AlphaBlend`
+/// 连 alpha 通道一起写，之后 `BitBlt` 到窗口时那圈 alpha=0 显示成黑。
+unsafe fn blend_argb(hdc: isize, r: &Sel, pixels: &[u8]) -> bool {
+    let (w, h) = (r.w(), r.h());
+    if w <= 0 || h <= 0 || pixels.len() < (w as usize * h as usize * 4) {
+        return false;
+    }
     let bmi = BitmapInfo {
         header: BitmapInfoHeader {
             size: std::mem::size_of::<BitmapInfoHeader>() as u32,
             width: w,
+            // 负高 = 自上而下，与 pixels 行序一致，memcpy 即可
             height: -h,
             planes: 1,
             bit_count: 32,
@@ -1325,17 +1354,14 @@ unsafe fn draw_toolbar(hdc: isize, sel: &Sel, sw: i32, sh: i32) {
     let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
     let bmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, 0, 0);
     if bmp == 0 || bits.is_null() {
-        // 兜底：退化成直角白块。工具条能点、只是不好看，比整块不画强
-        fill_rect(hdc, &bar, 0x00FF_FFFF);
-        return;
+        return false;
     }
     std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u8, pixels.len());
 
     let dc = CreateCompatibleDC(hdc);
     if dc == 0 {
         DeleteObject(bmp);
-        fill_rect(hdc, &bar, 0x00FF_FFFF);
-        return;
+        return false;
     }
     let old = SelectObject(dc, bmp);
     // AC_SRC_OVER + AC_SRC_ALPHA：按源图 alpha 混合，圆角边缘才能平滑过渡
@@ -1345,24 +1371,175 @@ unsafe fn draw_toolbar(hdc: isize, sel: &Sel, sw: i32, sh: i32) {
         source_constant_alpha: 255,
         alpha_format: 1,
     };
-    AlphaBlend(hdc, bar.left, bar.top, w, h, dc, 0, 0, w, h, bf);
+    AlphaBlend(hdc, r.left, r.top, w, h, dc, 0, 0, w, h, bf);
 
     SelectObject(dc, old);
     DeleteDC(dc);
     DeleteObject(bmp);
+    true
 }
 
-/// 工具条图像只生成一次：内容全是常量，尺寸也固定。
-fn toolbar_pixels() -> &'static [u8] {
+unsafe fn draw_toolbar(hdc: isize, sel: &Sel, sw: i32, sh: i32, hover: u8) {
+    let bar = toolbar_rect(sel, sw, sh);
+    if !blend_argb(hdc, &bar, toolbar_pixels(hover)) {
+        // 兜底：退化成直角白块。工具条能点、只是不好看，比整块不画强
+        fill_rect(hdc, &bar, 0x00FF_FFFF);
+    }
+}
+
+// ───────────────────────────── 按钮气泡 ─────────────────────────────
+
+const TIP_W: i32 = 46;
+const TIP_H: i32 = 26;
+const TIP_GAP: i32 = 6;
+
+/// 气泡位置：贴在工具条外侧，水平居中于被悬停的半区。
+/// 优先放工具条下方（不压选区），下方不够再翻到上方。
+fn tip_rect(bar: &Sel, hover: u8, sw: i32, sh: i32) -> Sel {
+    let mid = (bar.left + bar.right) / 2;
+    let cx = if hover == 1 {
+        (bar.left + mid) / 2
+    } else {
+        (mid + bar.right) / 2
+    };
+    let mut top = bar.bottom + TIP_GAP;
+    if top + TIP_H > sh {
+        top = bar.top - TIP_GAP - TIP_H;
+    }
+    if top < 0 {
+        top = (sh - TIP_H).max(0);
+    }
+    let left = (cx - TIP_W / 2).clamp(0, (sw - TIP_W).max(0));
+    Sel {
+        left,
+        top,
+        right: left + TIP_W,
+        bottom: top + TIP_H,
+    }
+}
+
+/// 深色圆角气泡底：逐像素 + 预乘 alpha，与工具条同一套做法。
+fn build_tip_pixels(w: i32, h: i32) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let radius = 7.0f32;
+    // 0.88 不透明度：压在截图内容上要读得清，又不能像实心块那样突兀
+    let alpha = 224u32;
+    let base = 28u32;
+    for y in 0..h {
+        for x in 0..w {
+            let cover = round_cover(x as f32 + 0.5, y as f32 + 0.5, w as f32, h as f32, radius);
+            if cover <= 0.0 {
+                continue;
+            }
+            let a = (cover * alpha as f32).round() as u32;
+            let i = ((y * w + x) * 4) as usize;
+            px[i] = ((base * a + 127) / 255) as u8;
+            px[i + 1] = ((base * a + 127) / 255) as u8;
+            px[i + 2] = ((base * a + 127) / 255) as u8;
+            px[i + 3] = a as u8;
+        }
+    }
+    px
+}
+
+fn tip_pixels() -> &'static [u8] {
     static CACHE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| build_toolbar_pixels(BAR_W, BAR_H))
+    CACHE.get_or_init(|| build_tip_pixels(TIP_W, TIP_H))
+}
+
+/// 画按钮文字。气泡底色是逐像素生成的，文字只能交给 GDI 排版 ——
+/// 中文字形没法像线段那样自己算覆盖率。
+unsafe fn draw_tip_text(hdc: isize, tip: &Sel, text: &str) {
+    unsafe extern "system" {
+        #[allow(clippy::too_many_arguments)]
+        fn CreateFontW(
+            height: i32,
+            width: i32,
+            escapement: i32,
+            orientation: i32,
+            weight: i32,
+            italic: u32,
+            underline: u32,
+            strike: u32,
+            charset: u32,
+            out_precision: u32,
+            clip_precision: u32,
+            quality: u32,
+            pitch_family: u32,
+            face: *const u16,
+        ) -> isize;
+        fn SetTextColor(hdc: isize, color: u32) -> u32;
+        fn SetBkMode(hdc: isize, mode: i32) -> i32;
+        fn DrawTextW(
+            hdc: isize,
+            text: *const u16,
+            len: i32,
+            rect: *mut crate::effects::Rect,
+            format: u32,
+        ) -> i32;
+    }
+    let face: Vec<u16> = "Microsoft YaHei UI"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // -13：12px 在这个尺寸下偏小，两个汉字容易挤成一团
+    let font = CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr());
+    if font == 0 {
+        return;
+    }
+    let old = SelectObject(hdc, font);
+    SetBkMode(hdc, 1); // TRANSPARENT：否则文字背后会刷一块底色
+    SetTextColor(hdc, 0x00FF_FFFF); // 白。COLORREF 是 0x00BBGGRR
+    let mut rc = crate::effects::Rect {
+        left: tip.left,
+        top: tip.top,
+        right: tip.right,
+        bottom: tip.bottom,
+    };
+    let units: Vec<u16> = text.encode_utf16().collect();
+    DrawTextW(
+        hdc,
+        units.as_ptr(),
+        units.len() as i32,
+        &mut rc,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+    SelectObject(hdc, old);
+    DeleteObject(font);
+}
+
+/// 悬停气泡：先铺底色再画字，顺序不能反。
+unsafe fn draw_bar_tip(hdc: isize, s: &Session) {
+    if s.hover_bar == 0 {
+        return;
+    }
+    let bar = toolbar_rect(&s.sel, s.width, s.height);
+    let tip = tip_rect(&bar, s.hover_bar, s.width, s.height);
+    if !blend_argb(hdc, &tip, tip_pixels()) {
+        // 底色都画不出来就别画字了，散落在截图上只会是脏点
+        return;
+    }
+    let text = if s.hover_bar == 1 { "取消" } else { "完成" };
+    draw_tip_text(hdc, &tip, text);
+}
+
+/// 工具条图像按三种悬停状态各生成一次：内容全是常量，尺寸也固定。
+fn toolbar_pixels(hover: u8) -> &'static [u8] {
+    static NONE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    static LEFT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    static RIGHT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    match hover {
+        1 => LEFT.get_or_init(|| build_toolbar_pixels(BAR_W, BAR_H, 1)),
+        2 => RIGHT.get_or_init(|| build_toolbar_pixels(BAR_W, BAR_H, 2)),
+        _ => NONE.get_or_init(|| build_toolbar_pixels(BAR_W, BAR_H, 0)),
+    }
 }
 
 /// 逐像素画工具条（BGRA，自上而下）。
 ///
 /// 每一层都按覆盖率混合：圆角 8px、线宽 2px 都带 1px 过渡，观感接近超采样，
 /// 但只在首次绘制时算一遍（随后走 `OnceLock` 缓存）。
-fn build_toolbar_pixels(w: i32, h: i32) -> Vec<u8> {
+fn build_toolbar_pixels(w: i32, h: i32, hover: u8) -> Vec<u8> {
     let mut px = vec![0u8; (w * h * 4) as usize];
     let radius = 8.0f32;
     let mid = w as f32 / 2.0;
@@ -1384,6 +1561,23 @@ fn build_toolbar_pixels(w: i32, h: i32) -> Vec<u8> {
             }
 
             let (mut r, mut g, mut b) = (255.0f32, 255.0f32, 255.0f32);
+
+            // 悬停底色：只铺在被悬停的那半区，左右各内缩 3px、圆角 6。
+            // 色值取 236 而不是更深的灰 —— 图标本身是饱和红/绿，底色再重会抢掉它；
+            // 同时 236 与纯白（255）的差在压暗背景上仍然一眼可辨。
+            if hover != 0 {
+                let (hl, hr) = if hover == 1 {
+                    (3.0f32, mid - 1.5)
+                } else {
+                    (mid + 1.5, w as f32 - 3.0)
+                };
+                let c = round_cover(fx - hl, fy - 3.0, hr - hl, (h - 6) as f32, 6.0);
+                if c > 0.0 {
+                    r = lerp(r, 236.0, c);
+                    g = lerp(g, 236.0, c);
+                    b = lerp(b, 236.0, c);
+                }
+            }
 
             // 中缝分隔线
             let in_sep = if fy > sep_top && fy < sep_bot { 1.0 } else { 0.0 };
