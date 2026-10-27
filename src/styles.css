@@ -2255,6 +2255,85 @@ body.dark .tour-dot.is-on {
   margin: 3px 0;
 }
 
+/* 嵌套列表：只给内层补一点缩进，不再叠一层默认 margin。
+   父层已经给了 padding-left: 22px，内层再 22 会很快把正文挤到右边。 */
+.detail-body.is-rich li > ul,
+.detail-body.is-rich li > ol {
+  margin: 3px 0 0;
+  padding-left: 20px;
+}
+
+/* 任务列表：用 span 画方块，不用 <input type="checkbox" disabled> ——
+   禁用态的 checkbox 在深色主题下是系统灰色，和界面配色对不上，也没法调大小。 */
+.detail-body.is-rich .md-box {
+  position: relative;
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 7px;
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
+  vertical-align: -1px;
+}
+
+.detail-body.is-rich .md-box.is-on {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+/* 对勾：用两条边框旋转 45° 画出来，不依赖字体里的 √ 字符 */
+.detail-body.is-rich .md-box.is-on::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 4px;
+  height: 7px;
+  border: solid #fff;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+/* 图片未显示的说明条：贴在正文最前面。
+   左侧一道强调色竖线足够把它和正文分开，不需要再加边框 —— 详情区本来就窄。 */
+.detail-body.is-rich .detail-note {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.detail-body.is-rich .detail-note strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.detail-body.is-rich .detail-note-why {
+  color: var(--text-dim);
+}
+
+/* 富文本里的内联图片：宽度跟着正文走，不按原图尺寸铺开。
+   只约束显示尺寸，不改动数据本身（原图仍完整存着，复制回去还是原样）。 */
+.detail-body.is-rich img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px 0;
+  border-radius: 4px;
+}
+
+/* 任务项不需要额外的列表符号间距 */
+.detail-body.is-rich li.md-task {
+  list-style: none;
+  margin-left: -18px;
+}
+
 .detail-body.is-rich blockquote {
   margin: 0 0 10px;
   padding: 6px 12px;
