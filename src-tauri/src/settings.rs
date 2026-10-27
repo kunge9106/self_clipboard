@@ -698,9 +698,12 @@ pub fn set_theme_mode(app: tauri::AppHandle, value: String) -> Result<(), String
     // 托盘菜单窗口也要跟上，否则主界面深色、菜单浅色
     for label in ["main", "tray-menu"] {
         if let Some(w) = app.get_webview_window(label) {
-            crate::effects::apply_theme_mode(&w);
-            // 只 set_theme 不够：acrylic 的 tint 与 DWM 图层都得重刷，
-            // 否则切完会留下一条上一主题的色带，且不重启不消失
+            // **不再调 window.set_theme()**。对 decorations=false 的窗口它本来就没有
+            // 可见效果（它只作用于原生装饰），而 tao 处理 theme change 时会重走
+            // set_window_flags，把 strip_window_frame 剥掉的 WS_CAPTION /
+            // WS_THICKFRAME 又加回来 —— Win10 上表现为原生标题栏（标题文字 +
+            // 最小化/最大化/关闭）整条重现，且只有重启才消失。
+            // 深色偏好改由 set_immersive_dark 直接下发，见 refresh_after_theme_switch。
             crate::effects::refresh_after_theme_switch(&w);
         }
     }

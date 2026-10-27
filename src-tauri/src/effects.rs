@@ -808,11 +808,13 @@ pub fn refresh_after_theme_switch(window: &tauri::WebviewWindow) {
 
 /// 主题视觉的实际刷新。`pass` 只用于日志。
 fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
-    let dark = match window.theme() {
-        Ok(tauri::Theme::Dark) => true,
-        Ok(tauri::Theme::Light) => false,
-        // 跟随系统时拿不到就按设置推：只有显式选 dark 才是深色
-        _ => crate::settings::get().theme_mode == "dark",
+    // 这是「实际应该用的深浅」。不能靠 window.theme() 推 —— 手动切主题时已经不再调
+    // set_theme（见 set_theme_mode 的注释），theme() 返回的始终是**系统**主题。
+    let dark = match crate::settings::get().theme_mode.as_str() {
+        "dark" => true,
+        "light" => false,
+        // 跟随系统：读系统主题
+        _ => matches!(window.theme(), Ok(tauri::Theme::Dark)),
     };
     let Ok(h) = window.hwnd() else {
         return;
