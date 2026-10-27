@@ -32,3 +32,6 @@ src-tauri/gen/schemas/
 
 # 运行时
 *.log
+
+# AI 协作的工作区配置与记忆，不属于源码
+.workbuddy/

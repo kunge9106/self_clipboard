@@ -2253,6 +2253,137 @@ function block(title, inner, opts = {}) {
   return `<section class="${cls}">${title ? `<h3 class="block-h">${title}</h3>` : ""}${inner}</section>`;
 }
 
+/// 把 `ctrl+alt+v` 显示成 `Ctrl + Alt + V`（值的形式由后端 `hotkey::parse_combo` 定义）。
+function comboLabel(combo) {
+  return String(combo || "")
+    .split("+")
+    .map((p) => {
+      const k = p.trim().toLowerCase();
+      if (k === "ctrl" || k === "control") return "Ctrl";
+      if (k === "alt") return "Alt";
+      if (k === "shift") return "Shift";
+      if (k === "win" || k === "super") return "Win";
+      if (k === "space") return "空格";
+      return k.toUpperCase();
+    })
+    .filter(Boolean)
+    .join(" + ");
+}
+
+/// DOM `KeyboardEvent.key` → 后端能解析的键名；不支持的返回 null。
+function hotkeyKeyName(key) {
+  if (key === " ") return "space";
+  if (key.length === 1) {
+    const c = key.toLowerCase();
+    // 与后端 `vk_of` 的白名单保持一致：字母、数字、反引号、减号
+    if (/[a-z0-9`\-]/.test(c)) return c;
+    return null;
+  }
+  if (/^f([1-9]|1[0-2])$/i.test(key)) return key.toLowerCase();
+  return null;
+}
+
+/// 绑定一组「开关 + 快捷键录制」控件。
+///
+/// 录制期间必须临时注销全局热键（`hotkey_suspend`）：注册过的组合会被系统**先**
+/// 截走，WebView 根本收不到 keydown，用户永远录不进「与当前相同」的组合。
+function bindHotkeyRow(view, opts) {
+  const enabled = view.querySelector("#" + opts.enabledId);
+  const btn = view.querySelector("#" + opts.btnId);
+  if (!enabled || !btn) return;
+
+  let recording = false;
+  const label = () => comboLabel(opts.get() || opts.fallback);
+
+  const endRecording = async () => {
+    if (!recording) return;
+    recording = false;
+    btn.classList.remove("is-recording");
+    btn.textContent = label();
+    try {
+      await invoke("hotkey_resume");
+    } catch {
+      /* 恢复失败体现在「按了没反应」，日志里已有记录，这里没地方提示 */
+    }
+  };
+
+  enabled.onchange = async () => {
+    try {
+      await invoke(opts.cmd, { combo: opts.get() || opts.fallback, enabled: enabled.checked });
+      settings = await invoke("get_settings");
+      btn.disabled = !enabled.checked;
+      toast(`${enabled.closest(".row")?.querySelector(".row-title")?.textContent?.trim() || "快捷键"}${
+        enabled.checked ? "已开启" : "已关闭"
+      }`);
+    } catch (e) {
+      toast("快捷键设置失败：" + e);
+      enabled.checked = !enabled.checked;
+    }
+  };
+
+  btn.onclick = async () => {
+    if (recording) return;
+    recording = true;
+    btn.classList.add("is-recording");
+    btn.textContent = "请按下组合键…（Esc 取消）";
+    btn.focus();
+    try {
+      await invoke("hotkey_suspend");
+    } catch (e) {
+      toast("暂停热键失败：" + e);
+    }
+  };
+  // 点到别处 = 放弃录制
+  btn.onblur = () => void endRecording();
+
+  btn.onkeydown = async (e) => {
+    if (!recording) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      void endRecording();
+      return;
+    }
+    // 只按住修饰键：先显示出来，等主键落下
+    if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) {
+      const pre = [];
+      if (e.ctrlKey) pre.push("Ctrl");
+      if (e.altKey) pre.push("Alt");
+      if (e.shiftKey) pre.push("Shift");
+      if (e.metaKey) pre.push("Win");
+      btn.textContent = pre.length ? pre.join(" + ") + " + …" : "请按下组合键…（Esc 取消）";
+      return;
+    }
+    const mods = [];
+    if (e.ctrlKey) mods.push("ctrl");
+    if (e.altKey) mods.push("alt");
+    if (e.shiftKey) mods.push("shift");
+    if (e.metaKey) mods.push("win");
+    const main = hotkeyKeyName(e.key);
+    if (!main) {
+      toast("这个键暂不支持，请用字母、数字、F1–F12、空格或 `");
+      return;
+    }
+    if (mods.length === 0) {
+      toast("至少需要一个修饰键（Ctrl / Alt / Shift / Win）");
+      return;
+    }
+    const combo = [...mods, main].join("+");
+    recording = false;
+    btn.classList.remove("is-recording");
+    btn.textContent = comboLabel(combo);
+    try {
+      await invoke(opts.cmd, { combo, enabled: true });
+      settings = await invoke("get_settings");
+      toast("快捷键已改为 " + comboLabel(combo));
+    } catch (err) {
+      // 后端已回滚并重注册旧组合，这里只把界面拉回去
+      toast("该组合不可用：" + err);
+      btn.textContent = label();
+    }
+  };
+}
+
 function settingsGeneralHtml(s) {
   return [
     block(
@@ -2263,6 +2394,56 @@ function settingsGeneralHtml(s) {
           "关闭时收进托盘",
           "关掉窗口后在后台继续记录；右键托盘图标可打开菜单",
           s.trayOnClose
+        )
+    ),
+    block(
+      "快捷操作",
+      // 两个热键共用一套「开关 + 录制」控件，绑定逻辑也只写一份（见 bindHotkeyRow）。
+      rowCheck(
+        "set-hotkey-enabled",
+        "唤起面板",
+        "在任何程序里按下组合键，弹出贴光标的小列表；回车直接粘回原窗口",
+        s.hotkeyEnabled
+      ) +
+        rowCtl(
+          "唤起面板的快捷键",
+          "点击后按下想要的组合（至少含一个修饰键）；按 Esc 取消",
+          `<button type="button" class="btn-ghost hotkey-btn" id="set-hotkey"${
+            s.hotkeyEnabled ? "" : " disabled"
+          }>${comboLabel(s.hotkey || "ctrl+alt+v")}</button>`,
+          true,
+          "set-hotkey"
+        ) +
+        // 从属项：它调的正是上一行那个面板的失焦行为，所以缩进一级
+        rowCheck(
+          "set-panel-stay",
+          "面板失焦不收起",
+          "默认点别处即收起；打开后可先去别的窗口看一眼再回来选。Esc 或再按一次唤起快捷键收起",
+          s.panelStayOnBlur,
+          true
+        ) +
+        rowCheck(
+          "set-shot-hotkey-enabled",
+          "截图",
+          "按下后框选屏幕区域，截完自动记进轻贴（默认 Alt + Q）",
+          s.screenshotHotkeyEnabled
+        ) +
+        rowCtl(
+          "截图快捷键",
+          "调用系统截图工具框选；已有截完的图会作为图片条目出现在列表里",
+          `<button type="button" class="btn-ghost hotkey-btn" id="set-shot-hotkey"${
+            s.screenshotHotkeyEnabled ? "" : " disabled"
+          }>${comboLabel(s.screenshotHotkey || "alt+q")}</button>`,
+          true,
+          "set-shot-hotkey"
+        ) +
+        // 截图覆盖层本身不响应右键，这一项把右键翻译成 Esc —— 默认开
+        rowCheck(
+          "set-shot-rclick",
+          "截图时右键取消",
+          "在系统截图上点右键即取消（等同 Esc）；关闭后右键没有反应",
+          s.screenshotRightClickCancel,
+          true
         )
     ),
     block(
@@ -3247,6 +3428,27 @@ function bindSettings(view) {
       }
     });
   }
+  // 两个热键（唤起面板 / 截图）共用同一套绑定 —— 交互细节多（只按修饰键先显示、
+  // Esc 取消、失败回滚、录制期挂起），各写一遍必然漂移。
+  bindHotkeyRow(view, {
+    enabledId: "set-hotkey-enabled",
+    btnId: "set-hotkey",
+    cmd: "set_hotkey",
+    fallback: "ctrl+alt+v",
+    get: () => settings.hotkey,
+  });
+  bindHotkeyRow(view, {
+    enabledId: "set-shot-hotkey-enabled",
+    btnId: "set-shot-hotkey",
+    cmd: "set_screenshot_hotkey",
+    fallback: "alt+q",
+    get: () => settings.screenshotHotkey,
+  });
+  // 面板失焦行为：只存一个布尔，后端失焦处理器现读配置，改完立即生效
+  bindCheck("set-panel-stay", "set_panel_stay_on_blur");
+  // 截图右键取消：同样只存布尔，下次唤起截图时按新值决定装不装钩子
+  bindCheck("set-shot-rclick", "set_screenshot_right_click_cancel");
+
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
   // 保留期清理的豁免开关。与上面那条是**两个不同策略点**，别合并：

@@ -1422,6 +1422,25 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   color: var(--text-dim);
 }
 
+/* 快捷键录制按钮：平时与普通 ghost 按钮一样，录制中换成强调色。
+   宽度固定，免得「Ctrl + Alt + V」和「请按下组合键…」之间来回跳。 */
+.settings .hotkey-btn {
+  min-width: 176px;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings .hotkey-btn.is-recording {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.18);
+}
+
+.settings .hotkey-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .settings .row-ctrl {
   flex: none;
   display: flex;

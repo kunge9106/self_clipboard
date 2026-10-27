@@ -29,6 +29,39 @@ pub struct Config {
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
+    /// 全局快捷键是否启用（默认启用：剪贴板工具的核心体验是「不用切窗口」）
+    #[serde(default = "default_true")]
+    pub hotkey_enabled: bool,
+    /// 全局快捷键组合，形如 `ctrl+alt+v`。解析见 `hotkey::parse_combo`。
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
+    /// 快捷面板**失焦时是否保持打开**（默认 false = 点别处就收起）。
+    ///
+    /// 为什么做成开关：失焦收起是「点一下就走」的默认体验，但也确实挡住一种很常见的
+    /// 用法 —— 按快捷键弹出面板后，想先回原窗口瞄一眼内容再决定选哪条，一回去面板
+    /// 就没了，等于白按一次。两种用法都合理，所以给开关而不是二选一。
+    ///
+    /// 打开后收起方式：Esc、再按一次唤起快捷键、选中一条（粘贴后自动收起）。
+    /// 只影响**快捷面板**；托盘菜单失焦必须收起（点别处 = 关掉菜单），不听这个开关。
+    #[serde(default)]
+    pub panel_stay_on_blur: bool,
+    /// 截图快捷键是否启用
+    #[serde(default = "default_true")]
+    pub screenshot_hotkey_enabled: bool,
+    /// 截图快捷键组合，默认 `alt+q`。
+    ///
+    /// 不用 `ctrl+alt+a`（微信占着）、也不建议 `alt+z`（部分编辑器拿它做撤销的变体）。
+    #[serde(default = "default_screenshot_hotkey")]
+    pub screenshot_hotkey: String,
+    /// 截图时**右键取消**（默认开启）。
+    ///
+    /// 系统截图覆盖层本身对右键毫无反应（Win11 实测），只能 Esc 或点 ×。很多人
+    /// （包括本项目的用户）习惯右键取消，所以额外挂一个临时鼠标钩子把右键翻译成 Esc。
+    ///
+    /// 为什么要开关：这是一段会**全局监听鼠标**的代码，虽然只在截图期间存在、且只对
+    /// 覆盖层生效，但「我的程序在监听鼠标」这件事应该由用户自己决定，不能默认替他装。
+    #[serde(default = "default_true")]
+    pub screenshot_right_click_cancel: bool,
     /// 上次运行时的版本号（每次启动写成当前版本）。
     ///
     /// 用来判断「本次是不是升级上来的」：两个版本号不一致，就说明用户刚换了版本，
@@ -229,6 +262,18 @@ fn default_true() -> bool {
     true
 }
 
+/// 默认组合：`Ctrl+Alt+V`。
+///
+/// 不用 `Ctrl+Shift+V`（很多应用拿它做「粘贴为纯文本」）、不用 `Win+V`（系统占用）、
+/// 不用 `Ctrl+Alt+A`（QQ 截图占用）。这个组合冲突面最小。
+fn default_hotkey() -> String {
+    "ctrl+alt+v".to_string()
+}
+
+fn default_screenshot_hotkey() -> String {
+    "alt+q".to_string()
+}
+
 /// 直角 / 圆角模式各自的**默认**浓度。
 ///
 /// 圆角模式没有背景模糊，同样浓度会显得更透，所以默认档更高。
@@ -292,6 +337,14 @@ impl Default for Config {
             retention_days: default_retention(),
             // 置顶/收藏默认不受保留期影响
             prune_include_pinned: false,
+            hotkey_enabled: true,
+            hotkey: default_hotkey(),
+            // 默认保持既有行为：点别处即收起
+            panel_stay_on_blur: false,
+            screenshot_hotkey_enabled: true,
+            screenshot_hotkey: default_screenshot_hotkey(),
+            // 默认开启：系统覆盖层对右键没反应，转成 Esc 才能右键取消
+            screenshot_right_click_cancel: true,
             // 首次安装时为空：没有「从哪一版升上来」，关于页只显示当前版本一节
             last_run_version: String::new(),
             upgraded_from: String::new(),
@@ -501,6 +554,12 @@ pub fn get_settings() -> serde_json::Value {
         "cleanIncludePinned": cfg.clean_include_pinned,
         "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
+        "hotkeyEnabled": cfg.hotkey_enabled,
+        "hotkey": cfg.hotkey,
+        "panelStayOnBlur": cfg.panel_stay_on_blur,
+        "screenshotHotkeyEnabled": cfg.screenshot_hotkey_enabled,
+        "screenshotHotkey": cfg.screenshot_hotkey,
+        "screenshotRightClickCancel": cfg.screenshot_right_click_cancel,
         "pruneIncludePinned": cfg.prune_include_pinned,
         // 当前模式生效的那一档（前端滑块直接用这个）
         "materialAlpha": cfg.alpha(),
@@ -643,6 +702,104 @@ pub fn set_pin_cancel_on_disable(value: bool) -> Result<(), String> {
 pub fn set_clean_include_pinned(value: bool) -> Result<(), String> {
     update(|c| c.clean_include_pinned = value);
     Ok(())
+}
+
+/// 快捷面板失焦时是否保持打开（设置页，默认关闭 = 点别处就收起）。
+///
+/// **只存值，无需通知谁**：失焦处理器每次触发时现读配置（见 `popup::closes_on_blur`），
+/// 所以改完立即生效，不必重建窗口或重启。
+#[tauri::command]
+pub fn set_panel_stay_on_blur(value: bool) -> Result<(), String> {
+    crate::log_print!(
+        "[settings] 面板失焦{}",
+        if value { "保持打开" } else { "即收起" }
+    );
+    update(|c| c.panel_stay_on_blur = value);
+    Ok(())
+}
+
+/// 设置全局快捷键。
+///
+/// **先注册、成功后才落配置**：注册可能失败（组合被占用），失败时恢复旧组合并重新
+/// 注册 —— 否则会出现「旧热键已注销、新热键没注册上」，用户彻底没有快捷键可用，
+/// 而设置页还显示着新组合。
+#[tauri::command]
+pub fn set_hotkey(combo: String, enabled: bool) -> Result<(), String> {
+    let prev = get();
+    match crate::hotkey::apply(
+        (&combo, enabled),
+        (&prev.screenshot_hotkey, prev.screenshot_hotkey_enabled),
+    ) {
+        Ok(()) => {
+            update(|c| {
+                c.hotkey = combo;
+                c.hotkey_enabled = enabled;
+            });
+            Ok(())
+        }
+        Err(e) => {
+            let _ = crate::hotkey::apply(
+                (&prev.hotkey, prev.hotkey_enabled),
+                (&prev.screenshot_hotkey, prev.screenshot_hotkey_enabled),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// 设置截图快捷键。回滚逻辑与 `set_hotkey` 相同。
+#[tauri::command]
+pub fn set_screenshot_hotkey(combo: String, enabled: bool) -> Result<(), String> {
+    let prev = get();
+    match crate::hotkey::apply(
+        (&prev.hotkey, prev.hotkey_enabled),
+        (&combo, enabled),
+    ) {
+        Ok(()) => {
+            update(|c| {
+                c.screenshot_hotkey = combo;
+                c.screenshot_hotkey_enabled = enabled;
+            });
+            Ok(())
+        }
+        Err(e) => {
+            let _ = crate::hotkey::apply(
+                (&prev.hotkey, prev.hotkey_enabled),
+                (&prev.screenshot_hotkey, prev.screenshot_hotkey_enabled),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// 截图右键取消开关（设置页，默认开启）。
+///
+/// 只存值：钩子是在**每次唤起截图时**按当时的配置决定装不装的（见
+/// `screenclip::launch`），所以这里不需要通知谁，也不必清理已经挂着的钩子 ——
+/// 它本来就只活一次截图的时间。
+#[tauri::command]
+pub fn set_screenshot_right_click_cancel(value: bool) -> Result<(), String> {
+    crate::log_print!(
+        "[settings] 截图右键取消已{}",
+        if value { "开启" } else { "关闭" }
+    );
+    update(|c| c.screenshot_right_click_cancel = value);
+    Ok(())
+}
+
+/// 录制快捷键期间临时注销热键。
+///
+/// 必须做：`RegisterHotKey` 注册的组合会被系统**先截走**，WebView 收不到 keydown，
+/// 用户就永远录不进「与当前相同的组合」，也录不进任何被自己占用的键。
+#[tauri::command]
+pub fn hotkey_suspend() -> Result<(), String> {
+    crate::hotkey::suspend()
+}
+
+/// 录制结束（无论成功、取消还是失败）后按当前配置恢复注册。
+#[tauri::command]
+pub fn hotkey_resume() -> Result<(), String> {
+    crate::hotkey::resume()
 }
 
 /// 保留期到期清理是否连置顶/收藏一起删。

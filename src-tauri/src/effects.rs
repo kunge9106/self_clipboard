@@ -99,13 +99,16 @@ struct RtlOsVersionInfoExW {
 type SetWindowCompositionAttributeFn =
     unsafe extern "system" fn(isize, *mut WindowCompositionAttribData) -> i32;
 
-/// 物理坐标矩形，user32 的 GetWindowRect / SetWindowRgn 都用它
+/// 物理坐标矩形，user32 的 GetWindowRect / SetWindowRgn 都用它。
+///
+/// `pub` 是给 `screenclip` 判断「截图覆盖层是否铺满全屏」用的：那里也要读窗口矩形，
+/// 再定义一个同形状的结构会让两处 `GetWindowRect` 的 extern 声明互相打架。
 #[repr(C)]
-struct Rect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
+pub struct Rect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
 }
 
 /// Win10 真·毛玻璃的唯一入口，但它是**未公开 API**：
@@ -1361,7 +1364,8 @@ pub fn disable_resize_border(hwnd: isize) {
         if BORDER_HWND.load(std::sync::atomic::Ordering::Relaxed) == found {
             return;
         }
-        let prev = SetWindowLongPtrW(found, GWLP_WNDPROC_BORDER, border_proc as isize);
+        // `as *const ()` 中转一下再变整数：Rust 2021 起不允许函数项直接 cast 成整数
+        let prev = SetWindowLongPtrW(found, GWLP_WNDPROC_BORDER, border_proc as *const () as isize);
         if prev == 0 {
             crate::log_warn!("[effects] 缩放边框子窗口子类化失败");
             return;
@@ -1484,7 +1488,7 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
         unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }
     }
 
-    let orig = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as isize) };
+    let orig = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as *const () as isize) };
     if orig == 0 {
         crate::log_warn!("[effects] WndProc 子类挂载失败（SetWindowLongPtrW 返回 0）");
         return;
