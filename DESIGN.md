@@ -657,10 +657,40 @@ settings   设置页
 
 ### 8.5 深色模式与主题三档
 
-**三档**：浅色 / 深色 / 系统，`settings.theme_mode`（默认 `system`）。Rust 侧
-`effects::apply_theme_mode` 在启动时与切换时把窗口主题钉住（`set_theme(Some(Light/Dark))`）
-或交还系统（`None`）—— 钉住后系统主题变化不会再影响窗口，所以前端 `onThemeChanged`
-只在 system 档才响应。托盘菜单窗口是懒创建的，每次弹出时补钉一次。
+**三档**：浅色 / 深色 / 系统，`settings.theme_mode`（默认 `system`）。启动时由
+`effects::apply_theme_mode` 调 `set_theme` 钉住窗口框架主题（或在 system 档交还系统），
+这一步在 `strip_window_frame` **之前**，顺序天然正确，保留。
+
+**手动切换时不再调 `window.set_theme`**，只走 `effects::refresh_after_theme_switch()`。原因见下，
+这条是硬约束，不要为了「让系统主题跟上」把它加回去。
+
+钉住之后系统主题变化不会再影响窗口，所以前端 `onThemeChanged` 只在 system 档才响应。
+托盘菜单窗口是懒创建的，每次弹出时补钉一次 `apply_theme_mode`。
+
+### 8.5.1 为什么手动切主题不能调 `set_theme`
+
+tao 的 undecorated 窗口**刻意保留** `WS_CAPTION | WS_THICKFRAME` 以取得 DWM 阴影，靠
+`WM_NCCALCSIZE` 把客户区撑满；而 `set_theme` 的实现是
+`SendMessageW(hwnd, CHANGE_THEME_MSG_ID)`，处理时重走 `set_window_flags` ——
+**把我们剥掉的样式位又写回去了**。Win10 上「顶部任何非客户区条带都会重绘原生标题栏」，
+表现就是整条标题栏（标题 + 三个按钮）重现，且只有重启才消失。
+社区结论一致：`setTheme` 只作用于原生装饰，对 `decorations: false` 的窗口没有可见效果 ——
+在这里调它只有副作用。
+
+**平台差异（决定了只有 Win10 会踩）**：
+
+| | Win11（≥ 22000） | Win10（17763+） |
+|---|---|---|
+| 材质来源 | 系统 Mica / SystemBackdrop | 自绘 `SetWindowCompositionAttribute` acrylic |
+| 切主题时材质怎么变 | 只下发 `DWMWA_USE_IMMERSIVE_DARK_MODE`，**系统自己换** | 必须重新调 accent API 改 tint |
+| `apply_theme_visuals` 分支 | 不重刷材质 | `apply_acrylic(hwnd, dark)` |
+
+所以这类「切完留残影 / 标题栏复现」的 bug 在天生托管材质的 Win11 上不存在，只在 Win10 复现。
+排查同类问题时应先确认现象是否只出现在 Win10，再直接看 `apply_acrylic` 那条分支。
+
+切换后的刷新分两遍（立刻 + 150ms 后），因为 `set_theme`（启动路径）引起的非客户区重建
+由 DWM 在**下一帧**完成；`strip_window_frame(force = true)` 则保证样式位即使没变也重发
+`SWP_FRAMECHANGED` —— DWM 重建后不认旧状态，不发就等于没做。
 
 **两个入口、一个状态源**：侧栏底部的快捷按钮（当前深→切浅，反之亦然；只落
 light/dark 两档）与设置 → 通用的三选一，都收敛到前端 `setThemeMode()` 一个函数，
@@ -1064,7 +1094,8 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 | 托盘唤回 / 点窗口外，四周浮出「Win7 式」直角边框（Win10/11 均有） | 隐藏（`hide()` 不产生 `WM_SIZE`）或失焦后，DWM 丢掉 accent 材质且 WebView2 内容尺寸停在隐藏前 | `show_main` 在 `show()` 后延迟 150/500ms 后台补涂；`Focused(true)` 延迟 150ms 补涂（详见 5.7） |
 | 关掉「圆角模式」后材质仍像圆角模式（Win11） | `apply_round_mode` 无脑 `apply_acrylic`：开圆角没清 Mica/SystemBackdrop、关圆角也没按档位恢复 | 开圆角清所有系统材质 + 清 accent；关圆角改走 `apply()` 按档位恢复（详见 5.8） |
 | 每开关一次「圆角模式」，材质浓度就被改掉一次（Win10 上尤其明显） | `set_round_mode` 按模式把浓度写死成 90 / 50，两个模式共用同一个值，切一次覆盖一次 | 浓度拆成两档各记各的（`alpha_straight` / `alpha_round`），切模式只换用另一档、绝不改值（详见 5.4） |
-| 圆角模式下浓度拉满（90%）仍显透 | `.app` 底色是 `--glass-alpha ± 0.05`；圆角模式没有系统模糊，半透明透过去是清晰的桌面而非模糊底 | 恢复 `body.round .app` 的加厚补偿（`+0.32` / 下段 `+0.20`，`min(1,…)` 夹住），拉满正好 clamp 到 1.0（详见 5.4） |
+| 圆角模式下浓度拉满（90%）仍显透 | `.app` 底色是 `--glass-alpha ± 0.05`；圆角模式没有系统模糊，半透明透过去是清晰的桌面而非模糊底 | 恢复 `body.round .app` 的加厚补偿（`+0.32` / `+0.20`，`min(1,…)` 夹住），拉满正好 clamp 到 1.0（详见 5.4） |
+| 手动切一次深浅色，顶栏浮出整条原生标题栏（标题 + 三个按钮），不重启不消失 —— **仅 Win10** | 切换路径调了 `window.set_theme`，tao 处理 `CHANGE_THEME_MSG_ID` 时重走 `set_window_flags`，把剥掉的 `WS_CAPTION` 写回；Win10 上顶部任何非客户区条带都会重绘原生标题栏 | 手动切换不再调 `set_theme`，只走 `refresh_after_theme_switch()`；深色偏好由 `set_immersive_dark` 下发（详见 8.5.1） |
 
 ### 14.3 构建与交付
 

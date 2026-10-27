@@ -20,7 +20,7 @@ mod popup;
 mod panel;
 mod input;
 mod screenclip;
-mod screenshot;
+mod shot_native;
 #[cfg(windows)]
 mod purge;
 
@@ -298,12 +298,6 @@ pub fn run() {
             settings::set_screenshot_hotkey,
             settings::set_screenshot_right_click_cancel,
             settings::set_screenshot_mode,
-            screenshot::shot_image,
-            screenshot::shot_show,
-            screenshot::shot_windows,
-            screenshot::shot_pointer,
-            screenshot::shot_commit,
-            screenshot::shot_cancel,
             settings::hotkey_suspend,
             settings::hotkey_resume,
             panel::panel_hide,
@@ -353,10 +347,8 @@ pub fn run() {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
         }
-        // 预热截图覆盖层：首次截图现建 WebView 要 1–2 秒，用户会以为「按了没反应」
-        // 甚至被兜底逻辑取消。只在内置模式下做（默认走系统截图时用不到覆盖层）；
-        // 用户在设置里切到内置的那一次由 `set_screenshot_mode` 立刻补预热。
-        screenshot::prewarm_delayed(app.handle().clone());
+        // 截图覆盖层不再需要预热：原生实现是新建一个普通窗口，创建耗时在毫秒级，
+        // 不存在旧版「首次要现建 WebView，1–2 秒没画面」的问题。
         Ok(())
     });
 

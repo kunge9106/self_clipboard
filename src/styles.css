@@ -2586,28 +2586,33 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   pointer-events: auto;
 }
 
-/* 热区贴着窗口最外圈那条边框线，厚度与系统原生的可调整边框相当
-   （100% DPI 下约 4–6px）。角上给到 10×10：斜向拖动要同时命中的是两个方向，
-   面积太小会「怎么点都不动」。 */
+/* 热区宽度对齐系统原生可缩放边框：`SM_CXSIZEFRAME + SM_CXPADDEDBORDER` 在
+   100% DPI 下是 8px。之前是 6px 且四角只有 10×10 —— 比系统窄，用户体感就是
+   「必须往里靠很多才拉得动」。
+   顶边单独用 6px：窗口控制按钮 34×30 垂直居中于 40px 顶栏，即 y 从 5 开始，
+   顶边再厚就会盖住关闭按钮。
+   四角给到 16px 宽：斜向拖动要同时命中两个方向，面积小就「怎么点都不动」；
+   上角的高度仍取 6px，同理避让按钮。 */
 .rz-n,
 .rz-s {
-  left: 12px;
-  right: 12px;
-  height: 6px;
+  left: 16px;
+  right: 16px;
   cursor: ns-resize;
 }
 .rz-n {
   top: 0;
+  height: 6px;
 }
 .rz-s {
   bottom: 0;
+  height: 8px;
 }
 
 .rz-w,
 .rz-e {
-  top: 12px;
-  bottom: 12px;
-  width: 6px;
+  top: 16px;
+  bottom: 16px;
+  width: 8px;
   cursor: ew-resize;
 }
 .rz-w {
@@ -2618,11 +2623,14 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 }
 
 .rz-nw,
-.rz-ne,
+.rz-ne {
+  width: 16px;
+  height: 6px;
+}
 .rz-sw,
 .rz-se {
-  width: 10px;
-  height: 10px;
+  width: 16px;
+  height: 16px;
 }
 .rz-nw {
   top: 0;

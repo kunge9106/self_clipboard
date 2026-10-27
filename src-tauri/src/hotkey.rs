@@ -42,7 +42,7 @@ static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static PENDING: Mutex<Option<(Vec<(i32, String)>, Sender<Result<(), String>>)>> = Mutex::new(None);
 
 #[repr(C)]
-struct Msg {
+pub(crate) struct Msg {
     hwnd: isize,
     message: u32,
     w_param: usize,
@@ -89,7 +89,8 @@ pub fn init(app: tauri::AppHandle) {
                         if mode == "system" {
                             crate::screenclip::launch();
                         } else {
-                            crate::screenshot::start(&app);
+                            // 原生覆盖层：不经过渲染进程，输入与重绘都在自己的消息循环里
+                            crate::shot_native::start(&app);
                         }
                     }
                     other => crate::log_warn!("[hotkey] 未知热键 ID {other}"),
@@ -110,13 +111,6 @@ pub fn init(app: tauri::AppHandle) {
                 crate::screenclip::install_hook();
             } else if msg.message == crate::screenclip::WM_REMOVE_HOOK {
                 crate::screenclip::remove_hook();
-            } else if msg.message == crate::screenshot::WM_SHOT_GUARD_ON {
-                // 内置截图的 Esc 逃生通道：低级键盘钩子同样必须装在有消息泵的线程上。
-                // `wParam` 带会话序号：连续两次截图时，旧会话排队的「装」/「卸」不能
-                // 作用到新会话上，否则会出现「这一轮压根没有钩子」的空档。
-                crate::screenshot::guard_install(msg.w_param as u32);
-            } else if msg.message == crate::screenshot::WM_SHOT_GUARD_OFF {
-                crate::screenshot::guard_uninstall(msg.w_param as u32);
             }
         }
         crate::log_warn!("[hotkey] 消息循环退出，热键不再生效");

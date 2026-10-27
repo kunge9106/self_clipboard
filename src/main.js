@@ -3631,7 +3631,10 @@ function bindSettings(view) {
         const slider = view.querySelector("#set-material");
         if (slider) slider.value = alpha;
         const label = view.querySelector("#material-val");
-        if (label) label.textContent = `${alpha}%（越高越厚实 · 越低越通透）`;
+        // 与拖动滑块那条路径保持一致：只显示百分比。
+        // 这里曾经写成 `${alpha}%（越高越厚实 · 越低越通透）`，用户切一次模式
+        // 括号就又冒出来了 —— 说明与上方「越高越厚实 · 越低越通透」重复。
+        if (label) label.textContent = `${alpha}%`;
         toast(
           round.checked
             ? `已切换为圆角模式（无背景模糊）· 浓度 ${alpha}%`
