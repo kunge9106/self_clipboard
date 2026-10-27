@@ -41,6 +41,19 @@ fn in_grace(label: &str) -> bool {
     })
 }
 
+/// 主窗口使用的 WebView2 附加参数。
+///
+/// **所有窗口必须与它完全一致**：WebView2 只有在「同一 user data 目录 + 同一组参数」
+/// 下才共享浏览器进程。截图覆盖层也要用同一组，否则按一次快捷键就多起一个进程组，
+/// 内存直接翻倍。
+pub fn browser_args(app: &AppHandle) -> Option<String> {
+    app.config()
+        .app
+        .windows
+        .first()
+        .and_then(|w| w.additional_browser_args.clone())
+}
+
 /// 按标准形态创建一个弹出窗口；已存在则直接返回。
 ///
 /// `url` 是 `WebviewUrl::App` 的相对路径（如 `"tray.html"`）。创建失败返回 `None`，
@@ -62,13 +75,7 @@ pub fn ensure(app: &AppHandle, label: &'static str, url: &str, title: &str, w: f
         .visible(false)
         .focused(false);
 
-    if let Some(args) = app
-        .config()
-        .app
-        .windows
-        .first()
-        .and_then(|w| w.additional_browser_args.clone())
-    {
+    if let Some(args) = browser_args(app) {
         b = b.additional_browser_args(&args);
     }
 

@@ -82,8 +82,15 @@ pub fn init(app: tauri::AppHandle) {
                         crate::panel::toggle(&app);
                     }
                     HOTKEY_SHOT => {
-                        crate::log_print!("[hotkey] 触发：截图");
-                        crate::screenclip::launch();
+                        // 走哪套实现由设置决定：内置覆盖层默认，系统截图留作备选
+                        // （系统那套自带标注，需要画箭头时可以切过去）。
+                        let mode = crate::settings::get().screenshot_mode;
+                        crate::log_print!("[hotkey] 触发：截图（{mode}）");
+                        if mode == "system" {
+                            crate::screenclip::launch();
+                        } else {
+                            crate::screenshot::start(&app);
+                        }
                     }
                     other => crate::log_warn!("[hotkey] 未知热键 ID {other}"),
                 }
@@ -103,6 +110,11 @@ pub fn init(app: tauri::AppHandle) {
                 crate::screenclip::install_hook();
             } else if msg.message == crate::screenclip::WM_REMOVE_HOOK {
                 crate::screenclip::remove_hook();
+            } else if msg.message == crate::screenshot::WM_SHOT_GUARD_ON {
+                // 内置截图的 Esc 逃生通道：低级键盘钩子同样必须装在有消息泵的线程上
+                crate::screenshot::guard_install();
+            } else if msg.message == crate::screenshot::WM_SHOT_GUARD_OFF {
+                crate::screenshot::guard_uninstall();
             }
         }
         crate::log_warn!("[hotkey] 消息循环退出，热键不再生效");
@@ -216,13 +228,21 @@ unsafe fn register_slots(slots: &[(i32, String)]) -> Result<(), String> {
     }
 }
 
-/// 热键线程的线程 ID（0 = 还没起来）。
+/// 给热键线程投递一条自定义消息。
 ///
-/// 给 `screenclip` 投递「装/卸鼠标钩子」用：低级钩子与安装线程绑定，只能由这个
-/// 线程来装卸。
-pub fn thread_id() -> u32 {
-    THREAD_ID.load(Ordering::SeqCst)
+/// 所有需要「有消息泵的线程」的活儿（装/卸低级输入钩子）都走这里，不再各起一个线程：
+/// 一个 Win32 消息线程服务热键、鼠标钩子、键盘钩子三件事，排查时只看一处。
+pub fn post_msg(msg: u32) {
+    let tid = THREAD_ID.load(Ordering::SeqCst);
+    if tid == 0 {
+        crate::log_warn!("[hotkey] 热键线程未就绪，消息 {msg:#x} 被丢弃");
+        return;
+    }
+    unsafe {
+        PostThreadMessageW(tid, msg, 0, 0);
+    }
 }
+
 
 /// `"ctrl+alt+v"` → (修饰键, 虚拟键码)。
 fn parse_combo(combo: &str) -> Result<(u32, u32), String> {

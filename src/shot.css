@@ -1,0 +1,111 @@
+/* 截图覆盖层样式。
+   刻意**不** @import styles.css：那一套是玻璃材质、圆角、主题变量，覆盖层要的是
+   「整屏一张图 + 一个洞」，任何圆角、阴影、透明底都会让截图看起来和真实屏幕不像。*/
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  /* 底色调黑：万一图还没解码完，宁可短暂全黑，也不要在截图里闪一下白 */
+  background: #000;
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#shot-img {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* 不做等比缩放：窗口尺寸就是图尺寸，1:1 贴上去，任何缩放都会让选区和像素错位 */
+  object-fit: fill;
+  pointer-events: none;
+}
+
+/* 选区：用 box-shadow 的「超大扩散」挖洞，代替四个独立遮罩。
+   四个遮罩要同步改 4 组 left/top/width/height，任一处算错就露出一条缝；
+   一个 100vmax 的阴影只需跟着选框走。 */
+.sel {
+  position: fixed;
+  border: 1px solid #4a9eff;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45);
+  cursor: move;
+  z-index: 2;
+}
+
+.sel[hidden] {
+  display: none;
+}
+
+/* 八个调整手柄。命中区域做到 12px（视觉 6px），贴着边缘拖的时候不用瞄准 */
+.h {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 1px solid #4a9eff;
+  background: #fff;
+  z-index: 3;
+}
+
+.h.nw { left: 0; top: 0; cursor: nwse-resize; }
+.h.n  { left: 50%; top: 0; cursor: ns-resize; }
+.h.ne { left: 100%; top: 0; cursor: nesw-resize; }
+.h.e  { left: 100%; top: 50%; cursor: ew-resize; }
+.h.se { left: 100%; top: 100%; cursor: nwse-resize; }
+.h.s  { left: 50%; top: 100%; cursor: ns-resize; }
+.h.sw { left: 0; top: 100%; cursor: nesw-resize; }
+.h.w  { left: 0; top: 50%; cursor: ew-resize; }
+
+/* 尺寸角标：显示物理像素，与写进剪贴板的尺寸完全一致 */
+.sel-size {
+  position: absolute;
+  top: -26px;
+  left: 0;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font: 500 12px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* 选区贴到屏幕顶端时，角标翻到选框下沿，别跑到屏幕外 */
+.sel.is-tight .sel-size {
+  top: auto;
+  bottom: -26px;
+}
+
+.hint {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 14px 22px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font: 400 14px/1.7 "Segoe UI", "Microsoft YaHei", sans-serif;
+  letter-spacing: 0.2px;
+  pointer-events: none;
+  z-index: 4;
+  transition: opacity 0.12s ease;
+}
+
+.hint b {
+  color: #7cb8ff;
+  font-weight: 600;
+}
+
+.hint[hidden] {
+  display: none;
+}

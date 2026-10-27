@@ -2430,18 +2430,32 @@ function settingsGeneralHtml(s) {
         ) +
         rowCtl(
           "截图快捷键",
-          "调用系统截图工具框选；已有截完的图会作为图片条目出现在列表里",
+          "点击后按下想要的组合（至少含一个修饰键）；按 Esc 取消",
           `<button type="button" class="btn-ghost hotkey-btn" id="set-shot-hotkey"${
             s.screenshotHotkeyEnabled ? "" : " disabled"
           }>${comboLabel(s.screenshotHotkey || "alt+q")}</button>`,
           true,
           "set-shot-hotkey"
         ) +
-        // 截图覆盖层本身不响应右键，这一项把右键翻译成 Esc —— 默认开
+        rowCtl(
+          "截图方式",
+          "内置：轻贴自己画覆盖层，交互与取消方式固定；系统：调用 Windows 截图工具，自带标注",
+          `<div class="seg" id="set-shot-mode">
+            <button type="button" data-mode="builtin" ${
+              (s.screenshotMode || "builtin") === "builtin" ? 'class="on"' : ""
+            }>内置</button>
+            <button type="button" data-mode="system" ${
+              s.screenshotMode === "system" ? 'class="on"' : ""
+            }>系统</button>
+          </div>`,
+          true,
+          "set-shot-mode"
+        ) +
+        // 只对系统截图有意义：内置覆盖层本来就能右键取消
         rowCheck(
           "set-shot-rclick",
           "截图时右键取消",
-          "在系统截图上点右键即取消（等同 Esc）；关闭后右键没有反应",
+          "在系统截图上点右键即取消（等同 Esc）；内置截图本身已支持",
           s.screenshotRightClickCancel,
           true
         )
@@ -3448,6 +3462,34 @@ function bindSettings(view) {
   bindCheck("set-panel-stay", "set_panel_stay_on_blur");
   // 截图右键取消：同样只存布尔，下次唤起截图时按新值决定装不装钩子
   bindCheck("set-shot-rclick", "set_screenshot_right_click_cancel");
+
+  // 截图方式：内置覆盖层 / 系统工具。「右键取消」只对前者之外的系统版有意义
+  // （内置版本来就能右键取消），所以切到内置时把那一行整行置灰。
+  const shotMode = view.querySelector("#set-shot-mode");
+  if (shotMode) {
+    const rclickRow = view.querySelector("#set-shot-rclick")?.closest(".row");
+    const syncShotMode = () => {
+      const mode = shotMode.querySelector("button.on")?.dataset.mode || "builtin";
+      rclickRow?.toggleAttribute("data-disabled", mode === "builtin");
+    };
+    syncShotMode();
+    shotMode.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      const mode = btn.dataset.mode;
+      try {
+        await invoke("set_screenshot_mode", { value: mode });
+        settings = await invoke("get_settings");
+        shotMode
+          .querySelectorAll("button[data-mode]")
+          .forEach((b) => b.classList.toggle("on", b === btn));
+        syncShotMode();
+        toast(mode === "system" ? "截图改为系统工具" : "截图改为内置覆盖层");
+      } catch (err) {
+        toast("切换失败：" + err);
+      }
+    });
+  }
 
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");

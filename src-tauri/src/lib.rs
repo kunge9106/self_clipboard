@@ -20,6 +20,7 @@ mod popup;
 mod panel;
 mod input;
 mod screenclip;
+mod screenshot;
 #[cfg(windows)]
 mod purge;
 
@@ -296,6 +297,11 @@ pub fn run() {
             settings::set_panel_stay_on_blur,
             settings::set_screenshot_hotkey,
             settings::set_screenshot_right_click_cancel,
+            settings::set_screenshot_mode,
+            screenshot::shot_image,
+            screenshot::shot_show,
+            screenshot::shot_commit,
+            screenshot::shot_cancel,
             settings::hotkey_suspend,
             settings::hotkey_resume,
             panel::panel_hide,
