@@ -30,7 +30,7 @@
    git checkout develop && git pull && git checkout -b feature/xxx
    ```
 
-2. 开发并提交，提交信息规范见第四节。
+2. 开发并提交，提交信息规范见第五节。
 
 3. 本地构建自测。只出 exe 用 `npm run tauri build -- --no-bundle`，出安装包用 `npm run tauri build`。
 
@@ -68,7 +68,55 @@ git checkout <tag>                # 回到某个发布版本
 
 因此发版必打 annotated tag：`git tag -a vX.Y.Z -m "轻贴 vX.Y.Z"`。
 
-## 四、提交信息
+## 四、工程质量红线
+
+### 不重复造轮子
+
+同一效果或逻辑，全项目只留一份实现。**动手前先搜**，不是写完再合并。第三次出现同类实现必须抽象；第二次出现且明显是同一意图，直接抽象。
+
+本仓库最容易出现重复的四处：
+
+**Win32 FFI 声明。** `shot_native.rs` 头部集中声明了截图链路用到的 GDI/user32 函数（`SetTextColor`、`SetBkMode`、`DrawTextW`、`AlphaBlend`、`CreateDIBSection`、`CreateCompatibleDC` 等），`effects.rs` 与 `screenclip.rs` 各有自己的声明块。新增前先查：
+
+```bash
+grep -n "fn SetTextColor" src-tauri/src/*.rs
+```
+
+同一符号出现两种签名会触发编译警告，须统一为一种。ABI 不同的不算重复：`MonitorFromPoint` 按值收 8 字节的 `POINT`，不能改用 16 字节的 `Rect`，否则 x64 下参数整体错位。
+
+**绘制原语。** 以下已存在，新增绘制需求时先看能否直接调用：
+
+| 函数 | 用途 |
+|---|---|
+| `draw_white_text(hdc, r, text)` | 在矩形内居中画一行白字，用 DC 当前字体 |
+| `create_ui_font(px)` | 建小字号微软雅黑，配合 `SelectObject` 使用 |
+| `put_premultiplied(px, i, r, g, b, a)` | 写入一个预乘 alpha 的 BGRA 像素 |
+| `blend_argb(hdc, r, pixels)` | 把预乘 alpha 图混合到目标 DC |
+| `round_cover(x, y, w, h, r)` | 圆角矩形的像素覆盖率，用于抗锯齿 |
+
+**同一 UI 的多条更新路径。** 一处文案或状态如果在「拖动 / 切换 / 初始化」等多条路径里各写一遍，改动时必然漏改。要么收敛成一个函数，要么每条都改到。
+
+**动画。** 只能定义在 `src/animations.css`（tokens 与 `.fx-*`），业务里不写裸 `@keyframes`、不硬编码时长；重播走 `replayFx()`。
+
+提交前把这批改动新增的函数列出来，逐条对照上面两份清单：
+
+```bash
+git diff --cached -U0 -- 'src-tauri/src/*.rs' | grep -E "^\+ *fn [A-Za-z]" | sed 's/^+ *//'
+```
+
+这条只负责**列出新增项**，是否重复仍需人工判断 —— 「是否同一意图」不是文本匹配能查的。不要试图用 `grep ... | sort | uniq -d` 去找重复声明：各文件都有自己的 `extern "system"` 局部块，同一符号在多个文件里各声明一次是常态，那样查只会得到一屏误报，然后把警告当背景噪音。
+
+### 不留死代码
+
+确定不再使用的实现整段删除，不用 `#[allow(dead_code)]` 长期挂着。旧截图链路的 `screenshot.rs` 曾以该属性保留作回退，实测通过后连同 `shot.html`、`src/shot.js`、`src/shot.css`、vite 入口与 6 个 `shot_*` 命令一次删净。
+
+### 同一事实只有一处来源
+
+- 版本号：`package.json`；`tauri.conf.json` 写 `"../package.json"` 引用它，不重复填值。
+- 尺寸与颜色：前端走 CSS 变量（`:root` 与 `body.dark` 成对定义），Rust 走模块顶部 `const`。
+- 已实测过的取舍写进 `DESIGN.md`，不在代码注释里另写一份。
+
+## 五、提交信息
 
 遵循 Conventional Commits，类型取 `feat` / `fix` / `perf` / `refactor` / `docs` / `test` / `build` / `chore`。
 
@@ -78,7 +126,7 @@ fix(effects): 圆角模式关闭后残留直角边框
 docs: 补齐 v2.1.8 功能说明
 ```
 
-## 五、双机开发
+## 六、双机开发
 
 开发机为办公室 Win11 与家里 Win10。换机器前先把改动 commit 并 push 到分支，不在本地留下未提交改动。
 
@@ -92,7 +140,7 @@ git fetch --all --prune && git checkout feature/xxx && git pull
 
 两台机器都要装好仓库、依赖与工具链，含 Node、Rust、NSIS 工具链。
 
-## 六、发版流程
+## 七、发版流程
 
 1. `feature/*` 合入 `main`，`develop` 快进，见第二节。
 
@@ -125,7 +173,7 @@ git fetch --all --prune && git checkout feature/xxx && git pull
 
 部分机器上 Tauri 自动下载 NSIS 工具链会被代理拦截，需手动放入 `%LOCALAPPDATA%\tauri\NSIS\`，解压时剥掉 `nsis-3.11/` 这一层目录。
 
-## 七、文档
+## 八、文档
 
 | 文件 | 读者 | 要求 |
 |---|---|---|
@@ -134,7 +182,7 @@ git fetch --all --prune && git checkout feature/xxx && git pull
 
 每次发版同步更新上述两份文档。
 
-## 八、构建产物与临时文件
+## 九、构建产物与临时文件
 
 项目自己生成、且确定无用的文件（构建产物、增量编译缓存、测试中间文件、一次性脚本），**直接删除，不要丢回收站**。
 
