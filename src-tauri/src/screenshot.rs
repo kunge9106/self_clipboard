@@ -87,15 +87,20 @@ extern "system" {
     fn GetModuleHandleW(name: *const u16) -> isize;
     fn GetLastError() -> u32;
     fn GetForegroundWindow() -> isize;
+    fn SetForegroundWindow(hwnd: isize) -> i32;
+    fn BringWindowToTop(hwnd: isize) -> i32;
+    fn IsWindowVisible(hwnd: isize) -> i32;
 }
 
 const SRCCOPY: u32 = 0x00CC_0020;
 const DIB_RGB_COLORS: u32 = 0;
 
 const WH_KEYBOARD_LL: i32 = 13;
+const WH_MOUSE_LL: i32 = 14;
 const HC_ACTION: i32 = 0;
 const WM_KEYDOWN: usize = 0x0100;
 const WM_SYSKEYDOWN: usize = 0x0104;
+const WM_LBUTTONDOWN: usize = 0x0201;
 const VK_ESCAPE: u32 = 0x1B;
 
 /// 让热键线程装上 Esc 兜底钩子（`WM_APP + 4`）
@@ -271,6 +276,11 @@ fn prepare_overlay(app: &AppHandle, left: i32, top: i32, w: i32, h: i32, scale: 
     // 1 CSS px = 1 物理 px，前端算出的选区坐标就等同于像素坐标
     let _ = win.set_zoom(1.0 / scale);
     disable_window_transitions(&win);
+    // 记下窗口句柄：鼠标钩子要在「第一次点击」时立刻激活它（见 `mouse_proc`）
+    SHOT_HWND.store(
+        win.hwnd().map(|h| h.0 as isize).unwrap_or(0),
+        Ordering::SeqCst,
+    );
 }
 
 /// 创建（或取出）覆盖层窗口。
@@ -479,6 +489,9 @@ fn guard_off() {
     crate::hotkey::post_msg(WM_SHOT_GUARD_OFF);
 }
 
+/// 本次截图的覆盖层窗口句柄。鼠标钩子要用它判断「第一次点击是否落在没激活的窗口上」。
+static SHOT_HWND: AtomicIsize = AtomicIsize::new(0);
+
 /// 装上 **Esc 兜底**钩子：截图期间无论前端是否正常，按 Esc 都能退出。
 ///
 /// 为什么必须有这一条：取消逻辑本来完全在前端（`keydown` → `shot_cancel`）。
@@ -500,6 +513,7 @@ pub fn guard_install() {
         GUARD.store(h, Ordering::SeqCst);
     }
     crate::log_print!("[shot] Esc 兜底已启用");
+    click_guard_install();
 }
 
 pub fn guard_uninstall() {
@@ -510,6 +524,54 @@ pub fn guard_uninstall() {
         }
         crate::log_print!("[shot] Esc 兜底已卸载");
     }
+    let m = MOUSE_GUARD.swap(0, Ordering::SeqCst);
+    if m != 0 {
+        unsafe {
+            UnhookWindowsHookEx(m);
+        }
+        crate::log_print!("[shot] 首次点击接管已卸载");
+    }
+    SHOT_HWND.store(0, Ordering::SeqCst);
+}
+
+/// 鼠标钩子句柄（首次点击接管），与 `GUARD`（键盘）成对装卸。
+static MOUSE_GUARD: AtomicIsize = AtomicIsize::new(0);
+
+/// 装上**首次点击接管**：覆盖层若还没拿到前台，用户第一次按下时立刻激活它。
+///
+/// 为什么还要这一条：`SetForegroundWindow` 在后台进程上会被系统静默拒绝，前面
+/// 的主线程重试与 Alt 注入都只是「提高成功率」，没有一条能保证。而这里恰好是
+/// 系统认定的「本进程刚收到输入」时刻 —— 此时激活最容易成功。
+///
+/// **不吞这次点击**（返回 `CallNextHookEx`）：激活完成后消息照常投递给覆盖层，
+/// 于是这第一次按下同时完成了「激活」与「开始框选」，用户不会再觉得要点两下。
+pub fn click_guard_install() {
+    if MOUSE_GUARD.load(Ordering::SeqCst) != 0 {
+        return;
+    }
+    unsafe {
+        let h = SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, GetModuleHandleW(std::ptr::null()), 0);
+        if h == 0 {
+            crate::log_warn!("[shot] 首次点击接管安装失败（错误码 {}）", GetLastError());
+            return;
+        }
+        MOUSE_GUARD.store(h, Ordering::SeqCst);
+    }
+    crate::log_print!("[shot] 首次点击接管已启用");
+}
+
+unsafe extern "system" fn mouse_proc(code: i32, w: usize, l: isize) -> isize {
+    if code == HC_ACTION && w == WM_LBUTTONDOWN {
+        let hwnd = SHOT_HWND.load(Ordering::SeqCst);
+        // 必须**可见**才接管：覆盖层在「抓屏 + 编码」这几百毫秒里还是隐藏的，
+        // 那时用户点在别的窗口上，抢焦点只会把人家正在用的窗口挤掉。
+        if hwnd != 0 && IsWindowVisible(hwnd) != 0 && GetForegroundWindow() != hwnd {
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            crate::log_print!("[shot] 首次点击：就地激活覆盖层 {hwnd:#x}");
+        }
+    }
+    CallNextHookEx(MOUSE_GUARD.load(Ordering::SeqCst), code, w, l)
 }
 
 unsafe extern "system" fn key_proc(code: i32, w: usize, l: isize) -> isize {

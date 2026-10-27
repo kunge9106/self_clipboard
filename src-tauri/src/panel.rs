@@ -41,6 +41,8 @@ extern "system" {
 
 const VK_CONTROL: u16 = 0x11;
 const VK_V: u16 = 0x56;
+/// Alt。注入它只是为了换取前台切换权限，不是要真的按 Alt（见 `force_foreground`）
+const VK_MENU: u16 = 0x12;
 
 /// 唤出面板。已有窗口就复用（重建 WebView 要多几百毫秒，弹出会很迟钝）。
 pub fn show(app: &AppHandle) {
@@ -153,6 +155,15 @@ pub(crate) unsafe fn force_foreground(hwnd: isize) -> bool {
         let fg = GetForegroundWindow();
         if fg == hwnd {
             return true;
+        }
+        // 前两轮都失败，说明进程不满足 Windows 放行前台切换的那几条
+        // （「调用进程收到最后一个输入事件」「前台锁超时已过」等）—— 只靠
+        // AttachThreadInput 也救不回来。这时模拟一次 **Alt 按下抬起**：本进程因此
+        // 成为最后输入接收者，系统才会放行。tao 自己在窗口创建时用的就是这招
+        // （`force_window_active`，注释里引的是「SetForegroundWindow 只在 VS
+        // 打开时才生效」那个经典问题），我们只是把它搬到运行时。
+        if round == 2 && crate::input::send_keys(&[VK_MENU]) {
+            crate::log_print!("[focus] 已注入 Alt 换取前台切换权限");
         }
         let fg_thread = GetWindowThreadProcessId(fg, std::ptr::null_mut());
         let cur = GetCurrentThreadId();
