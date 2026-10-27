@@ -316,6 +316,30 @@ pub fn prewarm(app: &AppHandle) {
     }
 }
 
+/// 启动后的延迟预热：**只在内置截图模式下做**。
+///
+/// 默认走系统截图时再常驻一个隐藏 WebView 是白花钱 —— 那套实现根本用不到覆盖层。
+/// 延迟 3 秒是为了避开开机那一段资源高峰，不跟主窗口抢。
+pub fn prewarm_delayed(app: AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        if crate::settings::get().screenshot_mode != "builtin" {
+            return;
+        }
+        let a = app.clone();
+        let _ = app.run_on_main_thread(move || prewarm(&a));
+    });
+}
+
+/// 立刻预热（用户在设置里切到内置截图时用）。
+///
+/// 为什么不能延后到「第一次按快捷键」：那正是要消除的那 1–2 秒等待。
+/// 窗口必须在主线程创建，而命令跑在异步运行时上，所以这里转一次主线程。
+pub fn prewarm_now(app: &AppHandle) {
+    let a = app.clone();
+    let _ = app.run_on_main_thread(move || prewarm(&a));
+}
+
 /// 让**客户区**严格等于屏幕矩形（而不是让外框等于屏幕）。
 ///
 /// 为什么不能只 `set_size(w,h)`：那设的是外框，而无边框窗口在 Windows 上仍带一圈

@@ -2439,13 +2439,13 @@ function settingsGeneralHtml(s) {
         ) +
         rowCtl(
           "截图方式",
-          "内置：轻贴自己画覆盖层，交互与取消方式固定；系统：调用 Windows 截图工具，自带标注",
+          "系统（默认）：调用 Windows 截图工具，自带箭头与马赛克；内置：轻贴自己画覆盖层，取消不碰剪贴板、截完直接进历史",
           `<div class="seg" id="set-shot-mode">
             <button type="button" data-mode="builtin" ${
-              (s.screenshotMode || "builtin") === "builtin" ? 'class="on"' : ""
+              s.screenshotMode === "builtin" ? 'class="on"' : ""
             }>内置</button>
             <button type="button" data-mode="system" ${
-              s.screenshotMode === "system" ? 'class="on"' : ""
+              (s.screenshotMode || "system") === "system" ? 'class="on"' : ""
             }>系统</button>
           </div>`,
           true,
