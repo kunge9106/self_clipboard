@@ -44,9 +44,16 @@ use crate::hotkey::Msg;
 // ───────────────────────────── Win32 常量 ─────────────────────────────
 
 const WS_POPUP: u32 = 0x8000_0000;
+/// `ShowWindow` 的命令：显示但不激活。
+const SW_SHOWNA: i32 = 8;
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
+/// 分层窗口：内容带 alpha，圆角外真正透明（普通绘制会留黑边）。
+const WS_EX_LAYERED: u32 = 0x0008_0000;
+/// `UpdateLayeredWindow` 的标志：按源位图的 alpha 合成。
+const ULW_ALPHA: u32 = 0x0000_0002;
+const WM_TIMER: u32 = 0x0113;
 
 const CS_HREDRAW: u32 = 0x0001;
 const CS_VREDRAW: u32 = 0x0002;
@@ -99,9 +106,6 @@ fn pin_dpi_context() {
     }
 }
 
-const DT_CENTER: u32 = 0x0000_0001;
-const DT_VCENTER: u32 = 0x0000_0004;
-const DT_SINGLELINE: u32 = 0x0000_0020;
 const TRANSPARENT: i32 = 1;
 
 // 光标资源号。`LoadCursorW` 接受 MAKEINTRESOURCE，即直接把序号当指针传。
@@ -294,6 +298,31 @@ extern "system" {
     fn GetWindowTextLengthW(hwnd: isize) -> i32;
     fn GetClassNameW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
     fn GetWindowRect(hwnd: isize, rect: *mut WinRect) -> i32;
+    /// 分层窗口更新：把带 alpha 的 32bpp 位图交给系统合成，圆角外真透明。
+    fn UpdateLayeredWindow(
+        hwnd: isize,
+        hdc_dst: isize,
+        dst: *const WinRect,
+        size: *const WinRect,
+        hdc_src: isize,
+        src: *const WinRect,
+        key: u32,
+        blend: *const BlendFunction,
+        flags: u32,
+    ) -> i32;
+    /// 系统 DPI（96 = 100%）。建窗前用来定提示窗口的尺寸。
+    fn GetDpiForSystem() -> u32;
+    /// 定时器。提示窗口靠它到点自毁。
+    fn SetTimer(hwnd: isize, id: isize, millis: u32, cb: isize) -> isize;
+    /// 显示窗口。`SW_SHOWNA` = 显示但不激活（提示不该抢走用户的焦点）。
+    fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+    /// 屏幕 DC（hwnd = 0）与释放。
+    fn GetDC(hwnd: isize) -> isize;
+    fn ReleaseDC(hwnd: isize, dc: isize) -> i32;
+    /// 量一行文字的像素宽高。
+    fn GetTextExtentPoint32W(hdc: isize, text: *const u16, len: i32, size: *mut TextSize) -> i32;
+    /// 按给定起点画一行文字（不做任何居中计算，起点由调用方给）。
+    fn TextOutW(hdc: isize, x: i32, y: i32, text: *const u16, len: i32) -> i32;
 
     // GDI
     fn CreateDCW(driver: *const u16, device: *const u16, port: *const u16, init: *const u16) -> isize;
@@ -327,7 +356,6 @@ extern "system" {
     fn FillRect(hdc: isize, rect: *const WinRect, brush: isize) -> i32;
     fn SetTextColor(hdc: isize, color: u32) -> u32;
     fn SetBkMode(hdc: isize, mode: i32) -> i32;
-    fn DrawTextW(hdc: isize, text: *const u16, len: i32, rect: *mut WinRect, format: u32) -> i32;
 }
 
 // ───────────────────────────── 数据结构 ─────────────────────────────
@@ -347,11 +375,11 @@ enum Handle {
 
 /// 选区（覆盖层客户区坐标，物理像素）。
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct Sel {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
+pub(crate) struct Sel {
+    pub(crate) left: i32,
+    pub(crate) top: i32,
+    pub(crate) right: i32,
+    pub(crate) bottom: i32,
 }
 
 impl Sel {
@@ -1308,7 +1336,7 @@ unsafe fn draw_size_label(hdc: isize, sel: &Sel) {
     fill_rect(hdc, &r, 0x0020_2020);
     // 沿用 DC 默认字体：尺寸角标一直就是这么画的，不要顺手换成 13px 雅黑，
     // 那会改变既有观感。
-    draw_white_text(hdc, &r, &text);
+    draw_text_centered(hdc, &r, &text, 0x00FF_FFFF);
 }
 
 /// 工具条：白底圆角，左半红叉取消、右半绿勾完成。
@@ -1410,22 +1438,80 @@ fn tip_rect(bar: &Sel, hover: u8, sw: i32, sh: i32) -> Sel {
     }
 }
 
-/// 深色圆角气泡底：逐像素 + 预乘 alpha，与工具条同一套做法。
-fn build_tip_pixels(w: i32, h: i32) -> Vec<u8> {
-    let mut px = vec![0u8; (w * h * 4) as usize];
-    let radius = 7.0f32;
-    // 0.88 不透明度：压在截图内容上要读得清，又不能像实心块那样突兀
-    let alpha = 0.88f32;
-    let base = 28.0f32;
+/// 圆角面板的两层数据：**不透明颜色**与**每像素 alpha**。
+///
+/// 分成两层是因为绘制顺序：GDI 只认不透明的颜色（它自己不带 alpha，
+/// 甚至会把 32bpp 位图的 alpha 通道清 0），而分层窗口的合成要的是
+/// 预乘 alpha。正确顺序是
+///
+/// 1. 先把不透明颜色写进位图，alpha 全填 255；
+/// 2. 在这张不透明位图上用 GDI 画字（字的抗锯齿在 RGB 里完成）；
+/// 3. 最后一遍扫描，把 RGB 按 alpha 预乘、alpha 通道填成目标值。
+///
+/// 少做第 3 步 → 文字变透明窟窿；少做第 1 步 → 文字被画到黑色上。
+fn build_round_panel_layers(
+    w: i32,
+    h: i32,
+    radius: f32,
+    fill: (f32, f32, f32),
+    border: Option<(f32, f32, f32)>,
+    alpha: f32,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut rgb = vec![0u8; (w * h * 3) as usize];
+    let mut a = vec![0u8; (w * h) as usize];
     for y in 0..h {
         for x in 0..w {
-            let cover = round_cover(x as f32 + 0.5, y as f32 + 0.5, w as f32, h as f32, radius);
+            let fx = x as f32 + 0.5;
+            let fy = y as f32 + 0.5;
+            let cover = round_cover(fx, fy, w as f32, h as f32, radius);
             if cover <= 0.0 {
                 continue;
             }
-            let i = ((y * w + x) * 4) as usize;
-            put_premultiplied(&mut px, i, base, base, base, cover * alpha);
+            // 描边带：把轮廓往里缩 1px 再量一次，落在两次覆盖率之间的就是边缘一圈
+            let color = match border {
+                Some(b) if w >= 4 && h >= 4 => {
+                    let inner = round_cover(
+                        fx - 1.0,
+                        fy - 1.0,
+                        (w - 2) as f32,
+                        (h - 2) as f32,
+                        (radius - 1.0).max(0.5),
+                    );
+                    if inner < cover {
+                        b
+                    } else {
+                        fill
+                    }
+                }
+                _ => fill,
+            };
+            let i = (y * w + x) as usize;
+            rgb[i * 3] = color.0.clamp(0.0, 255.0) as u8;
+            rgb[i * 3 + 1] = color.1.clamp(0.0, 255.0) as u8;
+            rgb[i * 3 + 2] = color.2.clamp(0.0, 255.0) as u8;
+            a[i] = (cover * alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
         }
+    }
+    (rgb, a)
+}
+
+/// 深色圆角气泡底（工具条用，尺寸固定）。
+///
+/// 与提示窗口共用 `build_round_panel_layers` —— 只是这里要的输出是「预乘好
+/// 的 BGRA 位图」（工具条是直接 AlphaBlend 到 DDB 的，不走分层窗口），
+/// 所以在两层数据之上多做一步预乘。
+fn build_tip_pixels(w: i32, h: i32) -> Vec<u8> {
+    // 0.88 不透明度：压在截图内容上要读得清，又不能像实心块那样突兀
+    let (rgb, a) = build_round_panel_layers(w, h, 7.0, (28.0, 28.0, 28.0), None, 0.88);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for i in 0..(w * h) as usize {
+        let av = a[i] as u32;
+        // 预乘：R = R * A / 255，四舍五入
+        let ch = |v: u8| -> u8 { ((v as u32 * av + 127) / 255) as u8 };
+        px[i * 4] = ch(rgb[i * 3]);
+        px[i * 4 + 1] = ch(rgb[i * 3 + 1]);
+        px[i * 4 + 2] = ch(rgb[i * 3 + 2]);
+        px[i * 4 + 3] = av as u8;
     }
     px
 }
@@ -1438,7 +1524,7 @@ fn tip_pixels() -> &'static [u8] {
 /// 建一个小字号界面字体（微软雅黑）。失败返回 0。
 ///
 /// 高度取负值 = 字符高度（不含内部行距），比正值更接近「字号」的直觉。
-unsafe fn create_ui_font(px: i32) -> isize {
+pub(crate) unsafe fn create_ui_font(px: i32) -> isize {
     unsafe extern "system" {
         fn CreateFontW(
             height: i32,
@@ -1467,19 +1553,64 @@ unsafe fn create_ui_font(px: i32) -> isize {
 
 /// 在矩形内居中画一行白字，用 DC 的**当前字体**。
 /// 要指定字号就先 `create_ui_font` + `SelectObject`，画完恢复并删除。
-unsafe fn draw_white_text(hdc: isize, r: &Sel, text: &str) {
-    let mut units: Vec<u16> = text.encode_utf16().collect();
-    units.push(0); // DrawTextW 传 -1 时需要 0 结尾
+/// 在矩形内居中画一行文字。
+///
+/// **同 DC、同字体先量后画**，不用 `DrawTextW` 的 `DT_CENTER`：后者把居中交给
+/// GDI 内部算，在位图 DC 上与实际量出来的宽度可能对不上 —— 表现是字被挤成一团
+/// （用户实见：7 个字压在 4 个字的宽度里）。
+///
+/// `color` 是 COLORREF（0x00BBGGRR）。
+pub(crate) unsafe fn draw_text_centered(hdc: isize, r: &Sel, text: &str, color: u32) {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    if units.is_empty() {
+        return;
+    }
+    let mut ts = TextSize { cx: 0, cy: 0 };
+    let ok = GetTextExtentPoint32W(hdc, units.as_ptr(), units.len() as i32, &mut ts);
+    // 量不出来就不画：宁可没有字，也不要画成一团
+    if ok == 0 || ts.cx <= 0 {
+        return;
+    }
+    let x = r.left + (r.right - r.left - ts.cx) / 2;
+    let y = r.top + (r.bottom - r.top - ts.cy) / 2;
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, 0x00FF_FFFF); // 白。COLORREF 是 0x00BBGGRR
-    let mut wr = r.to_win();
-    DrawTextW(
-        hdc,
-        units.as_ptr(),
-        -1,
-        &mut wr,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
+    SetTextColor(hdc, color);
+    TextOutW(hdc, x, y, units.as_ptr(), units.len() as i32);
+}
+
+#[repr(C)]
+struct TextSize {
+    cx: i32,
+    cy: i32,
+}
+
+/// 量一行文字在 `px` 字号下的像素宽高。
+///
+/// 提示条这类「框要贴着内容」的地方必须实测：中文、英文、数字的宽度差一半以上，
+/// 按字数估出来的框不是太宽就是文字贴边。
+pub(crate) unsafe fn measure_ui_text(text: &str, px: i32) -> (i32, i32) {
+    unsafe {
+        let fallback = (px * text.chars().count() as i32 / 2, px);
+        let dc = GetDC(0);
+        if dc == 0 {
+            return fallback;
+        }
+        let font = create_ui_font(px);
+        let old = if font != 0 { SelectObject(dc, font) } else { 0 };
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut ts = TextSize { cx: 0, cy: 0 };
+        let ok = GetTextExtentPoint32W(dc, units.as_ptr(), units.len() as i32, &mut ts);
+        if font != 0 {
+            SelectObject(dc, old);
+            DeleteObject(font);
+        }
+        ReleaseDC(0, dc);
+        if ok == 0 {
+            fallback
+        } else {
+            (ts.cx, ts.cy)
+        }
+    }
 }
 
 /// 悬停气泡：先铺底色再画字，顺序不能反。
@@ -1501,7 +1632,7 @@ unsafe fn draw_bar_tip(hdc: isize, s: &Session) {
     } else {
         0
     };
-    draw_white_text(hdc, &tip, text);
+    draw_text_centered(hdc, &tip, text, 0x00FF_FFFF);
     if font != 0 {
         SelectObject(hdc, old);
         DeleteObject(font);
@@ -1622,7 +1753,7 @@ fn build_toolbar_pixels(w: i32, h: i32, hover: u8) -> Vec<u8> {
 ///
 /// GDI 的 `AlphaBlend` 按**预乘**语义读源位图，这一步写错就是边缘黑边 ——
 /// 已经踩过两轮，集中到一处，别在各处自己拼。
-fn put_premultiplied(px: &mut [u8], i: usize, r: f32, g: f32, b: f32, alpha: f32) {
+pub(crate) fn put_premultiplied(px: &mut [u8], i: usize, r: f32, g: f32, b: f32, alpha: f32) {
     let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
     let ch = |v: f32| ((v.clamp(0.0, 255.0) as u32 * a + 127) / 255) as u8;
     px[i] = ch(b);
@@ -1636,7 +1767,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 /// 圆角矩形覆盖率：离圆角圆心越远越透明，边缘留 1px 过渡。
-fn round_cover(x: f32, y: f32, w: f32, h: f32, r: f32) -> f32 {
+pub(crate) fn round_cover(x: f32, y: f32, w: f32, h: f32, r: f32) -> f32 {
     let cx = x.clamp(r, w - r);
     let cy = y.clamp(r, h - r);
     let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
@@ -1663,14 +1794,29 @@ fn stroke_cover(d: f32, half: f32) -> f32 {
 // ───────────────────────────── 提交 / 取消 ─────────────────────────────
 
 fn commit(hwnd: isize) {
-    let Some((dib, w, h)) = with_session_mut(|s| {
+    let Some((dib, w, h, geo)) = with_session_mut(|s| {
         if s.committed || !s.sel.valid() {
             return None;
         }
         match crop_to_dib(&s.pixels, s.width, s.height, &s.sel) {
             Ok(d) => {
                 s.committed = true;
-                Some((d, s.sel.w(), s.sel.h()))
+                Some((
+                    d,
+                    s.sel.w(),
+                    s.sel.h(),
+                    ShotGeometry {
+                        // 选区坐标是覆盖层内的，要加上覆盖层在虚拟屏中的位置
+                        sel_x: s.origin_x + s.sel.left,
+                        sel_y: s.origin_y + s.sel.top,
+                        sel_w: s.sel.w(),
+                        sel_h: s.sel.h(),
+                        scr_x: s.origin_x,
+                        scr_y: s.origin_y,
+                        scr_w: s.width,
+                        scr_h: s.height,
+                    },
+                ))
             }
             Err(e) => {
                 crate::log_warn!("[shot] 裁图失败：{e}");
@@ -1697,6 +1843,361 @@ fn commit(hwnd: isize) {
     unsafe {
         DestroyWindow(hwnd);
     }
+
+    // 截图时人通常在别的程序里，轻贴窗口在后台 —— 窗口内的提示那时根本看不见。
+    // 所以在选区附近弹一个自绘的小提示。
+    spawn_copied_toast(&geo);
+}
+
+// ---------------------------------------------------------------------------
+// 截图完成提示（自绘小窗口）
+// ---------------------------------------------------------------------------
+
+/// 提示文案。只说「复制成功没有」，尺寸与路径这些用户不关心。
+const TOAST_TEXT: &str = "已复制到剪贴板";
+/// 停留时长（毫秒）。
+const TOAST_MS: u32 = 1500;
+
+/// 提交后传给提示窗口的几何信息（全部是虚拟屏物理坐标）。
+struct ShotGeometry {
+    /// 选区在虚拟屏中的位置与大小
+    sel_x: i32,
+    sel_y: i32,
+    sel_w: i32,
+    sel_h: i32,
+    /// 覆盖的那块屏在虚拟屏中的位置与大小
+    scr_x: i32,
+    scr_y: i32,
+    scr_w: i32,
+    scr_h: i32,
+}
+
+/// 在选区附近弹一个自绘提示，1.5 秒后自动消失。
+///
+/// 为什么不用系统通知：
+/// - WinRT toast 需要 AUMID，未安装的 exe 弹不出来；
+/// - 托盘气泡（`Shell_NotifyIcon` 的 NIF_INFO）必须挂在某个**已存在**的托盘图标上，
+///   而那个图标的 uID 是 Tauri → tray-icon 的私有字段，取不到 —— 强行自己建一个
+///   会在通知区多出一个重复图标。
+///
+/// 自己画没有这些依赖，必定可见；零件也都在本文件里：建窗、消息循环、GDI 绘制、
+/// 逐像素抗锯齿、预乘 alpha。圆角外要**真透明**（能看到桌面），所以用分层窗口
+/// （`UpdateLayeredWindow`）而不是普通绘制 —— 普通绘制在 alpha=0 处会留黑边。
+fn spawn_copied_toast(geo: &ShotGeometry) {
+    let g = ShotGeometry {
+        sel_x: geo.sel_x,
+        sel_y: geo.sel_y,
+        sel_w: geo.sel_w,
+        sel_h: geo.sel_h,
+        scr_x: geo.scr_x,
+        scr_y: geo.scr_y,
+        scr_w: geo.scr_w,
+        scr_h: geo.scr_h,
+    };
+    std::thread::spawn(move || unsafe {
+        run_toast(&g);
+    });
+}
+
+unsafe fn run_toast(geo: &ShotGeometry) {
+    // 窗口的 DPI awareness 在建窗那一刻冻结，与覆盖层同理
+    pin_dpi_context();
+
+    let dpi = GetDpiForSystem().max(96);
+    let scale = dpi as f32 / 96.0;
+
+    // 文字宽度必须实测：中文、英文、数字的宽度差一半以上，按字数估出来的框
+    // 不是太宽就是文字贴边
+    let font_px = (13.0 * scale).round().max(1.0) as i32;
+    let pad = (11.0 * scale).round() as i32;
+    let (text_w, text_h) = measure_ui_text(TOAST_TEXT, font_px);
+    let tip_w = text_w + pad * 2;
+    let tip_h = text_h.max(font_px) + pad;
+    if tip_w <= 0 || tip_h <= 0 {
+        return;
+    }
+
+    // 位置：贴选区下边缘居中；下方放不下就翻到上边缘；再不行贴屏幕底部
+    let gap = (8.0 * scale).round() as i32;
+    let mut left = geo.sel_x + (geo.sel_w - tip_w) / 2;
+    let mut top = geo.sel_y + geo.sel_h + gap;
+    if top + tip_h > geo.scr_y + geo.scr_h {
+        top = geo.sel_y - tip_h - gap;
+    }
+    if top < geo.scr_y {
+        top = geo.scr_y + geo.scr_h - tip_h;
+    }
+    if left < geo.scr_x {
+        left = geo.scr_x;
+    }
+    if left + tip_w > geo.scr_x + geo.scr_w {
+        left = geo.scr_x + geo.scr_w - tip_w;
+    }
+
+    let class_name = wide("QingTieShotToast");
+    let title = wide("轻贴提示");
+    // 窗口类只需注册一次；重复注册返回 0，无害
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    let instance = GetModuleHandleW(std::ptr::null());
+    if !REGISTERED.swap(true, Ordering::SeqCst) {
+        let wc = WndClassW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            wnd_proc: Some(toast_proc),
+            cls_extra: 0,
+            wnd_extra: 0,
+            instance,
+            icon: 0,
+            cursor: 0,
+            background: 0,
+            menu_name: std::ptr::null(),
+            class_name: class_name.as_ptr(),
+        };
+        RegisterClassW(&wc);
+    }
+
+    let hwnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+        class_name.as_ptr(),
+        title.as_ptr(),
+        WS_POPUP,
+        left,
+        top,
+        tip_w,
+        tip_h,
+        0,
+        0,
+        instance,
+        0,
+    );
+    if hwnd == 0 {
+        crate::log_warn!("[shot] 提示窗口创建失败（{tip_w}×{tip_h} @{left},{top}）");
+        return;
+    }
+    // 内容画一次就够：静态文字，不需要重绘机制
+    if !paint_layered_toast(hwnd, tip_w, tip_h, font_px) {
+        unsafe { DestroyWindow(hwnd) };
+        return;
+    }
+    // 分层窗口的内容提交与「显示」是两件事：ULW 只交内容，显示要自己来
+    let vis_before = IsWindowVisible(hwnd);
+    ShowWindow(hwnd, SW_SHOWNA);
+    let vis_after = IsWindowVisible(hwnd);
+    let style = GetWindowLongPtrW(hwnd, -16); // GWL_STYLE
+    crate::log_print!(
+        "[shot] 提示窗口 {tip_w}×{tip_h} @{left},{top}，DPI={dpi}，可见={vis_before}→{vis_after}，样式=0x{style:X}"
+    );
+
+    // 到点自毁
+    SetTimer(hwnd, 1, TOAST_MS, 0);
+
+    let mut msg = std::mem::zeroed::<Msg>();
+    while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
+
+extern "system" fn toast_proc(hwnd: isize, msg: u32, wp: usize, lp: isize) -> isize {
+    match msg {
+        WM_TIMER => {
+            unsafe { DestroyWindow(hwnd) };
+            0
+        }
+        WM_DESTROY => {
+            unsafe { PostQuitMessage(0) };
+            0
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+    }
+}
+
+/// 把提示内容画进 32bpp 位图，再交给 `UpdateLayeredWindow` 合成。
+unsafe fn paint_layered_toast(hwnd: isize, w: i32, h: i32, font_px: i32) -> bool {
+    let screen = CreateDCW(
+        display_name().as_ptr(),
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+    );
+    if screen == 0 {
+        return false;
+    }
+    let bmi = BitmapInfo {
+        header: BitmapInfoHeader {
+            size: std::mem::size_of::<BitmapInfoHeader>() as u32,
+            width: w,
+            // 负高 = 自上而下，与像素行序一致
+            height: -h,
+            planes: 1,
+            bit_count: 32,
+            compression: BI_RGB,
+            size_image: (w as usize * h as usize * 4) as u32,
+            x_ppm: 0,
+            y_ppm: 0,
+            clr_used: 0,
+            clr_important: 0,
+        },
+        colors: [0; 3],
+    };
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let bmp = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &mut bits, 0, 0);
+    if bmp == 0 || bits.is_null() {
+        DeleteDC(screen);
+        return false;
+    }
+
+    // 配色跟着轻贴的材质走：浅色主题白底黑字，深色主题黑底白字。
+    //
+    // 浓度取圆角模式那一档（默认 90%）：提示是浮在桌面上的独立窗口，透一点
+    // 能看出它压在哪，90% 也足够读清。
+    //
+    // 之前试过两种都不对：固定深底白字与浅色玻璃界面是两套语言；品牌蓝底
+    // 太跳，像报错弹窗。
+    let dark = crate::effects::is_dark_now();
+    let (fill, border, text_color) = if dark {
+        // 深色是真黑（与 --text 配套），描边用略亮的一档把圆角边缘带出来
+        (
+            (12.0f32, 12.0f32, 14.0f32),
+            (38.0f32, 38.0f32, 44.0f32),
+            0x00F4_F2_F0u32,
+        )
+    } else {
+        // 浅色是白底，描边用略深的一档
+        (
+            (252.0f32, 252.0f32, 253.0f32),
+            (222.0f32, 222.0f32, 226.0f32),
+            0x0022_1F_1Eu32,
+        )
+    };
+    let alpha = crate::settings::get().alpha_round as f32 / 100.0;
+    let scale = font_px as f32 / 13.0;
+    // 先取「不透明颜色 + 每像素 alpha」两层
+    let (panel_rgb, panel_alpha) =
+        build_round_panel_layers(w, h, 7.0 * scale, fill, Some(border), alpha);
+    // 把不透明颜色写进位图，alpha 通道全填 255 —— 这一步必须先做，
+    // GDI 画字时它认的是不透明底。
+    {
+        let buf = unsafe { std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize) };
+        for i in 0..(w * h) as usize {
+            buf[i * 4] = panel_rgb[i * 3];
+            buf[i * 4 + 1] = panel_rgb[i * 3 + 1];
+            buf[i * 4 + 2] = panel_rgb[i * 3 + 2];
+            buf[i * 4 + 3] = 255;
+        }
+    }
+
+    let dc = CreateCompatibleDC(screen);
+    if dc == 0 {
+        DeleteObject(bmp);
+        DeleteDC(screen);
+        return false;
+    }
+    let old_bmp = SelectObject(dc, bmp);
+    let font = create_ui_font(font_px);
+    let old_font = if font != 0 {
+        SelectObject(dc, font)
+    } else {
+        0
+    };
+    draw_text_centered(
+        dc,
+        &Sel {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        },
+        TOAST_TEXT,
+        text_color,
+    );
+    if font != 0 {
+        SelectObject(dc, old_font);
+        DeleteObject(font);
+    }
+
+    // 文字画完了，现在做最后一步：把整张位图转成**预乘 alpha**。
+    //
+    // GDI 往 32bpp 位图上写字时会把 alpha 通道写成 0 —— 那是 GDI 不支持
+    // 逐像素 alpha 的历史包袱。ULW_ALPHA 合成靠的就是这个通道，alpha 一旦
+    // 被清 0，文字就成了底上的透明窟窿。所以这里不依赖 GDI 写出来的 alpha，
+    // 而是用面板自己算好的那张 alpha 表重算一遍，并把 RGB 按 alpha 预乘
+    // （预乘错了边缘会发暗 —— 那个坑在 AlphaBlend 那次踩过）。
+    //
+    // RGB 里文字已经和底色混合过了（GDI 的 TRANSPARENT 背景模式就是这么画的），
+    // 所以整块气泡是「一层 90% 不透明的合成结果」，不是「底 + 文字两层」。
+    {
+        let buf = unsafe { std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize) };
+        for i in 0..(w * h) as usize {
+            let a = panel_alpha[i] as u32;
+            if a == 0 {
+                // 完全透明的像素：RGB 也要清零，否则合成时仍会带出颜色
+                buf[i * 4] = 0;
+                buf[i * 4 + 1] = 0;
+                buf[i * 4 + 2] = 0;
+                buf[i * 4 + 3] = 0;
+                continue;
+            }
+            // 预乘：R = R * A / 255，四舍五入
+            let ch = |v: u8| -> u8 { ((v as u32 * a + 127) / 255) as u8 };
+            buf[i * 4] = ch(buf[i * 4]);
+            buf[i * 4 + 1] = ch(buf[i * 4 + 1]);
+            buf[i * 4 + 2] = ch(buf[i * 4 + 2]);
+            buf[i * 4 + 3] = a as u8;
+        }
+    }
+
+    let mut wr = WinRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetWindowRect(hwnd, &mut wr);
+    let dst = WinRect {
+        left: wr.left,
+        top: wr.top,
+        right: 0,
+        bottom: 0,
+    };
+    // SIZE 的布局是 {cx, cy} —— 只有前两个 i32。复用 WinRect 传时必须把宽高
+    // 放进 left/top，放到 right/bottom 会变成 0×0，窗口建出来却什么都不显示。
+    let size = WinRect {
+        left: w,
+        top: h,
+        right: 0,
+        bottom: 0,
+    };
+    let src = WinRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    let blend = BlendFunction {
+        blend_op: 0,
+        blend_flags: 0,
+        source_constant_alpha: 255,
+        alpha_format: 1, // AC_SRC_ALPHA
+    };
+    // 回读中心像素：alpha 与颜色都得真的写进了位图。全 0 的话窗口就算显示了
+    // 也是一片透明，等于看不见
+    let mid = ((h / 2) * w + w / 2) as usize * 4;
+    let px = unsafe { std::slice::from_raw_parts((bits as *const u8).add(mid), 4) };
+    crate::log_print!(
+        "[shot] 提示底色中心像素 BGRA=({},{},{},{})",
+        px[0], px[1], px[2], px[3]
+    );
+
+    let ok = UpdateLayeredWindow(hwnd, 0, &dst, &size, dc, &src, 0, &blend, ULW_ALPHA) != 0;
+    if !ok {
+        crate::log_warn!("[shot] 提示窗口合成失败（UpdateLayeredWindow 返回 0）");
+    }
+
+    SelectObject(dc, old_bmp);
+    DeleteDC(dc);
+    DeleteObject(bmp);
+    DeleteDC(screen);
+    ok
 }
 
 fn cancel(hwnd: isize) {
