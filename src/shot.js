@@ -205,7 +205,7 @@ document.addEventListener("mousedown", (e) => {
 
   const handle = e.target.dataset?.h;
   if (handle && rect) {
-    drag = { mode: "resize", handle, x0: e.clientX, y0: e.clientY, base: { ...rect } };
+    drag = { mode: "resize", handle, x0: e.clientX, y0: e.clientY, base: { ...rect }, t: Date.now() };
     return;
   }
   if (rect && e.target.closest("#sel")) {
@@ -217,13 +217,13 @@ document.addEventListener("mousedown", (e) => {
       return;
     }
     lastSelDown = now;
-    drag = { mode: "move", x0: e.clientX, y0: e.clientY, base: { ...rect } };
+    drag = { mode: "move", x0: e.clientX, y0: e.clientY, base: { ...rect }, t: Date.now() };
     return;
   }
   // 空白处按下：开新框。此时旧选区先清掉，避免画出「两个框」
   // 记下按下瞬间的高亮窗口：松手时若几乎没动，就当成「单击截整窗」，
   // 这样点一下和拖一下各走一条路，不用二段式交互。
-  drag = { mode: "new", x0: e.clientX, y0: e.clientY, hover: hoverRect };
+  drag = { mode: "new", x0: e.clientX, y0: e.clientY, hover: hoverRect, t: Date.now() };
   rect = { x: e.clientX, y: e.clientY, w: 0, h: 0 };
   render();
 });
@@ -385,7 +385,11 @@ async function cancel() {
 /** 拉图 → 解码完成后再让后端显示窗口（顺序反了会先闪一帧空白） */
 async function load() {
   reset();
-  armed = false;
+  // **从拉图这一刻就认按下**。早先是等 `shot_show` 返回后才置位，而窗口在
+  // `shot_show` 执行时就已经显示出来了 —— 手快的话那一下正好落在「窗口已可见、
+  // 标志还没置上」的缝里，被丢掉，于是「还得再点一次」。
+  // 提前置位是安全的：钩子只在覆盖层**可见**时才转发按下，预热阶段不会有事件。
+  armed = true;
   try {
     // 窗口列表与图一起取：两者都来自这次抓屏，缺一个就没法做悬停高亮
     const t0 = performance.now();
@@ -410,7 +414,6 @@ async function load() {
     trace(
       `load 分段：取图 ${Math.round(t1 - t0)}ms · 解码 ${Math.round(t2 - t1)}ms · 显示 ${Math.round(t3 - t2)}ms`
     );
-    armed = true;
     // 用户按下快捷键后往往已经在拖了，而画面要 150–300ms 才出来 —— 那一下按在
     // 下层窗口上，等于白按，感觉就是「还得再点一次」。这里问一句「左键还按着吗」，
     // 按着就把当前光标位置当成框选起点，手感和「一出现就跟着我走」一致。
@@ -421,7 +424,7 @@ async function load() {
         const x = (p[0] - screenLeft) / sx;
         const y = (p[1] - screenTop) / sy;
         if (x >= 0 && y >= 0 && x <= window.innerWidth && y <= window.innerHeight) {
-          drag = { mode: "new", x0: x, y0: y, hover: windowAt(x, y) };
+          drag = { mode: "new", x0: x, y0: y, hover: windowAt(x, y), t: Date.now() };
           rect = { x, y, w: 0, h: 0 };
           render();
         }
@@ -484,15 +487,22 @@ listen("shot-down", (e) => {
 
   if (drag) return;
   trace(`首次按下 (${Math.round(x)},${Math.round(y)}) 开始框选`);
-  drag = { mode: "new", x0: x, y0: y, hover: windowAt(x, y) };
+  drag = { mode: "new", x0: x, y0: y, hover: windowAt(x, y), t };
   rect = { x, y, w: 0, h: 0 };
   render();
 });
 
 // 抬起也由钩子兜一道：DOM 的 mouseup 若丢一次，`drag` 会一直卡着不放手，
 // 表现为「拖完一次之后再也框不动、按钮也点不动」。
-listen("shot-up", () => {
+listen("shot-up", (e) => {
   if (!armed || !drag) return;
+  // 抬起的时间必须**不早于**本次按下：钩子事件的到达顺序不保证，一个迟到的
+  // `up`（比如上一次点击的）会把刚建好的拖拽立刻清掉，表现为「拖不动，得再点」。
+  const t = e.payload;
+  if (Number.isFinite(t) && Number.isFinite(drag.t) && t < drag.t) {
+    trace("忽略迟到的抬起事件");
+    return;
+  }
   endDrag();
 });
 

@@ -619,7 +619,8 @@ unsafe extern "system" fn mouse_proc(code: i32, w: usize, l: isize) -> isize {
         if hwnd != 0 && IsWindowVisible(hwnd) != 0 {
             let app = SHOT_APP.lock().ok().and_then(|g| g.clone());
             if let Some(app) = app {
-                let _ = app.emit_to(SHOT_LABEL, "shot-up", ());
+                // 带 Unix 毫秒：前端要拿它和本次按下的时间比，判断这条是不是迟到的
+                let _ = app.emit_to(SHOT_LABEL, "shot-up", now_ms());
             }
         }
     }
