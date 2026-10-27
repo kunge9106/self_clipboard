@@ -678,19 +678,27 @@ unsafe fn build_session(
                 return None;
             }
         };
-        // 双缓冲目标必须是 32bpp DIB：工具条用 AlphaBlend 贴图，而在 DDB 上
-        // AC_SRC_ALPHA 会被忽略，圆角会退化成硬边
-        let blank = vec![0u8; (w as usize) * (h as usize) * 4];
-        let (mem_bmp, mem_dc) = match make_bitmap(screen, &blank, w, h) {
-            Some(v) => v,
-            None => {
-                DeleteObject(frame_bmp);
-                DeleteDC(frame_dc);
-                DeleteObject(dim_bmp);
-                DeleteDC(dim_dc);
-                return None;
-            }
-        };
+        // 双缓冲目标用 DDB 而不是 DIB：AlphaBlend 在 32bpp DIB 目标上会连 alpha
+        // 通道一起写（圆角外写成 0），之后 BitBlt 到窗口时那圈 alpha=0 的像素
+        // 会显示成黑边。DDB 没有 alpha 通道，混合结果只剩 RGB，正是我们要的。
+        let mem_bmp = CreateCompatibleBitmap(screen, w, h);
+        if mem_bmp == 0 {
+            DeleteObject(frame_bmp);
+            DeleteDC(frame_dc);
+            DeleteObject(dim_bmp);
+            DeleteDC(dim_dc);
+            return None;
+        }
+        let mem_dc = CreateCompatibleDC(screen);
+        if mem_dc == 0 {
+            DeleteObject(frame_bmp);
+            DeleteDC(frame_dc);
+            DeleteObject(dim_bmp);
+            DeleteDC(dim_dc);
+            DeleteObject(mem_bmp);
+            return None;
+        }
+        SelectObject(mem_dc, mem_bmp);
         Some((frame_bmp, frame_dc, dim_bmp, dim_dc, mem_bmp, mem_dc))
     })();
     DeleteDC(screen);
