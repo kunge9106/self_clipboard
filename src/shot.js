@@ -26,6 +26,23 @@ let rect = null;
 /** 拖拽状态：new 画新框 / move 平移 / resize 拽手柄 */
 let drag = null;
 
+const hoverEl = document.getElementById("hover");
+const hoverSizeEl = document.getElementById("hover-size");
+
+/** 覆盖层所在显示器左上角在虚拟屏里的物理坐标（后端下发） */
+let screenLeft = 0;
+let screenTop = 0;
+/**
+ * 光标下的窗口候选（CSS 坐标，z 序从高到低）。
+ *
+ * 后端在覆盖层显示**之前**枚举好一次性下发：覆盖层一铺满整屏，
+ * `WindowFromPoint` 只会返回它自己，之后就再也问不出底下是谁了。
+ * 命中判断放在本地，是因为鼠标移动每秒上百次，一次 IPC 往返就够掉帧。
+ */
+let winRects = [];
+/** 当前悬停窗口（CSS 坐标）；null = 没有可吸附的窗口 */
+let hoverRect = null;
+
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /**
@@ -45,6 +62,35 @@ function imgScale() {
   };
 }
 
+/**
+ * 把鼠标位置换算成屏幕物理坐标，返回命中的窗口矩形（CSS 坐标）。
+ *
+ * 取**第一个**命中的：后端下发的顺序就是 z 序，第一个就是最上层那个 ——
+ * 这正是用户眼里「点下去应该截到谁」。
+ */
+function windowAt(cx, cy) {
+  const { sx, sy } = imgScale();
+  const px = cx * sx + screenLeft;
+  const py = cy * sy + screenTop;
+  for (const [l, t, r, b] of winRects) {
+    if (px >= l && px < r && py >= t && py < b) {
+      // 物理 → CSS：先减屏幕原点，再除以缩放比
+      const x = (l - screenLeft) / sx;
+      const y = (t - screenTop) / sy;
+      const w = (r - l) / sx;
+      const h = (b - t) / sy;
+      // 夹进视口：窗口可能有一半在另一块屏上
+      const x2 = clamp(x, 0, window.innerWidth);
+      const y2 = clamp(y, 0, window.innerHeight);
+      const x3 = clamp(x + w, 0, window.innerWidth);
+      const y3 = clamp(y + h, 0, window.innerHeight);
+      if (x3 - x2 < 2 || y3 - y2 < 2) continue;
+      return { x: x2, y: y2, w: x3 - x2, h: y3 - y2 };
+    }
+  }
+  return null;
+}
+
 /** 两个对角点 → 左上角 + 宽高（支持往任意方向拖） */
 function boxOf(x1, y1, x2, y2) {
   const x = clamp(Math.min(x1, x2), 0, window.innerWidth);
@@ -54,7 +100,25 @@ function boxOf(x1, y1, x2, y2) {
   return { x, y, w: r - x, h: b - y };
 }
 
+function renderHover() {
+  // 已经有选区（含正在拖）就不画高亮：选区自己会把下面这一层盖住，
+  // 再更新只是白白多算一次
+  if (!hoverRect || rect) {
+    hoverEl.hidden = true;
+    return;
+  }
+  hoverEl.hidden = false;
+  hoverEl.style.left = `${hoverRect.x}px`;
+  hoverEl.style.top = `${hoverRect.y}px`;
+  hoverEl.style.width = `${hoverRect.w}px`;
+  hoverEl.style.height = `${hoverRect.h}px`;
+  hoverEl.classList.toggle("is-tight", hoverRect.y < 30);
+  const { sx, sy } = imgScale();
+  hoverSizeEl.textContent = `${Math.round(hoverRect.w * sx)} × ${Math.round(hoverRect.h * sy)}`;
+}
+
 function render() {
+  renderHover();
   if (!rect || rect.w < 1 || rect.h < 1) {
     sel.hidden = true;
     bar.hidden = true;
@@ -94,6 +158,7 @@ function placeBar() {
 function reset() {
   rect = null;
   drag = null;
+  hoverRect = null;
   render();
 }
 
@@ -138,13 +203,27 @@ document.addEventListener("mousedown", (e) => {
     return;
   }
   // 空白处按下：开新框。此时旧选区先清掉，避免画出「两个框」
-  drag = { mode: "new", x0: e.clientX, y0: e.clientY };
+  // 记下按下瞬间的高亮窗口：松手时若几乎没动，就当成「单击截整窗」，
+  // 这样点一下和拖一下各走一条路，不用二段式交互。
+  drag = { mode: "new", x0: e.clientX, y0: e.clientY, hover: hoverRect };
   rect = { x: e.clientX, y: e.clientY, w: 0, h: 0 };
   render();
 });
 
 document.addEventListener("mousemove", (e) => {
-  if (!drag) return;
+  if (!drag) {
+    // 没在拖：跟随光标找窗口，先框出来告诉用户「点一下会截到哪」
+    const hit = windowAt(e.clientX, e.clientY);
+    const changed =
+      (hit === null) !== (hoverRect === null) ||
+      (hit && hoverRect && (hit.x !== hoverRect.x || hit.y !== hoverRect.y ||
+        hit.w !== hoverRect.w || hit.h !== hoverRect.h));
+    if (changed) {
+      hoverRect = hit;
+      render();
+    }
+    return;
+  }
   if (drag.mode === "new") {
     rect = boxOf(drag.x0, drag.y0, e.clientX, e.clientY);
   } else if (drag.mode === "move") {
@@ -165,10 +244,18 @@ document.addEventListener("mousemove", (e) => {
 document.addEventListener("mouseup", () => {
   if (!drag) return;
   const wasNew = drag.mode === "new";
+  const target = drag.hover;
   drag = null;
-  // 只是点了一下（没拖动）就当没框过：否则会留下一个 1×1 的选区，
-  // 用户再双击就会复制出一个像素点
+  // 只是点了一下（没拖动）：如果光标下正好有个窗口，就**直接截这个窗口**并完成 ——
+  // 这就是「识别窗口、点一下就走」；没有窗口（比如点在桌面空白处）才当没框过，
+  // 否则会留下一个 1×1 的选区，用户再双击就复制出一个像素点。
   if (wasNew && rect && (rect.w < 4 || rect.h < 4)) {
+    if (target) {
+      rect = target;
+      render();
+      commit();
+      return;
+    }
     rect = null;
   }
   render();
@@ -252,7 +339,11 @@ async function cancel() {
 async function load() {
   reset();
   try {
-    const url = await invoke("shot_image");
+    // 窗口列表与图一起取：两者都来自这次抓屏，缺一个就没法做悬停高亮
+    const [url, win] = await Promise.all([invoke("shot_image"), invoke("shot_windows")]);
+    screenLeft = win[0];
+    screenTop = win[1];
+    winRects = win[2];
     img.src = url;
     // **等解码完成再让窗口出现**。只等 `load` 事件是不够的：那时图片还没解码成
     // 可绘制的位图，窗口先出来后必定有一帧黑底/空白 —— 用户看到的就是「按快捷键
@@ -278,6 +369,12 @@ async function load() {
 
 // 只保留 error 兜底：正常路径由 `load()` 里 `decode()` 之后调 `shot_show`
 img.addEventListener("error", () => invoke("shot_show").catch(() => {}));
+
+// 覆盖层是 `WS_EX_NOACTIVATE`（永不获焦），页面收不到 keydown —— Enter 由后端的
+// 全局键盘钩子转发过来。这里只做「有没有选区」的判断，提交动作与双击、绿勾同一条路。
+listen("shot-enter", () => {
+  if (rect) commit();
+});
 
 // 两种进入方式都要覆盖：
 // 1. 窗口已被复用 → 后端 emit `shot-open`，这里收到就拉图；
