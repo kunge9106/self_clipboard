@@ -2480,7 +2480,7 @@ function settingsGeneralHtml(s) {
       "帮助",
       rowCtl(
         "功能导览",
-        "随时可以再看一遍这 7 步说明",
+        "随时可以再看一遍这 12 步说明",
         `<button class="btn-ghost" id="replay-tour">重新查看</button>`
       )
     ),
@@ -3155,7 +3155,7 @@ async function reloadSettings() {
 }
 
 // ---------------------------------------------------------------------------
-// 首次运行功能导览（7 步卡片式巡览，文案见 ONBOARDING.md）
+// 首次运行功能导览（12 步卡片式巡览，文案见 ONBOARDING.md）
 //
 // 为什么是卡片而不是聚光灯指引：窗口只有 1060×690，遮罩挖洞很容易连要指的
 // 控件一起盖住；而且控件位置随视图、分栏、窗口尺寸变化，定位逻辑必然错位。
@@ -3180,7 +3180,8 @@ function tourEls() {
   const all = [...mask.querySelectorAll(".tour-step")];
   // **升级用户只看增量**：`data-since` 大于上次看过的版本号才展示。
   // 全新安装（seen = 0）从头看一遍；从 2.4.x 升上来（seen = 1）只看 2.5.0 新增的那三步，
-  // 不把前面 7 步基础介绍重放一遍。后端只下发版本号，判断留在这里，
+  // 不重放前面那些基础介绍（导览 3 起为结构性重写，12 步统一标 since=3）。
+  // 后端只下发版本号，判断留在这里，
   // 「哪里该变」和「变了什么」在同一处，改导览时不容易漏。
   const seen = settings?.tourSeenVersion ?? 0;
   const steps =
@@ -3547,7 +3548,7 @@ function bindSettings(view) {
 
   // 重看功能导览：只打开，不写「已看过」标记 —— 看多少次都不影响首次判断
   const replayTour = view.querySelector("#replay-tour");
-  // 主动重看：从头到尾 10 步都放出来，而不是只给他「这次更新了什么」
+  // 主动重看：从头到尾都放出来，而不是只给他「这次更新了什么」
   if (replayTour) replayTour.onclick = () => openFeatureTour(false, true);
 
   // 置顶互通不能走 bindCheck：这个开关会把已有置顶记录归一到新表示，

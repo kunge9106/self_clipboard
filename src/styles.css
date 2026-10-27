@@ -1752,8 +1752,8 @@ html:not(.hovers-off) .statusbar-clear:hover {
   position: relative;
   width: 460px;
   max-width: 460px;
-  /* 400 是按最高的那一步量的：正文区约 300，最长一步（设置全解）约 230，
-     留 70 的余量。再高就是一整片空白了。 */
+  /* 410 是按最长的一步量的，留出余量。再高就是一整片空白了。
+     正文区自身可滚，万一某步超出也不会顶开卡片。 */
   height: 410px;
   padding: 22px 22px 16px;
   /* 给顶部色带和角落光斑裁个边 */
