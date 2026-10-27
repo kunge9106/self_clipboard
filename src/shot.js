@@ -42,6 +42,14 @@ let screenTop = 0;
 let winRects = [];
 /** 当前悬停窗口（CSS 坐标）；null = 没有可吸附的窗口 */
 let hoverRect = null;
+/**
+ * 是否处于「本次截图已就绪」状态：拿到图并显示之后才是 true，收尾后立刻 false。
+ *
+ * 后端钩子会把每一次左键按下转发过来（它无法区分自己该不该管），所以这里必须有
+ * 一道闸：否则截图结束之后你再点任何地方，都会凭空冒出一个选区 —— 看起来就像
+ * 「点完完成又回到截图状态」。
+ */
+let armed = false;
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -159,6 +167,8 @@ function reset() {
   rect = null;
   drag = null;
   hoverRect = null;
+  // 收尾即解除武装：之后任何转发来的按下都不再开新选区
+  armed = false;
   render();
 }
 
@@ -199,6 +209,14 @@ document.addEventListener("mousedown", (e) => {
     return;
   }
   if (rect && e.target.closest("#sel")) {
+    // 选区内第二次快速按下 = 双击完成（`dblclick` 在这里合成不出来，自己判）
+    const now = performance.now();
+    if (now - lastSelDown < 400) {
+      lastSelDown = 0;
+      commit();
+      return;
+    }
+    lastSelDown = now;
     drag = { mode: "move", x0: e.clientX, y0: e.clientY, base: { ...rect } };
     return;
   }
@@ -262,10 +280,9 @@ document.addEventListener("mouseup", () => {
   render();
 });
 
-// 双击 / 回车 = 复制；右键 / Esc = 取消
-document.addEventListener("dblclick", () => {
-  if (rect) commit();
-});
+// 双击 = 复制。同样不能用 `dblclick`（同上：NOACTIVATE 窗口合成不出这个事件），
+// 自己在选区内两次快速按下里判。
+let lastSelDown = 0;
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
@@ -277,18 +294,32 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-document.addEventListener("contextmenu", (e) => {
-  e.preventDefault();
+// 拦掉浏览器默认右键菜单（WebView 里一般是空白；挡一下更稳）
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// 右键取消也走 `mousedown`：`contextmenu` 同样是合成事件，NOACTIVATE 窗口里不可靠
+document.addEventListener("mousedown", (e) => {
+  if (e.button !== 2) return;
   // 在工具条上右击不该取消整次截图，避免误触
   if (e.target.closest(".bar")) return;
+  e.preventDefault();
   cancel();
 });
 
-document.getElementById("btn-ok").addEventListener("click", (e) => {
+// 按钮一律用 `mousedown` 而不是 `click` —— 这不是风格选择，是必需的：
+// 覆盖层是 `WS_EX_NOACTIVATE`，窗口从不被激活，Chromium 因此**不合成 click**
+// （它认为这次点击没有"完整落在激活窗口上"）。表现就是：能拖能框，但点绿勾
+// 毫无反应、图也进不了轻贴。`mousedown` 是最底层事件，一定派发。
+//
+// `preventDefault` 是为了不让这次按下落到 document 的框选逻辑里；
+// `stopPropagation` 同理，别让它顺带把选区清掉。
+document.getElementById("btn-ok").addEventListener("mousedown", (e) => {
+  e.preventDefault();
   e.stopPropagation();
   commit();
 });
-document.getElementById("btn-cancel").addEventListener("click", (e) => {
+document.getElementById("btn-cancel").addEventListener("mousedown", (e) => {
+  e.preventDefault();
   e.stopPropagation();
   cancel();
 });
@@ -301,7 +332,15 @@ document.getElementById("btn-cancel").addEventListener("click", (e) => {
 //  截图成功，换个位置又点一次。所以这里必须挡住重入。
 let committing = false;
 
+/** 把前端的关键分支写进后端日志：出问题时不用靠猜，也不用开 devtools */
+function trace(msg) {
+  invoke("frontend_log", { level: "INFO", tag: "shot", msg }).catch(() => {});
+}
+
 async function commit() {
+  // 「点完成没反应」这类问题只能靠这两行区分：是压根没走到这里，
+  // 还是走到了但被判成「没有选区 / 正在提交」
+  trace(`commit 调用：rect=${rect ? JSON.stringify(rect) : "null"} committing=${committing}`);
   if (!rect || committing) return;
   committing = true;
   const { sx, sy } = imgScale();
@@ -313,6 +352,7 @@ async function commit() {
   };
   try {
     await invoke("shot_commit", payload);
+    trace(`commit 成功 ${payload.w}×${payload.h}`);
     reset();
   } catch (e) {
     // 失败时**保留选区**并说明原因：清掉选区会变成「双击了，什么都没发生」，
@@ -339,6 +379,7 @@ async function cancel() {
 /** 拉图 → 解码完成后再让后端显示窗口（顺序反了会先闪一帧空白） */
 async function load() {
   reset();
+  armed = false;
   try {
     // 窗口列表与图一起取：两者都来自这次抓屏，缺一个就没法做悬停高亮
     const [url, win] = await Promise.all([invoke("shot_image"), invoke("shot_windows")]);
@@ -355,6 +396,7 @@ async function load() {
       console.warn("img.decode failed", e);
     }
     await invoke("shot_show");
+    armed = true;
     // 用户按下快捷键后往往已经在拖了，而画面要 150–300ms 才出来 —— 那一下按在
     // 下层窗口上，等于白按，感觉就是「还得再点一次」。这里问一句「左键还按着吗」，
     // 按着就把当前光标位置当成框选起点，手感和「一出现就跟着我走」一致。
@@ -399,7 +441,8 @@ listen("shot-enter", () => {
 // 钩子把这次按下原样发过来，这里就地开始框选 —— DOM 的 pointerdown 若也到了，
 // 会看到 `drag` 已存在而跳过，两条路谁先到都不重复。
 listen("shot-down", (e) => {
-  if (drag) return;
+  // `armed` 是必须的：钩子对所有左键按下都转发，截图结束后那一下不该再开选区
+  if (!armed || drag) return;
   const [px, py, t] = e.payload || [];
   if (!Number.isFinite(px)) return;
   // 迟到的事件（比如上一次拖拽结束后才排到）不能用来开新框
