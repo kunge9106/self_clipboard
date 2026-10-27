@@ -32,6 +32,10 @@ const hoverSizeEl = document.getElementById("hover-size");
 /** 覆盖层所在显示器左上角在虚拟屏里的物理坐标（后端下发） */
 let screenLeft = 0;
 let screenTop = 0;
+/** 抓屏的**物理**像素尺寸。预览图是降采样过的，绝不能拿 `naturalWidth` 顶替 ——
+ *  否则 CSS → 物理的换算比例会偏小，截出来的区域整体缩小并偏移。 */
+let screenW = 0;
+let screenH = 0;
 /**
  * 光标下的窗口候选（CSS 坐标，z 序从高到低）。
  *
@@ -62,8 +66,10 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
  * 只有粘贴出来才发现切歪了。所以统一走这个比例换算，宁可多一次乘法。
  */
 function imgScale() {
-  const iw = img.naturalWidth || window.innerWidth || 1;
-  const ih = img.naturalHeight || window.innerHeight || 1;
+  // 基准是**抓屏的物理尺寸**，不是 `img.naturalWidth`：预览图为了速度做过降采样，
+  // 拿图片尺寸当基准会把物理坐标算小一圈（选区缩小 + 偏移，且只有粘出来才发现）。
+  const iw = screenW || img.naturalWidth || window.innerWidth || 1;
+  const ih = screenH || img.naturalHeight || window.innerHeight || 1;
   return {
     sx: iw / (window.innerWidth || 1),
     sy: ih / (window.innerHeight || 1),
@@ -403,7 +409,9 @@ async function load() {
     const t1 = performance.now();
     screenLeft = win[0];
     screenTop = win[1];
-    winRects = win[2];
+    screenW = win[2];
+    screenH = win[3];
+    winRects = win[4];
     img.src = url;
     // **等解码完成再让窗口出现**。只等 `load` 事件是不够的：那时图片还没解码成
     // 可绘制的位图，窗口先出来后必定有一帧黑底/空白 —— 用户看到的就是「按快捷键
