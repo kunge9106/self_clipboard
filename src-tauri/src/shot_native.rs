@@ -86,6 +86,7 @@ const DT_SINGLELINE: u32 = 0x0000_0020;
 const TRANSPARENT: i32 = 1;
 
 // 光标资源号。`LoadCursorW` 接受 MAKEINTRESOURCE，即直接把序号当指针传。
+const IDC_ARROW: usize = 32512;
 const IDC_CROSS: usize = 32515;
 const IDC_SIZEALL: usize = 32646;
 const IDC_SIZENS: usize = 32645;
@@ -885,6 +886,12 @@ fn hit_handle(sel: &Sel, x: i32, y: i32) -> Option<Handle> {
 
 fn cursor_for(s: &Session, x: i32, y: i32) -> usize {
     if s.sel.valid() {
+        // 工具条是按钮，不是选区的一部分：光标移过去要变成箭头，
+        // 否则一路十字准星走到按钮上，看不出「这里可以点」
+        let bar = toolbar_rect(&s.sel, s.width, s.height);
+        if bar.contains(x, y) {
+            return IDC_ARROW;
+        }
         if let Some(h) = hit_handle(&s.sel, x, y) {
             return match h {
                 Handle::N | Handle::S => IDC_SIZENS,
@@ -1147,16 +1154,16 @@ unsafe fn draw_frame(hdc: isize, s: &Session) {
                     hw.top,
                     SRCCOPY,
                 );
-                stroke_rect(s.mem_dc, &hw, 2, 0x00D7_7800);
+                stroke_rect(s.mem_dc, &hw, 2, 0x0000_7AFF);
             }
         }
     }
 
     // ── 3. 选区边框 + 八向手柄 ──
     if s.sel.valid() {
-        // 两层描边：白在外、蓝在内。任何底色（白窗口 / 深色编辑器）上都能看见。
-        stroke_rect(s.mem_dc, &s.sel, 1, 0x00FF_FFFF);
-        stroke_rect(s.mem_dc, &s.sel, 1, 0x00D7_7800);
+        // 5px 橙色边框（COLORREF 是 0x00BBGGRR，0x00007AFF = #FF7A00）。
+        // 向内描 5px，出图裁的是 pixels 里的原始像素，边框不会进到截图里。
+        stroke_rect(s.mem_dc, &s.sel, 5, 0x0000_7AFF);
         draw_handles(s.mem_dc, &s.sel);
         draw_size_label(s.mem_dc, &s.sel);
         draw_toolbar(s.mem_dc, &s.sel, s.width, s.height);
@@ -1386,10 +1393,15 @@ fn build_toolbar_pixels(w: i32, h: i32) -> Vec<u8> {
             }
 
             let i = ((y * w + x) * 4) as usize;
-            px[i] = b as u8;
-            px[i + 1] = g as u8;
-            px[i + 2] = r as u8;
-            px[i + 3] = (cover * 255.0) as u8;
+            // **GDI 的 AlphaBlend 按「预乘 alpha」解释源位图**：RGB 必须先乘上 alpha。
+            // 直接给 straight alpha（RGB 保持原值、alpha 单独给）时，边缘那些
+            // alpha=0.5 的像素会被当成「已经预乘过」的亮值参与合成 —— 在深色背景上
+            // 就是一圈黑边/暗晕。同理，全透明区域必须 RGB 清零。
+            let a = (cover * 255.0).round() as u32;
+            px[i] = ((b as u32 * a + 127) / 255) as u8;
+            px[i + 1] = ((g as u32 * a + 127) / 255) as u8;
+            px[i + 2] = ((r as u32 * a + 127) / 255) as u8;
+            px[i + 3] = a as u8;
         }
     }
     px
