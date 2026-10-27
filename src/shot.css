@@ -50,8 +50,11 @@ body {
    盖住了，不用额外写「拖拽时隐藏高亮」的判断。 */
 .hover {
   position: fixed;
-  border: 1px solid #4a9eff;
-  background: rgba(74, 158, 255, 0.08);
+  /* 悬停时把**其余部分压暗**，只留这个窗口亮着 —— 复用选区的同一个手法：
+     一个 100vmax 的 box-shadow，比四块遮罩少三处要同步的坐标。
+     压暗让「点下去会截到哪」一眼可见，边框再补一道明确的边界。 */
+  border: 2px solid #4a9eff;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45);
   pointer-events: none;
   z-index: 1;
 }

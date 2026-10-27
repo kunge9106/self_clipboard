@@ -251,9 +251,10 @@ document.addEventListener("mouseup", () => {
   // 否则会留下一个 1×1 的选区，用户再双击就复制出一个像素点。
   if (wasNew && rect && (rect.w < 4 || rect.h < 4)) {
     if (target) {
+      // 选中这个窗口，但**不直接提交**：给用户留一条「看清楚了再点绿勾」的路，
+      // 也给「其实想拖框、只是手抖点了一下」留个反悔的机会（再拖一次即可）。
       rect = target;
       render();
-      commit();
       return;
     }
     rect = null;
@@ -354,6 +355,24 @@ async function load() {
       console.warn("img.decode failed", e);
     }
     await invoke("shot_show");
+    // 用户按下快捷键后往往已经在拖了，而画面要 150–300ms 才出来 —— 那一下按在
+    // 下层窗口上，等于白按，感觉就是「还得再点一次」。这里问一句「左键还按着吗」，
+    // 按着就把当前光标位置当成框选起点，手感和「一出现就跟着我走」一致。
+    try {
+      const p = await invoke("shot_pointer");
+      if (p && !drag) {
+        const { sx, sy } = imgScale();
+        const x = (p[0] - screenLeft) / sx;
+        const y = (p[1] - screenTop) / sy;
+        if (x >= 0 && y >= 0 && x <= window.innerWidth && y <= window.innerHeight) {
+          drag = { mode: "new", x0: x, y0: y, hover: windowAt(x, y) };
+          rect = { x, y, w: 0, h: 0 };
+          render();
+        }
+      }
+    } catch (e) {
+      console.warn("shot_pointer failed", e);
+    }
   } catch (e) {
     // 「没有待处理的截图」是预热窗口/页面首次加载时的正常情况（后端还没抓屏），
     // 不是错误。若按 ERROR 记，每次启动都会写一条并触发异常计数 —— 真正的故障
@@ -374,6 +393,24 @@ img.addEventListener("error", () => invoke("shot_show").catch(() => {}));
 // 全局键盘钩子转发过来。这里只做「有没有选区」的判断，提交动作与双击、绿勾同一条路。
 listen("shot-enter", () => {
   if (rect) commit();
+});
+
+// 后端的「首次按下补偿」：WebView2 偶尔仍会把第一次按下当成「先聚焦页面」吞掉。
+// 钩子把这次按下原样发过来，这里就地开始框选 —— DOM 的 pointerdown 若也到了，
+// 会看到 `drag` 已存在而跳过，两条路谁先到都不重复。
+listen("shot-down", (e) => {
+  if (drag) return;
+  const [px, py, t] = e.payload || [];
+  if (!Number.isFinite(px)) return;
+  // 迟到的事件（比如上一次拖拽结束后才排到）不能用来开新框
+  if (Math.abs(Date.now() - t) > 400) return;
+  const { sx, sy } = imgScale();
+  const x = (px - screenLeft) / sx;
+  const y = (py - screenTop) / sy;
+  if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return;
+  drag = { mode: "new", x0: x, y0: y, hover: windowAt(x, y) };
+  rect = { x, y, w: 0, h: 0 };
+  render();
 });
 
 // 两种进入方式都要覆盖：
