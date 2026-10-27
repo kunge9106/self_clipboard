@@ -277,7 +277,7 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     // 先清掉 WS_CAPTION | WS_THICKFRAME 等样式位——DWM 正是靠它们才
     // 沿窗口矩形画 1px 边框（SystemBackdrop 档需要 DWM 提供 backdrop 与圆角，不能动）
     if tier != Tier::SystemBackdrop {
-        strip_window_frame(hwnd);
+        strip_window_frame(hwnd, false);
         // Tauri 的 4px 缩放边框子窗口会挡在 WebView 之上、抢走边缘鼠标事件，
         // 每次 apply 都确认一遍（窗口重建后子窗口句柄会变）
         disable_resize_border(hwnd);
@@ -489,7 +489,12 @@ pub fn begin_resize(hwnd: isize) {
 ///
 /// 我们不需要 DWM 的阴影和边框（材质、圆角、拖动、缩放都自己做），
 /// 直接清掉这些样式位，DWM 就什么 frame 都不画了。
-fn strip_window_frame(hwnd: isize) {
+/// `force = true` 时：即使样式位已经干净，也照样下发 `SWP_FRAMECHANGED`。
+///
+/// 主题切换后 DWM 会重建非客户区 —— 样式位看着没被改过，DWM 那边却已经"忘掉"
+/// 我们剥离过边框，于是原生标题栏与那圈投影重新出现。这种情况下只删样式位不发
+/// `FRAMECHANGED` 等于什么都没做，必须强制它重算一次。
+fn strip_window_frame(hwnd: isize, force: bool) {
     unsafe {
         extern "system" {
             fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
@@ -523,10 +528,15 @@ fn strip_window_frame(hwnd: isize) {
             return;
         }
         let want = cur & !mask;
-        if cur == want {
+        crate::log_print!(
+            "[effects] strip frame：GWL_STYLE=0x{cur:X} → 0x{want:X}（force={force}）"
+        );
+        if cur == want && !force {
             return;
         }
-        SetWindowLongPtrW(hwnd, GWL_STYLE, want);
+        if cur != want {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, want);
+        }
         // SWP_FRAMECHANGED 必须带上，否则样式改动不会立刻反映到窗口外观
         SetWindowPos(
             hwnd,
@@ -536,10 +546,6 @@ fn strip_window_frame(hwnd: isize) {
             0,
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-        crate::log_print!(
-            "[effects] 已移除窗口 frame 样式位（0x{:X} → 0x{:X}）",
-            cur, want
         );
     }
 }
@@ -721,7 +727,7 @@ pub fn apply_rounded(hwnd: isize, dark: bool) {
     // 所以**无论当前档位**都无条件 strip frame + 关 NC 渲染，观感完全交给 CSS 层。
     // 这里不能按 tier 判断跳过：回退「失焦保持材质」后，Win11 的 tier 又变回
     // SystemBackdrop，若是跳过 strip，菜单四角会再次残留直角、与 CSS 圆角打架。
-    strip_window_frame(hwnd);
+    strip_window_frame(hwnd, false);
     disable_nc_rendering(hwnd);
     set_immersive_dark(hwnd, dark);
     clear_system_material(hwnd, tier);
@@ -781,6 +787,27 @@ pub fn refresh_theme(hwnd: isize, dark: bool) {
 /// - 圆角模式：材质已被 `apply_round_mode` 关掉、圆角靠 `SetWindowRgn` 裁，此时
 ///   再开 acrylic 会把圆角外的区域重新填上 —— 只重设区域 + nudge。
 pub fn refresh_after_theme_switch(window: &tauri::WebviewWindow) {
+    use tauri::Manager;
+
+    // 第一遍：立刻做，让切完的瞬间观感大致正确
+    apply_theme_visuals(window, 1);
+
+    // 第二遍：`set_theme` 引起的非客户区重建由 DWM 在**下一帧**完成，第一遍的
+    // strip / nudge 会被它覆盖 —— 表现就是原生标题栏连同那圈投影重新出现，且
+    // 不重启不消失。延迟补一次是目前唯一稳定的时序：既盖住这次重建，又不至于
+    // 让用户觉得「切了没反应」。
+    let w = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let w2 = w.clone();
+        let _ = w.app_handle().run_on_main_thread(move || {
+            apply_theme_visuals(&w2, 2);
+        });
+    });
+}
+
+/// 主题视觉的实际刷新。`pass` 只用于日志。
+fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
     let dark = match window.theme() {
         Ok(tauri::Theme::Dark) => true,
         Ok(tauri::Theme::Light) => false,
@@ -793,17 +820,19 @@ pub fn refresh_after_theme_switch(window: &tauri::WebviewWindow) {
     let hwnd = h.0 as isize;
 
     set_immersive_dark(hwnd, dark);
-    // `set_theme` 会让 DWM 重建非客户区，于是 tao 留下的 WS_CAPTION 又会被画出来：
-    // 沿**窗口矩形**一圈 1px 亮线与投影，且不受 SetWindowRgn 影响 —— 圆角模式下就是
-    // 「顶栏多出一条阴影/白带，且不重启不消失」。这两步都幂等，切主题后必须重跑。
-    strip_window_frame(hwnd);
+    // force：DWM 可能已经"忘掉"剥过边框，样式位没变也必须重发 FRAMECHANGED，
+    // 否则原生标题栏会重新出现
+    strip_window_frame(hwnd, true);
     disable_nc_rendering(hwnd);
     if is_round() {
+        // 圆角模式：系统材质已关，只重设区域。这里**不能**开 acrylic ——
+        // 矩形材质会把圆角外重新填上
         apply_rounded_corners(hwnd);
     } else if current_tier() == Tier::Acrylic {
         let _ = apply_acrylic(hwnd, dark);
     }
     nudge(hwnd);
+    crate::log_print!("[effects] 主题视觉重刷完成（第 {pass} 遍，dark={dark}）");
 }
 
 // ---------------------------------------------------------------------------
