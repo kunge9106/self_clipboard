@@ -197,6 +197,34 @@ extern "system" {
     fn DwmFlush() -> i32;
 }
 
+#[link(name = "msimg32")]
+extern "system" {
+    /// 带 alpha 的位图合成。工具条的圆角与斜线靠它贴上去：GDI 的 `RoundRect`
+    /// 与 `LineTo` 没有抗锯齿，76×38 的小图上锯齿一眼就能看出来。
+    fn AlphaBlend(
+        dst: isize,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        src: isize,
+        sx: i32,
+        sy: i32,
+        sw: i32,
+        sh: i32,
+        blend: BlendFunction,
+    ) -> i32;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BlendFunction {
+    blend_op: u8,
+    blend_flags: u8,
+    source_constant_alpha: u8,
+    alpha_format: u8,
+}
+
 extern "system" {
     // 窗口与消息
     fn RegisterClassW(class: *const WndClassW) -> u16;
@@ -273,10 +301,6 @@ extern "system" {
     fn EndPaint(hwnd: isize, ps: *const PaintStruct) -> i32;
     fn CreateSolidBrush(color: u32) -> isize;
     fn FillRect(hdc: isize, rect: *const WinRect, brush: isize) -> i32;
-    fn CreatePen(style: i32, width: i32, color: u32) -> isize;
-    fn MoveToEx(hdc: isize, x: i32, y: i32, prev: *mut crate::effects::Rect) -> i32;
-    fn LineTo(hdc: isize, x: i32, y: i32) -> i32;
-    fn RoundRect(hdc: isize, left: i32, top: i32, right: i32, bottom: i32, ew: i32, eh: i32) -> i32;
     fn SetTextColor(hdc: isize, color: u32) -> u32;
     fn SetBkMode(hdc: isize, mode: i32) -> i32;
     fn DrawTextW(hdc: isize, text: *const u16, len: i32, rect: *mut WinRect, format: u32) -> i32;
@@ -654,24 +678,19 @@ unsafe fn build_session(
                 return None;
             }
         };
-        let mem_bmp = CreateCompatibleBitmap(screen, w, h);
-        if mem_bmp == 0 {
-            DeleteObject(frame_bmp);
-            DeleteDC(frame_dc);
-            DeleteObject(dim_bmp);
-            DeleteDC(dim_dc);
-            return None;
-        }
-        let mem_dc = CreateCompatibleDC(screen);
-        if mem_dc == 0 {
-            DeleteObject(frame_bmp);
-            DeleteDC(frame_dc);
-            DeleteObject(dim_bmp);
-            DeleteDC(dim_dc);
-            DeleteObject(mem_bmp);
-            return None;
-        }
-        SelectObject(mem_dc, mem_bmp);
+        // 双缓冲目标必须是 32bpp DIB：工具条用 AlphaBlend 贴图，而在 DDB 上
+        // AC_SRC_ALPHA 会被忽略，圆角会退化成硬边
+        let blank = vec![0u8; (w as usize) * (h as usize) * 4];
+        let (mem_bmp, mem_dc) = match make_bitmap(screen, &blank, w, h) {
+            Some(v) => v,
+            None => {
+                DeleteObject(frame_bmp);
+                DeleteDC(frame_dc);
+                DeleteObject(dim_bmp);
+                DeleteDC(dim_dc);
+                return None;
+            }
+        };
         Some((frame_bmp, frame_dc, dim_bmp, dim_dc, mem_bmp, mem_dc))
     })();
     DeleteDC(screen);
@@ -1230,61 +1249,171 @@ unsafe fn draw_size_label(hdc: isize, sel: &Sel) {
 
 /// 工具条：白底圆角，左半红叉取消、右半绿勾完成。
 ///
-/// 不画投影：GDI 的 alpha 混合要额外的 DC 与位图，而工具条悬浮在任意底色上，
-/// 用矩形拼出来的投影会在压暗区里露出生硬的直角。层次交给「圆角 + 发丝边 +
-/// 半区分隔线」，代价低且不会出错。
+/// 整张图**逐像素生成**（含抗锯齿）后用 `AlphaBlend` 贴上去。
+/// 不用 GDI 的 `RoundRect` + `LineTo`：这两条 API 都没有抗锯齿，圆角与 45° 斜线
+/// 全是硬边，在 76×38 这个小尺寸上就是「歪歪斜斜、锯齿很重」的来源。
 unsafe fn draw_toolbar(hdc: isize, sel: &Sel, sw: i32, sh: i32) {
     let bar = toolbar_rect(sel, sw, sh);
+    let (w, h) = (bar.w(), bar.h());
+    let pixels = toolbar_pixels();
 
-    // 圆角需要先把画刷与画笔选进 DC，RoundRect 用的是 DC 的当前对象
-    let brush = CreateSolidBrush(0x00FF_FFFF);
-    let pen = CreatePen(0, 1, 0x00DC_DCDC);
-    let old_brush = SelectObject(hdc, brush);
-    let old_pen = SelectObject(hdc, pen);
-    RoundRect(hdc, bar.left, bar.top, bar.right, bar.bottom, 12, 12);
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    DeleteObject(brush);
-    DeleteObject(pen);
-
-    let mid = (bar.left + bar.right) / 2;
-    let cy = (bar.top + bar.bottom) / 2;
-    // 图标落在各自半区的正中。不能按中缝偏移算 —— 那样左侧会偏右、右侧会偏左，
-    // 宽度不对称时看起来像「图标挤在一起」。
-    let lx = (bar.left + mid) / 2;
-    let rx = (mid + bar.right) / 2;
-    let arm = 7i32;
-
-    // 红叉（COLORREF 是 0x00BBGGRR，别按 RGB 顺序写）
-    let pen_x = CreatePen(0, 2, 0x003A_3AE8);
-    let old = SelectObject(hdc, pen_x);
-    MoveToEx(hdc, lx - arm, cy - arm, std::ptr::null_mut());
-    LineTo(hdc, lx + arm, cy + arm);
-    MoveToEx(hdc, lx + arm, cy - arm, std::ptr::null_mut());
-    LineTo(hdc, lx - arm, cy + arm);
-    SelectObject(hdc, old);
-    DeleteObject(pen_x);
-
-    // 绿勾
-    let pen_v = CreatePen(0, 2, 0x0028_A428);
-    let old = SelectObject(hdc, pen_v);
-    MoveToEx(hdc, rx - 7, cy, std::ptr::null_mut());
-    LineTo(hdc, rx - 2, cy + 5);
-    LineTo(hdc, rx + 7, cy - 6);
-    SelectObject(hdc, old);
-    DeleteObject(pen_v);
-
-    // 中缝分隔线：两个按钮看起来是两个
-    fill_rect(
-        hdc,
-        &Sel {
-            left: mid,
-            top: bar.top + 9,
-            right: mid + 1,
-            bottom: bar.bottom - 9,
+    let bmi = BitmapInfo {
+        header: BitmapInfoHeader {
+            size: std::mem::size_of::<BitmapInfoHeader>() as u32,
+            width: w,
+            height: -h,
+            planes: 1,
+            bit_count: 32,
+            compression: BI_RGB,
+            size_image: (w as usize * h as usize * 4) as u32,
+            x_ppm: 0,
+            y_ppm: 0,
+            clr_used: 0,
+            clr_important: 0,
         },
-        0x00E8_E8E8,
-    );
+        colors: [0; 3],
+    };
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let bmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, 0, 0);
+    if bmp == 0 || bits.is_null() {
+        // 兜底：退化成直角白块。工具条能点、只是不好看，比整块不画强
+        fill_rect(hdc, &bar, 0x00FF_FFFF);
+        return;
+    }
+    std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u8, pixels.len());
+
+    let dc = CreateCompatibleDC(hdc);
+    if dc == 0 {
+        DeleteObject(bmp);
+        fill_rect(hdc, &bar, 0x00FF_FFFF);
+        return;
+    }
+    let old = SelectObject(dc, bmp);
+    // AC_SRC_OVER + AC_SRC_ALPHA：按源图 alpha 混合，圆角边缘才能平滑过渡
+    let bf = BlendFunction {
+        blend_op: 0,
+        blend_flags: 0,
+        source_constant_alpha: 255,
+        alpha_format: 1,
+    };
+    AlphaBlend(hdc, bar.left, bar.top, w, h, dc, 0, 0, w, h, bf);
+
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    DeleteObject(bmp);
+}
+
+/// 工具条图像只生成一次：内容全是常量，尺寸也固定。
+fn toolbar_pixels() -> &'static [u8] {
+    static CACHE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| build_toolbar_pixels(BAR_W, BAR_H))
+}
+
+/// 逐像素画工具条（BGRA，自上而下）。
+///
+/// 每一层都按覆盖率混合：圆角 8px、线宽 2px 都带 1px 过渡，观感接近超采样，
+/// 但只在首次绘制时算一遍（随后走 `OnceLock` 缓存）。
+fn build_toolbar_pixels(w: i32, h: i32) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let radius = 8.0f32;
+    let mid = w as f32 / 2.0;
+    let cy = h as f32 / 2.0;
+    let arm = 7.0f32;
+    // 图标落在各自半区的正中：按中缝偏移算会让两侧看起来不对称
+    let lx = mid / 2.0;
+    let rx = mid + mid / 2.0;
+    let sep_top = 9.0f32;
+    let sep_bot = h as f32 - 9.0;
+
+    for y in 0..h {
+        for x in 0..w {
+            let fx = x as f32 + 0.5;
+            let fy = y as f32 + 0.5;
+            let cover = round_cover(fx, fy, w as f32, h as f32, radius);
+            if cover <= 0.0 {
+                continue;
+            }
+
+            let (mut r, mut g, mut b) = (255.0f32, 255.0f32, 255.0f32);
+
+            // 中缝分隔线
+            let in_sep = if fy > sep_top && fy < sep_bot { 1.0 } else { 0.0 };
+            let sep = stroke_cover((fx - mid).abs(), 0.5) * in_sep;
+            if sep > 0.0 {
+                r = lerp(r, 226.0, sep);
+                g = lerp(g, 226.0, sep);
+                b = lerp(b, 226.0, sep);
+            }
+
+            // 红叉：两条对角线
+            let d = seg_dist(fx, fy, lx - arm, cy - arm, lx + arm, cy + arm).min(seg_dist(
+                fx,
+                fy,
+                lx + arm,
+                cy - arm,
+                lx - arm,
+                cy + arm,
+            ));
+            let t = stroke_cover(d, 1.0);
+            if t > 0.0 {
+                r = lerp(r, 224.0, t);
+                g = lerp(g, 50.0, t);
+                b = lerp(b, 50.0, t);
+            }
+
+            // 绿勾：两段折线
+            let d = seg_dist(fx, fy, rx - 7.0, cy, rx - 2.0, cy + 5.0).min(seg_dist(
+                fx,
+                fy,
+                rx - 2.0,
+                cy + 5.0,
+                rx + 7.0,
+                cy - 6.0,
+            ));
+            let t = stroke_cover(d, 1.0);
+            if t > 0.0 {
+                r = lerp(r, 22.0, t);
+                g = lerp(g, 158.0, t);
+                b = lerp(b, 22.0, t);
+            }
+
+            let i = ((y * w + x) * 4) as usize;
+            px[i] = b as u8;
+            px[i + 1] = g as u8;
+            px[i + 2] = r as u8;
+            px[i + 3] = (cover * 255.0) as u8;
+        }
+    }
+    px
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// 圆角矩形覆盖率：离圆角圆心越远越透明，边缘留 1px 过渡。
+fn round_cover(x: f32, y: f32, w: f32, h: f32, r: f32) -> f32 {
+    let cx = x.clamp(r, w - r);
+    let cy = y.clamp(r, h - r);
+    let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+    (r + 0.5 - d).clamp(0.0, 1.0)
+}
+
+/// 点到线段的距离。
+fn seg_dist(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    let (dx, dy) = (x2 - x1, y2 - y1);
+    let len2 = dx * dx + dy * dy;
+    if len2 <= f32::EPSILON {
+        return ((px - x1).powi(2) + (py - y1).powi(2)).sqrt();
+    }
+    let t = (((px - x1) * dx + (py - y1) * dy) / len2).clamp(0.0, 1.0);
+    let (qx, qy) = (x1 + t * dx, y1 + t * dy);
+    ((px - qx).powi(2) + (py - qy).powi(2)).sqrt()
+}
+
+/// 线宽 2（半宽 1）的覆盖率。
+fn stroke_cover(d: f32, half: f32) -> f32 {
+    (half + 0.5 - d).clamp(0.0, 1.0)
 }
 
 // ───────────────────────────── 提交 / 取消 ─────────────────────────────
