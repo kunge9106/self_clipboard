@@ -284,7 +284,7 @@
       </div>
     </div>
 
-    <!-- 首次运行功能导览：7 步卡片式巡览。
+    <!-- 首次运行功能导览：12 步卡片式巡览。
          卡片式而非聚光灯：窗口只有 1060×690，遮罩挖洞容易连要指的控件一起盖住。
          宽高固定 460×440、正文区内部滚动 —— 翻页时卡片边缘与按钮都不动。
          动效统一走 src/animations.css 的具名效果（fx-fade-up），不写裸 keyframes。
@@ -298,7 +298,7 @@
         </div>
 
         <div class="tour-body">
-          <section class="tour-step">
+          <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -309,7 +309,7 @@
               </span>
               <h3 class="tour-title">复制过的，都在这儿</h3>
             </div>
-            <p class="tour-sub">轻贴常驻后台，自动记下三类内容：</p>
+            <p class="tour-sub">轻贴常驻后台，文本、图片、文件都会自动记下来：</p>
             <div class="tour-cards">
               <div class="tour-card">
                 <span class="tour-card-k">文本</span>
@@ -324,19 +324,18 @@
                 <span class="tour-card-v">默认关闭</span>
               </div>
             </div>
-            <!-- 示意条：复用真实的 .tag 徽章样式，让这一步有个具体的样子可看，
-                 而不是只有三张抽象小卡 + 一大片空白 -->
             <div class="tour-mock">
-              <span class="tag tag-kind tag-kind-text">文本</span>
-              <span class="tour-mock-line">这是一条被自动记下的内容</span>
+              <span class="tag tag-code">代码</span>
+              <span class="tour-mock-line">function hello() { return 1 }</span>
               <span class="tour-mock-time">刚刚</span>
             </div>
             <p class="tour-hint">
-              记下来就长这样，点一下即可复制回去。关掉窗口也照记；内容只存本机且已加密。
+              链接、代码、Markdown 会被自动认出来并标在卡片上。记下来就长这样，
+              点一下即可复制回剪贴板。关掉窗口也照记。
             </p>
           </section>
 
-          <section class="tour-step">
+          <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -351,15 +350,57 @@
               <li><b>左键点卡片</b> —— 立刻复制回剪贴板，去别处粘贴</li>
               <li><b>右键「复制」</b> —— 同样的效果，不想误点时用</li>
               <li><b>右键「查看」</b> —— 长文本、长路径列表看全文</li>
-              <li>
-                <b>右键「编辑」</b> —— 改一份副本再复制出去，原条目不动；
-                保存后会多一条标着「已编辑」的记录
-              </li>
+              <li><b>右键「删除」/「批量删除」</b> —— 删单条，或进入选中模式勾一批</li>
             </ul>
-            <p class="tour-hint">编辑是「改副本」：历史永远忠实反映你当初复制了什么。</p>
+            <p class="tour-hint">批量删除：右键进入后左键点条目即选中，Esc 或切分类退出。</p>
           </section>
 
-          <section class="tour-step">
+          <section class="tour-step" data-since="3">
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M7 18V6h3.6a3 3 0 0 1 0 6H7" />
+                  <path d="M7 12h4a3 3 0 0 1 0 6H7" />
+                  <path d="M16.5 6v12" />
+                </svg>
+              </span>
+              <h3 class="tour-title">复制带着格式一起存</h3>
+            </div>
+            <p class="tour-sub">从网页、Word 复制来的内容，粗体、颜色、表格、超链接都保留。</p>
+            <ul class="tour-lines">
+              <li><b>默认按原格式粘贴</b> —— 左键点卡片或右键「复制」都是这个结果</li>
+              <li>
+                <b>只要纯文字</b> —— 右键「复制为纯文本」。这一项只在带格式的条目上出现，
+                普通文本没有
+              </li>
+              <li>
+                <b>粘到不支持富文本的地方</b> —— 记事本这类目标会自动收到纯文本，不用先转换
+              </li>
+            </ul>
+            <p class="tour-hint">图片和文件条目没有这一项：它们本身就是二进制或路径。</p>
+          </section>
+
+          <section class="tour-step" data-since="3">
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 5.5H7A2 2 0 0 0 5 7.5v11A2 2 0 0 0 7 20.5h11a2 2 0 0 0 2-2V13" />
+                  <path d="M15.4 4.6a2.1 2.1 0 0 1 3 3L11.6 14.4l-3.6.9.9-3.6z" />
+                </svg>
+              </span>
+              <h3 class="tour-title">编辑是改副本</h3>
+            </div>
+            <p class="tour-sub">右键「编辑」可以改内容再复制出去，改动不会覆盖原条目。</p>
+            <ul class="tour-lines">
+              <li><b>保存后另起一条</b> —— 新记录带「已编辑」徽章，方便和原文区分</li>
+              <li><b>原条目原样保留</b> —— 改坏了直接再用原文，不用重新复制</li>
+            </ul>
+            <p class="tour-hint">历史始终反映当初复制了什么，事后改动单独记一条。</p>
+          </section>
+
+          <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -367,24 +408,21 @@
                   <path d="M12 4.2l2.38 4.83 5.32.77-3.85 3.75.91 5.3L12 16.35l-4.76 2.5.91-5.3L4.3 9.8l5.32-.77z" />
                 </svg>
               </span>
-              <h3 class="tour-title">置顶、收藏、搜索</h3>
+              <h3 class="tour-title">分类、搜索、置顶与收藏</h3>
             </div>
             <ul class="tour-lines">
+              <li><b>分类</b> —— 左侧可只看文本、图片或文件</li>
+              <li><b>搜索</b> —— 顶部搜索框按内容、文件名、类型搜，输入「图片」或 <code>image</code> 都行</li>
               <li>
-                <b>置顶</b> —— 让某条浮到最上面。默认「按分类独立」（在文本里置顶不影响
-                历史视图），可在设置里改成互通
+                <b>置顶</b> —— 让某条浮到最上面。默认「按分类独立」（在文本里置顶不影响历史），
+                可在 设置 → 常规 → 置顶 → 「置顶互通」改成全分类同步
               </li>
               <li><b>收藏</b> —— 标记常用内容，左侧「收藏」一栏集中查看</li>
-              <li>
-                <b>搜索</b> —— 顶部搜索框按内容、文件名、类型搜，输入「图片」或
-                <code>image</code> 都行
-              </li>
-              <li><b>分类</b> —— 左侧能只看文本、图片或文件</li>
             </ul>
-            <p class="tour-hint">批量删除 —— 右键进入，左键直接勾选，一次清多条。</p>
+            <p class="tour-hint">置顶和收藏的条目在到期清理时会被跳过，不会自动清掉。</p>
           </section>
 
-          <section class="tour-step">
+          <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -398,15 +436,12 @@
             <ul class="tour-lines">
               <li><b>图片</b> —— 弹出大图</li>
               <li><b>文本</b> —— 比卡片多显示几行（卡片只有 2 行）</li>
-              <li><b>文件</b> —— 列出前几个文件名，更多折叠成「…另有 N 个」</li>
+              <li><b>文件</b> —— 列出前几个文件名，更多折叠成「另有 N 个」</li>
             </ul>
-            <p class="tour-hint">
-              卡片已经显示全的内容不会弹浮层 —— 重复一遍没意义。想看全文和完整路径，
-              用右键「查看」。
-            </p>
+            <p class="tour-hint">卡片已经显示全的内容不会弹浮层。全文和完整路径用右键「查看」。</p>
           </section>
 
-          <section class="tour-step">
+          <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -414,63 +449,121 @@
                   <path d="M3.5 7.2A1.7 1.7 0 0 1 5.2 5.5h3.9l2 2.4h7.7a1.7 1.7 0 0 1 1.7 1.7v7.9a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7z" />
                 </svg>
               </span>
-              <h3 class="tour-title">文件相关功能默认是关的</h3>
+              <h3 class="tour-title">文件功能默认关闭</h3>
             </div>
             <ul class="tour-lines">
+              <li><b>开关</b> —— 设置 → 数据 → 记录 → 「文件复制」。复制文件没反应就是这条没开</li>
               <li>
-                <b>默认关闭</b> —— 设置 → 记录与缓存 → 打开「文件复制」之后才会记录
+                <b>存的是路径，不是副本</b> —— 原文件被移动、改名或删除后，卡片会压暗并标「已失效」
               </li>
               <li>
-                <b>会标「已失效」</b> —— 原文件被移动、改名或删除后，这条就贴不出来，
-                卡片会压暗并标上「已失效」
+                <b>可以批量清掉</b> —— 设置 → 数据 → 「清空已失效条目」，一键清理，
+                仍存在的条目不会误删
               </li>
               <li>
-                <b>可以批量清掉</b> —— 设置 →「清空已失效条目」，一键清理，
-                不会误删仍存在的条目
+                <b>保留天数</b> —— 同页「记录」，默认 3 天，改成 0 才是永久保存
               </li>
             </ul>
-            <p class="tour-hint">部分文件失效时，复制会自动跳过失效的那些，并提示跳过了几个。</p>
+            <p class="tour-hint">复制的文件里若有失效的，粘贴时会自动跳过并提示跳过了几个。</p>
           </section>
 
-          <section class="tour-step">
+          <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                      stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M4 7.5h9M17.5 7.5H20" />
-                  <circle cx="15.2" cy="7.5" r="2.3" />
-                  <path d="M4 16.5h3M11.5 16.5H20" />
-                  <circle cx="9.2" cy="16.5" r="2.3" />
+                  <rect x="2.6" y="6.2" width="18.8" height="11.6" rx="2.2" />
+                  <path d="M6.4 10.2h.02M9.8 10.2h.02M13.2 10.2h.02M16.6 10.2h.02" />
+                  <path d="M8.2 14h7.6" />
                 </svg>
               </span>
-              <h3 class="tour-title">设置里最该知道的</h3>
+              <h3 class="tour-title">不切窗口，直接取</h3>
             </div>
-            <div class="tour-grid">
-              <div class="tour-cell">
-                <span class="tour-cell-k">通用</span>
-                <span class="tour-cell-v">自启 · 后台运行 · 置顶互通</span>
-              </div>
-              <div class="tour-cell">
-                <span class="tour-cell-k">外观</span>
-                <span class="tour-cell-v">材质浓度 · 圆角模式</span>
-              </div>
-              <div class="tour-cell is-wide">
-                <span class="tour-cell-k">记录与缓存</span>
-                <ul class="tour-hot">
-                  <li>文件复制<b>默认关着</b>，复制文件没记录就是这条没开</li>
-                  <li>保留天数<b>默认 3 天</b>，到期自动清理；改成 0 才是永久保存</li>
-                  <li>缓存目录<b>可以搬走</b>，搬完会重启一次</li>
-                </ul>
-              </div>
-              <div class="tour-cell is-wide">
-                <span class="tour-cell-k">关于</span>
-                <span class="tour-cell-v">版本 · 检查更新 · 运行环境自检</span>
-              </div>
-            </div>
-            <p class="tour-hint">三个最常踩的坑已经列在上面了，其余项目按字面意思调即可。</p>
+            <p class="tour-sub">在任何程序里按 <b>Ctrl + Alt + V</b>，光标旁弹出最近的内容。</p>
+            <ul class="tour-lines">
+              <li><b>选择</b> —— ↑ ↓ 上下移动，鼠标点也行</li>
+              <li><b>粘贴</b> —— Enter 直接粘回原窗口，全程不用切换</li>
+              <li><b>收起</b> —— 点别处就收起；Esc 或再按一次快捷键也可以</li>
+            </ul>
+            <p class="tour-hint">
+              习惯「先去别的窗口看一眼再回来选」，到 设置 → 常规 → 快捷操作 打开
+              「面板失焦不收起」。
+            </p>
           </section>
 
-          <section class="tour-step">
+          <section class="tour-step" data-since="3">
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 8.2V5.8A1.8 1.8 0 0 1 5.8 4H8.2" />
+                  <path d="M15.8 4h2.4A1.8 1.8 0 0 1 20 5.8v2.4" />
+                  <path d="M20 15.8v2.4a1.8 1.8 0 0 1-1.8 1.8h-2.4" />
+                  <path d="M8.2 20H5.8A1.8 1.8 0 0 1 4 18.2v-2.4" />
+                  <path d="M9.4 9.4h5.2v5.2H9.4z" />
+                </svg>
+              </span>
+              <h3 class="tour-title">截图也进轻贴</h3>
+            </div>
+            <p class="tour-sub">按 <b>Alt + Q</b> 截图，截完的图直接进「图片」分类。</p>
+            <ul class="tour-lines">
+              <li><b>默认</b> —— 用 Windows 自带截图工具，箭头、文字、马赛克都能画</li>
+              <li>
+                <b>换成内置</b> —— 设置 → 常规 → 快捷操作 → 「截图方式」选「内置」：屏幕先定格再框选，
+                支持窗口识取与尺寸标注；右键取消，且不动剪贴板里原有的内容
+              </li>
+            </ul>
+          </section>
+
+          <section class="tour-step" data-since="3">
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4.5 7.5h15M4.5 12h15M4.5 16.5h9" />
+                  <circle cx="18" cy="16.5" r="2.2" />
+                </svg>
+              </span>
+              <h3 class="tour-title">键位随你改</h3>
+            </div>
+            <p class="tour-sub">两个快捷键都在 设置 → 常规 → 快捷操作，谁都能改、也都能关。</p>
+            <ul class="tour-lines">
+              <li><b>改键</b> —— 点一下按钮开始录制，按下想要的组合即可</li>
+              <li><b>冲突</b> —— 被别的软件占用会明确提示，不会静默失效</li>
+              <li><b>关掉</b> —— 每个热键单独开关；不需要截图就只留面板</li>
+            </ul>
+          </section>
+
+          <section class="tour-step" data-since="3">
+            <div class="tour-head">
+              <span class="tour-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 3.8a8.2 8.2 0 1 0 0 16.4c1.3 0 2-.9 2-2 0-1.4-1-1.7-1-2.8 0-.8.7-1.4 1.5-1.4h1.7a3.9 3.9 0 0 0 3.9-3.9c0-3.5-3.6-6.3-8.1-6.3z" />
+                  <circle cx="8.4" cy="9.2" r="1.1" />
+                  <circle cx="12" cy="7.4" r="1.1" />
+                  <circle cx="15.4" cy="9.6" r="1.1" />
+                </svg>
+              </span>
+              <h3 class="tour-title">外观：主题、浓度、圆角</h3>
+            </div>
+            <ul class="tour-lines">
+              <li>
+                <b>主题</b> —— 浅色 / 深色 / 跟随系统。设置 → 外观 → 主题，
+                侧栏底部也有一个快捷切换按钮
+              </li>
+              <li>
+                <b>材质浓度</b> —— 设置 → 外观 → 窗口。直角与圆角各记一档，来回切模式不互相覆盖
+              </li>
+              <li>
+                <b>圆角模式</b> —— 四角真透明，边缘由界面自己画、带抗锯齿；
+                代价是没有系统背景模糊，所以浓度需要调高一些
+              </li>
+            </ul>
+            <p class="tour-hint">直角模式保留壁纸模糊，圆角模式四角更干净。两种模式都在「外观 → 窗口」里切。</p>
+          </section>
+
+          <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -483,20 +576,24 @@
             </div>
             <ul class="tour-lines">
               <li>
-                <b>加密</b> —— 正文和路径用 Windows 账户级密钥加密，换账户或换机器
-                都读不出来
+                <b>加密</b> —— 正文、文件路径、索引全部用 Windows 账户级密钥加密，
+                换账户或换机器都读不出来
               </li>
               <li>
-                <b>退出</b> —— 设置里选了「关闭时后台运行」，点右上角 × 就只是收进托盘；
+                <b>退出</b> —— 设置 → 常规 → 启动 里选了「关闭时后台运行」，点右上角 × 只收进托盘；
                 没选则直接退出
               </li>
               <li>
-                <b>找不到图标？</b> —— Windows 会把新图标折叠进任务栏的 ^ 里，
-                可以拖出来固定
+                <b>图标不见了？</b> —— Windows 会把新图标折叠进任务栏的 ^ 里，可以拖出来固定
               </li>
             </ul>
+            <p class="tour-hint">
+              更新在启动时自动检查，有新版本会在窗口内弹一条横幅；完整更新日志在「关于」。
+              设置其余项目按字面意思调即可，随时可以在 常规 → 帮助 里重看这份引导。
+            </p>
           </section>
         </div>
+
 
         <div class="tour-foot">
           <span class="tour-count" id="tour-count"></span>

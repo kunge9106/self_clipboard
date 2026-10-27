@@ -79,7 +79,16 @@ export function cardMarkdown(text) {
       const h = line.match(/^\s*#{1,6}\s+(.*)$/);
       if (h) return `<strong>${inlineFormat(h[1])}</strong>`;
       const ul = line.match(/^(\s*)[-*+]\s+(.*)$/);
-      if (ul) return `${ul[1]}<span class="md-bullet">•</span> ${inlineFormat(ul[2])}`;
+      if (ul) {
+        // 任务列表：卡片里没有空间画方块，用 ☑ / ☐ 两个字符表示勾选状态。
+        // 不显示成 `• [x]` —— 那是没解析的原始标记，正是用户之前抱怨过的观感。
+        const tm = ul[2].match(/^\[([ xX])\]\s+(.*)$/);
+        if (tm) {
+          const mark = tm[1].toLowerCase() === "x" ? "☑" : "☐";
+          return `${ul[1]}<span class="md-bullet">${mark}</span> ${inlineFormat(tm[2])}`;
+        }
+        return `${ul[1]}<span class="md-bullet">•</span> ${inlineFormat(ul[2])}`;
+      }
       const ol = line.match(/^(\s*)(\d+\.)\s+(.*)$/);
       if (ol) return `${ol[1]}<span class="md-bullet">${ol[2]}</span> ${inlineFormat(ol[3])}`;
       const bq = line.match(/^\s*>\s?(.*)$/);
@@ -149,11 +158,15 @@ export function renderMarkdown(text) {
   const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
   const out = [];
   let i = 0;
-  let list = null; // "ul" | "ol"
+  // 列表栈：每层记 { tag, indent, liOpen }。
+  // 单层 `list` 变量做不了嵌套 —— `- a` 里再缩进一层必须把 `<ul>` 放进上一个
+  // `<li>` 内部，而 `<li>` 得**延迟闭合**。所以栈里还要记这一层是否开着 li。
+  const listStack = [];
   const closeList = () => {
-    if (list) {
-      out.push(`</${list}>`);
-      list = null;
+    while (listStack.length) {
+      const top = listStack.pop();
+      if (top.liOpen) out.push("</li>");
+      out.push(`</${top.tag}>`);
     }
   };
 
@@ -227,17 +240,54 @@ export function renderMarkdown(text) {
       continue;
     }
 
-    // 列表
-    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
-    const ol = line.match(/^\s*\d+\.\s+(.*)$/);
-    if (ul || ol) {
-      const want = ul ? "ul" : "ol";
-      if (list !== want) {
-        closeList();
-        out.push(`<${want}>`);
-        list = want;
+    // 列表（支持嵌套与任务列表）
+    // 缩进宽度决定层级：制表符按 4 空格算，覆盖各种编辑器的输出。
+    const lm = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+    if (lm) {
+      const indent = lm[1].replace(/\t/g, "    ").length;
+      const tag = /\d/.test(lm[2]) ? "ol" : "ul";
+      let body = lm[3];
+
+      // 任务列表：`- [ ] xxx` / `- [x] xxx`
+      let task = null; // null = 普通列表项
+      const tm = body.match(/^\[([ xX])\]\s+(.*)$/);
+      if (tm) {
+        task = tm[1].toLowerCase() === "x";
+        body = tm[2];
       }
-      out.push(`<li>${inlineFormat((ul || ol)[1])}</li>`);
+
+      // 回到合适层级：缩进比栈顶浅就把那几层收掉（每层先关掉自己开着的 li）
+      while (listStack.length && indent < listStack[listStack.length - 1].indent) {
+        const top = listStack.pop();
+        if (top.liOpen) out.push("</li>");
+        out.push(`</${top.tag}>`);
+      }
+
+      const top = listStack[listStack.length - 1];
+      if (!top || indent > top.indent) {
+        // 更深一层：**不关上一层的 li**，直接嵌套进去
+        listStack.push({ tag, indent, liOpen: false });
+        out.push(`<${tag}>`);
+      } else {
+        // 同级：先关掉上一条 li
+        if (top.liOpen) {
+          out.push("</li>");
+          top.liOpen = false;
+        }
+        if (top.tag !== tag) {
+          // `- ` 接 `1. ` 这种类型切换：换标签，层级不变
+          out.push(`</${top.tag}>`);
+          listStack[listStack.length - 1] = { tag, indent, liOpen: false };
+          out.push(`<${tag}>`);
+        }
+      }
+
+      const box =
+        task === null ? "" : `<span class="md-box${task ? " is-on" : ""}"></span>`;
+      out.push(
+        `<li${task === null ? "" : ' class="md-task"'}>${box}${inlineFormat(body)}`
+      );
+      listStack[listStack.length - 1].liOpen = true;
       i++;
       continue;
     }
@@ -277,8 +327,18 @@ const RICH_TAGS = new Set([
 ]);
 const RICH_DROP = new Set([
   "SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "LINK", "META", "BASE", "FORM",
-  "INPUT", "BUTTON", "TEXTAREA", "SELECT", "SVG", "IMG", "VIDEO", "AUDIO", "CANVAS", "LINK",
+  "INPUT", "BUTTON", "TEXTAREA", "SELECT", "SVG", "VIDEO", "AUDIO", "CANVAS",
 ]);
+
+/// 单张内联图片的大小上限（base64 **字符数**，解码后约为其 3/4）。
+///
+/// 只放行 `data:` 内联图，**外链一律丢弃**：`<img src="https://…">` 会在渲染时
+/// 自动发请求，等于把「我在读这段内容」告诉对方服务器。内联图是本地的，没有这个问题。
+const RICH_IMG_MAX = 1_200_000;
+/// 一条内容里所有内联图的合计上限。防止一条长文档把详情页拖死。
+const RICH_IMG_TOTAL = 6_000_000;
+/// 只认这几种位图。**不含 svg** —— SVG 可以内嵌脚本，即使走 data: 也不安全。
+const RICH_IMG_MIME = /^data:image\/(png|jpe?g|gif|webp|bmp);base64,/i;
 const RICH_STYLES = new Set([
   "color", "background-color", "font-weight", "font-style", "text-decoration",
   "text-align", "font-size", "font-family", "line-height",
@@ -324,9 +384,20 @@ export function cfHtmlFragment(raw) {
   return i >= 0 ? s.slice(i) : "";
 }
 
+/// 内联图片的准入判断（纯函数，便于单测）。
+///
+/// 返回 `"ok"` / `"external"`（外链或 svg）/ `"too-large"` / `"budget"`。
+export function richImgVerdict(src, usedChars = 0) {
+  const s = String(src ?? "").trim();
+  if (!RICH_IMG_MIME.test(s)) return "external";
+  if (s.length > RICH_IMG_MAX) return "too-large";
+  if (usedChars + s.length > RICH_IMG_TOTAL) return "budget";
+  return "ok";
+}
+
 /// 把一段 HTML 过滤成可安全插入 DOM 的节点树。
 /// `onDrop(kind)` 用来把「丢了什么」报给日志（复用现有前端日志通道，不另造一套）。
-export function sanitizeRichHtml(html, onDrop) {
+export function sanitizeRichHtml(html, onDrop, richImages) {
   let doc;
   try {
     // 先剥掉 CF_HTML 封装头：否则 `Version:1.0 StartHTML:…` 会被 DOMParser
@@ -344,6 +415,8 @@ export function sanitizeRichHtml(html, onDrop) {
   }
 
   const root = document.createElement("div");
+  /// 已放进来的内联图大小合计（字符数），用于 `RICH_IMG_TOTAL` 预算
+  let imgChars = 0;
 
   const filterStyle = (style) =>
     style
@@ -371,6 +444,44 @@ export function sanitizeRichHtml(html, onDrop) {
       if (node.nodeType !== Node.ELEMENT_NODE) continue;
 
       const tag = node.tagName.toUpperCase();
+
+      // 图片单独处理：只放行内联 data: 位图，且受单张与合计两道预算约束
+      if (tag === "IMG") {
+        // 富文本内联图：存储时已拆成独立文件，这里按占位编号取回 data URL。
+        // 取不到（文件被删 / 提取时被丢弃）就跳过，不摆一个破图。
+        const qt = node.getAttribute?.("data-qt-img");
+        if (qt != null) {
+          const url = richImages?.get(String(qt));
+          if (!url) {
+            onDrop?.(qt === "drop" ? "drop-img:too-large" : "drop-img:missing");
+            continue;
+          }
+          const img = document.createElement("img");
+          img.src = url;
+          const alt0 = node.getAttribute?.("alt");
+          if (alt0) img.alt = String(alt0).slice(0, 200);
+          img.loading = "lazy";
+          dst.appendChild(img);
+          continue;
+        }
+        const src = (node.getAttribute?.("src") || "").trim();
+        const verdict = richImgVerdict(src, imgChars);
+        if (verdict !== "ok") {
+          onDrop?.(`drop-img:${verdict}`);
+          continue;
+        }
+        imgChars += src.length;
+        const img = document.createElement("img");
+        // 只赋 src 与 alt：width/height/style 一律不带（否则原文档的固定尺寸
+        // 会让图片溢出详情区），显示尺寸交给 CSS 控制。
+        img.src = src;
+        const alt = node.getAttribute?.("alt");
+        if (alt) img.alt = String(alt).slice(0, 200);
+        img.loading = "lazy";
+        dst.appendChild(img);
+        continue;
+      }
+
       if (RICH_DROP.has(tag)) {
         onDrop?.(`drop-tag:${tag}`);
         continue; // 连同内容一起丢

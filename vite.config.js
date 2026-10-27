@@ -16,12 +16,13 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
-    // 多入口：index.html 是主界面，tray.html 是托盘右键菜单（Tauri 端按
-    // WebviewUrl::App("tray.html") 加载，必须一起产出到 dist/）
+    // 多入口：index.html 主界面，tray.html 托盘菜单，panel.html 快捷面板，shot.html 截图覆盖层。
+    // 后三个由 Tauri 端按 `WebviewUrl::App("…")` 加载，必须一起产出到 dist/。
     rollupOptions: {
       input: {
         main: resolve(__dirname, "index.html"),
         tray: resolve(__dirname, "tray.html"),
+        panel: resolve(__dirname, "panel.html"),
       },
     },
   },

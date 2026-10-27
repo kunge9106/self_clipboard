@@ -674,8 +674,10 @@ body.dark #theme-toggle .i-sun {
 
 /* 从属选项：主开关关闭时整组置灰且不可点。
    只做视觉禁用而没有 pointer-events 的话，点下去仍会触发命令，
-   用户会看到「明明灰着却改成功了」这种自相矛盾的行为。 */
-.seg[data-disabled] {
+   用户会看到「明明灰着却改成功了」这种自相矛盾的行为。
+   `.row` 版用于整行是从属项的情况（例如「截图时右键取消」只对系统截图有意义）。 */
+.seg[data-disabled],
+.row[data-disabled] {
   opacity: 0.45;
   pointer-events: none;
 }
@@ -1422,6 +1424,25 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   color: var(--text-dim);
 }
 
+/* 快捷键录制按钮：平时与普通 ghost 按钮一样，录制中换成强调色。
+   宽度固定，免得「Ctrl + Alt + V」和「请按下组合键…」之间来回跳。 */
+.settings .hotkey-btn {
+  min-width: 176px;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings .hotkey-btn.is-recording {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.18);
+}
+
+.settings .hotkey-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .settings .row-ctrl {
   flex: none;
   display: flex;
@@ -1731,8 +1752,8 @@ html:not(.hovers-off) .statusbar-clear:hover {
   position: relative;
   width: 460px;
   max-width: 460px;
-  /* 400 是按最高的那一步量的：正文区约 300，最长一步（设置全解）约 230，
-     留 70 的余量。再高就是一整片空白了。 */
+  /* 410 是按最长的一步量的，留出余量。再高就是一整片空白了。
+     正文区自身可滚，万一某步超出也不会顶开卡片。 */
   height: 410px;
   padding: 22px 22px 16px;
   /* 给顶部色带和角落光斑裁个边 */
@@ -2255,6 +2276,85 @@ body.dark .tour-dot.is-on {
   margin: 3px 0;
 }
 
+/* 嵌套列表：只给内层补一点缩进，不再叠一层默认 margin。
+   父层已经给了 padding-left: 22px，内层再 22 会很快把正文挤到右边。 */
+.detail-body.is-rich li > ul,
+.detail-body.is-rich li > ol {
+  margin: 3px 0 0;
+  padding-left: 20px;
+}
+
+/* 任务列表：用 span 画方块，不用 <input type="checkbox" disabled> ——
+   禁用态的 checkbox 在深色主题下是系统灰色，和界面配色对不上，也没法调大小。 */
+.detail-body.is-rich .md-box {
+  position: relative;
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 7px;
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
+  vertical-align: -1px;
+}
+
+.detail-body.is-rich .md-box.is-on {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+/* 对勾：用两条边框旋转 45° 画出来，不依赖字体里的 √ 字符 */
+.detail-body.is-rich .md-box.is-on::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 4px;
+  height: 7px;
+  border: solid #fff;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+/* 图片未显示的说明条：贴在正文最前面。
+   左侧一道强调色竖线足够把它和正文分开，不需要再加边框 —— 详情区本来就窄。 */
+.detail-body.is-rich .detail-note {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--glass-strong);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.detail-body.is-rich .detail-note strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.detail-body.is-rich .detail-note-why {
+  color: var(--text-dim);
+}
+
+/* 富文本里的内联图片：宽度跟着正文走，不按原图尺寸铺开。
+   只约束显示尺寸，不改动数据本身（原图仍完整存着，复制回去还是原样）。 */
+.detail-body.is-rich img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px 0;
+  border-radius: 4px;
+}
+
+/* 任务项不需要额外的列表符号间距 */
+.detail-body.is-rich li.md-task {
+  list-style: none;
+  margin-left: -18px;
+}
+
 .detail-body.is-rich blockquote {
   margin: 0 0 10px;
   padding: 6px 12px;
@@ -2486,28 +2586,33 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   pointer-events: auto;
 }
 
-/* 热区贴着窗口最外圈那条边框线，厚度与系统原生的可调整边框相当
-   （100% DPI 下约 4–6px）。角上给到 10×10：斜向拖动要同时命中的是两个方向，
-   面积太小会「怎么点都不动」。 */
+/* 热区宽度对齐系统原生可缩放边框：`SM_CXSIZEFRAME + SM_CXPADDEDBORDER` 在
+   100% DPI 下是 8px。之前是 6px 且四角只有 10×10 —— 比系统窄，用户体感就是
+   「必须往里靠很多才拉得动」。
+   顶边单独用 6px：窗口控制按钮 34×30 垂直居中于 40px 顶栏，即 y 从 5 开始，
+   顶边再厚就会盖住关闭按钮。
+   四角给到 16px 宽：斜向拖动要同时命中两个方向，面积小就「怎么点都不动」；
+   上角的高度仍取 6px，同理避让按钮。 */
 .rz-n,
 .rz-s {
-  left: 12px;
-  right: 12px;
-  height: 6px;
+  left: 16px;
+  right: 16px;
   cursor: ns-resize;
 }
 .rz-n {
   top: 0;
+  height: 6px;
 }
 .rz-s {
   bottom: 0;
+  height: 8px;
 }
 
 .rz-w,
 .rz-e {
-  top: 12px;
-  bottom: 12px;
-  width: 6px;
+  top: 16px;
+  bottom: 16px;
+  width: 8px;
   cursor: ew-resize;
 }
 .rz-w {
@@ -2518,11 +2623,14 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 }
 
 .rz-nw,
-.rz-ne,
+.rz-ne {
+  width: 16px;
+  height: 6px;
+}
 .rz-sw,
 .rz-se {
-  width: 10px;
-  height: 10px;
+  width: 16px;
+  height: 16px;
 }
 .rz-nw {
   top: 0;

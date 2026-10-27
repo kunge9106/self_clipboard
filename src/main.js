@@ -1684,6 +1684,45 @@ let detailCtx = null;
 ///   Markdown 排版 > 富文本白名单 > 代码高亮 > 纯文本
 /// Markdown 条目即使带着 html 也优先排版源码 —— 用户的原话是「查看里怎么还是一堆
 /// markdown 原符号」，他要的就是渲染后的样子。
+/// 图片未显示时的说明条。
+///
+/// 三种原因分开讲，因为用户的处置方式完全不同：
+///   external —— 网页外链图，我们不替用户发请求（隐私）；想保留就回原网页另存为
+///   too-large —— 单张太大，超过保留上限
+///   missing   —— 文件丢了（被清理或手动删过）
+function richImageNote(drops) {
+  const count = (k) => drops.filter((d) => d === k).length;
+  const ext = count("drop-img:external");
+  const big = count("drop-img:too-large");
+  const lost = count("drop-img:missing");
+  if (!ext && !big && !lost) return null;
+
+  const box = document.createElement("div");
+  box.className = "detail-note";
+
+  const head = document.createElement("strong");
+  const facts = [];
+  if (ext) facts.push(`${ext} 张外链图片未显示`);
+  if (big) facts.push(`${big} 张图片体积过大未保留`);
+  if (lost) facts.push(`${lost} 张图片文件已不存在`);
+  head.textContent = facts.join("，").trim();
+  box.appendChild(head);
+
+  const why = document.createElement("div");
+  why.className = "detail-note-why";
+  const lines = [];
+  if (ext) {
+    lines.push("外链图片来自网页。轻贴不会替你访问这些地址——那样等于告诉对方服务器你在读什么。");
+    lines.push("需要这些图时：在原网页上右键图片 →「图片另存为」保存到本地，再把本地文件复制进轻贴。");
+  }
+  if (big) lines.push("过大的图片不落盘（单张上限约 3MB），以免一条记录占掉几十 MB。");
+  if (lost) lines.push("图片文件可能已被清理或手动删除；文字与排版仍在，复制出去不会带图。");
+  why.textContent = lines.join(" ");
+  box.appendChild(why);
+
+  return box;
+}
+
 function renderDetailBody(item, data) {
   const body = $detail("detail-body");
   if (!body || !data) return false;
@@ -1701,7 +1740,9 @@ function renderDetailBody(item, data) {
 
   if (data.html) {
     const drops = [];
-    const frag = sanitizeRichHtml(data.html, (kind) => drops.push(kind));
+    // 内联图在存储时被拆成独立文件（`data-qt-img="n"`），这里按编号取回 data URL
+    const richMap = new Map(Object.entries(data.rich_images || {}));
+    const frag = sanitizeRichHtml(data.html, (kind) => drops.push(kind), richMap);
     // 丢弃项汇总成一条日志（复用现成的前端上报通道，不另造一套）。
     // 逐项上报会让一条内容刷几十行，把真正有用的上下文挤掉。
     if (drops.length) {
@@ -1714,6 +1755,10 @@ function renderDetailBody(item, data) {
     if (frag.childNodes.length > 0) {
       body.classList.add("is-rich");
       body.appendChild(frag);
+      // 有图没显示出来，要说明「为什么」以及「怎么办」——
+      // 否则用户只会觉得「这软件把图弄丢了」。
+      const note = richImageNote(drops);
+      if (note) body.insertBefore(note, body.firstChild);
       return true;
     }
   }
@@ -2208,6 +2253,137 @@ function block(title, inner, opts = {}) {
   return `<section class="${cls}">${title ? `<h3 class="block-h">${title}</h3>` : ""}${inner}</section>`;
 }
 
+/// 把 `ctrl+alt+v` 显示成 `Ctrl + Alt + V`（值的形式由后端 `hotkey::parse_combo` 定义）。
+function comboLabel(combo) {
+  return String(combo || "")
+    .split("+")
+    .map((p) => {
+      const k = p.trim().toLowerCase();
+      if (k === "ctrl" || k === "control") return "Ctrl";
+      if (k === "alt") return "Alt";
+      if (k === "shift") return "Shift";
+      if (k === "win" || k === "super") return "Win";
+      if (k === "space") return "空格";
+      return k.toUpperCase();
+    })
+    .filter(Boolean)
+    .join(" + ");
+}
+
+/// DOM `KeyboardEvent.key` → 后端能解析的键名；不支持的返回 null。
+function hotkeyKeyName(key) {
+  if (key === " ") return "space";
+  if (key.length === 1) {
+    const c = key.toLowerCase();
+    // 与后端 `vk_of` 的白名单保持一致：字母、数字、反引号、减号
+    if (/[a-z0-9`\-]/.test(c)) return c;
+    return null;
+  }
+  if (/^f([1-9]|1[0-2])$/i.test(key)) return key.toLowerCase();
+  return null;
+}
+
+/// 绑定一组「开关 + 快捷键录制」控件。
+///
+/// 录制期间必须临时注销全局热键（`hotkey_suspend`）：注册过的组合会被系统**先**
+/// 截走，WebView 根本收不到 keydown，用户永远录不进「与当前相同」的组合。
+function bindHotkeyRow(view, opts) {
+  const enabled = view.querySelector("#" + opts.enabledId);
+  const btn = view.querySelector("#" + opts.btnId);
+  if (!enabled || !btn) return;
+
+  let recording = false;
+  const label = () => comboLabel(opts.get() || opts.fallback);
+
+  const endRecording = async () => {
+    if (!recording) return;
+    recording = false;
+    btn.classList.remove("is-recording");
+    btn.textContent = label();
+    try {
+      await invoke("hotkey_resume");
+    } catch {
+      /* 恢复失败体现在「按了没反应」，日志里已有记录，这里没地方提示 */
+    }
+  };
+
+  enabled.onchange = async () => {
+    try {
+      await invoke(opts.cmd, { combo: opts.get() || opts.fallback, enabled: enabled.checked });
+      settings = await invoke("get_settings");
+      btn.disabled = !enabled.checked;
+      toast(`${enabled.closest(".row")?.querySelector(".row-title")?.textContent?.trim() || "快捷键"}${
+        enabled.checked ? "已开启" : "已关闭"
+      }`);
+    } catch (e) {
+      toast("快捷键设置失败：" + e);
+      enabled.checked = !enabled.checked;
+    }
+  };
+
+  btn.onclick = async () => {
+    if (recording) return;
+    recording = true;
+    btn.classList.add("is-recording");
+    btn.textContent = "请按下组合键…（Esc 取消）";
+    btn.focus();
+    try {
+      await invoke("hotkey_suspend");
+    } catch (e) {
+      toast("暂停热键失败：" + e);
+    }
+  };
+  // 点到别处 = 放弃录制
+  btn.onblur = () => void endRecording();
+
+  btn.onkeydown = async (e) => {
+    if (!recording) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      void endRecording();
+      return;
+    }
+    // 只按住修饰键：先显示出来，等主键落下
+    if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) {
+      const pre = [];
+      if (e.ctrlKey) pre.push("Ctrl");
+      if (e.altKey) pre.push("Alt");
+      if (e.shiftKey) pre.push("Shift");
+      if (e.metaKey) pre.push("Win");
+      btn.textContent = pre.length ? pre.join(" + ") + " + …" : "请按下组合键…（Esc 取消）";
+      return;
+    }
+    const mods = [];
+    if (e.ctrlKey) mods.push("ctrl");
+    if (e.altKey) mods.push("alt");
+    if (e.shiftKey) mods.push("shift");
+    if (e.metaKey) mods.push("win");
+    const main = hotkeyKeyName(e.key);
+    if (!main) {
+      toast("这个键暂不支持，请用字母、数字、F1–F12、空格或 `");
+      return;
+    }
+    if (mods.length === 0) {
+      toast("至少需要一个修饰键（Ctrl / Alt / Shift / Win）");
+      return;
+    }
+    const combo = [...mods, main].join("+");
+    recording = false;
+    btn.classList.remove("is-recording");
+    btn.textContent = comboLabel(combo);
+    try {
+      await invoke(opts.cmd, { combo, enabled: true });
+      settings = await invoke("get_settings");
+      toast("快捷键已改为 " + comboLabel(combo));
+    } catch (err) {
+      // 后端已回滚并重注册旧组合，这里只把界面拉回去
+      toast("该组合不可用：" + err);
+      btn.textContent = label();
+    }
+  };
+}
+
 function settingsGeneralHtml(s) {
   return [
     block(
@@ -2218,6 +2394,70 @@ function settingsGeneralHtml(s) {
           "关闭时收进托盘",
           "关掉窗口后在后台继续记录；右键托盘图标可打开菜单",
           s.trayOnClose
+        )
+    ),
+    block(
+      "快捷操作",
+      // 两个热键共用一套「开关 + 录制」控件，绑定逻辑也只写一份（见 bindHotkeyRow）。
+      rowCheck(
+        "set-hotkey-enabled",
+        "唤起面板",
+        "在任何程序里按下组合键，弹出贴光标的小列表；回车直接粘回原窗口",
+        s.hotkeyEnabled
+      ) +
+        rowCtl(
+          "唤起面板的快捷键",
+          "点击后按下想要的组合（至少含一个修饰键）；按 Esc 取消",
+          `<button type="button" class="btn-ghost hotkey-btn" id="set-hotkey"${
+            s.hotkeyEnabled ? "" : " disabled"
+          }>${comboLabel(s.hotkey || "ctrl+alt+v")}</button>`,
+          true,
+          "set-hotkey"
+        ) +
+        // 从属项：它调的正是上一行那个面板的失焦行为，所以缩进一级
+        rowCheck(
+          "set-panel-stay",
+          "面板失焦不收起",
+          "默认点别处即收起；打开后可先去别的窗口看一眼再回来选。Esc 或再按一次唤起快捷键收起",
+          s.panelStayOnBlur,
+          true
+        ) +
+        rowCheck(
+          "set-shot-hotkey-enabled",
+          "截图",
+          "按下后框选屏幕区域，截完自动记进轻贴（默认 Alt + Q）",
+          s.screenshotHotkeyEnabled
+        ) +
+        rowCtl(
+          "截图快捷键",
+          "点击后按下想要的组合（至少含一个修饰键）；按 Esc 取消",
+          `<button type="button" class="btn-ghost hotkey-btn" id="set-shot-hotkey"${
+            s.screenshotHotkeyEnabled ? "" : " disabled"
+          }>${comboLabel(s.screenshotHotkey || "alt+q")}</button>`,
+          true,
+          "set-shot-hotkey"
+        ) +
+        rowCtl(
+          "截图方式",
+          "系统（默认）：调用 Windows 截图工具，自带箭头与马赛克；内置：轻贴自己画覆盖层，取消不碰剪贴板、截完直接进历史",
+          `<div class="seg" id="set-shot-mode">
+            <button type="button" data-mode="builtin" ${
+              s.screenshotMode === "builtin" ? 'class="on"' : ""
+            }>内置</button>
+            <button type="button" data-mode="system" ${
+              (s.screenshotMode || "system") === "system" ? 'class="on"' : ""
+            }>系统</button>
+          </div>`,
+          true,
+          "set-shot-mode"
+        ) +
+        // 只对系统截图有意义：内置覆盖层本来就能右键取消
+        rowCheck(
+          "set-shot-rclick",
+          "截图时右键取消",
+          "在系统截图上点右键即取消（等同 Esc）；内置截图本身已支持",
+          s.screenshotRightClickCancel,
+          true
         )
     ),
     block(
@@ -2240,7 +2480,7 @@ function settingsGeneralHtml(s) {
       "帮助",
       rowCtl(
         "功能导览",
-        "随时可以再看一遍这 7 步说明",
+        "随时可以再看一遍这 12 步说明",
         `<button class="btn-ghost" id="replay-tour">重新查看</button>`
       )
     ),
@@ -2915,7 +3155,7 @@ async function reloadSettings() {
 }
 
 // ---------------------------------------------------------------------------
-// 首次运行功能导览（7 步卡片式巡览，文案见 ONBOARDING.md）
+// 首次运行功能导览（12 步卡片式巡览，文案见 ONBOARDING.md）
 //
 // 为什么是卡片而不是聚光灯指引：窗口只有 1060×690，遮罩挖洞很容易连要指的
 // 控件一起盖住；而且控件位置随视图、分栏、窗口尺寸变化，定位逻辑必然错位。
@@ -2926,14 +3166,37 @@ async function reloadSettings() {
 
 let tourStep = 0;
 
+/** 本次导览是否展示**全部**步骤。
+ *  - 升级弹窗：false —— 只给新增的那几步，老用户不用重看基础介绍；
+ *  - 设置页「重新查看」：true —— 用户主动点进来，就是要从头看一遍。
+ *  放在 `tourStep` 旁边而不是 `openFeatureTour` 旁，是因为 `tourEls` 要读它，
+ *  而 `tourEls` 在本文件里被多处调用，声明必须早于任何一次调用。 */
+let tourShowAll = false;
+
 /** 一次性取出导览需要的节点，避免每个函数里反复 getElementById */
 function tourEls() {
   const mask = document.getElementById("feature-tour");
   if (!mask) return null;
+  const all = [...mask.querySelectorAll(".tour-step")];
+  // **升级用户只看增量**：`data-since` 大于上次看过的版本号才展示。
+  // 全新安装（seen = 0）从头看一遍；从 2.4.x 升上来（seen = 1）只看 2.5.0 新增的那三步，
+  // 不重放前面那些基础介绍（导览 3 起为结构性重写，12 步统一标 since=3）。
+  // 后端只下发版本号，判断留在这里，
+  // 「哪里该变」和「变了什么」在同一处，改导览时不容易漏。
+  const seen = settings?.tourSeenVersion ?? 0;
+  const steps =
+    !tourShowAll && seen > 0
+      ? all.filter((el) => Number(el.dataset.since || 1) > seen)
+      : all;
+  // 被排除的步骤必须**显式隐藏**：`renderTourStep` 只负责集合内部的显隐，
+  // 集合外的元素会保持原样，结果是一屏叠着好几步。
+  all.forEach((el) => {
+    if (!steps.includes(el)) el.hidden = true;
+  });
   return {
     mask,
     body: mask.querySelector(".tour-body"),
-    steps: [...mask.querySelectorAll(".tour-step")],
+    steps: steps.length ? steps : all,
     dots: document.getElementById("tour-dots"),
     prev: document.getElementById("tour-prev"),
     next: document.getElementById("tour-next"),
@@ -2986,7 +3249,8 @@ function renderTourStep(t) {
  *  从设置页「重新查看」进来的不算：那种情形下用户早就过了首次引导。 */
 let tourFromFirstRun = false;
 
-function openFeatureTour(fromFirstRun = false) {
+function openFeatureTour(fromFirstRun = false, showAll = false) {
+  tourShowAll = showAll;
   const t = tourEls();
   if (!t) return;
   tourFromFirstRun = fromFirstRun;
@@ -3017,18 +3281,23 @@ async function closeFeatureTour() {
 function bindFeatureTour() {
   const t = tourEls();
   if (!t) return;
+  // 翻页时**重新取**集合：注册这一刻 `settings` 可能还没加载完（步骤集合会变），
+  // 用捕获的那份会算出错误的总页数，表现为「最后一步点下一步又回到第一步」。
   t.next.onclick = () => {
-    if (tourStep >= t.steps.length - 1) {
+    const cur = tourEls();
+    if (!cur) return;
+    if (tourStep >= cur.steps.length - 1) {
       closeFeatureTour();
     } else {
       tourStep += 1;
-      renderTourStep(t);
+      renderTourStep(cur);
     }
   };
   t.prev.onclick = () => {
     if (tourStep === 0) return;
     tourStep -= 1;
-    renderTourStep(t);
+    const cur = tourEls();
+    if (cur) renderTourStep(cur);
   };
   // 跳过与点遮罩都算看过
   t.skip.onclick = () => closeFeatureTour();
@@ -3202,6 +3471,55 @@ function bindSettings(view) {
       }
     });
   }
+  // 两个热键（唤起面板 / 截图）共用同一套绑定 —— 交互细节多（只按修饰键先显示、
+  // Esc 取消、失败回滚、录制期挂起），各写一遍必然漂移。
+  bindHotkeyRow(view, {
+    enabledId: "set-hotkey-enabled",
+    btnId: "set-hotkey",
+    cmd: "set_hotkey",
+    fallback: "ctrl+alt+v",
+    get: () => settings.hotkey,
+  });
+  bindHotkeyRow(view, {
+    enabledId: "set-shot-hotkey-enabled",
+    btnId: "set-shot-hotkey",
+    cmd: "set_screenshot_hotkey",
+    fallback: "alt+q",
+    get: () => settings.screenshotHotkey,
+  });
+  // 面板失焦行为：只存一个布尔，后端失焦处理器现读配置，改完立即生效
+  bindCheck("set-panel-stay", "set_panel_stay_on_blur");
+  // 截图右键取消：同样只存布尔，下次唤起截图时按新值决定装不装钩子
+  bindCheck("set-shot-rclick", "set_screenshot_right_click_cancel");
+
+  // 截图方式：内置覆盖层 / 系统工具。「右键取消」只对前者之外的系统版有意义
+  // （内置版本来就能右键取消），所以切到内置时把那一行整行置灰。
+  const shotMode = view.querySelector("#set-shot-mode");
+  if (shotMode) {
+    const rclickRow = view.querySelector("#set-shot-rclick")?.closest(".row");
+    const syncShotMode = () => {
+      const mode = shotMode.querySelector("button.on")?.dataset.mode || "builtin";
+      rclickRow?.toggleAttribute("data-disabled", mode === "builtin");
+    };
+    syncShotMode();
+    shotMode.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      const mode = btn.dataset.mode;
+      try {
+        await invoke("set_screenshot_mode", { value: mode });
+        settings = await invoke("get_settings");
+        shotMode
+          .querySelectorAll("button[data-mode]")
+          .forEach((b) => b.classList.toggle("on", b === btn));
+        syncShotMode();
+        toast(mode === "system" ? "截图改为系统工具" : "截图改为内置覆盖层");
+      } catch (err) {
+        toast("切换失败：" + err);
+      }
+    });
+  }
+
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
   // 保留期清理的豁免开关。与上面那条是**两个不同策略点**，别合并：
@@ -3230,7 +3548,8 @@ function bindSettings(view) {
 
   // 重看功能导览：只打开，不写「已看过」标记 —— 看多少次都不影响首次判断
   const replayTour = view.querySelector("#replay-tour");
-  if (replayTour) replayTour.onclick = () => openFeatureTour();
+  // 主动重看：从头到尾都放出来，而不是只给他「这次更新了什么」
+  if (replayTour) replayTour.onclick = () => openFeatureTour(false, true);
 
   // 置顶互通不能走 bindCheck：这个开关会把已有置顶记录归一到新表示，
   // 必须顺带把本地缓存的 items 拉新的，否则列表里的置顶徽章/排序还是旧的。
@@ -3312,7 +3631,10 @@ function bindSettings(view) {
         const slider = view.querySelector("#set-material");
         if (slider) slider.value = alpha;
         const label = view.querySelector("#material-val");
-        if (label) label.textContent = `${alpha}%（越高越厚实 · 越低越通透）`;
+        // 与拖动滑块那条路径保持一致：只显示百分比。
+        // 这里曾经写成 `${alpha}%（越高越厚实 · 越低越通透）`，用户切一次模式
+        // 括号就又冒出来了 —— 说明与上方「越高越厚实 · 越低越通透」重复。
+        if (label) label.textContent = `${alpha}%`;
         toast(
           round.checked
             ? `已切换为圆角模式（无背景模糊）· 浓度 ${alpha}%`

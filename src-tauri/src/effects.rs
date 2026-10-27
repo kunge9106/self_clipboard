@@ -99,13 +99,16 @@ struct RtlOsVersionInfoExW {
 type SetWindowCompositionAttributeFn =
     unsafe extern "system" fn(isize, *mut WindowCompositionAttribData) -> i32;
 
-/// 物理坐标矩形，user32 的 GetWindowRect / SetWindowRgn 都用它
+/// 物理坐标矩形，user32 的 GetWindowRect / SetWindowRgn 都用它。
+///
+/// `pub` 是给 `screenclip` 判断「截图覆盖层是否铺满全屏」用的：那里也要读窗口矩形，
+/// 再定义一个同形状的结构会让两处 `GetWindowRect` 的 extern 声明互相打架。
 #[repr(C)]
-struct Rect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
+pub struct Rect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
 }
 
 /// Win10 真·毛玻璃的唯一入口，但它是**未公开 API**：
@@ -274,7 +277,7 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     // 先清掉 WS_CAPTION | WS_THICKFRAME 等样式位——DWM 正是靠它们才
     // 沿窗口矩形画 1px 边框（SystemBackdrop 档需要 DWM 提供 backdrop 与圆角，不能动）
     if tier != Tier::SystemBackdrop {
-        strip_window_frame(hwnd);
+        strip_window_frame(hwnd, false);
         // Tauri 的 4px 缩放边框子窗口会挡在 WebView 之上、抢走边缘鼠标事件，
         // 每次 apply 都确认一遍（窗口重建后子窗口句柄会变）
         disable_resize_border(hwnd);
@@ -486,7 +489,12 @@ pub fn begin_resize(hwnd: isize) {
 ///
 /// 我们不需要 DWM 的阴影和边框（材质、圆角、拖动、缩放都自己做），
 /// 直接清掉这些样式位，DWM 就什么 frame 都不画了。
-fn strip_window_frame(hwnd: isize) {
+/// `force = true` 时：即使样式位已经干净，也照样下发 `SWP_FRAMECHANGED`。
+///
+/// 主题切换后 DWM 会重建非客户区 —— 样式位看着没被改过，DWM 那边却已经"忘掉"
+/// 我们剥离过边框，于是原生标题栏与那圈投影重新出现。这种情况下只删样式位不发
+/// `FRAMECHANGED` 等于什么都没做，必须强制它重算一次。
+fn strip_window_frame(hwnd: isize, force: bool) {
     unsafe {
         extern "system" {
             fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
@@ -520,10 +528,15 @@ fn strip_window_frame(hwnd: isize) {
             return;
         }
         let want = cur & !mask;
-        if cur == want {
+        crate::log_print!(
+            "[effects] strip frame：GWL_STYLE=0x{cur:X} → 0x{want:X}（force={force}）"
+        );
+        if cur == want && !force {
             return;
         }
-        SetWindowLongPtrW(hwnd, GWL_STYLE, want);
+        if cur != want {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, want);
+        }
         // SWP_FRAMECHANGED 必须带上，否则样式改动不会立刻反映到窗口外观
         SetWindowPos(
             hwnd,
@@ -533,10 +546,6 @@ fn strip_window_frame(hwnd: isize) {
             0,
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-        crate::log_print!(
-            "[effects] 已移除窗口 frame 样式位（0x{:X} → 0x{:X}）",
-            cur, want
         );
     }
 }
@@ -718,7 +727,7 @@ pub fn apply_rounded(hwnd: isize, dark: bool) {
     // 所以**无论当前档位**都无条件 strip frame + 关 NC 渲染，观感完全交给 CSS 层。
     // 这里不能按 tier 判断跳过：回退「失焦保持材质」后，Win11 的 tier 又变回
     // SystemBackdrop，若是跳过 strip，菜单四角会再次残留直角、与 CSS 圆角打架。
-    strip_window_frame(hwnd);
+    strip_window_frame(hwnd, false);
     disable_nc_rendering(hwnd);
     set_immersive_dark(hwnd, dark);
     clear_system_material(hwnd, tier);
@@ -764,6 +773,68 @@ pub fn refresh_theme(hwnd: isize, dark: bool) {
     if current_tier() == Tier::Acrylic {
         let _ = apply_acrylic(hwnd, dark);
     }
+}
+
+/// 用户手动切换「浅色 / 深色 / 系统」之后，把材质与窗口区域重刷一遍。
+///
+/// `set_theme` 只改 DWM 的窗口框架主题，**不刷我们自己的 acrylic tint**。浅色与深色
+/// 用的 tint 不同，不重刷就留着上一个主题的色：顶栏一条浅带、圆角边缘一圈异色。
+/// 且 `set_theme` 之后 DWM 会保留旧图层缓存，残影一直挂到窗口重建（用户表现为
+/// 「除非重启」），所以末尾必须 `nudge` 一次强制重算。
+///
+/// 两个模式不能走同一条路：
+/// - 直角模式：系统材质矩形铺满整个窗口，必须重刷 tint；
+/// - 圆角模式：材质已被 `apply_round_mode` 关掉、圆角靠 `SetWindowRgn` 裁，此时
+///   再开 acrylic 会把圆角外的区域重新填上 —— 只重设区域 + nudge。
+pub fn refresh_after_theme_switch(window: &tauri::WebviewWindow) {
+    use tauri::Manager;
+
+    // 第一遍：立刻做，让切完的瞬间观感大致正确
+    apply_theme_visuals(window, 1);
+
+    // 第二遍：`set_theme` 引起的非客户区重建由 DWM 在**下一帧**完成，第一遍的
+    // strip / nudge 会被它覆盖 —— 表现就是原生标题栏连同那圈投影重新出现，且
+    // 不重启不消失。延迟补一次是目前唯一稳定的时序：既盖住这次重建，又不至于
+    // 让用户觉得「切了没反应」。
+    let w = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let w2 = w.clone();
+        let _ = w.app_handle().run_on_main_thread(move || {
+            apply_theme_visuals(&w2, 2);
+        });
+    });
+}
+
+/// 主题视觉的实际刷新。`pass` 只用于日志。
+fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
+    // 这是「实际应该用的深浅」。不能靠 window.theme() 推 —— 手动切主题时已经不再调
+    // set_theme（见 set_theme_mode 的注释），theme() 返回的始终是**系统**主题。
+    let dark = match crate::settings::get().theme_mode.as_str() {
+        "dark" => true,
+        "light" => false,
+        // 跟随系统：读系统主题
+        _ => matches!(window.theme(), Ok(tauri::Theme::Dark)),
+    };
+    let Ok(h) = window.hwnd() else {
+        return;
+    };
+    let hwnd = h.0 as isize;
+
+    set_immersive_dark(hwnd, dark);
+    // force：DWM 可能已经"忘掉"剥过边框，样式位没变也必须重发 FRAMECHANGED，
+    // 否则原生标题栏会重新出现
+    strip_window_frame(hwnd, true);
+    disable_nc_rendering(hwnd);
+    if is_round() {
+        // 圆角模式：系统材质已关，只重设区域。这里**不能**开 acrylic ——
+        // 矩形材质会把圆角外重新填上
+        apply_rounded_corners(hwnd);
+    } else if current_tier() == Tier::Acrylic {
+        let _ = apply_acrylic(hwnd, dark);
+    }
+    nudge(hwnd);
+    crate::log_print!("[effects] 主题视觉重刷完成（第 {pass} 遍，dark={dark}）");
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,8 +1348,72 @@ static HOOK_APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::ne
 /// tao 给无边框窗口创建的边框子窗口类名
 const RESIZE_BORDER_CLASS: &str = "TAURI_DRAG_RESIZE_BORDERS";
 const GWLP_WNDPROC_BORDER: i32 = -4;
-/// 边缘判定容差（物理 px）。这个子窗口本身只有 4px 宽，留一点余量。
-const RESIZE_EDGE_TOLERANCE: i32 = 6;
+/// 边缘判定容差（物理 px）。
+///
+/// 取系统标准值 `SM_CXSIZEFRAME + SM_CXPADDEDBORDER`：100% DPI 下是 8，150% 下 12，
+/// 200% 下 16。这正是资源管理器、记事本等原生窗口的可缩放边框宽度，也是用户
+/// 形成「碰到边框就能拉」直觉的来源。
+///
+/// 原先写死 6（物理像素）没做 DPI 换算 —— 在 150% 屏上只有 4 个逻辑像素，
+/// 只有系统标准的一半，表现就是「必须往里靠很多才拉得动」。系统这个值本身
+/// 已经按当前 DPI 给出，不需要再自己乘缩放比。
+fn resize_edge_tolerance(hwnd: isize) -> i32 {
+    const SM_CXSIZEFRAME: i32 = 32;
+    const SM_CXPADDEDBORDER: i32 = 92;
+    unsafe {
+        extern "system" {
+            fn GetDpiForWindow(hwnd: isize) -> u32;
+            fn GetSystemMetricsForDpi(index: i32, dpi: u32) -> i32;
+            fn GetSystemMetrics(index: i32) -> i32;
+        }
+        let dpi = GetDpiForWindow(hwnd);
+        if dpi >= 96 {
+            let w = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
+                + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+            if w > 0 {
+                return w;
+            }
+        }
+        // 兜底：理论上 Win10 1607+ 都有 GetSystemMetricsForDpi，这里只是防它返回 0
+        let w = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+        if w > 0 {
+            w
+        } else {
+            8
+        }
+    }
+}
+
+/// 按缩放方向位掩码换成系统的缩放光标。位掩码见 `edge_from_cursor`。
+///
+/// 需要自己设光标的原因：`TAURI_DRAG_RESIZE_BORDERS` 子窗口盖在 WebView 之上，
+/// 而我们让它 `WM_NCHITTEST` 一律返回 `HTCLIENT`，它就不再是「非客户区」，
+/// 系统不会给缩放光标。那 4px 里光标一直是箭头，看起来像「这里不能拉」。
+fn set_resize_cursor(edge: u32) {
+    // LoadCursorW 接受 MAKEINTRESOURCE，即把序号当指针传
+    const IDC_SIZEWE: usize = 32644;
+    const IDC_SIZENS: usize = 32645;
+    const IDC_SIZENWSE: usize = 32642;
+    const IDC_SIZENESW: usize = 32643;
+    // 注意：match 里的 `|` 是「或模式」，不是位或，所以组合值要写成字面量
+    let id = match edge {
+        1 | 2 => IDC_SIZENS,   // 上 / 下
+        4 | 8 => IDC_SIZEWE,   // 左 / 右
+        5 | 10 => IDC_SIZENWSE, // 左上(1|4) / 右下(2|8)：↖↘
+        6 | 9 => IDC_SIZENESW,  // 左下(2|4) / 右上(1|8)：↙↗
+        _ => return,
+    };
+    unsafe {
+        extern "system" {
+            fn LoadCursorW(inst: isize, name: *const u16) -> isize;
+            fn SetCursor(cursor: isize) -> isize;
+        }
+        let h = LoadCursorW(0, id as *const u16);
+        if h != 0 {
+            SetCursor(h);
+        }
+    }
+}
 
 static BORDER_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static BORDER_ORIG: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
@@ -1295,7 +1430,7 @@ fn edge_from_cursor(main: isize) -> u32 {
         if GetCursorPos(&mut cur) == 0 || GetWindowRect(main, &mut wr) == 0 {
             return 0;
         }
-        let t = RESIZE_EDGE_TOLERANCE;
+        let t = resize_edge_tolerance(main);
         let mut e = 0u32;
         if cur.top <= wr.top + t {
             e |= 1;
@@ -1361,7 +1496,8 @@ pub fn disable_resize_border(hwnd: isize) {
         if BORDER_HWND.load(std::sync::atomic::Ordering::Relaxed) == found {
             return;
         }
-        let prev = SetWindowLongPtrW(found, GWLP_WNDPROC_BORDER, border_proc as isize);
+        // `as *const ()` 中转一下再变整数：Rust 2021 起不允许函数项直接 cast 成整数
+        let prev = SetWindowLongPtrW(found, GWLP_WNDPROC_BORDER, border_proc as *const () as isize);
         if prev == 0 {
             crate::log_warn!("[effects] 缩放边框子窗口子类化失败");
             return;
@@ -1388,6 +1524,20 @@ unsafe extern "system" fn border_proc(
     // 自定义缩放（SetCapture 到主窗口，后续 mousemove/up 由主窗口的 hook 接管）。
     if msg == WM_NCHITTEST {
         return HTCLIENT;
+    }
+    // 光标：`WM_NCHITTEST` 一律返回 HTCLIENT 之后，这一圈在系统眼里就是客户区，
+    // 不会自动变成缩放箭头。最外这 4px 是用户「贴到边框」时最先碰到的位置，
+    // 那里光标不变，看起来就像「还没进入可缩放区」，只能再往里挪 —— 这正是
+    // 「必须靠边框里面很多才触发」的直接来源。
+    const WM_SETCURSOR: u32 = 0x0020;
+    if msg == WM_SETCURSOR {
+        let main = unsafe { GetAncestor(hwnd, 2) }; // GA_ROOT
+        let target = if main != 0 { main } else { hwnd };
+        let edge = edge_from_cursor(target);
+        if edge != 0 {
+            set_resize_cursor(edge);
+            return 1; // TRUE：光标已设，别让系统再改回箭头
+        }
     }
     if msg == WM_LBUTTONDOWN {
         let main = unsafe { GetAncestor(hwnd, 2) }; // GA_ROOT
@@ -1484,7 +1634,7 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
         unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }
     }
 
-    let orig = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as isize) };
+    let orig = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as *const () as isize) };
     if orig == 0 {
         crate::log_warn!("[effects] WndProc 子类挂载失败（SetWindowLongPtrW 返回 0）");
         return;

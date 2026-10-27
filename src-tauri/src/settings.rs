@@ -29,6 +29,52 @@ pub struct Config {
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
+    /// 全局快捷键是否启用（默认启用：剪贴板工具的核心体验是「不用切窗口」）
+    #[serde(default = "default_true")]
+    pub hotkey_enabled: bool,
+    /// 全局快捷键组合，形如 `ctrl+alt+v`。解析见 `hotkey::parse_combo`。
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
+    /// 快捷面板**失焦时是否保持打开**（默认 false = 点别处就收起）。
+    ///
+    /// 为什么做成开关：失焦收起是「点一下就走」的默认体验，但也确实挡住一种很常见的
+    /// 用法 —— 按快捷键弹出面板后，想先回原窗口瞄一眼内容再决定选哪条，一回去面板
+    /// 就没了，等于白按一次。两种用法都合理，所以给开关而不是二选一。
+    ///
+    /// 打开后收起方式：Esc、再按一次唤起快捷键、选中一条（粘贴后自动收起）。
+    /// 只影响**快捷面板**；托盘菜单失焦必须收起（点别处 = 关掉菜单），不听这个开关。
+    #[serde(default)]
+    pub panel_stay_on_blur: bool,
+    /// 截图由谁来画：`"system"` = 系统的 `ms-screenclip:`（**默认**），
+    /// `"builtin"` = 轻贴自带覆盖层。
+    ///
+    /// 默认交给系统：系统截图自带标注（箭头、马赛克），也不受 Win10/Win11 版本
+    /// 差异影响；内置覆盖层只在「单屏 + 100% 缩放」的 Win11 上实测过，Win10、
+    /// 多屏与混合 DPI 都还没验证，不宜在它落地后的第一个版本就顶掉系统截图。
+    /// 想要「取消不碰剪贴板、截完直接进历史」这套固定体验的，自己切到内置即可 ——
+    /// 切过去那一次会立刻预热覆盖层，首次按快捷键同样不用等。
+    ///
+    /// 与 `screenshot_right_click_cancel` 的关系：那个开关只对**系统版**有意义
+    /// （内置版本来就能右键取消），切到内置后它保留但不再被发现。
+    #[serde(default = "default_screenshot_mode")]
+    pub screenshot_mode: String,
+    /// 截图快捷键是否启用
+    #[serde(default = "default_true")]
+    pub screenshot_hotkey_enabled: bool,
+    /// 截图快捷键组合，默认 `alt+q`。
+    ///
+    /// 不用 `ctrl+alt+a`（微信占着）、也不建议 `alt+z`（部分编辑器拿它做撤销的变体）。
+    #[serde(default = "default_screenshot_hotkey")]
+    pub screenshot_hotkey: String,
+    /// 截图时**右键取消**（默认开启）。
+    ///
+    /// 系统截图覆盖层本身对右键毫无反应（Win11 实测），只能 Esc 或点 ×。很多人
+    /// （包括本项目的用户）习惯右键取消，所以额外挂一个临时鼠标钩子把右键翻译成 Esc。
+    ///
+    /// 为什么要开关：这是一段会**全局监听鼠标**的代码，虽然只在截图期间存在、且只对
+    /// 覆盖层生效，但「我的程序在监听鼠标」这件事应该由用户自己决定，不能默认替他装。
+    #[serde(default = "default_true")]
+    pub screenshot_right_click_cancel: bool,
     /// 上次运行时的版本号（每次启动写成当前版本）。
     ///
     /// 用来判断「本次是不是升级上来的」：两个版本号不一致，就说明用户刚换了版本，
@@ -121,7 +167,7 @@ pub struct Config {
     pub update_cache: Option<UpdateCache>,
     /// 功能导览看到第几版了。与 `TOUR_VERSION` 比较，小于就等于没看过。
     ///
-    /// **为什么用版本号而不是布尔**：以后加了新功能，把 `TOUR_VERSION` 提到 2，
+    /// **为什么用版本号而不是布尔**：以后加了新功能，把 `TOUR_VERSION` 加一，
     /// 老用户就会再看到一次「新功能导览」；布尔值只能二选一，要么永久不再提示，
     /// 要么得手动重置。
     ///
@@ -176,8 +222,14 @@ pub struct Config {
     pub subtype_version: u32,
 }
 
-/// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次增量。
-pub const TOUR_VERSION: u32 = 1;
+/// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次**增量**。
+///
+/// 3 = 导览整体重写为 12 步（见 `index.html` 里带 `data-since="3"` 的段落）。
+/// 这一版是结构性重写而不是追加：步骤编号与讲解顺序全部变了，老用户按增量看
+/// 会缺上下文，所以 12 步统一标 `data-since="3"` —— `tour_seen_version` 小于 3
+/// 的用户（含 2.4.x 升级上来的）会完整看一遍，全新安装同样看全部 12 步。
+/// 以后只在末尾追加新功能时，新段落标下一个版本号即可恢复增量行为。
+pub const TOUR_VERSION: u32 = 3;
 
 /// serde 缺字段时的默认值：**0 = 没看过**。
 ///
@@ -227,6 +279,26 @@ fn default_theme_mode() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+/// 默认组合：`Ctrl+Alt+V`。
+///
+/// 不用 `Ctrl+Shift+V`（很多应用拿它做「粘贴为纯文本」）、不用 `Win+V`（系统占用）、
+/// 不用 `Ctrl+Alt+A`（QQ 截图占用）。这个组合冲突面最小。
+fn default_hotkey() -> String {
+    "ctrl+alt+v".to_string()
+}
+
+fn default_screenshot_hotkey() -> String {
+    "alt+q".to_string()
+}
+
+/// 截图实现方式：默认走**系统截图工具**，内置覆盖层由用户在设置里切换。
+///
+/// 注意 serde 的缺字段默认值也走这里 —— 老配置升级上来同样是 `system`，
+/// 不会被静默换成刚落地、只在单屏验证过的内置覆盖层。
+fn default_screenshot_mode() -> String {
+    "system".into()
 }
 
 /// 直角 / 圆角模式各自的**默认**浓度。
@@ -292,6 +364,16 @@ impl Default for Config {
             retention_days: default_retention(),
             // 置顶/收藏默认不受保留期影响
             prune_include_pinned: false,
+            hotkey_enabled: true,
+            hotkey: default_hotkey(),
+            // 默认保持既有行为：点别处即收起
+            panel_stay_on_blur: false,
+            screenshot_hotkey_enabled: true,
+            screenshot_hotkey: default_screenshot_hotkey(),
+            // 默认内置覆盖层
+            screenshot_mode: default_screenshot_mode(),
+            // 默认开启：系统覆盖层对右键没反应，转成 Esc 才能右键取消
+            screenshot_right_click_cancel: true,
             // 首次安装时为空：没有「从哪一版升上来」，关于页只显示当前版本一节
             last_run_version: String::new(),
             upgraded_from: String::new(),
@@ -501,6 +583,13 @@ pub fn get_settings() -> serde_json::Value {
         "cleanIncludePinned": cfg.clean_include_pinned,
         "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
+        "hotkeyEnabled": cfg.hotkey_enabled,
+        "hotkey": cfg.hotkey,
+        "panelStayOnBlur": cfg.panel_stay_on_blur,
+        "screenshotHotkeyEnabled": cfg.screenshot_hotkey_enabled,
+        "screenshotHotkey": cfg.screenshot_hotkey,
+        "screenshotRightClickCancel": cfg.screenshot_right_click_cancel,
+        "screenshotMode": cfg.screenshot_mode,
         "pruneIncludePinned": cfg.prune_include_pinned,
         // 当前模式生效的那一档（前端滑块直接用这个）
         "materialAlpha": cfg.alpha(),
@@ -612,7 +701,13 @@ pub fn set_theme_mode(app: tauri::AppHandle, value: String) -> Result<(), String
     // 托盘菜单窗口也要跟上，否则主界面深色、菜单浅色
     for label in ["main", "tray-menu"] {
         if let Some(w) = app.get_webview_window(label) {
-            crate::effects::apply_theme_mode(&w);
+            // **不再调 window.set_theme()**。对 decorations=false 的窗口它本来就没有
+            // 可见效果（它只作用于原生装饰），而 tao 处理 theme change 时会重走
+            // set_window_flags，把 strip_window_frame 剥掉的 WS_CAPTION /
+            // WS_THICKFRAME 又加回来 —— Win10 上表现为原生标题栏（标题文字 +
+            // 最小化/最大化/关闭）整条重现，且只有重启才消失。
+            // 深色偏好改由 set_immersive_dark 直接下发，见 refresh_after_theme_switch。
+            crate::effects::refresh_after_theme_switch(&w);
         }
     }
     Ok(())
@@ -643,6 +738,126 @@ pub fn set_pin_cancel_on_disable(value: bool) -> Result<(), String> {
 pub fn set_clean_include_pinned(value: bool) -> Result<(), String> {
     update(|c| c.clean_include_pinned = value);
     Ok(())
+}
+
+/// 快捷面板失焦时是否保持打开（设置页，默认关闭 = 点别处就收起）。
+///
+/// **只存值，无需通知谁**：失焦处理器每次触发时现读配置（见 `popup::closes_on_blur`），
+/// 所以改完立即生效，不必重建窗口或重启。
+#[tauri::command]
+pub fn set_panel_stay_on_blur(value: bool) -> Result<(), String> {
+    crate::log_print!(
+        "[settings] 面板失焦{}",
+        if value { "保持打开" } else { "即收起" }
+    );
+    update(|c| c.panel_stay_on_blur = value);
+    Ok(())
+}
+
+/// 设置全局快捷键。
+///
+/// **先注册、成功后才落配置**：注册可能失败（组合被占用），失败时恢复旧组合并重新
+/// 注册 —— 否则会出现「旧热键已注销、新热键没注册上」，用户彻底没有快捷键可用，
+/// 而设置页还显示着新组合。
+#[tauri::command]
+pub fn set_hotkey(combo: String, enabled: bool) -> Result<(), String> {
+    let prev = get();
+    match crate::hotkey::apply(
+        (&combo, enabled),
+        (&prev.screenshot_hotkey, prev.screenshot_hotkey_enabled),
+    ) {
+        Ok(()) => {
+            update(|c| {
+                c.hotkey = combo;
+                c.hotkey_enabled = enabled;
+            });
+            Ok(())
+        }
+        Err(e) => {
+            let _ = crate::hotkey::apply(
+                (&prev.hotkey, prev.hotkey_enabled),
+                (&prev.screenshot_hotkey, prev.screenshot_hotkey_enabled),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// 设置截图快捷键。回滚逻辑与 `set_hotkey` 相同。
+#[tauri::command]
+pub fn set_screenshot_hotkey(combo: String, enabled: bool) -> Result<(), String> {
+    let prev = get();
+    match crate::hotkey::apply(
+        (&prev.hotkey, prev.hotkey_enabled),
+        (&combo, enabled),
+    ) {
+        Ok(()) => {
+            update(|c| {
+                c.screenshot_hotkey = combo;
+                c.screenshot_hotkey_enabled = enabled;
+            });
+            Ok(())
+        }
+        Err(e) => {
+            let _ = crate::hotkey::apply(
+                (&prev.hotkey, prev.hotkey_enabled),
+                (&prev.screenshot_hotkey, prev.screenshot_hotkey_enabled),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// 切换截图实现：`builtin`（内置覆盖层）/ `system`（系统截图工具，默认）。
+///
+/// 只存值：下次按快捷键时才决定用哪个，不需要重启，也不需要拆掉已经存在的窗口。
+///
+/// 切到 `builtin` 时**顺手预热覆盖层**：启动时只给内置模式预热，而默认不是内置，
+/// 不补这一次的话用户切过去后第一次按快捷键仍要等 WebView 创建 1–2 秒 ——
+/// 恰好是这个开关想把体验换来的东西。
+#[tauri::command]
+pub fn set_screenshot_mode(app: tauri::AppHandle, value: String) -> Result<(), String> {
+    if !matches!(value.as_str(), "builtin" | "system") {
+        return Err(format!("未知截图方式：{value}"));
+    }
+    crate::log_print!(
+        "[settings] 截图方式：{}",
+        if value == "system" { "系统截图" } else { "内置覆盖层" }
+    );
+    update(|c| c.screenshot_mode = value);
+    // 原生覆盖层不需要预热，`app` 参数保留只为不改变命令签名
+    let _ = &app;
+    Ok(())
+}
+
+/// 截图右键取消开关（设置页，默认开启）。
+///
+/// 只存值：钩子是在**每次唤起截图时**按当时的配置决定装不装的（见
+/// `screenclip::launch`），所以这里不需要通知谁，也不必清理已经挂着的钩子 ——
+/// 它本来就只活一次截图的时间。
+#[tauri::command]
+pub fn set_screenshot_right_click_cancel(value: bool) -> Result<(), String> {
+    crate::log_print!(
+        "[settings] 截图右键取消已{}",
+        if value { "开启" } else { "关闭" }
+    );
+    update(|c| c.screenshot_right_click_cancel = value);
+    Ok(())
+}
+
+/// 录制快捷键期间临时注销热键。
+///
+/// 必须做：`RegisterHotKey` 注册的组合会被系统**先截走**，WebView 收不到 keydown，
+/// 用户就永远录不进「与当前相同的组合」，也录不进任何被自己占用的键。
+#[tauri::command]
+pub fn hotkey_suspend() -> Result<(), String> {
+    crate::hotkey::suspend()
+}
+
+/// 录制结束（无论成功、取消还是失败）后按当前配置恢复注册。
+#[tauri::command]
+pub fn hotkey_resume() -> Result<(), String> {
+    crate::hotkey::resume()
 }
 
 /// 保留期到期清理是否连置顶/收藏一起删。
@@ -736,6 +951,18 @@ mod tests {
         record_upgrade(&mut c, "2.2.0");
         assert_eq!(c.upgraded_from, "2.4.1");
         assert_eq!(c.last_run_version, "2.2.0");
+    }
+
+    /// 截图默认走**系统截图**，而且老配置升级上来也不会被换成内置。
+    ///
+    /// 内置覆盖层只在「单屏 + 100% 缩放」的 Win11 上实测过，Win10、多屏与混合 DPI
+    /// 都还没验证。serde 的缺字段默认值与 `Config::default()` 必须是同一个来源，
+    /// 否则老用户升级后会在毫无提示的情况下换掉截图实现。
+    #[test]
+    fn screenshot_defaults_to_system_for_new_install_and_upgrade() {
+        assert_eq!(Config::default().screenshot_mode, "system");
+        let upgraded: Config = serde_json::from_str("{}").expect("老 config.json 必须能解析");
+        assert_eq!(upgraded.screenshot_mode, "system");
     }
 
     /// 功能导览的判定：**新装与升级都要弹一次**，弹过之后不再弹。
