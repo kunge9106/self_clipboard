@@ -1048,8 +1048,8 @@ fn on_mouse_up(hwnd: isize, x: i32, y: i32) {
 
 // ───────────────────────────── 工具条几何 ─────────────────────────────
 
-const BAR_W: i32 = 78;
-const BAR_H: i32 = 42;
+const BAR_W: i32 = 76;
+const BAR_H: i32 = 38;
 const BAR_GAP: i32 = 8;
 
 /// 工具条位置：默认贴选区右下外侧；底部放不下翻到上方；再不行压到屏幕内。
@@ -1229,15 +1229,19 @@ unsafe fn draw_size_label(hdc: isize, sel: &Sel) {
 }
 
 /// 工具条：白底圆角，左半红叉取消、右半绿勾完成。
+///
+/// 不画投影：GDI 的 alpha 混合要额外的 DC 与位图，而工具条悬浮在任意底色上，
+/// 用矩形拼出来的投影会在压暗区里露出生硬的直角。层次交给「圆角 + 发丝边 +
+/// 半区分隔线」，代价低且不会出错。
 unsafe fn draw_toolbar(hdc: isize, sel: &Sel, sw: i32, sh: i32) {
     let bar = toolbar_rect(sel, sw, sh);
 
-    // 圆角需要先把画刷选进 DC，RoundRect 用的是 DC 当前画刷与画笔
+    // 圆角需要先把画刷与画笔选进 DC，RoundRect 用的是 DC 的当前对象
     let brush = CreateSolidBrush(0x00FF_FFFF);
-    let pen = CreatePen(0, 1, 0x00D0_D0D0);
+    let pen = CreatePen(0, 1, 0x00DC_DCDC);
     let old_brush = SelectObject(hdc, brush);
     let old_pen = SelectObject(hdc, pen);
-    RoundRect(hdc, bar.left, bar.top, bar.right, bar.bottom, 10, 10);
+    RoundRect(hdc, bar.left, bar.top, bar.right, bar.bottom, 12, 12);
     SelectObject(hdc, old_brush);
     SelectObject(hdc, old_pen);
     DeleteObject(brush);
@@ -1245,25 +1249,28 @@ unsafe fn draw_toolbar(hdc: isize, sel: &Sel, sw: i32, sh: i32) {
 
     let mid = (bar.left + bar.right) / 2;
     let cy = (bar.top + bar.bottom) / 2;
+    // 图标落在各自半区的正中。不能按中缝偏移算 —— 那样左侧会偏右、右侧会偏左，
+    // 宽度不对称时看起来像「图标挤在一起」。
+    let lx = (bar.left + mid) / 2;
+    let rx = (mid + bar.right) / 2;
     let arm = 7i32;
 
     // 红叉（COLORREF 是 0x00BBGGRR，别按 RGB 顺序写）
-    let pen_x = CreatePen(0, 2, 0x0026_26E8);
+    let pen_x = CreatePen(0, 2, 0x003A_3AE8);
     let old = SelectObject(hdc, pen_x);
-    MoveToEx(hdc, mid - 14 - arm, cy - arm, std::ptr::null_mut());
-    LineTo(hdc, mid - 14 + arm, cy + arm);
-    MoveToEx(hdc, mid - 14 + arm, cy - arm, std::ptr::null_mut());
-    LineTo(hdc, mid - 14 - arm, cy + arm);
+    MoveToEx(hdc, lx - arm, cy - arm, std::ptr::null_mut());
+    LineTo(hdc, lx + arm, cy + arm);
+    MoveToEx(hdc, lx + arm, cy - arm, std::ptr::null_mut());
+    LineTo(hdc, lx - arm, cy + arm);
     SelectObject(hdc, old);
     DeleteObject(pen_x);
 
     // 绿勾
-    let pen_v = CreatePen(0, 2, 0x0021_A121);
+    let pen_v = CreatePen(0, 2, 0x0028_A428);
     let old = SelectObject(hdc, pen_v);
-    let bx = mid + 14;
-    MoveToEx(hdc, bx - 7, cy, std::ptr::null_mut());
-    LineTo(hdc, bx - 2, cy + 5);
-    LineTo(hdc, bx + 7, cy - 6);
+    MoveToEx(hdc, rx - 7, cy, std::ptr::null_mut());
+    LineTo(hdc, rx - 2, cy + 5);
+    LineTo(hdc, rx + 7, cy - 6);
     SelectObject(hdc, old);
     DeleteObject(pen_v);
 
@@ -1272,11 +1279,11 @@ unsafe fn draw_toolbar(hdc: isize, sel: &Sel, sw: i32, sh: i32) {
         hdc,
         &Sel {
             left: mid,
-            top: bar.top + 8,
+            top: bar.top + 9,
             right: mid + 1,
-            bottom: bar.bottom - 8,
+            bottom: bar.bottom - 9,
         },
-        0x00E0_E0E0,
+        0x00E8_E8E8,
     );
 }
 
