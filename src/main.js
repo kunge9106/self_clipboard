@@ -850,8 +850,16 @@ function render({ keepScroll = false } = {}) {
   // 掉进第一列（1fr）而不再居中；隐藏但占位才能保持居中。
   document.querySelector(".statusbar").classList.toggle("is-settings", isSettings);
   if (isSettings) {
+    // 设置页的滚动容器是 .settings-body，与列表的 .history 不是同一个。
+    // 不单独保住它的话，任何一次重绘都会把设置页弹回顶部 —— 用户正看着
+    // 某一项时后台来了新内容，页面就自己跳了。
+    const prevBodyTop = keepScroll
+      ? (view.querySelector(".settings-body")?.scrollTop ?? 0)
+      : 0;
     view.innerHTML = settingsHtml();
     bindSettings(view);
+    const nextBody = view.querySelector(".settings-body");
+    if (prevBodyTop > 0 && nextBody) nextBody.scrollTop = prevBodyTop;
     return;
   }
 
@@ -860,7 +868,7 @@ function render({ keepScroll = false } = {}) {
     document.getElementById("status-count").textContent = "共 0 条";
     view.innerHTML = `<div class="empty">
       <div class="empty-title">文件复制已关闭</div>
-      <div class="empty-sub">可在「设置 → 记录与缓存」里打开</div>
+      <div class="empty-sub">可在「设置 → 数据 → 记录」里打开</div>
     </div>`;
     return;
   }
@@ -2182,7 +2190,7 @@ function toast(msg) {
 // 容易被 .view 的 overflow:hidden 裁掉（且无法滚动）。改成分页后每页只显示一组，
 // 组内仍保持平铺（不折叠）—— 视觉密度下来了，但不会多出「先点开才能改」这一步。
 //
-// 「记录」已并入「记录与缓存」：记什么（文件复制）→ 留多久（保留天数）→ 存在哪
+// 「记录」与缓存相关项同属「数据」页：记什么（文件复制）→ 留多久（保留天数）→ 存在哪
 // （缓存目录）→ 怎么清（清理缓存 / 清空全部），本就是同一条链路，拆成两页反而跳。
 const SETTINGS_TABS = [
   { id: "general", label: "常规" },
@@ -3848,10 +3856,23 @@ async function main() {
   // 增量：复制新内容时 Rust 推事件，直接插到顶部
   await listen("clipboard-update", (e) => {
     const item = e.payload;
-    if (!items.some((i) => i.id === item.id)) {
-      items.unshift(item);
-      // 新内容插到顶部，但用户可能正在看下面的内容 → 别把位置顶掉
-      render({ keepScroll: true });
+    if (items.some((i) => i.id === item.id)) return;
+    items.unshift(item);
+    // 设置页与条目列表无关。重绘只是把整页重建一遍，然后弹回顶部 ——
+    // 数据已经进了 items，切回列表自然是最新的。
+    if (currentView === "settings") return;
+    // 新内容插在**顶部**：内容整体下移一条。只恢复相同的 scrollTop，等于把
+    // 用户正在看的那一条往下推了「一条高度 + 间距」，观感就是页面自己滚了一下。
+    // 把这一段补回去，那一条才会停在原地。本来就在顶部时不补 —— 那种情况下
+    // 他应该立刻看到新内容。
+    const before = wrapEl ? wrapEl.scrollTop : 0;
+    render({ keepScroll: true });
+    // 只有新条目真的落在列表首位时才补。搜索中、或当前分类不显示这类内容时，
+    // 列表内容没变，补了反而把用户推到别处。
+    if (before > 0 && wrapEl && renderList[0]?.id === item.id) {
+      const first = wrapEl.firstElementChild;
+      const gap = parseFloat(getComputedStyle(wrapEl).rowGap) || 0;
+      if (first) wrapEl.scrollTop = before + first.offsetHeight + gap;
     }
   });
 }
