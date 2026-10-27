@@ -301,6 +301,7 @@ pub fn run() {
             screenshot::shot_image,
             screenshot::shot_show,
             screenshot::shot_windows,
+            screenshot::shot_pointer,
             screenshot::shot_commit,
             screenshot::shot_cancel,
             settings::hotkey_suspend,

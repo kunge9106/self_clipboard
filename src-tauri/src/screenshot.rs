@@ -89,17 +89,31 @@ extern "system" {
     /// 64 位必须用 Ptr 版本：`SetWindowLongW` 只能改 32 位，窗口样式会被截断
     fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+    fn SetWindowPos(
+        hwnd: isize,
+        after: isize,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        flags: u32,
+    ) -> i32;
+    /// 返回值最高位 = 当前是否按下；低字节的「曾被按过」不可用于判断
+    fn GetAsyncKeyState(vk: i32) -> i16;
 }
 
 const SRCCOPY: u32 = 0x00CC_0020;
 const DIB_RGB_COLORS: u32 = 0;
 
 const WH_KEYBOARD_LL: i32 = 13;
+const WH_MOUSE_LL: i32 = 14;
+const WM_LBUTTONDOWN: usize = 0x0201;
 const HC_ACTION: i32 = 0;
 const WM_KEYDOWN: usize = 0x0100;
 const WM_SYSKEYDOWN: usize = 0x0104;
 const VK_ESCAPE: u32 = 0x1B;
 const VK_RETURN: u32 = 0x0D;
+const VK_LBUTTON: i32 = 0x01;
 
 /// 让热键线程装上 Esc 兜底钩子（`WM_APP + 4`）
 pub const WM_SHOT_GUARD_ON: u32 = 0x8000 + 4;
@@ -107,6 +121,23 @@ pub const WM_SHOT_GUARD_ON: u32 = 0x8000 + 4;
 pub const WM_SHOT_GUARD_OFF: u32 = 0x8000 + 5;
 
 type HookProc = unsafe extern "system" fn(i32, usize, isize) -> isize;
+
+#[repr(C)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+/// 低级鼠标钩子的参数。只读 `pt`，但结构体按真实布局定义 —— 少写一个字段
+/// 不影响读 `pt`，多写错一个字段就会读到垃圾。
+#[repr(C)]
+struct MsllHookStruct {
+    pt: Point,
+    mouse_data: u32,
+    flags: u32,
+    time: u32,
+    extra: usize,
+}
 
 #[repr(C)]
 struct KbdLlHookStruct {
@@ -134,9 +165,9 @@ struct Shot {
     left: i32,
     top: i32,
     pixels: Vec<u8>,
-    /// 编码后的 PNG data URL。**同一张图只编一次**：1080p 的 PNG 压缩要几十毫秒，
-    /// 而前端为了防「事件早于页面加载」会主动拉一次图，可能连拉两次。
-    png: Option<String>,
+    /// 编码后的**预览图**（JPEG data URL）。**同一张图只编一次**：前端为了防
+    /// 「事件早于页面加载」会主动拉一次图，可能连拉两次。
+    preview: Option<String>,
     /// 光标下可选的顶层窗口矩形（虚拟屏物理坐标，按 z 序从高到低）。
     ///
     /// **必须在覆盖层显示之前枚举**：覆盖层一铺满整屏，
@@ -201,7 +232,7 @@ pub fn start(app: &AppHandle) {
             left,
             top,
             pixels,
-            png: None,
+            preview: None,
             windows,
         });
     }
@@ -290,6 +321,7 @@ fn prepare_overlay(app: &AppHandle, left: i32, top: i32, w: i32, h: i32, scale: 
     disable_window_transitions(&win);
     if let Ok(h) = win.hwnd() {
         never_focus(h.0 as isize);
+        SHOT_HWND.store(h.0 as isize, Ordering::SeqCst);
     }
 }
 
@@ -311,12 +343,24 @@ fn never_focus(hwnd: isize) {
     const GWL_EXSTYLE: i32 = -20;
     const WS_EX_NOACTIVATE: isize = 0x0800_0000;
     const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+    const SWP_FLAGS: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020;
     unsafe {
         let cur = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let next = cur | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
         if next != cur {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
         }
+        // 改完扩展样式必须让系统重算一次窗口框架，否则新样式可能不生效 ——
+        // 「明明设了 NOACTIVATE 却还被激活」十有八九是漏了这一步。
+        SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FLAGS);
+        let now = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let ok = now & WS_EX_NOACTIVATE != 0;
+        crate::log_print!(
+            "[shot] 覆盖层样式 {cur:#x} → {now:#x}（NOACTIVATE {}，TOOLWINDOW {}）",
+            if ok { "已生效" } else { "⚠ 未生效" },
+            if now & WS_EX_TOOLWINDOW != 0 { "有" } else { "无" }
+        );
     }
 }
 
@@ -376,7 +420,10 @@ pub fn prewarm(app: &AppHandle) {
 /// 延迟 3 秒是为了避开开机那一段资源高峰，不跟主窗口抢。
 pub fn prewarm_delayed(app: AppHandle) {
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        // 1.5 秒而不是 3 秒：日志显示「刚打开就按快捷键」时覆盖层常常还没建好，
+        // 那一次要现建窗口（页面加载 + IPC 建立），慢到 1.3–2 秒 —— 用户的鼠标
+        // 早就在拖了，第一下自然落空。1.5 秒仍避开了主窗口首帧那一波。
+        std::thread::sleep(std::time::Duration::from_millis(1500));
         if crate::settings::get().screenshot_mode != "builtin" {
             return;
         }
@@ -492,6 +539,11 @@ fn guard_off() {
     crate::hotkey::post_msg(WM_SHOT_GUARD_OFF);
 }
 
+/// 覆盖层窗口句柄。钩子要用它判断「覆盖层是否已经可见」。
+static SHOT_HWND: AtomicIsize = AtomicIsize::new(0);
+/// 首次按下补偿的鼠标钩子句柄（与 `GUARD` 成对装卸）
+static MOUSE_GUARD: AtomicIsize = AtomicIsize::new(0);
+
 /// 装上 **Esc 兜底**钩子：截图期间无论前端是否正常，按 Esc 都能退出。
 ///
 /// 为什么必须有这一条：取消逻辑本来完全在前端（`keydown` → `shot_cancel`）。
@@ -513,6 +565,48 @@ pub fn guard_install() {
         GUARD.store(h, Ordering::SeqCst);
     }
     crate::log_print!("[shot] Esc / Enter 兜底已启用");
+    click_guard_install();
+}
+
+/// 装上**首次按下补偿**。
+///
+/// 覆盖层已经是 `WS_EX_NOACTIVATE`（点击不激活），但实测仍偶发「第一下拖不动」——
+/// 说明 WebView2 自己在那儿挡了一下：宿主窗口不激活了，渲染进程仍会把第一次按下
+/// 当成「先聚焦页面」。与其继续猜它内部怎么判，不如在这里补一手：
+///
+/// 钩子把这次按下**原样告诉前端**（坐标 + 时间戳），前端就地开始框选。
+/// **不吞事件**：WebView 若也能收到，它的 `pointerdown` 会先一步把 `drag` 建好，
+/// 前端靠 `drag` 已存在 + 时间戳去重，不会重复开始。两条路谁先到都行。
+pub fn click_guard_install() {
+    if MOUSE_GUARD.load(Ordering::SeqCst) != 0 {
+        return;
+    }
+    unsafe {
+        let h = SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, GetModuleHandleW(std::ptr::null()), 0);
+        if h == 0 {
+            crate::log_warn!("[shot] 首次按下补偿钩子安装失败（错误码 {}）", GetLastError());
+            return;
+        }
+        MOUSE_GUARD.store(h, Ordering::SeqCst);
+    }
+}
+
+unsafe extern "system" fn mouse_proc(code: i32, w: usize, l: isize) -> isize {
+    if code == HC_ACTION && w == WM_LBUTTONDOWN {
+        let hwnd = SHOT_HWND.load(Ordering::SeqCst);
+        // 只在这一轮覆盖层可见时补：抓屏+编码那几百毫秒窗口还藏着，
+        // 那时的点击属于别的程序，不该拿来开选区。
+        if hwnd != 0 && IsWindowVisible(hwnd) != 0 {
+            let ms = &*(l as *const MsllHookStruct);
+            let app = SHOT_APP.lock().ok().and_then(|g| g.clone());
+            if let Some(app) = app {
+                // 时间戳用 Unix 毫秒而不是结构体里的 `time`：后者是开机以来的 tick 数，
+                // 前端拿 `Date.now()` 减它只会得到一个天文数字，判不出「是否迟到」。
+                let _ = app.emit_to(SHOT_LABEL, "shot-down", (ms.pt.x, ms.pt.y, now_ms()));
+            }
+        }
+    }
+    CallNextHookEx(MOUSE_GUARD.load(Ordering::SeqCst), code, w, l)
 }
 
 pub fn guard_uninstall() {
@@ -619,23 +713,28 @@ unsafe fn grab(left: i32, top: i32, w: i32, h: i32) -> Option<Vec<u8>> {
 ///
 /// 走 data URL 而不是临时文件：省掉「写盘 → 权限 → 清理」三件事，
 /// 也不会在用户磁盘上留一堆截图残片。代价是 IPC 会传一段 base64（1080p 约 1–2MB）。
-fn png_data_url(shot: &Shot) -> Option<String> {
-    let mut rgba = Vec::with_capacity(shot.pixels.len());
+fn preview_data_url(shot: &Shot) -> Option<String> {
+    // 预览用 **JPEG** 而不是 PNG：1080p 的 PNG 编码实测 143–203ms，占了
+    // 「按下快捷键 → 看到画面」的大头，而这段时间里用户的鼠标已经在按了 ——
+    // 画面晚到一步，第一下就落在下层窗口上，表现为「还得再点一次」。
+    //
+    // 画质不受影响：**最终裁的是 `shot.pixels` 里的原始像素**，预览图只负责
+    // 给用户看「我在哪、框哪块」，不参与出图。
+    let pixels = shot.w as usize * shot.h as usize;
+    let mut rgb = Vec::with_capacity(pixels * 3);
     for px in shot.pixels.chunks_exact(4) {
-        // BGRA → RGBA
-        rgba.push(px[2]);
-        rgba.push(px[1]);
-        rgba.push(px[0]);
-        rgba.push(255);
+        // BGRA → RGB：JPEG 没有 alpha 通道，少转一个也少占 1/4 内存
+        rgb.push(px[2]);
+        rgb.push(px[1]);
+        rgb.push(px[0]);
     }
-    let img = image::RgbaImage::from_raw(shot.w, shot.h, rgba)?;
-    let mut out = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut out, image::ImageFormat::Png)
+    let mut out = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
+    enc.encode(&rgb, shot.w, shot.h, image::ExtendedColorType::Rgb8)
         .ok()?;
     Some(format!(
-        "data:image/png;base64,{}",
-        crate::clipboard::base64_encode(out.get_ref())
+        "data:image/jpeg;base64,{}",
+        crate::clipboard::base64_encode(&out)
     ))
 }
 
@@ -680,14 +779,14 @@ fn crop_to_dib(shot: &Shot, x: i32, y: i32, w: i32, h: i32) -> Result<Vec<u8>, S
 pub fn shot_image() -> Result<String, String> {
     let mut g = LAST.lock().map_err(|_| "截图状态锁失效")?;
     let shot = g.as_mut().ok_or("没有待处理的截图")?;
-    if let Some(p) = shot.png.clone() {
+    if let Some(p) = shot.preview.clone() {
         crate::log_print!("[shot] 前端取图（命中缓存，{} KB）", p.len() / 1024);
         return Ok(p);
     }
     let t0 = std::time::Instant::now();
-    let Some(encoded) = png_data_url(shot) else {
+    let Some(encoded) = preview_data_url(shot) else {
         crate::log_warn!(
-            "[shot] PNG 编码失败（{}×{}，原始 {} 字节）",
+            "[shot] 预览编码失败（{}×{}，原始 {} 字节）",
             shot.w,
             shot.h,
             shot.pixels.len()
@@ -695,12 +794,39 @@ pub fn shot_image() -> Result<String, String> {
         return Err("截图编码失败".into());
     };
     crate::log_print!(
-        "[shot] 前端取图（编码 {} KB，耗时 {}ms）",
+        "[shot] 前端取图（JPEG {} KB，耗时 {}ms）",
         encoded.len() / 1024,
         t0.elapsed().as_millis()
     );
-    shot.png = Some(encoded.clone());
+    shot.preview = Some(encoded.clone());
     Ok(encoded)
+}
+
+/// 覆盖层刚显示时，左键是否**已经按着**？按着就返回当时的屏幕坐标。
+///
+/// 这是「20% 概率要点两次」的直接解法：抓屏 + 编码 + 解码要 150–300ms（dev 下更久），
+/// 用户按下快捷键后手指已经在拖了，等他看到画面时那一下早就按下去了 —— 那一下落在
+/// 下面的窗口上，等于白按。这里让前端在显示之后立刻问一句「是不是已经在按着」，
+/// 是的话就把**当前光标位置**当成框选起点，用户的手感是「一出现就跟着我走」。
+#[tauri::command]
+pub fn shot_pointer() -> Option<(i32, i32)> {
+    unsafe {
+        // 高字节是「当前是否按下」，不能用 != 0 判断，得取最高位
+        if GetAsyncKeyState(VK_LBUTTON) & 0x8000u16 as i16 == 0 {
+            return None;
+        }
+        // 复用 `effects::Rect` 接 POINT：两者前两个字段都是 i32，系统只写前 8 字节
+        let mut r = crate::effects::Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetCursorPos(&mut r) == 0 {
+            return None;
+        }
+        Some((r.left, r.top))
+    }
 }
 
 /// 光标下的窗口候选列表（给前端做「悬停高亮、单击截整窗」）。
@@ -731,8 +857,6 @@ extern "system" {
     fn IsIconic(hwnd: isize) -> i32;
     fn GetWindowTextLengthW(hwnd: isize) -> i32;
     fn GetClassNameW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
-    fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
-    fn GetCurrentProcessId() -> u32;
     fn GetWindowRect(hwnd: isize, rect: *mut crate::effects::Rect) -> i32;
     fn DwmGetWindowAttribute(
         hwnd: isize,
@@ -751,17 +875,27 @@ extern "system" {
 /// - 本进程自己的窗口 → 覆盖层自己和轻贴主窗口，选中它们毫无意义；
 /// - 没有标题 → 大量隐藏的宿主窗口都是无标题的。
 unsafe fn list_windows() -> Vec<[i32; 4]> {
-    let mut out: Vec<[i32; 4]> = Vec::new();
-    EnumWindows(
-        enum_proc,
-        &mut out as *mut Vec<[i32; 4]> as isize,
-    );
-    out
+    // 只跳过**覆盖层自己**：轻贴的主窗口、快捷面板都是正经窗口，用户完全可能想截它们
+    // （「快速识别不到轻贴本身」就是早先按进程过滤带来的）。
+    let mut ctx = EnumCtx {
+        out: Vec::new(),
+        skip: SHOT_HWND.load(Ordering::SeqCst),
+    };
+    EnumWindows(enum_proc, &mut ctx as *mut EnumCtx as isize);
+    ctx.out
+}
+
+struct EnumCtx {
+    out: Vec<[i32; 4]>,
+    skip: isize,
 }
 
 extern "system" fn enum_proc(hwnd: isize, param: isize) -> i32 {
     unsafe {
-        let out = &mut *(param as *mut Vec<[i32; 4]>);
+        let ctx = &mut *(param as *mut EnumCtx);
+        if hwnd == ctx.skip {
+            return 1;
+        }
         if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
             return 1;
         }
@@ -784,11 +918,6 @@ extern "system" fn enum_proc(hwnd: isize, param: isize) -> i32 {
             ) {
                 return 1;
             }
-        }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        if pid == GetCurrentProcessId() {
-            return 1;
         }
         let mut cloaked = 0u32;
         if DwmGetWindowAttribute(
@@ -822,7 +951,7 @@ extern "system" fn enum_proc(hwnd: isize, param: isize) -> i32 {
         if w <= 0 || h <= 0 {
             return 1;
         }
-        out.push([r.left, r.top, r.right, r.bottom]);
+        ctx.out.push([r.left, r.top, r.right, r.bottom]);
         1 // 继续枚举
     }
 }
@@ -922,7 +1051,7 @@ mod tests {
             left: 0,
             top: 0,
             pixels: vec![7u8; (w as usize) * (h as usize) * 4],
-            png: None,
+            preview: None,
             windows: Vec::new(),
         }
     }
