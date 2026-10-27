@@ -108,6 +108,8 @@ const DIB_RGB_COLORS: u32 = 0;
 const WH_KEYBOARD_LL: i32 = 13;
 const WH_MOUSE_LL: i32 = 14;
 const WM_LBUTTONDOWN: usize = 0x0201;
+const WM_LBUTTONUP: usize = 0x0202;
+const WM_RBUTTONDOWN: usize = 0x0204;
 const HC_ACTION: i32 = 0;
 const WM_KEYDOWN: usize = 0x0100;
 const WM_SYSKEYDOWN: usize = 0x0104;
@@ -601,6 +603,26 @@ pub fn click_guard_install() {
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, w: usize, l: isize) -> isize {
+    // 右键也转给前端：「取消」要是点按钮/按 Esc 之外再多一条稳的路，
+    // 而 `contextmenu` 在 NOACTIVATE 窗口里是不合成的，只能靠这里。
+    if code == HC_ACTION && w == WM_RBUTTONDOWN {
+        let hwnd = SHOT_HWND.load(Ordering::SeqCst);
+        if hwnd != 0 && IsWindowVisible(hwnd) != 0 {
+            let app = SHOT_APP.lock().ok().and_then(|g| g.clone());
+            if let Some(app) = app {
+                let _ = app.emit_to(SHOT_LABEL, "shot-right", ());
+            }
+        }
+    }
+    if code == HC_ACTION && w == WM_LBUTTONUP {
+        let hwnd = SHOT_HWND.load(Ordering::SeqCst);
+        if hwnd != 0 && IsWindowVisible(hwnd) != 0 {
+            let app = SHOT_APP.lock().ok().and_then(|g| g.clone());
+            if let Some(app) = app {
+                let _ = app.emit_to(SHOT_LABEL, "shot-up", ());
+            }
+        }
+    }
     if code == HC_ACTION && w == WM_LBUTTONDOWN {
         let hwnd = SHOT_HWND.load(Ordering::SeqCst);
         // 只在这一轮覆盖层可见时补：抓屏+编码那几百毫秒窗口还藏着，

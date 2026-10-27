@@ -259,8 +259,9 @@ document.addEventListener("mousemove", (e) => {
   render();
 });
 
-document.addEventListener("mouseup", () => {
-  if (!drag) return;
+/** 松开左键的收尾。DOM 的 mouseup 与钩子转发的 shot-up 共用这一份，
+ *  两边都到也不会重复（`drag` 为 null 就是已经收过了）。 */
+function endDrag() {
   const wasNew = drag.mode === "new";
   const target = drag.hover;
   drag = null;
@@ -278,6 +279,11 @@ document.addEventListener("mouseup", () => {
     rect = null;
   }
   render();
+}
+
+document.addEventListener("mouseup", () => {
+  if (!drag) return;
+  endDrag();
 });
 
 // 双击 = 复制。同样不能用 `dblclick`（同上：NOACTIVATE 窗口合成不出这个事件），
@@ -450,7 +456,7 @@ listen("shot-enter", () => {
 // 会看到 `drag` 已存在而跳过，两条路谁先到都不重复。
 listen("shot-down", (e) => {
   // `armed` 是必须的：钩子对所有左键按下都转发，截图结束后那一下不该再开选区
-  if (!armed || drag) return;
+  if (!armed) return;
   const [px, py, t] = e.payload || [];
   if (!Number.isFinite(px)) return;
   // 迟到的事件（比如上一次拖拽结束后才排到）不能用来开新框
@@ -459,9 +465,41 @@ listen("shot-down", (e) => {
   const x = (px - screenLeft) / sx;
   const y = (py - screenTop) / sy;
   if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return;
+
+  // **按钮判定必须排在 `drag` 检查之前**。覆盖层是 NOACTIVATE 窗口，按钮的
+  // mousedown/click 能不能到页面并不稳定（实测点绿勾毫无反应）；而万一某次
+  // `mouseup` 也丢了，`drag` 就会一直卡在「拖拽中」，把后面每次点击都挡掉 ——
+  // 那样绿勾永远点不动。钩子是系统级事件，坐标命中不依赖事件派发。
+  const hit = document.elementFromPoint(x, y);
+  if (hit && hit.closest(".bar")) {
+    if (hit.closest(".is-ok")) {
+      trace("工具条：完成（钩子命中）");
+      commit();
+    } else if (hit.closest(".is-cancel")) {
+      trace("工具条：取消（钩子命中）");
+      cancel();
+    }
+    return;
+  }
+
+  if (drag) return;
+  trace(`首次按下 (${Math.round(x)},${Math.round(y)}) 开始框选`);
   drag = { mode: "new", x0: x, y0: y, hover: windowAt(x, y) };
   rect = { x, y, w: 0, h: 0 };
   render();
+});
+
+// 抬起也由钩子兜一道：DOM 的 mouseup 若丢一次，`drag` 会一直卡着不放手，
+// 表现为「拖完一次之后再也框不动、按钮也点不动」。
+listen("shot-up", () => {
+  if (!armed || !drag) return;
+  endDrag();
+});
+
+// 右键由钩子转发：`contextmenu` 在这里同样不合成
+listen("shot-right", () => {
+  if (!armed) return;
+  cancel();
 });
 
 // 两种进入方式都要覆盖：
