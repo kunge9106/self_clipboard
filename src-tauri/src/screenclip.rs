@@ -47,7 +47,6 @@ extern "system" {
     fn SetWindowsHookExW(id: i32, proc: HookProc, module: isize, thread: u32) -> isize;
     fn UnhookWindowsHookEx(hook: isize) -> i32;
     fn CallNextHookEx(hook: isize, code: i32, w: usize, l: isize) -> isize;
-    fn PostThreadMessageW(tid: u32, msg: u32, w: usize, l: isize) -> i32;
     fn GetModuleHandleW(name: *const u16) -> isize;
     fn GetLastError() -> u32;
     fn GetForegroundWindow() -> isize;
@@ -94,16 +93,9 @@ pub fn launch() {
 }
 
 fn post(msg: u32) {
-    let tid = crate::hotkey::thread_id();
-    if tid == 0 {
-        // 热键线程还没起来（启动瞬间按了截图键）—— 截图本身已经唤起了，
-        // 只是没有右键取消，不值得为此报错给用户。
-        crate::log_warn!("[shot] 热键线程未就绪，本次没有安装右键取消钩子");
-        return;
-    }
-    unsafe {
-        PostThreadMessageW(tid, msg, 0, 0);
-    }
+    // 投递统一走 `hotkey::post_msg`：热键线程是本进程唯一的 Win32 消息线程，
+    // 各模块自己 PostThreadMessage 迟早会出现「线程 ID 取法不一致」的幽灵问题。
+    crate::hotkey::post_msg(msg);
 }
 
 /// 安装钩子。**必须在热键线程调用**（低级钩子与安装线程绑定）。

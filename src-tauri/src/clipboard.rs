@@ -31,6 +31,13 @@ static HISTORY: OnceLock<Mutex<Vec<HistoryItem>>> = OnceLock::new();
 static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
 /// 本程序写回剪贴板后产生的序列号（应被忽略，避免自读）
 static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// 「自己写进剪贴板的内容也照常记录」的一次性通行证。
+///
+/// 采集端默认把自己 owner 的写入当成「从历史回贴」跳过（否则每粘一次就多一条重复）。
+/// 但**截图**是唯一的例外：内容由我们自己写进剪贴板，用户却期望它立刻出现在列表里。
+/// 这个标记只被采集端消费一次，回贴时会主动清掉，防止残留把一次真实的回贴记成新条目。
+static RECORD_OWN_WRITE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// 「未识别」日志的去重序号：同一个序号只报一次，避免轮询期间每拍刷一条。
 static LAST_LOGGED_SEQ: AtomicU32 = AtomicU32::new(0);
 /// 「正在读剪贴板」互斥标记。
@@ -1233,8 +1240,11 @@ pub fn on_clipboard_update() {
         // 就处理掉这条消息。owner 由系统在 SetClipboardData 时原子设置，没有这个窗口期。
         let me = MAIN_HWND.get().copied().unwrap_or(0);
         if me != 0 && GetClipboardOwner() == me {
-            LAST_SEQ.store(seq, Ordering::Relaxed);
-            return;
+            if !RECORD_OWN_WRITE.swap(false, Ordering::SeqCst) {
+                LAST_SEQ.store(seq, Ordering::Relaxed);
+                return;
+            }
+            // 通行证生效：这是截图写进来的，继续往下走当成一次新复制
         }
         if seq == SKIP_SEQ.load(Ordering::Relaxed) {
             SKIP_SEQ.store(0, Ordering::Relaxed);
@@ -3430,6 +3440,20 @@ unsafe fn mark_skip() {
 
 /// DIB（BITMAPINFOHEADER + 像素）写入 CF_DIB
 unsafe fn write_dib_to_clipboard(dib: &[u8]) -> Result<(), String> {
+    write_dib_raw(dib, false)
+}
+
+/// 写位图到剪贴板。`record` = 是否让采集线程把它当成一条新内容。
+///
+/// 两个调用方的诉求正好相反，所以必须分开：
+/// - **从历史回贴**（`copy_back` 的图片分支）：`record = false`。回贴是「把旧内容
+///   还给剪贴板」，若让它再记一条，用户每粘一次就多一条重复；
+/// - **截图**（`screenshot`）：`record = true`。截图是新内容，用户截完就期望它在
+///   列表里 —— 这条链路正是「截图 → 自动进轻贴」的实现方式。
+///
+/// 共用一个函数体而不是各写一份：GMEM/加锁/SetClipboardData 的顺序错了会静默失败
+/// （剪贴板里是空的，或格式写不进去），这类代码只该有一份。
+unsafe fn write_dib_raw(dib: &[u8], record: bool) -> Result<(), String> {
     let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
     if OpenClipboard(hwnd) == 0 {
         return Err("OpenClipboard 失败".into());
@@ -3452,8 +3476,26 @@ unsafe fn write_dib_to_clipboard(dib: &[u8]) -> Result<(), String> {
     if ok == 0 {
         return Err("SetClipboardData(CF_DIB) 失败".into());
     }
-    mark_skip();
+    if !record {
+        mark_skip();
+        // 回贴绝不能被记录：顺手把可能残留的通行证清掉，
+        // 否则「上一条截图刚好没被采集消费」时，这一次回贴会被误记成新条目
+        RECORD_OWN_WRITE.store(false, Ordering::SeqCst);
+    }
     Ok(())
+}
+
+/// 把一张位图当作**新内容**写进剪贴板（截图专用）。
+///
+/// 刻意不 `mark_skip`：写完之后采集线程会正常读到它，于是截图立刻出现在轻贴列表里，
+/// 不需要截图模块自己再走一遍存储。
+pub fn write_shot_to_clipboard(dib: &[u8]) -> Result<(), String> {
+    RECORD_OWN_WRITE.store(true, Ordering::SeqCst);
+    let r = unsafe { write_dib_raw(dib, true) };
+    if r.is_err() {
+        RECORD_OWN_WRITE.store(false, Ordering::SeqCst);
+    }
+    r
 }
 
 // ---------------------------------------------------------------------------
@@ -4759,7 +4801,7 @@ fn cf_html_fragment(raw: &str) -> &str {
     }
 }
 
-fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {

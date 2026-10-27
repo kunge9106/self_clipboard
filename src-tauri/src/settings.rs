@@ -45,6 +45,17 @@ pub struct Config {
     /// 只影响**快捷面板**；托盘菜单失焦必须收起（点别处 = 关掉菜单），不听这个开关。
     #[serde(default)]
     pub panel_stay_on_blur: bool,
+    /// 截图由谁来画：`"builtin"` = 轻贴自带覆盖层（默认），`"system"` = 系统的
+    /// `ms-screenclip:`。
+    ///
+    /// 默认内置：内置版的行为（工具条、取消方式、截完进历史）由我们决定，不受
+    /// Win10/Win11 系统版本差异影响。系统版留作备选 —— 它自带标注能力，
+    /// 需要画箭头时仍可切过去。
+    ///
+    /// 与 `screenshot_right_click_cancel` 的关系：那个开关只对**系统版**有意义
+    /// （内置版本来就能右键取消），切到内置后它保留但不再被发现。
+    #[serde(default = "default_screenshot_mode")]
+    pub screenshot_mode: String,
     /// 截图快捷键是否启用
     #[serde(default = "default_true")]
     pub screenshot_hotkey_enabled: bool,
@@ -209,8 +220,11 @@ pub struct Config {
     pub subtype_version: u32,
 }
 
-/// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次增量。
-pub const TOUR_VERSION: u32 = 1;
+/// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次**增量**。
+///
+/// 2 = 2.5.0 的快捷键 / 截图 / 键位可改三步（见 `index.html` 里带 `data-since="2"`
+/// 的段落）。老用户（`tour_seen_version = 1`）只展示这三步，不重放前面 7 步基础介绍。
+pub const TOUR_VERSION: u32 = 2;
 
 /// serde 缺字段时的默认值：**0 = 没看过**。
 ///
@@ -272,6 +286,11 @@ fn default_hotkey() -> String {
 
 fn default_screenshot_hotkey() -> String {
     "alt+q".to_string()
+}
+
+/// 截图实现方式：内置覆盖层（默认）或系统截图工具。
+fn default_screenshot_mode() -> String {
+    "builtin".into()
 }
 
 /// 直角 / 圆角模式各自的**默认**浓度。
@@ -343,6 +362,8 @@ impl Default for Config {
             panel_stay_on_blur: false,
             screenshot_hotkey_enabled: true,
             screenshot_hotkey: default_screenshot_hotkey(),
+            // 默认内置覆盖层
+            screenshot_mode: default_screenshot_mode(),
             // 默认开启：系统覆盖层对右键没反应，转成 Esc 才能右键取消
             screenshot_right_click_cancel: true,
             // 首次安装时为空：没有「从哪一版升上来」，关于页只显示当前版本一节
@@ -560,6 +581,7 @@ pub fn get_settings() -> serde_json::Value {
         "screenshotHotkeyEnabled": cfg.screenshot_hotkey_enabled,
         "screenshotHotkey": cfg.screenshot_hotkey,
         "screenshotRightClickCancel": cfg.screenshot_right_click_cancel,
+        "screenshotMode": cfg.screenshot_mode,
         "pruneIncludePinned": cfg.prune_include_pinned,
         // 当前模式生效的那一档（前端滑块直接用这个）
         "materialAlpha": cfg.alpha(),
@@ -770,6 +792,22 @@ pub fn set_screenshot_hotkey(combo: String, enabled: bool) -> Result<(), String>
             Err(e)
         }
     }
+}
+
+/// 切换截图实现：`builtin`（内置覆盖层）/ `system`（系统截图工具）。
+///
+/// 只存值：下次按快捷键时才决定用哪个，不需要重启，也不需要拆掉已经存在的窗口。
+#[tauri::command]
+pub fn set_screenshot_mode(value: String) -> Result<(), String> {
+    if !matches!(value.as_str(), "builtin" | "system") {
+        return Err(format!("未知截图方式：{value}"));
+    }
+    crate::log_print!(
+        "[settings] 截图方式：{}",
+        if value == "system" { "系统截图" } else { "内置覆盖层" }
+    );
+    update(|c| c.screenshot_mode = value);
+    Ok(())
 }
 
 /// 截图右键取消开关（设置页，默认开启）。

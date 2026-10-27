@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "轻贴默认权限：核心能力（自定义命令默认允许，无需显式声明）",
-  "windows": ["main", "tray-menu", "panel"],
+  "windows": ["main", "tray-menu", "panel", "shot"],
   "permissions": [
     "core:default",
     "core:window:default",

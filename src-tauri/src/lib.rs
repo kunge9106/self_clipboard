@@ -20,6 +20,7 @@ mod popup;
 mod panel;
 mod input;
 mod screenclip;
+mod screenshot;
 #[cfg(windows)]
 mod purge;
 
@@ -296,6 +297,11 @@ pub fn run() {
             settings::set_panel_stay_on_blur,
             settings::set_screenshot_hotkey,
             settings::set_screenshot_right_click_cancel,
+            settings::set_screenshot_mode,
+            screenshot::shot_image,
+            screenshot::shot_show,
+            screenshot::shot_commit,
+            screenshot::shot_cancel,
             settings::hotkey_suspend,
             settings::hotkey_resume,
             panel::panel_hide,
@@ -345,6 +351,14 @@ pub fn run() {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
         }
+        // 预热截图覆盖层：首次截图现建 WebView 要 1–2 秒，用户会以为「按了没反应」
+        // 甚至被兜底逻辑取消。启动 3 秒后（不抢开机性能）在后台把窗口建好、隐藏着。
+        let warm = app.handle().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let a = warm.clone();
+            let _ = warm.run_on_main_thread(move || screenshot::prewarm(&a));
+        });
         Ok(())
     });
 

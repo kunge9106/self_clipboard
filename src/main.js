@@ -2430,18 +2430,32 @@ function settingsGeneralHtml(s) {
         ) +
         rowCtl(
           "截图快捷键",
-          "调用系统截图工具框选；已有截完的图会作为图片条目出现在列表里",
+          "点击后按下想要的组合（至少含一个修饰键）；按 Esc 取消",
           `<button type="button" class="btn-ghost hotkey-btn" id="set-shot-hotkey"${
             s.screenshotHotkeyEnabled ? "" : " disabled"
           }>${comboLabel(s.screenshotHotkey || "alt+q")}</button>`,
           true,
           "set-shot-hotkey"
         ) +
-        // 截图覆盖层本身不响应右键，这一项把右键翻译成 Esc —— 默认开
+        rowCtl(
+          "截图方式",
+          "内置：轻贴自己画覆盖层，交互与取消方式固定；系统：调用 Windows 截图工具，自带标注",
+          `<div class="seg" id="set-shot-mode">
+            <button type="button" data-mode="builtin" ${
+              (s.screenshotMode || "builtin") === "builtin" ? 'class="on"' : ""
+            }>内置</button>
+            <button type="button" data-mode="system" ${
+              s.screenshotMode === "system" ? 'class="on"' : ""
+            }>系统</button>
+          </div>`,
+          true,
+          "set-shot-mode"
+        ) +
+        // 只对系统截图有意义：内置覆盖层本来就能右键取消
         rowCheck(
           "set-shot-rclick",
           "截图时右键取消",
-          "在系统截图上点右键即取消（等同 Esc）；关闭后右键没有反应",
+          "在系统截图上点右键即取消（等同 Esc）；内置截图本身已支持",
           s.screenshotRightClickCancel,
           true
         )
@@ -3152,14 +3166,36 @@ async function reloadSettings() {
 
 let tourStep = 0;
 
+/** 本次导览是否展示**全部**步骤。
+ *  - 升级弹窗：false —— 只给新增的那几步，老用户不用重看基础介绍；
+ *  - 设置页「重新查看」：true —— 用户主动点进来，就是要从头看一遍。
+ *  放在 `tourStep` 旁边而不是 `openFeatureTour` 旁，是因为 `tourEls` 要读它，
+ *  而 `tourEls` 在本文件里被多处调用，声明必须早于任何一次调用。 */
+let tourShowAll = false;
+
 /** 一次性取出导览需要的节点，避免每个函数里反复 getElementById */
 function tourEls() {
   const mask = document.getElementById("feature-tour");
   if (!mask) return null;
+  const all = [...mask.querySelectorAll(".tour-step")];
+  // **升级用户只看增量**：`data-since` 大于上次看过的版本号才展示。
+  // 全新安装（seen = 0）从头看一遍；从 2.4.x 升上来（seen = 1）只看 2.5.0 新增的那三步，
+  // 不把前面 7 步基础介绍重放一遍。后端只下发版本号，判断留在这里，
+  // 「哪里该变」和「变了什么」在同一处，改导览时不容易漏。
+  const seen = settings?.tourSeenVersion ?? 0;
+  const steps =
+    !tourShowAll && seen > 0
+      ? all.filter((el) => Number(el.dataset.since || 1) > seen)
+      : all;
+  // 被排除的步骤必须**显式隐藏**：`renderTourStep` 只负责集合内部的显隐，
+  // 集合外的元素会保持原样，结果是一屏叠着好几步。
+  all.forEach((el) => {
+    if (!steps.includes(el)) el.hidden = true;
+  });
   return {
     mask,
     body: mask.querySelector(".tour-body"),
-    steps: [...mask.querySelectorAll(".tour-step")],
+    steps: steps.length ? steps : all,
     dots: document.getElementById("tour-dots"),
     prev: document.getElementById("tour-prev"),
     next: document.getElementById("tour-next"),
@@ -3212,7 +3248,8 @@ function renderTourStep(t) {
  *  从设置页「重新查看」进来的不算：那种情形下用户早就过了首次引导。 */
 let tourFromFirstRun = false;
 
-function openFeatureTour(fromFirstRun = false) {
+function openFeatureTour(fromFirstRun = false, showAll = false) {
+  tourShowAll = showAll;
   const t = tourEls();
   if (!t) return;
   tourFromFirstRun = fromFirstRun;
@@ -3243,18 +3280,23 @@ async function closeFeatureTour() {
 function bindFeatureTour() {
   const t = tourEls();
   if (!t) return;
+  // 翻页时**重新取**集合：注册这一刻 `settings` 可能还没加载完（步骤集合会变），
+  // 用捕获的那份会算出错误的总页数，表现为「最后一步点下一步又回到第一步」。
   t.next.onclick = () => {
-    if (tourStep >= t.steps.length - 1) {
+    const cur = tourEls();
+    if (!cur) return;
+    if (tourStep >= cur.steps.length - 1) {
       closeFeatureTour();
     } else {
       tourStep += 1;
-      renderTourStep(t);
+      renderTourStep(cur);
     }
   };
   t.prev.onclick = () => {
     if (tourStep === 0) return;
     tourStep -= 1;
-    renderTourStep(t);
+    const cur = tourEls();
+    if (cur) renderTourStep(cur);
   };
   // 跳过与点遮罩都算看过
   t.skip.onclick = () => closeFeatureTour();
@@ -3449,6 +3491,34 @@ function bindSettings(view) {
   // 截图右键取消：同样只存布尔，下次唤起截图时按新值决定装不装钩子
   bindCheck("set-shot-rclick", "set_screenshot_right_click_cancel");
 
+  // 截图方式：内置覆盖层 / 系统工具。「右键取消」只对前者之外的系统版有意义
+  // （内置版本来就能右键取消），所以切到内置时把那一行整行置灰。
+  const shotMode = view.querySelector("#set-shot-mode");
+  if (shotMode) {
+    const rclickRow = view.querySelector("#set-shot-rclick")?.closest(".row");
+    const syncShotMode = () => {
+      const mode = shotMode.querySelector("button.on")?.dataset.mode || "builtin";
+      rclickRow?.toggleAttribute("data-disabled", mode === "builtin");
+    };
+    syncShotMode();
+    shotMode.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      const mode = btn.dataset.mode;
+      try {
+        await invoke("set_screenshot_mode", { value: mode });
+        settings = await invoke("get_settings");
+        shotMode
+          .querySelectorAll("button[data-mode]")
+          .forEach((b) => b.classList.toggle("on", b === btn));
+        syncShotMode();
+        toast(mode === "system" ? "截图改为系统工具" : "截图改为内置覆盖层");
+      } catch (err) {
+        toast("切换失败：" + err);
+      }
+    });
+  }
+
   bindCheck("set-clean", "set_clean_on_close");
   bindCheck("set-clean-pinned", "set_clean_include_pinned");
   // 保留期清理的豁免开关。与上面那条是**两个不同策略点**，别合并：
@@ -3477,7 +3547,8 @@ function bindSettings(view) {
 
   // 重看功能导览：只打开，不写「已看过」标记 —— 看多少次都不影响首次判断
   const replayTour = view.querySelector("#replay-tour");
-  if (replayTour) replayTour.onclick = () => openFeatureTour();
+  // 主动重看：从头到尾 10 步都放出来，而不是只给他「这次更新了什么」
+  if (replayTour) replayTour.onclick = () => openFeatureTour(false, true);
 
   // 置顶互通不能走 bindCheck：这个开关会把已有置顶记录归一到新表示，
   // 必须顺带把本地缓存的 items 拉新的，否则列表里的置顶徽章/排序还是旧的。

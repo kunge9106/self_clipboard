@@ -674,8 +674,10 @@ body.dark #theme-toggle .i-sun {
 
 /* 从属选项：主开关关闭时整组置灰且不可点。
    只做视觉禁用而没有 pointer-events 的话，点下去仍会触发命令，
-   用户会看到「明明灰着却改成功了」这种自相矛盾的行为。 */
-.seg[data-disabled] {
+   用户会看到「明明灰着却改成功了」这种自相矛盾的行为。
+   `.row` 版用于整行是从属项的情况（例如「截图时右键取消」只对系统截图有意义）。 */
+.seg[data-disabled],
+.row[data-disabled] {
   opacity: 0.45;
   pointer-events: none;
 }

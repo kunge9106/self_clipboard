@@ -129,7 +129,10 @@ fn show_now(app: &AppHandle) {
 /// 非前台进程调用 `SetForegroundWindow` 会被系统拦（防止弹窗骚扰），绕法是先
 /// `AttachThreadInput` 把自己的输入队列挂到**当前前台线程**上，此时系统认为两者
 /// 是同一个输入上下文，设置才能生效；做完立刻解挂，否则两边键盘状态会互相影响。
-unsafe fn force_foreground(hwnd: isize) {
+///
+/// `pub(crate)`：截图覆盖层也要抢一次前台（否则按 Esc 收不掉），逻辑完全一样，
+/// 不重复实现 —— 这个函数里每一步都是踩坑换来的，复制一份必然漂移。
+pub(crate) unsafe fn force_foreground(hwnd: isize) {
     if hwnd == 0 {
         return;
     }

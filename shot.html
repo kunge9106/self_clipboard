@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>轻贴截图</title>
+    <link rel="stylesheet" href="/src/shot.css" />
+  </head>
+  <body>
+    <!-- 截图覆盖层：整窗就是一张冻结的屏幕图，上面盖一层可拖拽的选区。
+         尺寸由 Rust 端按显示器物理像素设定，webview 缩放已配成 1 CSS px = 1 物理 px，
+         所以这里拿到的 clientX/clientY 可以直接当像素坐标交给后端裁剪。 -->
+    <img id="shot-img" alt="" draggable="false" decoding="sync" />
+    <div id="sel" class="sel" hidden>
+      <span class="h nw" data-h="nw"></span>
+      <span class="h n" data-h="n"></span>
+      <span class="h ne" data-h="ne"></span>
+      <span class="h e" data-h="e"></span>
+      <span class="h se" data-h="se"></span>
+      <span class="h s" data-h="s"></span>
+      <span class="h sw" data-h="sw"></span>
+      <span class="h w" data-h="w"></span>
+      <span id="sel-size" class="sel-size"></span>
+    </div>
+    <div id="hint" class="hint">
+      <b>拖动</b>选择区域 · <b>双击 / 回车</b>复制 · <b>右键 / Esc</b>取消
+    </div>
+    <!-- 选区工具条：跟着选区走。
+         视觉参照微信/QQ 截图：一条浅色半透明圆角条，纯图标按钮、无文字标签，
+         右侧固定「红叉 = 取消 / 绿勾 = 完成」。S1 只有这两个动作，
+         标注工具（矩形/箭头/文字…）是 S2 的事，但位置和形态先按那套留好。 -->
+    <div id="sel-bar" class="bar" hidden>
+      <button type="button" id="btn-cancel" class="bar-btn is-cancel" title="取消（Esc）">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" aria-hidden="true">
+          <path d="M5.5 5.5l13 13M18.5 5.5l-13 13" />
+        </svg>
+      </button>
+      <button type="button" id="btn-ok" class="bar-btn is-ok" title="完成（Enter / 双击）">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4.5 12.5l5 5L20 6.5" />
+        </svg>
+      </button>
+    </div>
+    <script type="module" src="/src/shot.js"></script>
+  </body>
+</html>
