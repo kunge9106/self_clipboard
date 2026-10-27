@@ -220,8 +220,11 @@ pub struct Config {
     pub subtype_version: u32,
 }
 
-/// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次增量。
-pub const TOUR_VERSION: u32 = 1;
+/// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次**增量**。
+///
+/// 2 = 2.5.0 的快捷键 / 截图 / 键位可改三步（见 `index.html` 里带 `data-since="2"`
+/// 的段落）。老用户（`tour_seen_version = 1`）只展示这三步，不重放前面 7 步基础介绍。
+pub const TOUR_VERSION: u32 = 2;
 
 /// serde 缺字段时的默认值：**0 = 没看过**。
 ///

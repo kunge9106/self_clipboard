@@ -3166,14 +3166,36 @@ async function reloadSettings() {
 
 let tourStep = 0;
 
+/** 本次导览是否展示**全部**步骤。
+ *  - 升级弹窗：false —— 只给新增的那几步，老用户不用重看基础介绍；
+ *  - 设置页「重新查看」：true —— 用户主动点进来，就是要从头看一遍。
+ *  放在 `tourStep` 旁边而不是 `openFeatureTour` 旁，是因为 `tourEls` 要读它，
+ *  而 `tourEls` 在本文件里被多处调用，声明必须早于任何一次调用。 */
+let tourShowAll = false;
+
 /** 一次性取出导览需要的节点，避免每个函数里反复 getElementById */
 function tourEls() {
   const mask = document.getElementById("feature-tour");
   if (!mask) return null;
+  const all = [...mask.querySelectorAll(".tour-step")];
+  // **升级用户只看增量**：`data-since` 大于上次看过的版本号才展示。
+  // 全新安装（seen = 0）从头看一遍；从 2.4.x 升上来（seen = 1）只看 2.5.0 新增的那三步，
+  // 不把前面 7 步基础介绍重放一遍。后端只下发版本号，判断留在这里，
+  // 「哪里该变」和「变了什么」在同一处，改导览时不容易漏。
+  const seen = settings?.tourSeenVersion ?? 0;
+  const steps =
+    !tourShowAll && seen > 0
+      ? all.filter((el) => Number(el.dataset.since || 1) > seen)
+      : all;
+  // 被排除的步骤必须**显式隐藏**：`renderTourStep` 只负责集合内部的显隐，
+  // 集合外的元素会保持原样，结果是一屏叠着好几步。
+  all.forEach((el) => {
+    if (!steps.includes(el)) el.hidden = true;
+  });
   return {
     mask,
     body: mask.querySelector(".tour-body"),
-    steps: [...mask.querySelectorAll(".tour-step")],
+    steps: steps.length ? steps : all,
     dots: document.getElementById("tour-dots"),
     prev: document.getElementById("tour-prev"),
     next: document.getElementById("tour-next"),
@@ -3226,7 +3248,8 @@ function renderTourStep(t) {
  *  从设置页「重新查看」进来的不算：那种情形下用户早就过了首次引导。 */
 let tourFromFirstRun = false;
 
-function openFeatureTour(fromFirstRun = false) {
+function openFeatureTour(fromFirstRun = false, showAll = false) {
+  tourShowAll = showAll;
   const t = tourEls();
   if (!t) return;
   tourFromFirstRun = fromFirstRun;
@@ -3257,18 +3280,23 @@ async function closeFeatureTour() {
 function bindFeatureTour() {
   const t = tourEls();
   if (!t) return;
+  // 翻页时**重新取**集合：注册这一刻 `settings` 可能还没加载完（步骤集合会变），
+  // 用捕获的那份会算出错误的总页数，表现为「最后一步点下一步又回到第一步」。
   t.next.onclick = () => {
-    if (tourStep >= t.steps.length - 1) {
+    const cur = tourEls();
+    if (!cur) return;
+    if (tourStep >= cur.steps.length - 1) {
       closeFeatureTour();
     } else {
       tourStep += 1;
-      renderTourStep(t);
+      renderTourStep(cur);
     }
   };
   t.prev.onclick = () => {
     if (tourStep === 0) return;
     tourStep -= 1;
-    renderTourStep(t);
+    const cur = tourEls();
+    if (cur) renderTourStep(cur);
   };
   // 跳过与点遮罩都算看过
   t.skip.onclick = () => closeFeatureTour();
@@ -3519,7 +3547,8 @@ function bindSettings(view) {
 
   // 重看功能导览：只打开，不写「已看过」标记 —— 看多少次都不影响首次判断
   const replayTour = view.querySelector("#replay-tour");
-  if (replayTour) replayTour.onclick = () => openFeatureTour();
+  // 主动重看：从头到尾 10 步都放出来，而不是只给他「这次更新了什么」
+  if (replayTour) replayTour.onclick = () => openFeatureTour(false, true);
 
   // 置顶互通不能走 bindCheck：这个开关会把已有置顶记录归一到新表示，
   // 必须顺带把本地缓存的 items 拉新的，否则列表里的置顶徽章/排序还是旧的。
