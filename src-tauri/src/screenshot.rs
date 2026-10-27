@@ -53,6 +53,16 @@ struct BitmapInfo {
     colors: [u32; 3],
 }
 
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmSetWindowAttribute(
+        hwnd: isize,
+        attribute: u32,
+        value: *const std::ffi::c_void,
+        size: u32,
+    ) -> i32;
+}
+
 extern "system" {
     fn CreateDCW(driver: *const u16, device: *const u16, port: *const u16, init: *const u16) -> isize;
     fn CreateCompatibleDC(hdc: isize) -> isize;
@@ -197,9 +207,12 @@ pub fn start(app: &AppHandle) {
     // 这一条是被真实事故换来的：早先的实现是「没就绪就照样 show」，结果前端加载失败时
     // 用户看到的是全屏纯黑、按 Esc 也没反应（Esc 由前端处理），只能杀进程。
     // 截图失败可以重来，把用户困在全屏黑窗里不行。
+    //
+    // 3 秒而不是 1 秒：**首次**截图要现建 WebView（约 1–2 秒），1.2 秒会把正常的首次
+    // 截图误杀（用户实测撞到了）。这里宁可等久一点，也不要让「第一次按快捷键没反应」。
     let app3 = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(1200));
+        std::thread::sleep(std::time::Duration::from_millis(3000));
         let pending = LAST.lock().map(|g| g.is_some()).unwrap_or(false);
         if !pending {
             return; // 已经 commit / cancel 过了
@@ -209,7 +222,7 @@ pub fn start(app: &AppHandle) {
             .and_then(|w| w.is_visible().ok())
             .unwrap_or(false);
         if !visible {
-            crate::log_warn!("[shot] 前端 1.2 秒内未就绪，取消本次截图（窗口保持隐藏）");
+            crate::log_warn!("[shot] 前端 3 秒内未就绪，取消本次截图（窗口保持隐藏）");
             guard_off();
             if let Ok(mut g) = LAST.lock() {
                 *g = None;
@@ -245,36 +258,62 @@ extern "system" {
 }
 
 fn prepare_overlay(app: &AppHandle, left: i32, top: i32, w: i32, h: i32, scale: f64) {
-    let win = match app.get_webview_window(SHOT_LABEL) {
-        Some(w) => w,
-        None => {
-            let mut b = WebviewWindowBuilder::new(app, SHOT_LABEL, WebviewUrl::App("shot.html".into()))
-                .title("轻贴截图")
-                .decorations(false)
-                // 不透明：整个窗口就是那张冻结的屏幕图，透明反而会露出下面还在动的桌面
-                .transparent(false)
-                .shadow(false)
-                .resizable(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .visible(false)
-                .focused(true);
-            if let Some(args) = crate::popup::browser_args(app) {
-                b = b.additional_browser_args(&args);
-            }
-            match b.build() {
-                Ok(w) => w,
-                Err(e) => {
-                    crate::log_err!("screenshot", "创建截图覆盖层失败：{e}");
-                    return;
-                }
-            }
-        }
+    let Some(win) = build_overlay(app) else {
+        return;
     };
 
     fit_client_to_screen(&win, left, top, w, h);
     // 1 CSS px = 1 物理 px，前端算出的选区坐标就等同于像素坐标
     let _ = win.set_zoom(1.0 / scale);
+    disable_window_transitions(&win);
+}
+
+/// 创建（或取出）覆盖层窗口。
+///
+/// 抽成独立函数是为了 `prewarm`：预热和真正截图走同一套创建参数，
+/// 两边各写一份必然漂移（少一个 `transparent(false)` 就会变成半透明窗口）。
+fn build_overlay(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(w) = app.get_webview_window(SHOT_LABEL) {
+        return Some(w);
+    }
+    let mut b = WebviewWindowBuilder::new(app, SHOT_LABEL, WebviewUrl::App("shot.html".into()))
+        .title("轻贴截图")
+        .decorations(false)
+        // 不透明：整个窗口就是那张冻结的屏幕图，透明反而会露出下面还在动的桌面
+        .transparent(false)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .focused(true);
+    if let Some(args) = crate::popup::browser_args(app) {
+        b = b.additional_browser_args(&args);
+    }
+    match b.build() {
+        Ok(w) => {
+            disable_window_transitions(&w);
+            Some(w)
+        }
+        Err(e) => {
+            crate::log_err!("screenshot", "创建截图覆盖层失败：{e}");
+            None
+        }
+    }
+}
+
+/// 预热：启动后把覆盖层窗口建好并隐藏着，让第一次按快捷键不用等 WebView 创建。
+///
+/// 代价是常驻一个隐藏的 WebView。它与主窗口**共享同一个浏览器进程**（同 user data
+/// 目录 + 同 browser args），所以增量内存远小于再起一个进程组；换来的是一次
+/// 「按下就到」的首次体验 —— 否则第一次截图要等 1–2 秒，用户会以为没反应。
+pub fn prewarm(app: &AppHandle) {
+    if app.get_webview_window(SHOT_LABEL).is_some() {
+        return;
+    }
+    if build_overlay(app).is_some() {
+        crate::log_print!("[shot] 覆盖层已预热（隐藏待命）");
+    }
 }
 
 /// 让**客户区**严格等于屏幕矩形（而不是让外框等于屏幕）。
@@ -313,6 +352,27 @@ fn fit_client_to_screen(win: &tauri::WebviewWindow, left: i32, top: i32, w: i32,
         }
     } else {
         let _ = win.set_position(PhysicalPosition::new(left, top));
+    }
+}
+
+/// 关掉这个窗口的显示/隐藏过渡动画。
+///
+/// Windows（尤其 Win11）给普通窗口的 show/hide 加了淡入淡出，全屏覆盖层上表现为
+/// 「按快捷键闪一下」「点完成/取消闪一下」。微信截图没有这个问题，因为它用的是
+/// layered window 直接贴图；我们用普通窗口 + WebView，只能把这个动画关掉。
+///
+/// 失败的代价为零（最坏就是保持默认动画），所以不检查返回值、也不记日志。
+fn disable_window_transitions(win: &tauri::WebviewWindow) {
+    const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
+    let Ok(h) = win.hwnd() else { return };
+    let on: u32 = 1;
+    unsafe {
+        DwmSetWindowAttribute(
+            h.0 as isize,
+            DWMWA_TRANSITIONS_FORCEDISABLED,
+            &on as *const u32 as *const std::ffi::c_void,
+            4,
+        );
     }
 }
 

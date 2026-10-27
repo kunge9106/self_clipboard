@@ -111,15 +111,20 @@ body {
 }
 
 /* 选区工具条。浮在选区外侧（右下优先），不压住选区内容，
-   否则用户框住的最后一行正好被按钮挡住，截图出来却带着按钮的位置感。 */
+   否则用户框住的最后一行正好被按钮挡住，截图出来却带着按钮的位置感。
+
+   形态照微信/QQ：浅色半透明的一小条 + 纯图标按钮。深色底上浅色条更清楚，
+   而且截图工具的用户预期就是「一条浅色工具条」。 */
 .bar {
   position: fixed;
   display: flex;
-  gap: 8px;
-  padding: 6px;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
   border-radius: 8px;
-  background: rgba(28, 28, 30, 0.92);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  background: rgba(250, 250, 252, 0.97);
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.22);
   z-index: 5;
 }
 
@@ -128,36 +133,42 @@ body {
 }
 
 .bar-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #f2f2f5;
-  font: 500 13px/1.2 "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: transparent;
+  color: #3a3a3c;
   cursor: pointer;
+  transition: background-color 0.1s ease;
 }
 
-.bar-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
+.bar-btn svg {
+  width: 20px;
+  height: 20px;
 }
 
-.bar-btn.is-primary {
-  border-color: #2f7dff;
-  background: #2f7dff;
-  color: #fff;
+.bar-btn.is-cancel {
+  color: #e5484d;
 }
 
-.bar-btn.is-primary:hover {
-  background: #4a8dff;
+.bar-btn.is-cancel:hover {
+  background: rgba(229, 72, 77, 0.12);
 }
 
-.bar-btn kbd {
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: rgba(0, 0, 0, 0.22);
-  font: 500 11px/1.4 inherit;
-  opacity: 0.85;
+.bar-btn.is-ok {
+  color: #2eb872;
+}
+
+.bar-btn.is-ok:hover {
+  background: rgba(46, 184, 114, 0.14);
+}
+
+/* 键盘焦点只在 Tab 键导航时出现，鼠标点击不留下焦点框 */
+.bar-btn:focus-visible {
+  outline: 2px solid #2f7dff;
+  outline-offset: -2px;
 }

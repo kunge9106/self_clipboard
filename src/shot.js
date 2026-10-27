@@ -79,8 +79,8 @@ function render() {
 /// 不能让它盖住选区 —— 用户框住的最后一行被按钮挡住，粘贴出来会莫名觉得「少了一块」。
 function placeBar() {
   bar.hidden = false;
-  const bw = bar.offsetWidth || 200;
-  const bh = bar.offsetHeight || 40;
+  const bw = bar.offsetWidth || 78;
+  const bh = bar.offsetHeight || 42;
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   let left = clamp(rect.x + rect.w - bw, 4, Math.max(4, vw - bw - 4));
@@ -253,10 +253,15 @@ async function load() {
     }
     await invoke("shot_show");
   } catch (e) {
+    // 「没有待处理的截图」是预热窗口/页面首次加载时的正常情况（后端还没抓屏），
+    // 不是错误。若按 ERROR 记，每次启动都会写一条并触发异常计数 —— 真正的故障
+    // 反而会被这条噪音淹掉。
+    if (String(e).includes("没有待处理的截图")) return;
     console.error("shot_image failed", e);
     invoke("frontend_log", { level: "ERROR", tag: "shot", msg: `取图失败：${e}` }).catch(() => {});
-    // 拿不到图也必须把窗口亮出来，否则按了快捷键像没反应
-    invoke("shot_show").catch(() => {});
+    // **这里绝不能调 `shot_show`**。`start()` 会在页面加载时先跑一次（那时还没有
+    // 待处理的截图），预热窗口更是每次启动都会走到这里 —— 一旦 show，就会把一个
+    // 全屏纯黑的空窗口亮在用户面前。要不要显示由后端兜底（3 秒未就绪即取消）决定。
   }
 }
 
