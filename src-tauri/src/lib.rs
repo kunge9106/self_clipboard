@@ -5,6 +5,7 @@ use tauri::Manager;
 
 #[cfg(windows)]
 mod effects;
+mod idle_release;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]
@@ -109,7 +110,7 @@ fn log_startup_banner() {
 }
 
 #[cfg(windows)]
-fn setup_effects(app: &tauri::AppHandle) {
+pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     // —— 诊断：确认运行时配置与窗口实际状态是否一致 ——
     let cfg_win = &app.config().app.windows;
     crate::log_print!("[debug] config windows = {:?}", cfg_win);
@@ -204,6 +205,8 @@ fn setup_effects(app: &tauri::AppHandle) {
                     let _ = window_for_events.hide();
                     tray::create_tray(&app_for_events);
                     crate::log_print!("[tray] 窗口已隐藏到托盘");
+                    // 低占用模式：闲置够久就把 WebView 一起释放
+                    idle_release::note_hidden(app_for_events.clone());
                 }
                 // 未开启托盘模式 → 放行关闭，退出清理在 RunEvent::Exit 统一处理
             }
@@ -356,8 +359,17 @@ pub fn run() {
     match builder.build(tauri::generate_context!()) {
         Ok(app) => {
             app.run(|_app, event| {
-                if let tauri::RunEvent::Exit = event {
-                    clipboard::on_app_exit();
+                match event {
+                    // 最后一个窗口关闭默认会退出应用。低占用模式下窗口是我们
+                    // 自己销毁的，后端线程与托盘都还在 —— 必须拦住，否则一释放
+                    // 整个程序就没了。用户主动退出（托盘菜单）不在此列。
+                    tauri::RunEvent::ExitRequested { api, .. } => {
+                        if idle_release::is_released() {
+                            api.prevent_exit();
+                        }
+                    }
+                    tauri::RunEvent::Exit => clipboard::on_app_exit(),
+                    _ => {}
                 }
             });
         }

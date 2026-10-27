@@ -220,6 +220,15 @@ pub struct Config {
     /// 只在规则变更时递增，正常运行不会触发。
     #[serde(default)]
     pub subtype_version: u32,
+    /// 主窗口隐藏多久后释放它的 WebView（秒）。0 = 从不释放（沿用既有行为）。
+    ///
+    /// 释放后只留后端与托盘：常驻占用从 411 MB 降到 40 MB 上下（实测 373 MB
+    /// 属于 WebView2 的进程组，自己的 Rust 代码只占 38 MB）。代价是下次唤起
+    /// 要重建窗口，约 200–400 ms。
+    ///
+    /// 默认 30 秒：短时间内反复唤起仍是瞬时的，真正闲置之后才省内存。
+    #[serde(default = "default_release_idle")]
+    pub release_idle_secs: u32,
 }
 
 /// 当前的功能导览版本。改了导览内容就 +1，老用户会再看一次**增量**。
@@ -267,6 +276,11 @@ pub struct UpdateCache {
     /// 检查时间（epoch 秒）
     #[serde(default)]
     pub checked_at: u64,
+}
+
+/// 后台释放界面的默认等待时长（秒）。
+fn default_release_idle() -> u32 {
+    30
 }
 
 fn default_retention() -> u32 {
@@ -390,6 +404,7 @@ impl Default for Config {
             delete_files_permanent: false,
             // 0 = 尚未按当前规则算过，首次启动会重算一遍存量
             subtype_version: 0,
+            release_idle_secs: default_release_idle(),
             pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
             pin_cancel_on_disable: true, // 默认开启：关掉互通即撤销它铺开的置顶
             cache_dir: None,

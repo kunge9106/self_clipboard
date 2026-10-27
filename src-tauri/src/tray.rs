@@ -212,7 +212,17 @@ pub fn tray_quit(app: AppHandle) -> Result<(), String> {
 /// 把主窗口唤回前台。托盘菜单与「重复启动」都用它，
 /// 所以「补齐材质 + relayout」这一套只此一份，不会两处漂移。
 pub fn show_main(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
+    // 窗口要显示了：取消释放倒计时（用户正在用，不能被销毁）
+    crate::idle_release::note_shown();
+    // 低占用模式下窗口可能已被释放：先确保它存在，再走补齐流程
+    let w = match app.get_webview_window("main") {
+        Some(w) => w,
+        None => match crate::idle_release::ensure_window(app) {
+            Some(w) => w,
+            None => return,
+        },
+    };
+    {
         // 所有「补齐」动作都必须在窗口可见**之前**做完。显示之后再改材质或尺寸，
         // 用户会看到「先出现、再变样」的闪烁（上一版就是这么闪的）。
         #[cfg(windows)]
