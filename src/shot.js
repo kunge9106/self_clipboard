@@ -207,8 +207,15 @@ document.getElementById("btn-cancel").addEventListener("click", (e) => {
 
 // ── 与后端 ──────────────────────────────────────────────────────────────
 
+/// 正在提交：双击会连发 mousedown/up/dblclick，手快点两下绿勾也会发两次
+//  `click`。第一次提交成功后后端会收起覆盖层并清掉待处理截图，第二次再去提交
+//  就只会拿到「没有待处理的截图」，然后在前端弹一条「复制失败」——用户以为没
+//  截图成功，换个位置又点一次。所以这里必须挡住重入。
+let committing = false;
+
 async function commit() {
-  if (!rect) return;
+  if (!rect || committing) return;
+  committing = true;
   const { sx, sy } = imgScale();
   const payload = {
     x: Math.round(rect.x * sx),
@@ -225,6 +232,10 @@ async function commit() {
     console.error("shot_commit failed", e);
     hint.hidden = false;
     hint.textContent = `复制失败：${e}`;
+  } finally {
+    // 成功时窗口已经被后端收起，这个标志留着也无所谓；失败时要放开，
+    // 否则用户「再双击重试」会被自己挡住。
+    committing = false;
   }
 }
 
