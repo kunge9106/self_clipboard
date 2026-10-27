@@ -769,6 +769,43 @@ pub fn refresh_theme(hwnd: isize, dark: bool) {
     }
 }
 
+/// 用户手动切换「浅色 / 深色 / 系统」之后，把材质与窗口区域重刷一遍。
+///
+/// `set_theme` 只改 DWM 的窗口框架主题，**不刷我们自己的 acrylic tint**。浅色与深色
+/// 用的 tint 不同，不重刷就留着上一个主题的色：顶栏一条浅带、圆角边缘一圈异色。
+/// 且 `set_theme` 之后 DWM 会保留旧图层缓存，残影一直挂到窗口重建（用户表现为
+/// 「除非重启」），所以末尾必须 `nudge` 一次强制重算。
+///
+/// 两个模式不能走同一条路：
+/// - 直角模式：系统材质矩形铺满整个窗口，必须重刷 tint；
+/// - 圆角模式：材质已被 `apply_round_mode` 关掉、圆角靠 `SetWindowRgn` 裁，此时
+///   再开 acrylic 会把圆角外的区域重新填上 —— 只重设区域 + nudge。
+pub fn refresh_after_theme_switch(window: &tauri::WebviewWindow) {
+    let dark = match window.theme() {
+        Ok(tauri::Theme::Dark) => true,
+        Ok(tauri::Theme::Light) => false,
+        // 跟随系统时拿不到就按设置推：只有显式选 dark 才是深色
+        _ => crate::settings::get().theme_mode == "dark",
+    };
+    let Ok(h) = window.hwnd() else {
+        return;
+    };
+    let hwnd = h.0 as isize;
+
+    set_immersive_dark(hwnd, dark);
+    // `set_theme` 会让 DWM 重建非客户区，于是 tao 留下的 WS_CAPTION 又会被画出来：
+    // 沿**窗口矩形**一圈 1px 亮线与投影，且不受 SetWindowRgn 影响 —— 圆角模式下就是
+    // 「顶栏多出一条阴影/白带，且不重启不消失」。这两步都幂等，切主题后必须重跑。
+    strip_window_frame(hwnd);
+    disable_nc_rendering(hwnd);
+    if is_round() {
+        apply_rounded_corners(hwnd);
+    } else if current_tier() == Tier::Acrylic {
+        let _ = apply_acrylic(hwnd, dark);
+    }
+    nudge(hwnd);
+}
+
 // ---------------------------------------------------------------------------
 // 自定义拖动（替代系统移动循环 startDragging/SC_MOVE）
 //

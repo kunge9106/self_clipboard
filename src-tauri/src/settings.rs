@@ -699,6 +699,9 @@ pub fn set_theme_mode(app: tauri::AppHandle, value: String) -> Result<(), String
     for label in ["main", "tray-menu"] {
         if let Some(w) = app.get_webview_window(label) {
             crate::effects::apply_theme_mode(&w);
+            // 只 set_theme 不够：acrylic 的 tint 与 DWM 图层都得重刷，
+            // 否则切完会留下一条上一主题的色带，且不重启不消失
+            crate::effects::refresh_after_theme_switch(&w);
         }
     }
     Ok(())
