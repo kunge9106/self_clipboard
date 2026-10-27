@@ -21,11 +21,6 @@ mod panel;
 mod input;
 mod screenclip;
 mod shot_native;
-// 旧的 WebView 截图实现：原生版实测通过后，连同 shot.html / src/shot.js / src/shot.css
-// 与 5 个 shot_* 命令一起删掉。暂时留着，出问题时可把 hotkey.rs 里的
-// `shot_native::start` 换回 `screenshot::start`，一行完成回退。
-#[allow(dead_code)]
-mod screenshot;
 #[cfg(windows)]
 mod purge;
 
@@ -303,12 +298,6 @@ pub fn run() {
             settings::set_screenshot_hotkey,
             settings::set_screenshot_right_click_cancel,
             settings::set_screenshot_mode,
-            screenshot::shot_image,
-            screenshot::shot_show,
-            screenshot::shot_windows,
-            screenshot::shot_pointer,
-            screenshot::shot_commit,
-            screenshot::shot_cancel,
             settings::hotkey_suspend,
             settings::hotkey_resume,
             panel::panel_hide,

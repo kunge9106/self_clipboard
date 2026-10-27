@@ -23,7 +23,6 @@ export default defineConfig({
         main: resolve(__dirname, "index.html"),
         tray: resolve(__dirname, "tray.html"),
         panel: resolve(__dirname, "panel.html"),
-        shot: resolve(__dirname, "shot.html"),
       },
     },
   },
