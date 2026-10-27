@@ -15,7 +15,7 @@
 //! 3. **窗口按物理像素铺满该显示器**，并把 webview 缩放设成 `1/scale`，
 //!    使 1 CSS px = 1 物理 px —— 前端算出来的选区坐标才能直接当像素坐标用。
 
-use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use tauri::{
@@ -146,6 +146,10 @@ static LAST: Mutex<Option<Shot>> = Mutex::new(None);
 /// `Alt+Q` 的入口：抓屏 → 铺满鼠标所在显示器 → 通知前端画图。
 pub fn start(app: &AppHandle) {
     START_MS.store(now_ms(), Ordering::SeqCst);
+    // 新会话：把「上次怎么结束的」归零，否则重复提交的判据会把这一次也当成已提交
+    LAST_END.store(END_NONE, Ordering::SeqCst);
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    crate::log_print!("[shot] 会话 #{seq} 开始");
     // 抓屏前确保覆盖层是隐藏的：它平时就该是隐藏的，但万一上一次异常退出没收拾
     // 干净，这里先收一下，避免把「自己的残影」截进图里。
     if let Some(w) = app.get_webview_window(SHOT_LABEL) {
@@ -233,6 +237,7 @@ pub fn start(app: &AppHandle) {
             .unwrap_or(false);
         if !visible {
             crate::log_warn!("[shot] 前端 3 秒内未就绪，取消本次截图（窗口保持隐藏）");
+            LAST_END.store(END_TIMEOUT, Ordering::SeqCst);
             guard_off();
             if let Ok(mut g) = LAST.lock() {
                 *g = None;
@@ -583,7 +588,7 @@ unsafe extern "system" fn key_proc(code: i32, w: usize, l: isize) -> isize {
                 // 钩子回调必须尽快返回，收窗口的活交给独立线程
                 std::thread::spawn(move || {
                     crate::log_print!("[shot] Esc（兜底）取消截图");
-                    close(&app);
+                    close(&app, END_CANCEL);
                 });
             }
             // 吞掉这次 Esc：别让它同时落到下层窗口（比如编辑器里退出全屏）
@@ -757,14 +762,31 @@ pub fn shot_show(app: AppHandle) {
 pub fn shot_commit(app: AppHandle, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
     // 顺带把「抓的是哪块屏」记进日志：多屏下选区坐标看着正常但内容错位时，
     // 第一个要排除的就是「抓屏原点不对」
-    let (dib, left, top) = {
+    let framed = {
         let g = LAST.lock().map_err(|_| "截图状态锁失效")?;
-        let shot = g.as_ref().ok_or("没有待处理的截图")?;
-        (crop_to_dib(shot, x, y, w, h)?, shot.left, shot.top)
+        match g.as_ref() {
+            Some(shot) => Some((crop_to_dib(shot, x, y, w, h)?, shot.left, shot.top)),
+            None if LAST_END.load(Ordering::SeqCst) == END_COMMIT => None,
+            None => {
+                crate::log_warn!(
+                    "[shot] 提交时没有待处理截图（最近一次结束原因 {}，最近会话 #{}）",
+                    end_reason_name(LAST_END.load(Ordering::SeqCst)),
+                    SEQ.load(Ordering::SeqCst)
+                );
+                return Err("没有待处理的截图".into());
+            }
+        }
+    };
+    // `None` = 上一次提交已经完成、这是**重复提交**。双击完成、连按 Enter、手快
+    // 连点两下绿勾都会走到这里：图早写进剪贴板了，此时再报「复制失败」只会让用户
+    // 以为没成功，于是换个位置再点一次。当成功处理。
+    let Some((dib, left, top)) = framed else {
+        crate::log_print!("[shot] 重复提交，已忽略（图已在剪贴板）");
+        return Ok(());
     };
     crate::clipboard::write_shot_to_clipboard(&dib)?;
     crate::log_print!("[shot] 已复制选区 {w}×{h}（屏幕原点 {left},{top}）");
-    close(&app);
+    close(&app, END_COMMIT);
     Ok(())
 }
 
@@ -774,10 +796,31 @@ pub fn shot_commit(app: AppHandle, x: i32, y: i32, w: i32, h: i32) -> Result<(),
 #[tauri::command]
 pub fn shot_cancel(app: AppHandle) {
     crate::log_print!("[shot] 已取消（剪贴板未改动）");
-    close(&app);
+    close(&app, END_CANCEL);
 }
 
-fn close(app: &AppHandle) {
+/// 最近一次截图是怎么结束的。用来区分「重复提交」与「压根没有截图」——
+/// 两者在 `LAST` 里都是 `None`，但对用户的意义完全相反。
+const END_NONE: u8 = 0;
+const END_COMMIT: u8 = 1;
+const END_CANCEL: u8 = 2;
+const END_TIMEOUT: u8 = 3;
+
+static LAST_END: AtomicU8 = AtomicU8::new(END_NONE);
+/// 会话序号，只用于日志对齐（一次截图 = 一个序号）
+static SEQ: AtomicU32 = AtomicU32::new(0);
+
+fn end_reason_name(code: u8) -> &'static str {
+    match code {
+        END_COMMIT => "已提交",
+        END_CANCEL => "已取消",
+        END_TIMEOUT => "前端未就绪被兜底取消",
+        _ => "无（还没开始或异常）",
+    }
+}
+
+fn close(app: &AppHandle, reason: u8) {
+    LAST_END.store(reason, Ordering::SeqCst);
     if let Some(w) = app.get_webview_window(SHOT_LABEL) {
         let _ = w.hide();
     }
