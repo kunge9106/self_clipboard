@@ -228,6 +228,26 @@ document.addEventListener("mousedown", (e) => {
   render();
 });
 
+/** 把指针位置应用到当前拖拽上。DOM 的 `mousemove` 与钩子转发的 `shot-move`
+ *  共用这一份 —— 覆盖层是 NOACTIVATE 窗口，DOM 的移动事件也不保证每次都到。 */
+function updateDrag(cx, cy) {
+  if (drag.mode === "new") {
+    rect = boxOf(drag.x0, drag.y0, cx, cy);
+  } else if (drag.mode === "move") {
+    const dx = cx - drag.x0;
+    const dy = cy - drag.y0;
+    rect = {
+      x: clamp(drag.base.x + dx, 0, window.innerWidth - drag.base.w),
+      y: clamp(drag.base.y + dy, 0, window.innerHeight - drag.base.h),
+      w: drag.base.w,
+      h: drag.base.h,
+    };
+  } else {
+    rect = resizeBy(drag.base, drag.handle, cx - drag.x0, cy - drag.y0);
+  }
+  render();
+}
+
 document.addEventListener("mousemove", (e) => {
   if (!drag) {
     // 没在拖：跟随光标找窗口，先框出来告诉用户「点一下会截到哪」
@@ -242,21 +262,7 @@ document.addEventListener("mousemove", (e) => {
     }
     return;
   }
-  if (drag.mode === "new") {
-    rect = boxOf(drag.x0, drag.y0, e.clientX, e.clientY);
-  } else if (drag.mode === "move") {
-    const dx = e.clientX - drag.x0;
-    const dy = e.clientY - drag.y0;
-    rect = {
-      x: clamp(drag.base.x + dx, 0, window.innerWidth - drag.base.w),
-      y: clamp(drag.base.y + dy, 0, window.innerHeight - drag.base.h),
-      w: drag.base.w,
-      h: drag.base.h,
-    };
-  } else {
-    rect = resizeBy(drag.base, drag.handle, e.clientX - drag.x0, e.clientY - drag.y0);
-  }
-  render();
+  updateDrag(e.clientX, e.clientY);
 });
 
 /** 松开左键的收尾。DOM 的 mouseup 与钩子转发的 shot-up 共用这一份，
@@ -418,19 +424,37 @@ async function load() {
     // 下层窗口上，等于白按，感觉就是「还得再点一次」。这里问一句「左键还按着吗」，
     // 按着就把当前光标位置当成框选起点，手感和「一出现就跟着我走」一致。
     try {
+      // 1) 先取「窗口出现之前那一次按下」：这是「还得再点一次」的根因 ——
+      //    按完快捷键手已经在拖，那一下落在下面的窗口上，等你看到画面早已松手。
       const p = await invoke("shot_pointer");
       if (p && !drag) {
+        const [px, py, , held] = p;
         const { sx, sy } = imgScale();
-        const x = (p[0] - screenLeft) / sx;
-        const y = (p[1] - screenTop) / sy;
-        if (x >= 0 && y >= 0 && x <= window.innerWidth && y <= window.innerHeight) {
-          drag = { mode: "new", x0: x, y0: y, hover: windowAt(x, y), t: Date.now() };
-          rect = { x, y, w: 0, h: 0 };
-          render();
+        const x = (px - screenLeft) / sx;
+        const y = (py - screenTop) / sy;
+        const inside = x >= 0 && y >= 0 && x <= window.innerWidth && y <= window.innerHeight;
+        if (inside) {
+          if (held) {
+            // 手还按着：直接用那次按下的位置当框选起点，拖动立刻跟手
+            trace(`补上窗口出现前的按下 (${Math.round(x)},${Math.round(y)})`);
+            drag = { mode: "new", x0: x, y0: y, hover: windowAt(x, y), t: Date.now() };
+            rect = { x, y, w: 0, h: 0 };
+            render();
+          } else {
+            // 已经松手了：**绝不能**建拖拽，否则会等一个永远不来的 mouseup，
+            // `drag` 卡死后连按钮都点不动。当成一次单击（有窗口就选中它）。
+            const target = windowAt(x, y);
+            if (target) {
+              trace("补上窗口出现前的单击：选中该窗口");
+              hoverRect = target;
+              rect = target;
+              render();
+            }
+          }
         }
       }
     } catch (e) {
-      console.warn("shot_pointer failed", e);
+      trace(`shot_pointer 失败：${e}`);
     }
   } catch (e) {
     // 「没有待处理的截图」是预热窗口/页面首次加载时的正常情况（后端还没抓屏），
@@ -485,11 +509,27 @@ listen("shot-down", (e) => {
     return;
   }
 
+  // 卡死的拖拽自愈：`drag` 存在但两秒内一个像素都没动过，说明对应的 `mouseup`
+  // 丢了（钩子/页面事件偶尔不齐）。此时不能让它继续挡着后续所有按下。
+  if (drag && Date.now() - (drag.t || 0) > 2000 && rect && rect.w < 4 && rect.h < 4) {
+    trace("拖拽状态卡死，自动复位");
+    drag = null;
+  }
   if (drag) return;
   trace(`首次按下 (${Math.round(x)},${Math.round(y)}) 开始框选`);
   drag = { mode: "new", x0: x, y0: y, hover: windowAt(x, y), t };
   rect = { x, y, w: 0, h: 0 };
   render();
+});
+
+// 移动也由钩子兜一道（后端按 16ms 节流）：NOACTIVATE 窗口里 DOM 的 mousemove
+// 同样可能丢，而拖动时只要漏几次，用户就觉得「按下没反应」。
+listen("shot-move", (e) => {
+  if (!armed || !drag) return;
+  const [px, py] = e.payload || [];
+  if (!Number.isFinite(px)) return;
+  const { sx, sy } = imgScale();
+  updateDrag((px - screenLeft) / sx, (py - screenTop) / sy);
 });
 
 // 抬起也由钩子兜一道：DOM 的 mouseup 若丢一次，`drag` 会一直卡着不放手，

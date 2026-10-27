@@ -107,6 +107,7 @@ const DIB_RGB_COLORS: u32 = 0;
 
 const WH_KEYBOARD_LL: i32 = 13;
 const WH_MOUSE_LL: i32 = 14;
+const WM_MOUSEMOVE: usize = 0x0200;
 const WM_LBUTTONDOWN: usize = 0x0201;
 const WM_LBUTTONUP: usize = 0x0202;
 const WM_RBUTTONDOWN: usize = 0x0204;
@@ -184,6 +185,10 @@ pub fn start(app: &AppHandle) {
     START_MS.store(now_ms(), Ordering::SeqCst);
     // 新会话：把「上次怎么结束的」归零，否则重复提交的判据会把这一次也当成已提交
     LAST_END.store(END_NONE, Ordering::SeqCst);
+    // 新会话：把上一轮记下的按下清掉，否则前端会拿几秒前的旧坐标当框选起点
+    if let Ok(mut g) = LAST_DOWN.lock() {
+        *g = None;
+    }
     let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
     crate::log_print!("[shot] 会话 #{seq} 开始");
     // 抓屏前确保覆盖层是隐藏的：它平时就该是隐藏的，但万一上一次异常退出没收拾
@@ -542,16 +547,25 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 开关都带上当前会话序号：热键线程是异步处理这两条消息的，连续两次截图时
+/// 旧会话排队的「卸」很可能排在新会话的「装」后面 —— 一带序号就能识别出来并忽略。
 fn guard_on() {
-    crate::hotkey::post_msg(WM_SHOT_GUARD_ON);
+    crate::hotkey::post_msg_w(WM_SHOT_GUARD_ON, SEQ.load(Ordering::SeqCst) as usize);
 }
 
 fn guard_off() {
-    crate::hotkey::post_msg(WM_SHOT_GUARD_OFF);
+    crate::hotkey::post_msg_w(WM_SHOT_GUARD_OFF, SEQ.load(Ordering::SeqCst) as usize);
 }
 
 /// 覆盖层窗口句柄。钩子要用它判断「覆盖层是否已经可见」。
 static SHOT_HWND: AtomicIsize = AtomicIsize::new(0);
+/// 最近一次左键按下：屏幕物理坐标 + Unix 毫秒。
+///
+/// **不看窗口是否可见** —— 用户按下快捷键后手已经在拖，那一下发生在覆盖层出现
+/// 之前，正是「还得再点一次」的根源，所以必须记下来。
+static LAST_DOWN: Mutex<Option<(i32, i32, u64)>> = Mutex::new(None);
+/// 上一次转发移动事件的时间（16ms 节流用）
+static LAST_MOVE_MS: AtomicU64 = AtomicU64::new(0);
 /// 首次按下补偿的鼠标钩子句柄（与 `GUARD` 成对装卸）
 static MOUSE_GUARD: AtomicIsize = AtomicIsize::new(0);
 
@@ -563,19 +577,27 @@ static MOUSE_GUARD: AtomicIsize = AtomicIsize::new(0);
 ///
 /// 与 `screenclip` 的鼠标钩子同源（都装在热键线程的消息泵上），但判据不同：
 /// 那个拦截鼠标右键、只在系统截图覆盖层出现时生效；这个只认 Esc、只在本次截图期间存在。
-pub fn guard_install() {
-    if GUARD.load(Ordering::SeqCst) != 0 {
+pub fn guard_install(seq: u32) {
+    // 旧会话排队的「装」不能作用到新会话上（序号一定落后），直接丢弃
+    if seq != SEQ.load(Ordering::SeqCst) {
+        crate::log_print!("[shot] 忽略旧会话 #{seq} 的钩子安装请求");
         return;
     }
-    unsafe {
-        let h = SetWindowsHookExW(WH_KEYBOARD_LL, key_proc, GetModuleHandleW(std::ptr::null()), 0);
-        if h == 0 {
-            crate::log_warn!("[shot] Esc 兜底钩子安装失败（错误码 {}）", GetLastError());
-            return;
+    // **两个钩子各自判断、各装各的**。早先这里是「键盘钩子已装就直接 return」，
+    // 于是「上一轮还在卸载、这一轮已经开始」的竞态下，鼠标钩子被整段跳过 ——
+    // 那一轮里第一次拖动就完全没反应，用户只能再点一次。
+    if GUARD.load(Ordering::SeqCst) == 0 {
+        unsafe {
+            let h =
+                SetWindowsHookExW(WH_KEYBOARD_LL, key_proc, GetModuleHandleW(std::ptr::null()), 0);
+            if h == 0 {
+                crate::log_warn!("[shot] Esc 兜底钩子安装失败（错误码 {}）", GetLastError());
+            } else {
+                GUARD.store(h, Ordering::SeqCst);
+                crate::log_print!("[shot] Esc / Enter 兜底已启用");
+            }
         }
-        GUARD.store(h, Ordering::SeqCst);
     }
-    crate::log_print!("[shot] Esc / Enter 兜底已启用");
     click_guard_install();
 }
 
@@ -614,6 +636,23 @@ unsafe extern "system" fn mouse_proc(code: i32, w: usize, l: isize) -> isize {
             }
         }
     }
+    // 移动也转发（16ms 节流 ≈ 60Hz）：NOACTIVATE 窗口里 DOM 的 mousemove 同样
+    // 不保证每次都到，而拖动时漏几次，用户就觉得「按下去没反应」。
+    if code == HC_ACTION && w == WM_MOUSEMOVE {
+        let hwnd = SHOT_HWND.load(Ordering::SeqCst);
+        if hwnd != 0 && IsWindowVisible(hwnd) != 0 {
+            let now = now_ms();
+            let prev = LAST_MOVE_MS.load(Ordering::SeqCst);
+            if now.saturating_sub(prev) >= 16 {
+                LAST_MOVE_MS.store(now, Ordering::SeqCst);
+                let ms = &*(l as *const MsllHookStruct);
+                let app = SHOT_APP.lock().ok().and_then(|g| g.clone());
+                if let Some(app) = app {
+                    let _ = app.emit_to(SHOT_LABEL, "shot-move", (ms.pt.x, ms.pt.y));
+                }
+            }
+        }
+    }
     if code == HC_ACTION && w == WM_LBUTTONUP {
         let hwnd = SHOT_HWND.load(Ordering::SeqCst);
         if hwnd != 0 && IsWindowVisible(hwnd) != 0 {
@@ -626,8 +665,15 @@ unsafe extern "system" fn mouse_proc(code: i32, w: usize, l: isize) -> isize {
     }
     if code == HC_ACTION && w == WM_LBUTTONDOWN {
         let hwnd = SHOT_HWND.load(Ordering::SeqCst);
-        // 只在这一轮覆盖层可见时补：抓屏+编码那几百毫秒窗口还藏着，
-        // 那时的点击属于别的程序，不该拿来开选区。
+        // **不论窗口是否可见都记一笔**：窗口出现前的那次按下正是「要再点一次」的
+        // 根源，它必须能被 `shot_pointer` 取到（前端据此把起点补上）。
+        // 钩子只在截图期间装着，所以这里记下的一定属于本轮。
+        let ms = &*(l as *const MsllHookStruct);
+        if let Ok(mut g) = LAST_DOWN.lock() {
+            *g = Some((ms.pt.x, ms.pt.y, now_ms()));
+        }
+        // 但**转发给前端**仍然要求窗口可见：不可见时的点击属于下面的程序，
+        // 不该被拿来开选区。
         if hwnd != 0 && IsWindowVisible(hwnd) != 0 {
             let ms = &*(l as *const MsllHookStruct);
             let app = SHOT_APP.lock().ok().and_then(|g| g.clone());
@@ -641,7 +687,13 @@ unsafe extern "system" fn mouse_proc(code: i32, w: usize, l: isize) -> isize {
     CallNextHookEx(MOUSE_GUARD.load(Ordering::SeqCst), code, w, l)
 }
 
-pub fn guard_uninstall() {
+pub fn guard_uninstall(seq: u32) {
+    // 旧会话的「卸」如果排到了新会话的「装」之后，会把新会话正在用的钩子拆掉 ——
+    // 那一轮就会出现「拖不动、按钮点不动、Esc 也没反应」。序号不匹配就不动。
+    if seq != SEQ.load(Ordering::SeqCst) {
+        crate::log_print!("[shot] 忽略旧会话 #{seq} 的钩子卸载请求");
+        return;
+    }
     let h = GUARD.swap(0, Ordering::SeqCst);
     if h != 0 {
         unsafe {
@@ -864,10 +916,28 @@ pub async fn shot_image() -> Result<String, String> {
 /// 下面的窗口上，等于白按。这里让前端在显示之后立刻问一句「是不是已经在按着」，
 /// 是的话就把**当前光标位置**当成框选起点，用户的手感是「一出现就跟着我走」。
 #[tauri::command]
-pub fn shot_pointer() -> Option<(i32, i32)> {
+/// 返回值：`(x, y, age_ms, still_down)`。
+///
+/// `still_down` 必须给前端：拿旧坐标建了拖拽、而手其实早就松开的话，前端会一直
+/// 等一个永远不来的 `mouseup`，`drag` 卡死，后面每次点击都被挡住。
+pub fn shot_pointer() -> Option<(i32, i32, u64, bool)> {
+    // 1) **优先用钩子记下的那次按下**。这是关键：用户按下快捷键后手已经在拖，
+    //    那一下发生在覆盖层出现之前（抓屏 + 编码 200–400ms），落在下面的窗口上。
+    //    等他看到画面时早就松手了，`GetAsyncKeyState` 查不到 —— 于是只能再点一次。
+    //    钩子在截图期间一直记着最后一次按下，这里把它取出来当框选起点。
+    let held = unsafe { GetAsyncKeyState(VK_LBUTTON) & 0x8000u16 as i16 != 0 };
+    let recorded = LAST_DOWN.lock().ok().and_then(|g| *g);
+    if let Some((x, y, t)) = recorded {
+        let age = now_ms().saturating_sub(t);
+        // 3 秒内才算「这一下的」：更早的是上次操作留下的，不能拿来开框
+        if age <= 3000 {
+            return Some((x, y, age, held));
+        }
+    }
     unsafe {
-        // 高字节是「当前是否按下」，不能用 != 0 判断，得取最高位
-        if GetAsyncKeyState(VK_LBUTTON) & 0x8000u16 as i16 == 0 {
+        // 2) 没有记录但左键正按着 → 用当前光标位置
+        //    高字节是「当前是否按下」，不能用 != 0 判断，得取最高位
+        if !held {
             return None;
         }
         // 复用 `effects::Rect` 接 POINT：两者前两个字段都是 i32，系统只写前 8 字节
@@ -880,7 +950,7 @@ pub fn shot_pointer() -> Option<(i32, i32)> {
         if GetCursorPos(&mut r) == 0 {
             return None;
         }
-        Some((r.left, r.top))
+        Some((r.left, r.top, 0, true))
     }
 }
 

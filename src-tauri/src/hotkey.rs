@@ -111,10 +111,12 @@ pub fn init(app: tauri::AppHandle) {
             } else if msg.message == crate::screenclip::WM_REMOVE_HOOK {
                 crate::screenclip::remove_hook();
             } else if msg.message == crate::screenshot::WM_SHOT_GUARD_ON {
-                // 内置截图的 Esc 逃生通道：低级键盘钩子同样必须装在有消息泵的线程上
-                crate::screenshot::guard_install();
+                // 内置截图的 Esc 逃生通道：低级键盘钩子同样必须装在有消息泵的线程上。
+                // `wParam` 带会话序号：连续两次截图时，旧会话排队的「装」/「卸」不能
+                // 作用到新会话上，否则会出现「这一轮压根没有钩子」的空档。
+                crate::screenshot::guard_install(msg.w_param as u32);
             } else if msg.message == crate::screenshot::WM_SHOT_GUARD_OFF {
-                crate::screenshot::guard_uninstall();
+                crate::screenshot::guard_uninstall(msg.w_param as u32);
             }
         }
         crate::log_warn!("[hotkey] 消息循环退出，热键不再生效");
@@ -233,13 +235,18 @@ unsafe fn register_slots(slots: &[(i32, String)]) -> Result<(), String> {
 /// 所有需要「有消息泵的线程」的活儿（装/卸低级输入钩子）都走这里，不再各起一个线程：
 /// 一个 Win32 消息线程服务热键、鼠标钩子、键盘钩子三件事，排查时只看一处。
 pub fn post_msg(msg: u32) {
+    post_msg_w(msg, 0);
+}
+
+/// 带一个整型参数投递（`wParam`）。目前只有截图钩子的开关用它带会话序号。
+pub fn post_msg_w(msg: u32, param: usize) {
     let tid = THREAD_ID.load(Ordering::SeqCst);
     if tid == 0 {
         crate::log_warn!("[hotkey] 热键线程未就绪，消息 {msg:#x} 被丢弃");
         return;
     }
     unsafe {
-        PostThreadMessageW(tid, msg, 0, 0);
+        PostThreadMessageW(tid, msg, param, 0);
     }
 }
 
