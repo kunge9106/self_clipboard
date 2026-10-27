@@ -1348,8 +1348,72 @@ static HOOK_APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::ne
 /// tao 给无边框窗口创建的边框子窗口类名
 const RESIZE_BORDER_CLASS: &str = "TAURI_DRAG_RESIZE_BORDERS";
 const GWLP_WNDPROC_BORDER: i32 = -4;
-/// 边缘判定容差（物理 px）。这个子窗口本身只有 4px 宽，留一点余量。
-const RESIZE_EDGE_TOLERANCE: i32 = 6;
+/// 边缘判定容差（物理 px）。
+///
+/// 取系统标准值 `SM_CXSIZEFRAME + SM_CXPADDEDBORDER`：100% DPI 下是 8，150% 下 12，
+/// 200% 下 16。这正是资源管理器、记事本等原生窗口的可缩放边框宽度，也是用户
+/// 形成「碰到边框就能拉」直觉的来源。
+///
+/// 原先写死 6（物理像素）没做 DPI 换算 —— 在 150% 屏上只有 4 个逻辑像素，
+/// 只有系统标准的一半，表现就是「必须往里靠很多才拉得动」。系统这个值本身
+/// 已经按当前 DPI 给出，不需要再自己乘缩放比。
+fn resize_edge_tolerance(hwnd: isize) -> i32 {
+    const SM_CXSIZEFRAME: i32 = 32;
+    const SM_CXPADDEDBORDER: i32 = 92;
+    unsafe {
+        extern "system" {
+            fn GetDpiForWindow(hwnd: isize) -> u32;
+            fn GetSystemMetricsForDpi(index: i32, dpi: u32) -> i32;
+            fn GetSystemMetrics(index: i32) -> i32;
+        }
+        let dpi = GetDpiForWindow(hwnd);
+        if dpi >= 96 {
+            let w = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
+                + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+            if w > 0 {
+                return w;
+            }
+        }
+        // 兜底：理论上 Win10 1607+ 都有 GetSystemMetricsForDpi，这里只是防它返回 0
+        let w = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+        if w > 0 {
+            w
+        } else {
+            8
+        }
+    }
+}
+
+/// 按缩放方向位掩码换成系统的缩放光标。位掩码见 `edge_from_cursor`。
+///
+/// 需要自己设光标的原因：`TAURI_DRAG_RESIZE_BORDERS` 子窗口盖在 WebView 之上，
+/// 而我们让它 `WM_NCHITTEST` 一律返回 `HTCLIENT`，它就不再是「非客户区」，
+/// 系统不会给缩放光标。那 4px 里光标一直是箭头，看起来像「这里不能拉」。
+fn set_resize_cursor(edge: u32) {
+    // LoadCursorW 接受 MAKEINTRESOURCE，即把序号当指针传
+    const IDC_SIZEWE: usize = 32644;
+    const IDC_SIZENS: usize = 32645;
+    const IDC_SIZENWSE: usize = 32642;
+    const IDC_SIZENESW: usize = 32643;
+    // 注意：match 里的 `|` 是「或模式」，不是位或，所以组合值要写成字面量
+    let id = match edge {
+        1 | 2 => IDC_SIZENS,   // 上 / 下
+        4 | 8 => IDC_SIZEWE,   // 左 / 右
+        5 | 10 => IDC_SIZENWSE, // 左上(1|4) / 右下(2|8)：↖↘
+        6 | 9 => IDC_SIZENESW,  // 左下(2|4) / 右上(1|8)：↙↗
+        _ => return,
+    };
+    unsafe {
+        extern "system" {
+            fn LoadCursorW(inst: isize, name: *const u16) -> isize;
+            fn SetCursor(cursor: isize) -> isize;
+        }
+        let h = LoadCursorW(0, id as *const u16);
+        if h != 0 {
+            SetCursor(h);
+        }
+    }
+}
 
 static BORDER_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static BORDER_ORIG: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
@@ -1366,7 +1430,7 @@ fn edge_from_cursor(main: isize) -> u32 {
         if GetCursorPos(&mut cur) == 0 || GetWindowRect(main, &mut wr) == 0 {
             return 0;
         }
-        let t = RESIZE_EDGE_TOLERANCE;
+        let t = resize_edge_tolerance(main);
         let mut e = 0u32;
         if cur.top <= wr.top + t {
             e |= 1;
@@ -1460,6 +1524,20 @@ unsafe extern "system" fn border_proc(
     // 自定义缩放（SetCapture 到主窗口，后续 mousemove/up 由主窗口的 hook 接管）。
     if msg == WM_NCHITTEST {
         return HTCLIENT;
+    }
+    // 光标：`WM_NCHITTEST` 一律返回 HTCLIENT 之后，这一圈在系统眼里就是客户区，
+    // 不会自动变成缩放箭头。最外这 4px 是用户「贴到边框」时最先碰到的位置，
+    // 那里光标不变，看起来就像「还没进入可缩放区」，只能再往里挪 —— 这正是
+    // 「必须靠边框里面很多才触发」的直接来源。
+    const WM_SETCURSOR: u32 = 0x0020;
+    if msg == WM_SETCURSOR {
+        let main = unsafe { GetAncestor(hwnd, 2) }; // GA_ROOT
+        let target = if main != 0 { main } else { hwnd };
+        let edge = edge_from_cursor(target);
+        if edge != 0 {
+            set_resize_cursor(edge);
+            return 1; // TRUE：光标已设，别让系统再改回箭头
+        }
     }
     if msg == WM_LBUTTONDOWN {
         let main = unsafe { GetAncestor(hwnd, 2) }; // GA_ROOT
