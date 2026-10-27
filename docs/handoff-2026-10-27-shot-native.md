@@ -109,8 +109,8 @@
 ## 四、环境与验证方法
 
 ```bash
-# 仓库
-cd "D:/Desktop/Wen/06 Codex/self_clipboard"
+# 进入仓库根目录（clone / pull 后的路径，家里和单位不一样，别写死）
+cd <仓库根>
 # Cargo.toml 在 src-tauri/ 下（不是仓库根）
 
 # 测试
@@ -121,10 +121,11 @@ cd src-tauri && cargo test --lib     # 当前 67 个测试全过
 # 终端2：cargo build 然后双击 src-tauri/target/debug/self-clipboard.exe
 ```
 
-**日志**（诊断一切问题先看它）：
-`D:\self_clipboard_images\log\Clipboard.log`
-（不是 `%LOCALAPPDATA%\轻贴` —— 缓存目录在 config 里，
-`%APPDATA%\com.kunge.selfclipboard\config.json` 的 `cache_dir`）
+**日志**（诊断一切问题先看它）：`<cache_dir>/log/Clipboard.log`。
+`cache_dir` 由**当前这台机器**的配置决定，在
+`%APPDATA%\com.kunge.selfclipboard\config.json` 的 `cache_dir` 字段里读
+（家里和单位的缓存目录不一样，**以当前机器的配置文件为准**）。
+不是 `%LOCALAPPDATA%\轻贴` 那个位置。
 
 **判定标准**：日志里应能看到 `[shot] 会话 #N 开始` → `[shot] 已复制选区 …`；
 `[fe/shot]` 是前端上报。
