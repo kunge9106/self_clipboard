@@ -80,6 +80,25 @@ const WM_SYSKEYDOWN: usize = 0x0104;
 const VK_ESCAPE: u32 = 0x1B;
 const VK_RETURN: u32 = 0x0D;
 
+/// 每显示器 DPI 感知 v2 的上下文句柄（Windows 用负值表示预定义 context）。
+///
+/// **必须在 `CreateWindowExW` 之前设置**：窗口的 DPI awareness 在创建那一刻就
+/// 冻结了（`GetWindowDpiAwarenessContext` 是窗口级状态），之后再改线程 context
+/// 不会影响已建窗口。
+const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
+
+/// 覆盖层线程统一钉到 per-monitor v2，让所有坐标都是**物理像素**。
+///
+/// 线程若不是 DPI 感知，Windows 会把 `GetCursorPos` / `GetMonitorInfo` 的返回值
+/// "虚拟化"成 96 DPI 的逻辑坐标。结果就是 150% 的副屏上：框选的框和真正截到的
+/// 区域错位（框一半、截另一半）。`start()` 与覆盖层线程各调一次 —— 前者管
+/// 抓屏与取显示器矩形，后者管建窗。
+fn pin_dpi_context() {
+    unsafe {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
 const DT_CENTER: u32 = 0x0000_0001;
 const DT_VCENTER: u32 = 0x0000_0004;
 const DT_SINGLELINE: u32 = 0x0000_0020;
@@ -259,6 +278,10 @@ extern "system" {
     fn SetCursor(cursor: isize) -> isize;
     fn LoadCursorW(instance: isize, name: *const u16) -> isize;
     fn GetModuleHandleW(name: *const u16) -> isize;
+    /// 线程级 DPI 上下文。必须在建窗之前设置，见 `pin_dpi_context`。
+    fn SetThreadDpiAwarenessContext(ctx: isize) -> isize;
+    /// 窗口当前所在显示器的 DPI（96 = 100%）。仅用于日志核对。
+    fn GetDpiForWindow(hwnd: isize) -> u32;
     fn MonitorFromPoint(pt: Point, flags: u32) -> isize;
     fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
     fn SetWindowsHookExW(id: i32, proc: HookProc, module: isize, thread: u32) -> isize;
@@ -461,6 +484,11 @@ pub fn start(_app: &AppHandle) {
         return;
     }
 
+    // 抓屏与取显示器矩形都要用**物理像素**。线程若不是 DPI 感知，Windows 会把
+    // `GetCursorPos` / `GetMonitorInfo` 虚拟化成 96 DPI 的逻辑坐标 —— 高 DPI 副屏上
+    // 就成了「框这一半、截另一半」。awareness 在建窗时冻结，这里先钉好。
+    pin_dpi_context();
+
     let Some((left, top, w, h)) = monitor_at_cursor() else {
         crate::log_warn!("[shot] 找不到鼠标所在的显示器，截图取消");
         BUSY.store(false, Ordering::SeqCst);
@@ -543,6 +571,10 @@ fn run_overlay(
     pixels: Vec<u8>,
     windows: Vec<[i32; 4]>,
 ) {
+    // 新建线程默认继承进程的 DPI 上下文，但窗口的 awareness 在 `CreateWindowExW`
+    // 那一刻冻结，所以这里必须显式钉一次（父线程设过也重设，幂等且便宜）。
+    pin_dpi_context();
+
     let Some(session) = (unsafe { build_session(left, top, w, h, pixels, windows) }) else {
         crate::log_warn!("[shot] 会话 #{seq} 建窗失败");
         return;
@@ -572,8 +604,10 @@ fn run_overlay(
     }
 
     let t0 = std::time::Instant::now();
+    // DPI 写进日志：多屏/缩放出问题时，先看这个数与显示器矩形是否自洽
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
     crate::log_print!(
-        "[shot] 会话 #{seq} 覆盖层已就位（{}ms）",
+        "[shot] 会话 #{seq} 覆盖层已就位（{}ms），DPI={dpi}，{w}×{h} @{left},{top}",
         t0.elapsed().as_millis()
     );
 
