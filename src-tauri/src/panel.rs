@@ -116,7 +116,9 @@ fn show_now(app: &AppHandle) {
     // 再显式抢一次前台。后台进程直接 `SetForegroundWindow` 常被系统拒绝
     // （实测：焦点会落到同进程的主窗口上，面板刚弹出就因为失焦被收起）。
     if let Ok(h) = win.hwnd() {
-        unsafe { force_foreground(h.0 as isize) };
+        if !unsafe { force_foreground(h.0 as isize) } {
+            crate::log_warn!("[panel] 焦点没抢到，面板可能刚弹出就被失焦收起");
+        }
     }
 
     // 每次弹出都让页面重新拉一次数据：面板是常驻的，不刷新就会看到旧列表，
@@ -124,31 +126,49 @@ fn show_now(app: &AppHandle) {
     let _ = app.emit_to(PANEL_LABEL, "panel-open", ());
 }
 
-/// 把窗口强行拉到前台。
+/// 把窗口强行拉到前台，**返回是否真的抢到了**。
 ///
 /// 非前台进程调用 `SetForegroundWindow` 会被系统拦（防止弹窗骚扰），绕法是先
 /// `AttachThreadInput` 把自己的输入队列挂到**当前前台线程**上，此时系统认为两者
 /// 是同一个输入上下文，设置才能生效；做完立刻解挂，否则两边键盘状态会互相影响。
 ///
-/// `pub(crate)`：截图覆盖层也要抢一次前台（否则按 Esc 收不掉），逻辑完全一样，
+/// **调用线程必须是主线程**：窗口是主线程创建的，Attach 挂的也是线程输入队列，
+/// 从别的线程调用等于挂到一个跟窗口无关的队列上 —— 白挂。面板与截图两处都按这条
+/// 走（截图那边用 `run_on_main_thread` 转一次）。
+///
+/// `pub(crate)`：截图覆盖层也要抢一次前台（否则第一次点击会被系统拿去激活窗口，
+/// 表现为「必须点一下才能开始框选」），逻辑完全一样，
 /// 不重复实现 —— 这个函数里每一步都是踩坑换来的，复制一份必然漂移。
-pub(crate) unsafe fn force_foreground(hwnd: isize) {
+pub(crate) unsafe fn force_foreground(hwnd: isize) -> bool {
     if hwnd == 0 {
-        return;
+        return false;
     }
-    let fg = GetForegroundWindow();
-    if fg == hwnd {
-        return;
+    // 必须重试，而且每轮重新取前台窗口，原因有两个：
+    // 1. `show()` 与前台切换都是**异步**的 —— 刚 show 完的窗口还没成为可激活的
+    //    顶层窗口，第一次调用多半无效；
+    // 2. Attach 的对象（当前前台窗口）每一轮都可能变，拿上一轮的结果去挂会挂空。
+    //
+    // 40ms × 4 轮 ≈ 160ms，用户察觉不到，但足够覆盖「窗口刚显示」这段时间。
+    for round in 0..4 {
+        let fg = GetForegroundWindow();
+        if fg == hwnd {
+            return true;
+        }
+        let fg_thread = GetWindowThreadProcessId(fg, std::ptr::null_mut());
+        let cur = GetCurrentThreadId();
+        let attached =
+            fg_thread != 0 && fg_thread != cur && AttachThreadInput(fg_thread, cur, 1) != 0;
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+        if attached {
+            AttachThreadInput(fg_thread, cur, 0);
+        }
+        if round < 3 {
+            std::thread::sleep(Duration::from_millis(40));
+        }
     }
-    let fg_thread = GetWindowThreadProcessId(fg, std::ptr::null_mut());
-    let cur = GetCurrentThreadId();
-    let attached = fg_thread != 0 && fg_thread != cur && AttachThreadInput(fg_thread, cur, 1) != 0;
-    BringWindowToTop(hwnd);
-    SetForegroundWindow(hwnd);
-    SetFocus(hwnd);
-    if attached {
-        AttachThreadInput(fg_thread, cur, 0);
-    }
+    GetForegroundWindow() == hwnd
 }
 
 /// 把某条内容复制进剪贴板，收起面板，再粘回唤出前的窗口。

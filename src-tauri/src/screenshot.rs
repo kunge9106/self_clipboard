@@ -192,6 +192,11 @@ pub fn start(app: &AppHandle) {
 
     let scale = mon.scale_factor().max(0.1);
     let app2 = app.clone();
+    // 「首次打开后立刻按快捷键」慢，多半是没赶上预热（启动 3 秒后才建窗口）。
+    // 记一行，看到它就能确定是预热没到，而不是抓屏变慢了。
+    if app.get_webview_window(SHOT_LABEL).is_none() {
+        crate::log_print!("[shot] 覆盖层尚未预热，本次现建（首次按下会慢一点）");
+    }
     // 窗口必须在主线程创建/移动
     if let Err(e) = app.run_on_main_thread(move || prepare_overlay(&app2, left, top, w, h, scale)) {
         crate::log_warn!("[shot] 切到主线程失败：{e}");
@@ -411,19 +416,48 @@ fn reveal(app: &AppHandle) {
     };
     let _ = win.show();
     let _ = win.set_focus();
-    if let Ok(h) = win.hwnd() {
-        let target = h.0 as isize;
-        // 后台进程直接 SetForegroundWindow 会被系统拒绝，必须走 AttachThreadInput
-        let before = unsafe { GetForegroundWindow() };
-        unsafe { crate::panel::force_foreground(target) };
-        let after = unsafe { GetForegroundWindow() };
-        crate::log_print!(
-            "[shot] 覆盖层已显示，前台 {before:#x} → {after:#x}（目标 {target:#x}）{}",
-            if after == target { "" } else { " ⚠ 焦点没抢到，首次点击可能被吞" }
-        );
+    // 抢前台**必须切到主线程**：`force_foreground` 靠 `AttachThreadInput` 把当前线程的
+    // 输入队列挂到前台线程上，而 `shot_show` 是命令、跑在异步运行时线程里 ——
+    // 挂错线程等于没挂，「点了第一下才开始框选」就是这么来的（面板那边早已踩过同一条）。
+    let app2 = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || steal_foreground(&app2)) {
+        crate::log_warn!("[shot] 切到主线程失败：{e}");
     }
     let elapsed = now_ms().saturating_sub(START_MS.load(Ordering::SeqCst));
     crate::log_print!("[shot] 从按下快捷键到覆盖层可见：{elapsed}ms");
+}
+
+/// 主线程上抢一次前台，并把结果写进日志。
+///
+/// 日志带上窗口的**扩展样式**：`skip_taskbar(true)` 在 Windows 上会给窗口挂
+/// `WS_EX_TOOLWINDOW`（0x80），工具窗口不进 Alt+Tab、任务栏也不显示 —— 万一它同时
+/// 影响了激活，看这一行就能定位，不用再猜。
+fn steal_foreground(app: &AppHandle) {
+    let Some(win) = app.get_webview_window(SHOT_LABEL) else {
+        return;
+    };
+    let Ok(h) = win.hwnd() else {
+        return;
+    };
+    let target = h.0 as isize;
+    let before = unsafe { GetForegroundWindow() };
+    let ok = unsafe { crate::panel::force_foreground(target) };
+    let after = unsafe { GetForegroundWindow() };
+    let ex = unsafe { GetWindowLongW(target, GWL_EXSTYLE) };
+    crate::log_print!(
+        "[shot] 覆盖层已显示，前台 {before:#x} → {after:#x}（目标 {target:#x}，exstyle {ex:#x}）{}",
+        if ok {
+            ""
+        } else {
+            " ⚠ 焦点没抢到，第一次点击会被系统拿去激活窗口"
+        }
+    );
+}
+
+const GWL_EXSTYLE: i32 = -20;
+
+extern "system" {
+    fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
 }
 
 /// 本次截图开始的时刻（Unix 毫秒）。跨线程只能用整数时间戳，
