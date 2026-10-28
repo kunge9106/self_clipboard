@@ -1,6 +1,6 @@
 [package]
 name = "self-clipboard"
-version = "2.5.0"
+version = "2.6.0"
 description = "轻贴 — 本地剪贴板管理工具"
 authors = ["kunge9106"]
 edition = "2021"

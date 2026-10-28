@@ -1,152 +1,214 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="840" viewBox="0 0 1280 840" role="img" aria-label="轻贴主界面示意：左侧为历史/文本/图片/文件/收藏导航，右侧为搜索与剪贴板历史列表">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="840" viewBox="0 0 1280 840" role="img" aria-label="轻贴主界面：左侧为历史 / 文本 / 图片 / 文件 / 收藏导航，右侧为搜索框与历史条目列表，条目卡片上带类型、代码、链接、截图、已置顶、已收藏等徽章">
+  <!-- 按 1:1 逻辑像素绘制：窗口 1060×690，侧栏 168、标题栏 40、工具栏 52、状态栏 28，
+       徽章与卡片尺寸与 src/styles.css 对齐。颜色取 :root 的浅色变量与 13 位徽章色板。 -->
   <defs>
     <linearGradient id="wall" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#e7edf7"/>
-      <stop offset="0.5" stop-color="#d5deee"/>
-      <stop offset="1" stop-color="#c3cfe4"/>
+      <stop offset="0" stop-color="#e9eef8"/>
+      <stop offset="0.45" stop-color="#d8e1f1"/>
+      <stop offset="1" stop-color="#c6d1e6"/>
     </linearGradient>
-    <radialGradient id="blobA" cx="0.2" cy="0.15" r="0.7">
+    <radialGradient id="blobA" cx="0.18" cy="0.12" r="0.72">
       <stop offset="0" stop-color="#8fb0ff" stop-opacity="0.55"/>
       <stop offset="1" stop-color="#8fb0ff" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="blobB" cx="0.9" cy="0.9" r="0.7">
-      <stop offset="0" stop-color="#ffb9d6" stop-opacity="0.5"/>
+    <radialGradient id="blobB" cx="0.92" cy="0.94" r="0.7">
+      <stop offset="0" stop-color="#ffb9d6" stop-opacity="0.45"/>
       <stop offset="1" stop-color="#ffb9d6" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="sheet" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.82"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0.68"/>
-    </linearGradient>
-    <linearGradient id="side" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.42"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0.22"/>
+
+    <!-- 窗口材质：acrylic 的模糊由系统做，这里用「透出的壁纸 + 白色叠加」逼近 -->
+    <linearGradient id="glass" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.74"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.58"/>
     </linearGradient>
     <linearGradient id="thumb" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#9db8ff"/>
       <stop offset="1" stop-color="#6a8cf0"/>
     </linearGradient>
-    <filter id="cardShadow" x="-10%" y="-20%" width="120%" height="160%">
-      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#33406b" flood-opacity="0.10"/>
+
+    <filter id="winShadow" x="-8%" y="-8%" width="116%" height="120%">
+      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#2b3a5c" flood-opacity="0.20"/>
     </filter>
+    <filter id="cardShadow" x="-10%" y="-25%" width="120%" height="170%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#33406b" flood-opacity="0.07"/>
+    </filter>
+
+    <clipPath id="winClip">
+      <rect x="0" y="0" width="1060" height="690" rx="12"/>
+    </clipPath>
   </defs>
 
+  <!-- 桌面壁纸 -->
   <rect width="1280" height="840" fill="url(#wall)"/>
   <rect width="1280" height="840" fill="url(#blobA)"/>
   <rect width="1280" height="840" fill="url(#blobB)"/>
 
-  <!-- 窗口 -->
-  <rect x="40" y="40" width="1200" height="760" rx="18" fill="url(#sheet)" stroke="#ffffff" stroke-opacity="0.75"/>
-  <rect x="40" y="40" width="1200" height="760" rx="18" fill="none" stroke="#3a465e" stroke-opacity="0.10"/>
+  <g transform="translate(110 75)">
+    <rect x="0" y="0" width="1060" height="690" rx="12" fill="#ffffff" filter="url(#winShadow)"/>
 
-  <!-- 标题栏 -->
-  <g>
-    <rect x="52" y="62" width="26" height="26" rx="8" fill="#4b6fe0"/>
-    <rect x="60" y="68" width="10" height="4" rx="2" fill="#fff" fill-opacity="0.9"/>
-    <rect x="59" y="71" width="12" height="12" rx="3" fill="none" stroke="#fff" stroke-opacity="0.85" stroke-width="2"/>
-    <text x="88" y="82" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="19" font-weight="600" fill="#1b2029">轻贴</text>
+    <g clip-path="url(#winClip)">
+      <!-- 透过材质看到的壁纸（模糊后的壁纸本就是平滑渐变，这里直接透出） -->
+      <g opacity="0.75">
+        <rect x="-110" y="-75" width="1280" height="840" fill="url(#wall)"/>
+        <rect x="-110" y="-75" width="1280" height="840" fill="url(#blobA)"/>
+        <rect x="-110" y="-75" width="1280" height="840" fill="url(#blobB)"/>
+      </g>
+      <rect x="0" y="0" width="1060" height="690" fill="url(#glass)"/>
 
-    <g fill="none" stroke="#4a5468" stroke-width="1.7" stroke-linecap="round">
-      <path d="M1080 75h14" />
-      <rect x="1114" y="69" width="12" height="12" rx="2"/>
-      <path d="M1152 68l12 12M1164 68l-12 12"/>
+      <!-- ── 标题栏 ────────────────────────────────────────────── -->
+      <g>
+        <rect x="14" y="9" width="22" height="22" rx="6" fill="#2f6bff"/>
+        <rect x="22" y="17" width="6" height="2" rx="1" fill="#ffffff" fill-opacity="0.92"/>
+        <rect x="21" y="19" width="8" height="8" rx="2" fill="none" stroke="#ffffff" stroke-opacity="0.9" stroke-width="1.6"/>
+        <text x="44" y="25" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="14" font-weight="600" fill="#1b1b1f">轻贴</text>
+
+        <g fill="none" stroke="#1b1b1f" stroke-opacity="0.72" stroke-width="1.1" stroke-linecap="round">
+          <!-- 最小化 / 最大化 / 关闭 -->
+          <path d="M957 20h10"/>
+          <rect x="990.5" y="15.5" width="9" height="9" rx="1.5"/>
+          <path d="M1024 16l9 9M1033 16l-9 9"/>
+        </g>
+      </g>
+      <path d="M0 40h1060" stroke="rgba(27,27,31,0.07)"/>
+
+      <!-- ── 侧栏 ──────────────────────────────────────────────── -->
+      <g>
+        <rect x="0" y="40" width="168" height="622" fill="#ffffff" fill-opacity="0.16"/>
+        <path d="M168 40v622" stroke="rgba(27,27,31,0.07)"/>
+
+        <!-- 选中项：历史 -->
+        <rect x="10" y="50" width="148" height="34" rx="8" fill="#ffffff" fill-opacity="0.55" stroke="rgba(27,27,31,0.07)"/>
+        <g fill="none" stroke="#2f6bff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="28" cy="67" r="5.5"/>
+          <path d="M28 63.5v3.5l2.6 1.7"/>
+        </g>
+        <text x="46" y="72" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="13" font-weight="700" fill="#1b1b1f">历史</text>
+
+        <!-- 未选中项（图标按导航项中心对齐：105 / 143 / 181 / 219） -->
+        <g fill="none" stroke="#1b1b1f" stroke-opacity="0.6" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+          <g transform="translate(20 97)">
+            <path d="M3 2.5h10M3 6.5h10M3 10.5h6.5"/>
+          </g>
+          <g transform="translate(20 135)">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="2"/>
+            <circle cx="5.5" cy="6" r="1"/>
+            <path d="M1.5 11l4-3.5 3 2.5 2.5-2 3.5 3"/>
+          </g>
+          <g transform="translate(20 173)">
+            <path d="M1.5 4.5A1.5 1.5 0 013 3h3l1.5 2H13a1.5 1.5 0 011.5 1.5v6A1.5 1.5 0 0113 14H3a1.5 1.5 0 01-1.5-1.5z"/>
+          </g>
+          <g transform="translate(20 211)">
+            <path d="M8 1.5l2 4.5 4.5.6-3.3 3.2.8 4.7L8 12l-4 2.5.8-4.7L1.5 6.6 6 6z"/>
+          </g>
+        </g>
+        <g font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="13" font-weight="500" fill="#1b1b1f">
+          <text x="46" y="110">文本</text>
+          <text x="46" y="148">图片</text>
+          <text x="46" y="186">文件</text>
+          <text x="46" y="224">收藏</text>
+        </g>
+
+        <!-- 底部：深浅切换 + 设置（项中心 597 / 635） -->
+        <g fill="none" stroke="#1b1b1f" stroke-opacity="0.6" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+          <g transform="translate(20 589)">
+            <path d="M13.3 9.9A5.7 5.7 0 016.1 2.7a5.7 5.7 0 107.2 7.2z"/>
+          </g>
+          <g transform="translate(20 627)">
+            <path d="M6.6 1.8h2.8l.42 1.85c.5.17.96.42 1.37.74l1.8-.62 1.4 2.42-1.38 1.23a5.3 5.3 0 010 1.56l1.38 1.23-1.4 2.42-1.8-.62c-.41.32-.87.57-1.37.74L9.4 14.2H6.6l-.42-1.85a5.3 5.3 0 01-1.37-.74l-1.8.62-1.4-2.42 1.38-1.23a5.3 5.3 0 010-1.56L1.61 6.19l1.4-2.42 1.8.62c.41-.32.87-.57 1.37-.74z"/>
+            <circle cx="8" cy="8" r="2.1"/>
+          </g>
+        </g>
+        <g font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="13" font-weight="500" fill="#1b1b1f">
+          <text x="46" y="602">深色</text>
+          <text x="46" y="641">设置</text>
+        </g>
+      </g>
+
+      <!-- ── 搜索框 ────────────────────────────────────────────── -->
+      <rect x="184" y="50" width="846" height="32" rx="8" fill="#ffffff" fill-opacity="0.34" stroke="rgba(27,27,31,0.08)"/>
+      <g fill="none" stroke="#1b1b1f" stroke-opacity="0.45" stroke-width="1.3" stroke-linecap="round">
+        <circle cx="202" cy="65" r="4.2"/>
+        <path d="M205.2 68.2L209 72"/>
+      </g>
+      <text x="216" y="70" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="13" fill="#1b1b1f" fill-opacity="0.45">搜索剪贴板历史…</text>
+
+      <!-- ── 条目列表 ──────────────────────────────────────────── -->
+      <!-- 卡片 1：文本 + 代码 + 已置顶 -->
+      <g>
+        <rect x="182" y="92" width="848" height="78" rx="8" fill="#ffffff" fill-opacity="0.58" stroke="#2f6bff" filter="url(#cardShadow)"/>
+        <rect x="192" y="102" width="34" height="18" rx="4" fill="rgba(101,163,13,0.14)"/>
+        <text x="209" y="115" text-anchor="middle" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#65a30d">文本</text>
+        <rect x="232" y="102" width="34" height="18" rx="4" fill="rgba(8,145,178,0.13)"/>
+        <text x="249" y="115" text-anchor="middle" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#0891b2">代码</text>
+        <rect x="272" y="102" width="49" height="18" rx="4" fill="#2f6bff"/>
+        <text x="296.5" y="115" text-anchor="middle" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" font-weight="500" fill="#ffffff">已置顶</text>
+        <text x="1020" y="115" text-anchor="end" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#1b1b1f" fill-opacity="0.5">刚刚</text>
+
+        <text x="192" y="136" font-family="ui-monospace,'Cascadia Mono',Consolas,monospace" font-size="13" fill="#1b1b1f"><tspan fill="#7c3aed">const</tspan> idx = items.findIndex((i) =&gt; i.id === target);</text>
+        <text x="192" y="156" font-family="ui-monospace,'Cascadia Mono',Consolas,monospace" font-size="13" fill="#1b1b1f"><tspan fill="#7c3aed">return</tspan> idx &gt;= <tspan fill="#b45309">0</tspan> ? spliceOne(idx) : -<tspan fill="#b45309">1</tspan>;</text>
+      </g>
+
+      <!-- 卡片 2：链接 -->
+      <g>
+        <rect x="182" y="178" width="848" height="59" rx="8" fill="#ffffff" fill-opacity="0.58" stroke="rgba(27,27,31,0.07)" filter="url(#cardShadow)"/>
+        <rect x="192" y="188" width="34" height="18" rx="4" fill="rgba(2,132,199,0.13)"/>
+        <text x="209" y="201" text-anchor="middle" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#0284c7">链接</text>
+        <text x="1020" y="201" text-anchor="end" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#1b1b1f" fill-opacity="0.5">3 分钟前</text>
+        <text x="192" y="224" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="13" fill="#0284c7">https://github.com/kunge9106/self_clipboard/releases/latest</text>
+      </g>
+
+      <!-- 卡片 3：图片 + 截图（缩略图） -->
+      <g>
+        <rect x="182" y="245" width="848" height="100" rx="8" fill="#ffffff" fill-opacity="0.58" stroke="rgba(27,27,31,0.07)" filter="url(#cardShadow)"/>
+        <rect x="192" y="255" width="34" height="18" rx="4" fill="rgba(124,58,237,0.12)"/>
+        <text x="209" y="268" text-anchor="middle" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#7c3aed">图片</text>
+        <rect x="232" y="255" width="34" height="18" rx="4" fill="rgba(219,39,119,0.12)"/>
+        <text x="249" y="268" text-anchor="middle" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#db2777">截图</text>
+        <text x="1020" y="268" text-anchor="end" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#1b1b1f" fill-opacity="0.5">8 分钟前</text>
+
+        <g>
+          <rect x="192" y="275" width="107" height="60" rx="6" fill="url(#thumb)" stroke="rgba(255,255,255,0.35)"/>
+          <circle cx="210" cy="291" r="4" fill="#ffffff" fill-opacity="0.85"/>
+          <path d="M198 331l26-22 16 13 14-11 21 20" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="2.2" stroke-linejoin="round"/>
+          <rect x="192" y="275" width="107" height="60" rx="6" fill="none" stroke="rgba(27,27,31,0.08)"/>
+        </g>
+      </g>
+
+      <!-- 卡片 4：文件 -->
+      <g>
+        <rect x="182" y="353" width="848" height="59" rx="8" fill="#ffffff" fill-opacity="0.58" stroke="rgba(27,27,31,0.07)" filter="url(#cardShadow)"/>
+        <rect x="192" y="363" width="34" height="18" rx="4" fill="rgba(13,148,136,0.13)"/>
+        <text x="209" y="376" text-anchor="middle" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#0d9488">文件</text>
+        <text x="1020" y="376" text-anchor="end" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#1b1b1f" fill-opacity="0.5">25 分钟前</text>
+        <text x="192" y="399" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="13" fill="#1b1b1f">2026Q4-预算.xlsx、方案.pdf、截图.png</text>
+      </g>
+
+      <!-- 卡片 5：文本 + 已收藏 -->
+      <g>
+        <rect x="182" y="420" width="848" height="78" rx="8" fill="#ffffff" fill-opacity="0.58" stroke="rgba(27,27,31,0.07)" filter="url(#cardShadow)"/>
+        <rect x="192" y="430" width="34" height="18" rx="4" fill="rgba(101,163,13,0.14)"/>
+        <text x="209" y="443" text-anchor="middle" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#65a30d">文本</text>
+        <rect x="232" y="430" width="49" height="18" rx="4" fill="rgba(217,119,6,0.14)"/>
+        <text x="256.5" y="443" text-anchor="middle" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#d97706">已收藏</text>
+        <text x="1020" y="443" text-anchor="end" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#1b1b1f" fill-opacity="0.5">1 小时前</text>
+
+        <text x="192" y="466" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="13" fill="#1b1b1f">图片按日期时间命名，截图与其它图片分目录存放。</text>
+        <text x="192" y="486" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="13" fill="#1b1b1f">关掉开关就重新平铺回 images/ 下。</text>
+      </g>
+
+      <!-- 滚动条 -->
+      <rect x="1043" y="96" width="5" height="240" rx="2.5" fill="rgba(27,27,31,0.14)"/>
+
+      <!-- ── 状态栏 ────────────────────────────────────────────── -->
+      <path d="M168 662h892" stroke="rgba(27,27,31,0.07)"/>
+      <text x="180" y="681" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#1b1b1f" fill-opacity="0.55">共 128 条</text>
+      <text x="614" y="681" text-anchor="middle" font-family="'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',sans-serif" font-size="11" fill="#1b1b1f" fill-opacity="0.45">v2.6.0</text>
+      <g transform="translate(1022 668)" fill="none" stroke="#1b1b1f" stroke-opacity="0.5" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/>
+      </g>
+
+      <!-- 窗口内描边：玻璃边缘的一道白线 -->
+      <rect x="0.5" y="0.5" width="1059" height="689" rx="11.5" fill="none" stroke="#ffffff" stroke-opacity="0.55"/>
     </g>
-  </g>
-
-  <path d="M40 104h1200" stroke="#3a465e" stroke-opacity="0.10"/>
-
-  <!-- 侧栏 -->
-  <rect x="40" y="104" width="188" height="696" fill="url(#side)"/>
-  <path d="M228 104v696" stroke="#3a465e" stroke-opacity="0.10"/>
-
-  <!-- 导航项：历史（选中）/ 文本 / 图片 / 文件 / 收藏 -->
-  <rect x="56" y="126" width="156" height="40" rx="10" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.08"/>
-  <g font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15.5">
-    <g transform="translate(70,136)">
-      <circle cx="8" cy="8" r="6.6" fill="none" stroke="#4b6fe0" stroke-width="1.7"/>
-      <path d="M8 4.6V8l2.4 1.6" stroke="#4b6fe0" stroke-width="1.7" fill="none" stroke-linecap="round"/>
-      <text x="26" y="13.5" fill="#111318" font-weight="700">历史</text>
-    </g>
-
-    <g transform="translate(70,182)" fill="#3b4354">
-      <path d="M1 2.5h14M1 8h14M1 13.5h9" stroke="#5a6478" stroke-width="1.7" fill="none" stroke-linecap="round"/>
-      <text x="26" y="13.5" font-weight="600">文本</text>
-    </g>
-
-    <g transform="translate(70,228)" fill="#3b4354">
-      <rect x="1" y="2" width="14" height="12" rx="2.4" fill="none" stroke="#5a6478" stroke-width="1.7"/>
-      <circle cx="5.6" cy="6" r="1.3" fill="#5a6478"/>
-      <path d="M2 12l4-3.6 2.6 2.2 2.4-2 3.6 3.2" fill="none" stroke="#5a6478" stroke-width="1.7" stroke-linecap="round"/>
-      <text x="26" y="13.5" font-weight="600">图片</text>
-    </g>
-
-    <g transform="translate(70,274)" fill="#3b4354">
-      <path d="M1 4.6A1.6 1.6 0 012.6 3h3.4l1.6 2.2h6A1.6 1.6 0 0115 6.8v6.6A1.6 1.6 0 0113.4 13.4H2.6A1.6 1.6 0 011 11.8z" fill="none" stroke="#5a6478" stroke-width="1.7" stroke-linejoin="round"/>
-      <text x="26" y="13.5" font-weight="600">文件</text>
-    </g>
-
-    <g transform="translate(70,320)" fill="#3b4354">
-      <path d="M8 1.6l1.9 4.2 4.3.6-3.1 3 .8 4.4L8 11.7l-3.9 2.1.8-4.4-3.1-3 4.3-.6z" fill="none" stroke="#5a6478" stroke-width="1.6" stroke-linejoin="round"/>
-      <text x="26" y="13.5" font-weight="600">收藏</text>
-    </g>
-
-    <!-- 设置（底部） -->
-    <g transform="translate(70,742)" fill="#3b4354">
-      <circle cx="8" cy="8" r="3" fill="none" stroke="#5a6478" stroke-width="1.6"/>
-      <circle cx="8" cy="8" r="6.6" fill="none" stroke="#5a6478" stroke-width="1.6" stroke-dasharray="2.6 2.4"/>
-      <text x="26" y="13.5" font-weight="600">设置</text>
-    </g>
-  </g>
-
-  <!-- 搜索栏 -->
-  <rect x="256" y="126" width="952" height="40" rx="10" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.10"/>
-  <g transform="translate(276,138)" fill="none" stroke="#7c8698" stroke-width="1.8">
-    <circle cx="6.5" cy="6.5" r="4.6"/>
-    <path d="M10.2 10.2L14 14" stroke-linecap="round"/>
-  </g>
-  <text x="302" y="152" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="14" fill="#98a1b2">搜索剪贴板历史…</text>
-
-  <!-- 卡片 1：文本 -->
-  <g filter="url(#cardShadow)">
-    <rect x="256" y="186" width="952" height="86" rx="12" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.09"/>
-  </g>
-  <text x="280" y="212" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12.5" font-weight="600" fill="#6d7686">文本 · 2 分钟前</text>
-  <rect x="280" y="226" width="700" height="9" rx="4.5" fill="#c9cfdb"/>
-  <rect x="280" y="244" width="520" height="9" rx="4.5" fill="#d8dde6"/>
-
-  <!-- 卡片 2：图片 -->
-  <g filter="url(#cardShadow)">
-    <rect x="256" y="288" width="952" height="86" rx="12" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.09"/>
-  </g>
-  <rect x="280" y="302" width="58" height="58" rx="8" fill="url(#thumb)"/>
-  <circle cx="297" cy="319" r="4" fill="#ffffff" fill-opacity="0.85"/>
-  <path d="M284 352l16-14 10 9 9-8 13 13" fill="none" stroke="#ffffff" stroke-opacity="0.9" stroke-width="2.2" stroke-linejoin="round"/>
-  <text x="354" y="322" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12.5" font-weight="600" fill="#6d7686">图片 · 1920 × 1080 · 5 分钟前</text>
-  <rect x="354" y="336" width="320" height="9" rx="4.5" fill="#c9cfdb"/>
-
-  <!-- 卡片 3：文本 -->
-  <g filter="url(#cardShadow)">
-    <rect x="256" y="390" width="952" height="86" rx="12" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.09"/>
-  </g>
-  <text x="280" y="416" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12.5" font-weight="600" fill="#6d7686">文本 · 12 分钟前</text>
-  <rect x="280" y="430" width="640" height="9" rx="4.5" fill="#c9cfdb"/>
-  <rect x="280" y="448" width="430" height="9" rx="4.5" fill="#d8dde6"/>
-
-  <!-- 卡片 4：文件（半透明，示意） -->
-  <g filter="url(#cardShadow)" opacity="0.55">
-    <rect x="256" y="492" width="952" height="86" rx="12" fill="#ffffff" stroke="#3a465e" stroke-opacity="0.09"/>
-  </g>
-  <g opacity="0.55">
-    <rect x="280" y="508" width="54" height="54" rx="8" fill="#eef1f7" stroke="#3a465e" stroke-opacity="0.08"/>
-    <path d="M298 522h9l4 5h13v15h-26z" fill="none" stroke="#8b93a5" stroke-width="2" stroke-linejoin="round"/>
-    <text x="352" y="526" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12.5" font-weight="600" fill="#6d7686">文件 · report.xlsx 等 3 个文件 · 20 分钟前</text>
-    <rect x="352" y="540" width="300" height="9" rx="4.5" fill="#d8dde6"/>
-  </g>
-
-  <!-- 状态栏 -->
-  <path d="M228 756h1012" stroke="#3a465e" stroke-opacity="0.10"/>
-  <text x="276" y="792" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13.5" fill="#6d7686">共 128 条</text>
-  <text x="640" y="792" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13.5" fill="#98a1b2">v2.0.0</text>
-  <g transform="translate(1168,776)" fill="none" stroke="#8b93a5" stroke-width="1.7" stroke-linecap="round">
-    <path d="M1.5 4h13M6 2h3M3 4l.7 9a1.4 1.4 0 001.4 1.3h4.8A1.4 1.4 0 0011.3 13L12 4M6.5 7v4.6M9.5 7v4.6"/>
   </g>
 </svg>
