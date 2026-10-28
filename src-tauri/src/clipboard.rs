@@ -5249,6 +5249,24 @@ mod tests {
         assert!(ts_from_stamp("hello").is_none());
     }
 
+    /// 截图标记：取过即清、超时不再认。
+    ///
+    /// 这两个性质缺一条都会出静默错误 —— 不清会一直把后续手动复制的图当成
+    /// 截图；不设时效则「截图没被捕获到」之后标记会永久挂着。
+    #[test]
+    fn shot_mark_is_consumed_and_expires() {
+        SHOT_AT.store(now_ms(), Ordering::SeqCst);
+        assert!(take_shot_mark(), "刚置位的标记应生效");
+        assert!(!take_shot_mark(), "取过就该清掉，不能重复生效");
+
+        SHOT_AT.store(
+            now_ms().saturating_sub(SHOT_MARK_TTL_MS + 1_000),
+            Ordering::SeqCst,
+        );
+        assert!(!take_shot_mark(), "超过有效期不应再认");
+        assert_eq!(SHOT_AT.load(Ordering::SeqCst), 0, "过期的那次也要清掉");
+    }
+
     /// 造一条图片条目，供目录迁移测试用。
     fn image_item(id: &str, ts: u64, img_path: String) -> HistoryItem {
         HistoryItem {
