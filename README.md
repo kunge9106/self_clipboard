@@ -6,7 +6,7 @@
     <a href="https://github.com/kunge9106/self_clipboard/releases/latest"><img src="https://img.shields.io/github/v/release/kunge9106/self_clipboard?label=release&sort=semver&color=2ea043" alt="Release"></a>
     <img src="https://img.shields.io/badge/platform-Windows%2010%2B-0a7cd6" alt="Platform">
     <img src="https://img.shields.io/badge/Tauri-2-24c8db?logo=tauri&logoColor=white" alt="Tauri 2">
-    <img src="https://img.shields.io/badge/installer-1.4%20MB-4b6fe0" alt="Installer size">
+    <img src="https://img.shields.io/badge/installer-1.7%20MB-4b6fe0" alt="Installer size">
     <img src="https://img.shields.io/badge/license-MIT-2ea043" alt="License: MIT">
   </p>
 </div>
@@ -19,7 +19,7 @@
 
 应用为单机工具，无账号、无云端。除检查更新外不产生网络请求：启动时静默查询一次 GitHub 公开版本信息，其余仅在手动触发，只读取版本数据，不上传本机内容。历史数据存放在本机缓存目录，默认 `%APPDATA%\com.kunge.selfclipboard\clipboard`，可自定义。
 
-安装包 1.4 MB；基于 Electron 的 v1 为 89 MB。启动后进程组占用实测约 400 MB，其中轻贴自身进程约 38 MB，其余为系统 WebView2 的多进程开销。开启「后台释放」后，收起界面时只剩约 40 MB。
+安装包 1.7 MB；基于 Electron 的 v1 为 89 MB。启动后进程组占用实测约 400 MB，其中轻贴自身进程约 38 MB，其余为系统 WebView2 的多进程开销。开启「后台释放」后，收起界面时只剩约 40 MB。
 
 ## 界面
 
