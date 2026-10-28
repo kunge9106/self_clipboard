@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 
 static TRAY: Mutex<Option<tauri::tray::TrayIcon>> = Mutex::new(None);
 
-const MENU_LABEL: &str = "tray-menu";
+use crate::popup::MENU_LABEL;
 /// 以下三个都是**逻辑单位**（CSS px）。`inner_size` 收的就是逻辑值，会按 DPI 放大；
 /// 而托盘图标坐标、显示器工作区都是**物理像素** —— 两套单位在 `open_menu` 里
 /// 必须显式换算，否则高缩放下菜单会偏半个身位（150% 差 42px），还会被错误地
@@ -82,7 +82,12 @@ pub fn create_tray(app: &AppHandle) {
             TrayIconEvent::DoubleClick {
                 button: MouseButton::Left,
                 ..
-            } => show_main(tray.app_handle()),
+            } => {
+                // 与上面同理：回调线程里同步建窗口会死锁，扔到独立线程。
+                // 窗口本来就存在时只是 show，走线程也看不出差别。
+                let app = tray.app_handle().clone();
+                std::thread::spawn(move || show_main(&app));
+            }
             _ => {}
         });
 
@@ -196,14 +201,30 @@ fn apply_material(_win: &WebviewWindow) {}
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn tray_show_main(app: AppHandle) -> Result<(), String> {
-    show_main(&app);
+pub async fn tray_show_main(app: AppHandle) -> Result<(), String> {
+    // 为什么必须是 async + spawn_blocking：Windows 上**同步命令里建窗口会死锁**。
+    // 窗口创建要把活派回主事件循环再等它完成，而同步命令本身就跑在会挡住
+    // 事件循环的线程上 —— 自己等自己（Tauri 文档 WebviewWindowBuilder::build
+    // 的 Known issues 明确写了这一条）。
+    //
+    // 死锁的后果远不止这一个按钮：整个事件循环被卡住，之后所有 IPC 都不再
+    // 响应。实测现象正是「菜单两个按钮都没反应」—— 第一个把循环堵死了。
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::log_print!("[tray] 菜单点了「打开轻贴」");
+        let had = app.get_webview_window("main").is_some();
+        show_main(&app);
+        let now = app.get_webview_window("main").is_some();
+        crate::log_print!("[tray] 打开轻贴完成：主窗口 之前={had} 之后={now}");
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn tray_quit(app: AppHandle) -> Result<(), String> {
     crate::log_print!("[tray] 用户从托盘菜单退出");
+    crate::idle_release::note_exiting();
     crate::clipboard::on_app_exit();
     app.exit(0);
     Ok(())
@@ -212,7 +233,24 @@ pub fn tray_quit(app: AppHandle) -> Result<(), String> {
 /// 把主窗口唤回前台。托盘菜单与「重复启动」都用它，
 /// 所以「补齐材质 + relayout」这一套只此一份，不会两处漂移。
 pub fn show_main(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
+    // 窗口要显示了：取消释放倒计时（用户正在用，不能被销毁）
+    crate::idle_release::note_shown();
+    // 低占用模式下窗口可能已被释放：先确保它存在，再走补齐流程
+    let (w, just_built) = match app.get_webview_window("main") {
+        Some(w) => (w, false),
+        None => match crate::idle_release::ensure_window(app) {
+            Some(w) => (w, true),
+            None => return,
+        },
+    };
+    // 刚重建的窗口页面还没加载完（`visible(false)` 建的，等 PageLoadEvent::Finished
+    // 才由回调 show）。这里再 show 一次会显示一块空白区域 —— 用户看到的就是
+    // 「点了没反应」或一片白。所以重建这条路直接交给回调，不在这里补。
+    if just_built {
+        crate::log_print!("[tray] 界面刚重建，交给页面加载完成后显示");
+        return;
+    }
+    {
         // 所有「补齐」动作都必须在窗口可见**之前**做完。显示之后再改材质或尺寸，
         // 用户会看到「先出现、再变样」的闪烁（上一版就是这么闪的）。
         #[cfg(windows)]

@@ -23,6 +23,14 @@ const WINDOW_TITLE: &str = "轻贴";
 /// 与系统消息、tao 自己的消息都不会撞。
 pub const WM_QINGTIE_WAKE: u32 = 0x8000 + 0x51;
 
+/// `OpenEventW` 的访问权限：只要求能 `SetEvent`。
+const EVENT_MODIFY_STATE: u32 = 0x0002;
+const INFINITE: u32 = 0xFFFF_FFFF;
+const WAIT_OBJECT_0: u32 = 0;
+
+/// 唤醒事件句柄：第一个实例创建后一直持有，监听线程用它等待。
+static WAKE_HANDLE: OnceLock<isize> = OnceLock::new();
+
 extern "system" {
     fn CreateMutexW(attrs: *mut c_void, initial_owner: i32, name: *const u16) -> isize;
     fn CloseHandle(h: isize) -> i32;
@@ -31,6 +39,17 @@ extern "system" {
     fn GetWindowTextW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
     fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
     fn SetForegroundWindow(hwnd: isize) -> i32;
+    // 低占用模式释放主窗口后，按标题已经找不到任何窗口：
+    // 唤醒改为走命名事件（内核对象，与窗口无关）
+    fn CreateEventW(
+        attrs: *mut c_void,
+        manual_reset: i32,
+        initial_state: i32,
+        name: *const u16,
+    ) -> isize;
+    fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> isize;
+    fn SetEvent(h: isize) -> i32;
+    fn WaitForSingleObject(h: isize, millis: u32) -> u32;
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -74,6 +93,9 @@ pub fn ensure_single_instance() -> bool {
         false
     } else {
         let _ = LOCK_HANDLE.set(h);
+        // 唤醒事件必须早于主窗口创建：低占用模式下窗口随时可能不存在，
+        // 而事件得一直有人等
+        let _ = WAKE_HANDLE.set(create_wake_event());
         // debug 与正式版用的是**不同锁名**：两者可以同时跑，而它们读写的是
         // **同一个缓存目录与同一份 index.json**。这条日志是为了让「多实例共存时
         // 数据被互相覆盖」这类事故一眼能看出来，而不是让人去猜。
@@ -141,7 +163,9 @@ fn find_main_window() -> isize {
 pub fn notify_existing_instance() -> bool {
     let hwnd = find_main_window();
     if hwnd == 0 {
-        return false;
+        // 低占用模式已把主窗口连同 WebView 释放掉，按标题找不到任何窗口。
+        // 退回命名事件，否则「再次双击」会毫无反应。
+        return notify_via_event();
     }
     let posted = unsafe { PostMessageW(hwnd, WM_QINGTIE_WAKE, 0, 0) != 0 };
     if !posted {
@@ -151,4 +175,58 @@ pub fn notify_existing_instance() -> bool {
         unsafe { SetForegroundWindow(hwnd) };
     }
     posted
+}
+
+/// 唤醒事件名：与锁名同样区分 debug/release，否则测试版会把正式版叫起来。
+fn wake_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "Local\\com.kunge.selfclipboard.wake.debug"
+    } else {
+        "Local\\com.kunge.selfclipboard.wake"
+    }
+}
+
+/// 创建唤醒事件：**自动重置**、初始无信号。只有第一个实例调用。
+///
+/// 自动重置送达即清，不必手动 `ResetEvent`；代价是两次送达挤在一起会合并成
+/// 一次 —— 唤醒本身幂等（唤回窗口），无妨。
+fn create_wake_event() -> isize {
+    let name = wide(wake_name());
+    let h = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, name.as_ptr()) };
+    if h == 0 {
+        crate::log_warn!("[singleton] 唤醒事件创建失败，释放界面后重复启动将无法唤回");
+    }
+    h
+}
+
+/// 用命名事件通知已运行的实例。返回是否送达。
+fn notify_via_event() -> bool {
+    let name = wide(wake_name());
+    let h = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
+    if h == 0 {
+        return false;
+    }
+    let ok = unsafe { SetEvent(h) } != 0;
+    unsafe { CloseHandle(h) };
+    ok
+}
+
+/// 起后台线程等唤醒事件：每次送达就唤回主窗口（窗口不存在时由 `show_main`
+/// 负责重建）并通知前端。线程只做阻塞等待，空闲零 CPU。
+pub fn spawn_wake_listener(app: tauri::AppHandle) {
+    let event = match WAKE_HANDLE.get() {
+        Some(h) if *h != 0 => *h,
+        _ => return,
+    };
+    std::thread::spawn(move || loop {
+        let r = unsafe { WaitForSingleObject(event, INFINITE) };
+        if r != WAIT_OBJECT_0 {
+            // WAIT_FAILED 之类：别空转把 CPU 打满
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            continue;
+        }
+        use tauri::Emitter;
+        crate::tray::show_main(&app);
+        let _ = app.emit("singleton-wake", ());
+    });
 }
