@@ -9,6 +9,7 @@
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::OnceLock;
 
 const ERROR_ALREADY_EXISTS: u32 = 183;
@@ -60,7 +61,29 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// 持有 mutex 句柄：进程存活期间锁名一直被占用，后续实例才能判定为"重复"。
-static LOCK_HANDLE: OnceLock<isize> = OnceLock::new();
+///
+/// 用 `AtomicIsize` 而不是 `OnceLock`：重启前要让出锁（见 `yield_instance_lock`），
+/// 让出后句柄必须能被清零，否则会重复 `CloseHandle`。
+static LOCK_HANDLE: AtomicIsize = AtomicIsize::new(0);
+
+/// 提前让出实例锁，供「应用重启自己」使用。
+///
+/// `restart()` 是「spawn 新进程 + 退出自己」，中间没有握手：新进程往往在旧进程
+/// 退出之前就开始检查单例锁 —— 不让出的话它会判定「已有实例在运行」，于是唤回
+/// 旧窗口并退出；而旧进程此刻正在退出。**结果两个都没了。**
+/// 实测过一次：迁移缓存目录后日志里出现「即将重启」紧接着「已有同版本实例在
+/// 运行，本次唤回其窗口后退出」，应用直接消失。
+///
+/// mutex 的 owner 从未被占用（`CreateMutexW` 的 `initial_owner = 0`），所以只需
+/// 关句柄：最后一个句柄关闭时内核对象销毁，锁名随之释放。窗口期内没有第二个
+/// 启动者 —— 这条路径只服务重启。
+pub fn yield_instance_lock() {
+    let h = LOCK_HANDLE.swap(0, Ordering::SeqCst);
+    if h != 0 {
+        unsafe { CloseHandle(h) };
+        crate::log_print!("[singleton] 已让出实例锁（供重启使用）");
+    }
+}
 
 fn lock_name() -> &'static str {
     if cfg!(debug_assertions) {
@@ -92,7 +115,7 @@ pub fn ensure_single_instance() -> bool {
         crate::log_print!("[singleton] 已有同版本实例在运行（{}），本次唤回其窗口后退出", lock_name());
         false
     } else {
-        let _ = LOCK_HANDLE.set(h);
+        LOCK_HANDLE.store(h, Ordering::SeqCst);
         // 唤醒事件必须早于主窗口创建：低占用模式下窗口随时可能不存在，
         // 而事件得一直有人等
         let _ = WAKE_HANDLE.set(create_wake_event());

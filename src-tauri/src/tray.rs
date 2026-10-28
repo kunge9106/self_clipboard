@@ -225,6 +225,8 @@ pub async fn tray_show_main(app: AppHandle) -> Result<(), String> {
 pub fn tray_quit(app: AppHandle) -> Result<(), String> {
     crate::log_print!("[tray] 用户从托盘菜单退出");
     crate::idle_release::note_exiting();
+    // 用户主动退出 →「关闭时清理数据」才有机会生效
+    crate::clipboard::note_user_quit();
     crate::clipboard::on_app_exit();
     app.exit(0);
     Ok(())

@@ -921,6 +921,8 @@ pub fn set_clean_confirm_exit(value: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
     crate::idle_release::note_exiting();
+    // 用户主动退出 →「关闭时清理数据」才有机会生效
+    crate::clipboard::note_user_quit();
     crate::clipboard::on_app_exit();
     app.exit(0);
     Ok(())

@@ -4792,20 +4792,44 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
     crate::settings::update(|c| c.cache_dir = Some(new_dir_str.clone()));
     crate::log_print!("[clipboard] 缓存目录已迁移至 {new_dir_str}，即将重启");
 
-    // DIR 是 OnceLock，运行期改不了：只能退出，让新目录在下次启动生效。
+    // DIR 是 OnceLock，运行期改不了：只能重启进程让新目录生效。
     //
-    // 这里**不能**用 `app.restart()`：它 spawn 新进程与退出旧进程之间有竞态，
-    // 新进程常常在旧进程释放单例锁之前就启动，于是判定「已有同版本实例在运行」
-    // → 唤回旧窗口 → 自己退出；旧进程此时也在退出流程里，结果两个都没了。
-    // 实测过一次：迁移成功、应用消失。改成提示用户手动重开，一步操作换确定性。
-    SKIP_CLEAN_ON_EXIT.store(true, Ordering::SeqCst);
-    crate::log_print!("[clipboard] 缓存目录已迁移，应用即将退出；请重新打开轻贴以使用新目录");
+    // 重启前必须**让出实例锁**。`restart()` 是「spawn 新进程 + 退出自己」，
+    // 新进程常在旧进程退出之前就检查单例锁 —— 不让出的话它会判定「已有实例」
+    // 并退出自己，而旧进程正在退出，结果两个都没了（实测过一次）。
+    //
+    // 用户主动退出才可能清理数据：这里只调 `note_exiting`（放行 ExitRequested），
+    // 不调 `note_user_quit`，`clean_on_close` 不会生效。
+    crate::log_print!("[clipboard] 缓存目录已迁移，等待用户确认后重启");
+
+    // 用原生弹框而不是 toast：重启会关掉整个窗口，toast 一闪就没，用户来不及看
+    // 发生了什么。弹框能停在那儿，把「自动重启不会清除任何数据」这句说清楚 ——
+    // 换目录本身是低频动作，多一次点确认不算负担。
+    //
+    // `blocking_show` 不能在主线程调（会死锁），挪到阻塞线程。
+    let app_for_dialog = app.clone();
+    let path_for_msg = new_dir_str.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        app_for_dialog
+            .dialog()
+            .message(format!(
+                "已迁移到：\n{path_for_msg}\n\n即将自动重启以使用新目录。\n自动重启不会清除任何数据。"
+            ))
+            .title("缓存目录已迁移")
+            .blocking_show();
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 用户已确认 → 让出实例锁再重启，否则新进程会撞上旧进程的锁而自己退出
     let handle = app.clone();
     std::thread::spawn(move || {
-        // 留够时间让界面上那条 toast 被看见
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        // 让这个命令的返回值先送到前端，再退出
+        std::thread::sleep(std::time::Duration::from_millis(300));
         crate::idle_release::note_exiting();
-        handle.exit(0);
+        crate::singleton::yield_instance_lock();
+        handle.restart();
     });
     Ok(Some((new_dir_str, true)))
 }
@@ -4959,13 +4983,18 @@ pub fn open_log_dir() -> Result<(), String> {
 /// 日志只会在用户于文件管理器里手动删除时才消失。
 const CONTENT_DIRS: [&str; 3] = ["data", "images", "files"];
 
-/// 迁移缓存目录后是否跳过「退出时清理」。
+/// 本次退出是不是**用户主动**要求的（托盘「退出」/ 设置页「退出」）。
 ///
-/// 换目录的收尾是退出应用（`DIR` 是 OnceLock，运行期改不了）。若用户开着
-/// `clean_on_close`，那次退出会把**刚迁过去的数据整个清空** —— 数据没丢在
-/// 迁移里，丢在迁移之后。所以迁移完成时置位，只跳过这一次。
-static SKIP_CLEAN_ON_EXIT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// 「关闭时清理数据」只在这个场景生效。迁移缓存目录、装完更新、重启应用这些
+/// 退出都是程序自己发起的 —— 用户没打算清空什么，清掉一次就等于丢光历史。
+/// 曾经这里是反过来的（默认清理，迁移时打补丁跳过），漏一个场景就清一次数据；
+/// 现在改成默认不清理，只有明确的用户退出才清。
+static USER_QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 标记「接下来这次退出是用户主动要求的」，`clean_on_close` 才有机会生效。
+pub fn note_user_quit() {
+    USER_QUIT.store(true, Ordering::SeqCst);
+}
 
 /// 在 RunEvent::Exit 时调用。clean_on_close 开启则清空全部内容文件与历史索引。
 pub fn on_app_exit() {
@@ -4973,8 +5002,9 @@ pub fn on_app_exit() {
     // 上限 2 秒：大图解码可能较久，但不至于让退出卡住。
     flush_pending(std::time::Duration::from_secs(2));
 
-    if SKIP_CLEAN_ON_EXIT.swap(false, Ordering::SeqCst) {
-        crate::log_print!("[clipboard] 本次退出由「迁移缓存目录」触发，跳过清理");
+    if !USER_QUIT.swap(false, Ordering::SeqCst) {
+        // 迁移缓存目录 / 装完更新 / 重启应用：程序自己发起的退出，不动数据
+        crate::log_print!("[clipboard] 非用户主动退出（重启 / 升级 / 迁移），保留全部数据");
         return;
     }
     let cfg = crate::settings::get();

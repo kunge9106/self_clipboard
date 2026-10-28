@@ -3873,12 +3873,10 @@ function bindSettings(view) {
       try {
         const res = await invoke("pick_cache_dir");
         if (res) {
-          const [path, moved] = res;
-          toast(
-            moved
-              ? `已迁移到「${path}」，请重新打开轻贴`
-              : "已经是当前缓存目录，无需更改"
-          );
+          const [, moved] = res;
+          // 迁移成功时后端会弹原生确认框（说明去问与「不会清除数据」），
+          // 用户点完即自动重启，这里不必再补一条 toast
+          if (!moved) toast("已经是当前缓存目录，无需更改");
         }
       } catch (e) {
         // 迁移中途失败时进度遮罩可能已经挂出来了，必须收掉，否则它挡住整个界面
