@@ -951,19 +951,19 @@ pub fn set_release_idle_secs(value: u32) -> Result<(), String> {
 /// 关掉只影响**之后**的落盘位置；已经在子目录里的文件不搬 —— 搬回去需要再
 /// 迁移一次，而「关掉」的意图通常只是「不想再多一层目录」，不是要改造存量。
 #[tauri::command]
-pub fn set_images_split_dirs(value: bool) -> Result<(), String> {
+pub fn set_images_split_dirs(value: bool) -> Result<usize, String> {
     crate::log_print!("[settings] 图片分类存放：{}", if value { "开" } else { "关" });
-    let before = get().images_split_dirs;
-    update(|c| {
-        c.images_split_dirs = value;
-        // 从关切到开：把布局版本退回去，下次启动把仍平铺在 images/ 根目录的
-        // 存量图片整理进 copy/。不这样做的话，目录里会长期混着「平铺」与
-        // 「分类」两种层级 —— 用户刚打开的正是这个分类能力，却看不到旧图被归类。
-        if value && !before {
-            c.image_layout_ver = 0;
-        }
-    });
-    Ok(())
+    if get().images_split_dirs == value {
+        return Ok(0);
+    }
+    update(|c| c.images_split_dirs = value);
+    // 立刻把存量图片摆到新位置，而不是等下次启动。
+    // 不做这一步，用户会看到「开关已经开了、旧图却还平铺在 images/ 根目录」，
+    // 而且那个状态要重启才修好 —— 开关像是没生效。
+    //
+    // 整理走 `rename`（同盘原子操作，不搬数据），耗时只跟条目数相关，与文件
+    // 大小无关；同步执行不会卡住界面。返回搬动的条数供前端提示。
+    Ok(crate::clipboard::organize_image_layout())
 }
 
 #[tauri::command]

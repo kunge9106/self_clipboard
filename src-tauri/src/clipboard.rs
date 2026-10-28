@@ -1170,28 +1170,22 @@ pub fn init(app: &AppHandle) {
     if subtyped > 0 {
         crate::log_print!("[clipboard] 已为 {subtyped} 条存量文本判定「链接 / 代码」子类型");
     }
-    // 图片目录布局：旧的 `images/<id>.ext` → 日期命名 + 按类型分目录
+    // 图片目录布局：按当前设置把图片摆到应有的位置（日期命名 + 可选分目录）
     let layout_stale = crate::settings::get().image_layout_ver < IMAGE_LAYOUT_VERSION;
-    let (img_moved, img_stale) = if layout_stale {
+    let img_moved = if layout_stale {
         let split = crate::settings::get().images_split_dirs;
         migrate_image_layout(&dir, &mut hist, split)
     } else {
-        (0, Vec::new())
+        0
     };
 
     if backfilled > 0 || refreshed > 0 || subtyped > 0 || img_moved > 0 {
         save_index(&dir, &hist);
     }
-    if crate::settings::get().image_layout_ver < IMAGE_LAYOUT_VERSION {
-        // 索引已落盘 → 旧文件可以删了。删失败只是留个孤儿，不影响任何功能。
-        for p in &img_stale {
-            if let Err(e) = fs::remove_file(p) {
-                crate::log_warn!("[clipboard] 旧图片删除失败（可忽略）：{e}");
-            }
-        }
+    if layout_stale {
         crate::settings::update(|c| c.image_layout_ver = IMAGE_LAYOUT_VERSION);
         if img_moved > 0 {
-            crate::log_print!("[clipboard] 图片已改为日期命名并分类存放，迁移 {img_moved} 条");
+            crate::log_print!("[clipboard] 图片已按当前设置整理，迁移 {img_moved} 条");
         }
     }
 
@@ -3277,13 +3271,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> Option<i64> {
 /// - 开关 `images_split_dirs` 关掉时全部平铺在 `images/` 下：文件名仍然带日期。
 /// - 同一秒里落两张（连按两次截图）会撞名，依次加 `-2`、`-3`。
 fn image_rel(dir: &Path, ts_ms: u64, ext: &str, from_shot: bool, split: bool) -> String {
-    let base = if !split {
-        "images"
-    } else if from_shot {
-        "images/shot"
-    } else {
-        "images/copy"
-    };
+    let base = image_dir(split, from_shot);
     let stamp = local_stamp(ts_ms);
     let mut n = 1;
     loop {
@@ -3304,24 +3292,21 @@ fn image_rel(dir: &Path, ts_ms: u64, ext: &str, from_shot: bool, split: bool) ->
 /// 图片目录布局的当前版本。改规则就把这里 +1，启动时按需迁移一次。
 const IMAGE_LAYOUT_VERSION: u32 = 1;
 
-/// 把旧的 `images/<内部 id>.ext` 迁到日期命名的新布局。
+/// 把图片按当前设置搬到应有的位置（`images/shot/`、`images/copy/` 或根目录），
+/// 文件名一律日期时间。幂等：已在目标位置的条目会被跳过。
 ///
-/// 与 `encrypt_legacy_entities` 同一类：幂等、启动时跑一遍、只在版本落后时真干活。
 /// 存量条目的来源已不可考（旧记录没有来源标记），**一律按「复制」归类** ——
-/// 只有从这一版起用 `Alt+Q` 截的图才进 `shot/`。
+/// 只有用 `Alt+Q` 截的图才进 `shot/`。
 ///
-/// 用**复制**而不是 `rename`：任何时刻索引指向的旧文件都还在，中途被强杀也不会
-/// 出现「索引指向一个不存在的文件」。旧文件由调用方在索引写盘成功之后删除，
-/// 删失败只是留个孤儿，不影响功能。
+/// 用 `rename` 而不是 `copy`：同盘 rename 是原子操作且毫秒级。copy 在 165 MB
+/// 上要几秒 —— 那就只能放在启动时慢慢跑，切开关时没法立即生效。
 ///
-/// 返回（迁移条数，可删除的旧文件）。
-fn migrate_image_layout(
-    dir: &PathBuf,
-    hist: &mut Vec<HistoryItem>,
-    split: bool,
-) -> (usize, Vec<PathBuf>) {
+/// rename 留下的窗口（文件已移走、索引还没写盘）由 `rebuild_index_from_files`
+/// 兜住：它会扫 `shot/` 与 `copy/`，并从文件名解析时间重建条目。真被强杀也不丢图。
+///
+/// 返回迁移条数。
+fn migrate_image_layout(dir: &PathBuf, hist: &mut Vec<HistoryItem>, split: bool) -> usize {
     let mut moved = 0usize;
-    let mut stale = Vec::new();
     for item in hist.iter_mut() {
         let Some(old_rel) = item.img_path.clone() else {
             continue;
@@ -3329,8 +3314,20 @@ fn migrate_image_layout(
         let Some(rest) = old_rel.strip_prefix("images/") else {
             continue;
         };
-        // 已经在子目录里 = 已经迁过，不动（幂等）
-        if rest.contains('/') {
+        // 富文本内联图与缩略图有各自的目录规则，不参与整理
+        if rest.starts_with("rich/") || rest.starts_with("thumbs/") {
+            continue;
+        }
+        // 来源：已在 `shot/` 里说明它是截图；其余（`copy/`、根目录）按复制处理
+        let from_shot = rest.starts_with("shot/");
+        let stem = Path::new(rest)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let cur_dir = old_rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        // 已经在正确位置：目录对、文件名就是该有的日期（撞名的 `-2` 后缀不算变化）
+        let base = stem.split('-').next().unwrap_or(stem);
+        if cur_dir == image_dir(split, from_shot) && base == local_stamp(item.ts) {
             continue;
         }
         let ext = Path::new(rest)
@@ -3342,22 +3339,65 @@ fn migrate_image_layout(
         if !src.is_file() {
             continue;
         }
-        let new_rel = image_rel(dir, item.ts, &ext, false, split);
+        let new_rel = image_rel(dir, item.ts, &ext, from_shot, split);
         let dst = dir.join(&new_rel);
         if let Some(parent) = dst.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        match fs::copy(&src, &dst) {
-            Ok(_) => {
+        match fs::rename(&src, &dst) {
+            Ok(()) => {
                 item.img_path = Some(new_rel);
-                stale.push(src);
                 moved += 1;
             }
             // 单条失败不阻断整体：该条继续用旧路径，仍然能显示
             Err(e) => crate::log_warn!("[clipboard] 图片迁移跳过 {old_rel}：{e}"),
         }
     }
-    (moved, stale)
+    moved
+}
+
+/// 按当前设置重新整理图片目录，并记下布局版本。返回搬了几条。
+///
+/// 初始化与「切换图片分类开关」都调它。切开关后不整理的话，用户会看到
+/// 「开关开了、旧图却还平铺在根目录」—— 而且那个状态要等到下次启动才修好。
+pub fn organize_image_layout() -> usize {
+    let (Some(dir), Some(hist)) = (DIR.get(), HISTORY.get()) else {
+        return 0;
+    };
+    let split = crate::settings::get().images_split_dirs;
+    let started = std::time::Instant::now();
+    let mut h = match hist.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let moved = migrate_image_layout(dir, &mut h, split);
+    // rename 不搬数据，耗时只跟条目数相关；真正的大头通常是索引整份重新加密写盘
+    // （条数越多越慢）。这两段分开记，以后要优化才知道该动哪一段。
+    let files_done = started.elapsed();
+    if moved > 0 {
+        let t = std::time::Instant::now();
+        save_index(dir, &h);
+        crate::log_print!(
+            "[clipboard] 图片整理：搬动 {moved} 条用时 {} ms，写索引 {} ms（共 {} 条历史）",
+            files_done.as_millis(),
+            t.elapsed().as_millis(),
+            h.len()
+        );
+    }
+    drop(h);
+    crate::settings::update(|c| c.image_layout_ver = IMAGE_LAYOUT_VERSION);
+    moved
+}
+
+/// 图片该放哪个目录。落盘与整理共用一处判断，免得两边走偏。
+fn image_dir(split: bool, from_shot: bool) -> &'static str {
+    if !split {
+        "images"
+    } else if from_shot {
+        "images/shot"
+    } else {
+        "images/copy"
+    }
 }
 
 /// 图片落盘：父目录不存在时先建。
@@ -4746,7 +4786,7 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
     };
 
     // ── 防线③在 move_dir_contents 内部（结构性杜绝无限递归）──
-    move_dir_contents(&old, &target_root).map_err(|e| format!("迁移缓存文件失败：{e}"))?;
+    move_dir_contents(&old, &target_root, &app).map_err(|e| format!("迁移缓存文件失败：{e}"))?;
 
     let new_dir_str = strip_ext_prefix(&target_root.to_string_lossy());
     crate::settings::update(|c| c.cache_dir = Some(new_dir_str.clone()));
@@ -4778,11 +4818,58 @@ fn dir_is_empty(dir: &Path) -> bool {
 ///   条目读回来——一旦 new 位于 old 内部，就必然自我嵌套、一层套一层。
 /// - **每层断言**：`old != new` 且 `new` 不在 `old` 内部，违反立即返回错误、绝不继续。
 /// - **深度上限**兜底，任何异常递归都会在此终止。
-fn move_dir_contents(old: &PathBuf, new: &PathBuf) -> std::io::Result<()> {
-    move_dir_contents_depth(old, new, 0)
+/// 迁移进度事件。跨盘搬迁要**真复制数据**（同盘才是 rename），174 MB 就要
+/// 几十秒；期间界面上什么都不显示，用户会以为程序卡死。
+const CACHE_MOVE_EVENT: &str = "cache-move";
+
+/// 迁移进度。按已复制的字节数上报，节流 120ms —— 小文件多的时候逐条发事件
+/// 会把 IPC 刷爆，而进度条 8 帧/秒已经够顺。
+struct MoveProgress<'a> {
+    done: u64,
+    total: u64,
+    last: std::time::Instant,
+    app: &'a AppHandle,
 }
 
-fn move_dir_contents_depth(old: &Path, new: &Path, depth: u32) -> std::io::Result<()> {
+impl MoveProgress<'_> {
+    fn emit_now(&self) {
+        use tauri::Emitter;
+        let _ = self.app.emit(
+            CACHE_MOVE_EVENT,
+            serde_json::json!({ "done": self.done, "total": self.total }),
+        );
+    }
+    fn add(&mut self, bytes: u64) {
+        self.done += bytes;
+        if self.last.elapsed().as_millis() >= 120 {
+            self.last = std::time::Instant::now();
+            self.emit_now();
+        }
+    }
+}
+
+fn move_dir_contents(old: &PathBuf, new: &PathBuf, app: &AppHandle) -> std::io::Result<()> {
+    let (_, total) = dir_stats(old);
+    let mut p = MoveProgress {
+        done: 0,
+        total,
+        last: std::time::Instant::now(),
+        app,
+    };
+    // 先发一次 0/total：界面立刻出现进度条，而不是等第一个文件搬完
+    p.emit_now();
+    move_dir_contents_depth(old, new, 0, &mut p)?;
+    p.done = total;
+    p.emit_now();
+    Ok(())
+}
+
+fn move_dir_contents_depth(
+    old: &Path,
+    new: &Path,
+    depth: u32,
+    progress: &mut MoveProgress,
+) -> std::io::Result<()> {
     const MAX_DEPTH: u32 = 64;
     if depth > MAX_DEPTH {
         return Err(std::io::Error::new(
@@ -4812,11 +4899,16 @@ fn move_dir_contents_depth(old: &Path, new: &Path, depth: u32) -> std::io::Resul
         };
         let to = new.join(name);
         if from.is_dir() {
-            move_dir_contents_depth(&from, &to, depth + 1)?;
+            move_dir_contents_depth(&from, &to, depth + 1, progress)?;
             fs::remove_dir_all(&from).ok();
-        } else if fs::rename(&from, &to).is_err() {
-            fs::copy(&from, &to)?;
-            let _ = fs::remove_file(&from);
+        } else {
+            let size = fs::metadata(&from).map(|m| m.len()).unwrap_or(0);
+            // 同盘 rename 是原子的、不搬数据；跨盘才会退化成真复制
+            if fs::rename(&from, &to).is_err() {
+                fs::copy(&from, &to)?;
+                let _ = fs::remove_file(&from);
+            }
+            progress.add(size);
         }
     }
     Ok(())
@@ -5494,11 +5586,14 @@ mod tests {
         let old_rel = format!("images/{old_id}.bmp");
         std::fs::write(dir.join(&old_rel), b"pixels").unwrap();
         let ts = 1_697_000_000_000u64;
-        let mut hist = vec![image_item(old_id, ts, old_rel)];
+        let mut hist = vec![image_item(old_id, ts, old_rel.clone())];
 
-        let (moved, stale) = migrate_image_layout(&dir, &mut hist, true);
+        let moved = migrate_image_layout(&dir, &mut hist, true);
         assert_eq!(moved, 1);
-        assert_eq!(stale.len(), 1);
+        assert!(
+            !dir.join(&old_rel).is_file(),
+            "rename 之后旧位置不该再有文件"
+        );
 
         let new_rel = hist[0].img_path.clone().unwrap();
         assert!(new_rel.starts_with("images/copy/"), "应进 copy/：{new_rel}");
@@ -5508,10 +5603,9 @@ mod tests {
             "文件名应是条目时间对应的日期"
         );
         assert!(dir.join(&new_rel).is_file(), "新文件必须真的存在");
-        assert!(stale[0].is_file(), "索引还没写盘，旧文件此时不能删");
 
         // 幂等：再跑一次什么都不该搬
-        let (again, _) = migrate_image_layout(&dir, &mut hist, true);
+        let again = migrate_image_layout(&dir, &mut hist, true);
         assert_eq!(again, 0, "第二次不应再迁移");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -5530,7 +5624,7 @@ mod tests {
         let ts = 1_698_000_000_000u64;
         let mut hist = vec![image_item(old_id, ts, old_rel)];
 
-        let (moved, _) = migrate_image_layout(&dir, &mut hist, false);
+        let moved = migrate_image_layout(&dir, &mut hist, false);
         assert_eq!(moved, 1);
         let new_rel = hist[0].img_path.clone().unwrap();
         assert!(
@@ -5542,6 +5636,43 @@ mod tests {
             local_stamp(ts),
             "文件名仍按日期"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 关掉分类开关时，已经分好目录的图片要搬回 `images/` 根目录。
+    ///
+    /// 只做单向（根目录 → 子目录）时，用户会看到「关了开关，图还在 shot/copy 里」，
+    /// 与开着的时候一样困惑。
+    #[test]
+    fn migrate_image_layout_moves_back_when_split_turned_off() {
+        let dir = std::env::temp_dir().join(format!("qt-img-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("images/copy")).unwrap();
+
+        let ts = 1_697_000_000_000u64;
+        let dated = format!("images/copy/{}.bmp", local_stamp(ts));
+        std::fs::write(dir.join(&dated), b"x").unwrap();
+        let mut hist = vec![image_item("1a1358e82e7-5", ts, dated.clone())];
+
+        // 关掉开关 → 搬回根目录
+        let moved = migrate_image_layout(&dir, &mut hist, false);
+        assert_eq!(moved, 1);
+        let flat = hist[0].img_path.clone().unwrap();
+        assert_eq!(flat, format!("images/{}.bmp", local_stamp(ts)));
+        assert!(!dir.join(&dated).is_file(), "旧位置应已清空");
+        assert!(dir.join(&flat).is_file(), "新位置应有文件");
+
+        // 再打开 → 搬进 copy/
+        let moved = migrate_image_layout(&dir, &mut hist, true);
+        assert_eq!(moved, 1);
+        assert_eq!(hist[0].img_path.as_deref(), Some(dated.as_str()));
+        assert!(dir.join(&dated).is_file());
+        assert!(!dir.join(&flat).is_file());
+
+        // 已经对位了就不该再动
+        let moved = migrate_image_layout(&dir, &mut hist, true);
+        assert_eq!(moved, 0, "位置正确时不应搬");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

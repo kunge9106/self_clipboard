@@ -2527,6 +2527,53 @@ html:not(.hovers-off) .btn-danger:hover {
   transform: translateX(-50%) translateY(0);
 }
 
+/* 缓存迁移进度：跨盘要真复制数据（同盘才是 rename），174 MB 就要几十秒。
+   这期间没有任何反馈会让人以为程序卡死，所以给一条确定的进度。 */
+.move-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.move-box {
+  width: 260px;
+  padding: 16px 18px;
+  border-radius: var(--radius-sm);
+  background: var(--solid-bg);
+  border: 1px solid var(--stroke);
+  box-shadow: var(--shadow);
+  color: var(--text);
+}
+
+.move-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.move-bar {
+  margin-top: 12px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--stroke);
+  overflow: hidden;
+}
+
+.move-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+
+.move-sub {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 /* 滚动条：细圆角半透明，融入玻璃风格 */
 ::-webkit-scrollbar {
   width: 6px;
