@@ -2661,7 +2661,13 @@ function settingsDataHtml(s) {
           <button class="btn-ghost" id="btn-open-log">日志目录</button>
         </div>
         <div class="cache-log-hint"><b>缓存与日志相互独立</b>：清空、保留天数、退出清理都不会影响日志，日志仅能手动删除。</div>
-      </div>`
+      </div>` +
+        rowCheck(
+          "set-images-split",
+          "图片分类存放",
+          "截图放 <b>shot/</b>，其它图片放 <b>copy/</b>；文件名一律按日期时间。关闭则全部平铺在 images/ 下",
+          s.imagesSplitDirs
+        )
     ),
     block(
       "清理",
@@ -3530,6 +3536,7 @@ function bindSettings(view) {
   bindCheck("set-autostart", "set_autostart");
   bindCheck("set-tray", "set_tray_on_close");
   bindCheck("set-file-copy", "set_file_copy");
+  bindCheck("set-images-split", "set_images_split_dirs");
   bindCheck("set-delete-files", "set_delete_files_with_item");
 
   // 「处理方式」是从属选项：主开关关着时整组置灰且不可点（CSS 里 pointer-events: none 兜底）。

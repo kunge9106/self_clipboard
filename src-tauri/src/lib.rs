@@ -294,6 +294,7 @@ pub fn run() {
             settings::dismiss_onboarding,
             settings::set_tray_on_close,
             settings::set_release_idle_secs,
+            settings::set_images_split_dirs,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,

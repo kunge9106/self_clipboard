@@ -220,6 +220,25 @@ pub struct Config {
     /// 只在规则变更时递增，正常运行不会触发。
     #[serde(default)]
     pub subtype_version: u32,
+    /// 图片是否按类型分目录存放。
+    ///
+    /// 开（默认）：截图 → `images/shot/`，其余 → `images/copy/`。
+    /// 关：全部平铺在 `images/` 下。
+    ///
+    /// 无论开关如何，文件名一律按日期时间（`20261028_223610.bmp`）——
+    /// 原来的文件名是内部 id（`1a126311c6c-3.bmp`），翻缓存目录时认不出
+    /// 哪张是截图、是什么时候的。
+    ///
+    /// 「是不是截图」只认轻贴自己的 `Alt+Q`：剪贴板里没有来源元数据，别的
+    /// 截图工具（微信、QQ）与它们自己「复制图片」是同一个进程，区分不了，
+    /// 一律按复制处理。
+    #[serde(default = "default_true")]
+    pub images_split_dirs: bool,
+    /// 图片目录布局的迁移版本。0 = 还是旧的 `images/<id>.ext` 平铺。
+    ///
+    /// 与 `subtype_version` 同一套做法：改规则就加一版，启动时按需迁移一次。
+    #[serde(default)]
+    pub image_layout_ver: u32,
     /// 主窗口隐藏多久后释放它的 WebView（秒）。0 = 关闭（默认）。
     ///
     /// 释放后只留后端与托盘：常驻占用从 411 MB 降到 40 MB 上下（实测 373 MB
@@ -407,6 +426,8 @@ impl Default for Config {
             delete_files_permanent: false,
             // 0 = 尚未按当前规则算过，首次启动会重算一遍存量
             subtype_version: 0,
+            images_split_dirs: true,
+            image_layout_ver: 0,
             release_idle_secs: default_release_idle(),
             pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
             pin_cancel_on_disable: true, // 默认开启：关掉互通即撤销它铺开的置顶
@@ -631,6 +652,7 @@ pub fn get_settings() -> serde_json::Value {
         "ignoreDpiScale": cfg.ignore_dpi_scale,
         "themeMode": cfg.theme_mode,
         "releaseIdleSecs": cfg.release_idle_secs,
+        "imagesSplitDirs": cfg.images_split_dirs,
     })
 }
 
@@ -921,6 +943,26 @@ pub fn set_release_idle_secs(value: u32) -> Result<(), String> {
         }
     );
     update(|c| c.release_idle_secs = value);
+    Ok(())
+}
+
+/// 图片是否按类型分目录（截图 / 其余）。
+///
+/// 关掉只影响**之后**的落盘位置；已经在子目录里的文件不搬 —— 搬回去需要再
+/// 迁移一次，而「关掉」的意图通常只是「不想再多一层目录」，不是要改造存量。
+#[tauri::command]
+pub fn set_images_split_dirs(value: bool) -> Result<(), String> {
+    crate::log_print!("[settings] 图片分类存放：{}", if value { "开" } else { "关" });
+    let before = get().images_split_dirs;
+    update(|c| {
+        c.images_split_dirs = value;
+        // 从关切到开：把布局版本退回去，下次启动把仍平铺在 images/ 根目录的
+        // 存量图片整理进 copy/。不这样做的话，目录里会长期混着「平铺」与
+        // 「分类」两种层级 —— 用户刚打开的正是这个分类能力，却看不到旧图被归类。
+        if value && !before {
+            c.image_layout_ver = 0;
+        }
+    });
     Ok(())
 }
 
