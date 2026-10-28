@@ -304,6 +304,7 @@ pub fn run() {
             settings::set_screenshot_mode,
             settings::hotkey_suspend,
             settings::hotkey_resume,
+            hotkey::hotkey_status,
             panel::panel_hide,
             panel::panel_paste,
             settings::set_clean_confirm_exit,

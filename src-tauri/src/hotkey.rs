@@ -193,6 +193,19 @@ pub fn resume() -> Result<(), String> {
 ///
 /// 一个槽位失败不影响另一个（继续往下注册），错误只报第一个 —— 常见情况是
 /// 「截图键被占用、面板键没问题」，那种时候不该把面板键一起废掉。
+/// 最近一次注册失败的原因（成功则为 None）。
+///
+/// 前端在设置页据此提示「这个组合被别的程序占了」。
+/// 为什么不让后端直接发事件：启动那一刻前端可能还没就绪，事件大概率丢失；
+/// 改成「前端主动来问」时序才稳定。
+static LAST_ERR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// 当前热键是否可用；`Some(原因)` 表示被别的程序占用。
+#[tauri::command]
+pub fn hotkey_status() -> Option<String> {
+    LAST_ERR.lock().ok().and_then(|g| g.clone())
+}
+
 unsafe fn register_slots(slots: &[(i32, String)]) -> Result<(), String> {
     for (id, _) in slots {
         UnregisterHotKey(0, *id);
@@ -217,6 +230,9 @@ unsafe fn register_slots(slots: &[(i32, String)]) -> Result<(), String> {
                 }
             }
         }
+    }
+    if let Ok(mut g) = LAST_ERR.lock() {
+        *g = first_err.clone();
     }
     match first_err {
         Some(e) => Err(e),

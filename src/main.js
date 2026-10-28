@@ -501,11 +501,9 @@ function bindClearMissingModal() {
     if (ids.length === 0) return;
     try {
       await invoke("delete_items", { ids, deleteLocalFiles: false });
-      const drop = new Set(ids);
-      items = items.filter((i) => !drop.has(i.id));
       // 失效集合整体作废，让下次渲染重新检测，避免残留已删除条目的 id
       missingFiles = new Set();
-      render({ keepScroll: true });
+      removeCards(ids);
       toast(`已清空 ${ids.length} 条失效条目`);
     } catch (e) {
       toast("清空失败：" + e);
@@ -571,12 +569,17 @@ async function deleteSelected() {
     toast("删除失败：" + e);
     return;
   }
-  const gone = new Set(ids);
-  items = items.filter((i) => !gone.has(i.id));
   selectMode = false;
   selectedIds.clear();
+  // 退出选择模式要手动收尾：原来靠整表重绘顺手清掉，现在只摘卡片
+  if (wrapEl) {
+    wrapEl
+      .querySelectorAll(".card.is-selected")
+      .forEach((el) => el.classList.remove("is-selected"));
+  }
+  document.querySelector(".toolbar")?.classList.remove("is-selecting");
   // 保留滚动位置：删几条不该把人踹回列表顶部（与单条删除同一口径）
-  render({ keepScroll: true });
+  removeCards(ids);
   toast(`已删除 ${ids.length} 项`);
 }
 
@@ -619,9 +622,7 @@ async function doClearView(ids) {
   }
   try {
     await invoke("delete_items", { ids: uniq, deleteLocalFiles: false });
-    const drop = new Set(uniq);
-    items = items.filter((i) => !drop.has(i.id));
-    render({ keepScroll: true });
+    removeCards(uniq);
     toast(query ? `已清理 ${uniq.length} 条搜索结果` : `已清理 ${uniq.length} 条`);
   } catch (e) {
     toast("清理失败：" + e);
@@ -876,10 +877,7 @@ function render({ keepScroll = false } = {}) {
   const list = filtered();
   // 状态栏：搜索中显示「找到 X 条结果」，否则显示总数
   const countEl = document.getElementById("status-count");
-  if (countEl)
-    countEl.textContent = query
-      ? `找到 ${list.length} 条结果`
-      : `共 ${fileCopyOn() ? items.length : items.filter((i) => i.kind !== "files").length} 条`;
+  if (countEl) countEl.textContent = statusCountText(list.length);
 
   if (list.length === 0) {
     view.innerHTML = emptyHtml();
@@ -919,6 +917,62 @@ function restoreScroll(top) {
     appendBatch();
   }
   wrapEl.scrollTop = top;
+}
+
+/// 状态栏计数文案。`n` 是当前视图过滤后的条数。
+function statusCountText(n) {
+  const total = fileCopyOn()
+    ? items.length
+    : items.filter((i) => i.kind !== "files").length;
+  return query ? `找到 ${n} 条结果` : `共 ${total} 条`;
+}
+
+/**
+ * 局部删除：只摘掉被删的那几张卡片，不整表重绘。
+ *
+ * 为什么不用 `render({ keepScroll: true })`：那会 `view.innerHTML = ""` 重建
+ * 整张列表，中间有一帧是空的（观感就是「跳一下」）；而且它恢复的是相同
+ * scrollTop 数值 —— 删掉视口上方的条目时，正在看的内容会整体上移一条。
+ *
+ * 这里改成：摘掉 DOM 后浏览器自然让下方内容上提填补；若被删的卡片原本在
+ * 视口上方，把这段高度从 scrollTop 扣回来，其余内容的视觉位置纹丝不动。
+ */
+function removeCards(ids) {
+  const drop = new Set(ids);
+  if (drop.size === 0) return;
+
+  let removedAbove = 0; // 视口上沿之上被删掉的总高度（含间距）
+  let removedRendered = 0; // 已渲染卡片里被删掉的数量
+  if (wrapEl) {
+    const wrapTop = wrapEl.getBoundingClientRect().top;
+    const gap = parseFloat(getComputedStyle(wrapEl).rowGap) || 0;
+    const doomed = [];
+    for (const el of wrapEl.querySelectorAll(".card")) {
+      if (!drop.has(el.dataset.id)) continue;
+      const r = el.getBoundingClientRect();
+      // 完全落在视口上沿之上 → 删掉它会让下面整体上移，需要补滚动
+      if (r.bottom <= wrapTop) removedAbove += r.height + gap;
+      doomed.push(el);
+    }
+    removedRendered = doomed.length;
+    for (const el of doomed) el.remove();
+  }
+
+  // 数据层同步：不同步的话下次 render 会把删掉的又「复活」
+  items = items.filter((i) => !drop.has(i.id));
+  renderList = renderList.filter((i) => !drop.has(i.id));
+  renderedUpTo = Math.max(0, renderedUpTo - removedRendered);
+
+  if (wrapEl && removedAbove > 0) {
+    wrapEl.scrollTop = Math.max(0, wrapEl.scrollTop - removedAbove);
+  }
+
+  if (renderList.length === 0) {
+    render({ keepScroll: false });
+    return;
+  }
+  const countEl = document.getElementById("status-count");
+  if (countEl) countEl.textContent = statusCountText(renderList.length);
 }
 
 // ---------------------------------------------------------------------------
@@ -2405,7 +2459,7 @@ function settingsGeneralHtml(s) {
         ) +
         rowCheck(
           "set-release-idle",
-          "后台释放界面",
+          "后台释放",
           "收起后关掉界面进程，常驻内存约 400 MB 降到 40 MB；唤回时要重建，慢约 0.3 秒",
           (s.releaseIdleSecs || 0) > 0
         ) +
@@ -3518,6 +3572,29 @@ function bindSettings(view) {
     fallback: "alt+q",
     get: () => settings.screenshotHotkey,
   });
+  // 热键被别的程序占用：注册发生在后端启动那一刻，前端没有回调可拿，
+  // 所以主动问一次，把原因标在「唤起面板」那一行下面。
+  invoke("hotkey_status")
+    .then((err) => {
+      const row = view.querySelector("#set-hotkey-enabled")?.closest(".row");
+      if (!row) return;
+      view.querySelector("#hotkey-conflict")?.remove();
+      if (!err) return;
+      const tip = document.createElement("div");
+      tip.id = "hotkey-conflict";
+      tip.className = "row is-sub";
+      const text = document.createElement("div");
+      text.className = "row-text";
+      const desc = document.createElement("div");
+      desc.className = "row-desc";
+      desc.style.color = "var(--danger)";
+      desc.textContent = err;
+      text.appendChild(desc);
+      tip.appendChild(text);
+      row.insertAdjacentElement("afterend", tip);
+    })
+    .catch(() => {});
+
   // 面板失焦行为：只存一个布尔，后端失焦处理器现读配置，改完立即生效
   bindCheck("set-panel-stay", "set_panel_stay_on_blur");
   // 截图右键取消：同样只存布尔，下次唤起截图时按新值决定装不装钩子
