@@ -1091,6 +1091,9 @@ function cardEl(item) {
       : "") +
     (pinned ? '<span class="tag tag-pinned">已置顶</span>' : "") +
     (item.favorite && !hideFav ? '<span class="tag tag-fav">已收藏</span>' : "") +
+    // 「截图」= 微信 / QQ / 系统截图工具或轻贴 Alt+Q 截的图。分类只体现在磁盘
+    // 目录上，列表里看不出来；给个徽章才分得清「我截的」和「我复制的」。
+    (item.shot ? '<span class="tag tag-shot">截图</span>' : "") +
     // 「已编辑」= 在全文编辑里改过并保存后落成的新条目。原文条目始终保留不动，
     // 两条内容相近、挨在一起，靠这个徽章才能一眼分清哪条是自己改过的。
     (item.edited ? '<span class="tag tag-edited">已编辑</span>' : "") +
