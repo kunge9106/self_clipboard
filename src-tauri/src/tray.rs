@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 
 static TRAY: Mutex<Option<tauri::tray::TrayIcon>> = Mutex::new(None);
 
-const MENU_LABEL: &str = "tray-menu";
+use crate::popup::MENU_LABEL;
 /// 以下三个都是**逻辑单位**（CSS px）。`inner_size` 收的就是逻辑值，会按 DPI 放大；
 /// 而托盘图标坐标、显示器工作区都是**物理像素** —— 两套单位在 `open_menu` 里
 /// 必须显式换算，否则高缩放下菜单会偏半个身位（150% 差 42px），还会被错误地

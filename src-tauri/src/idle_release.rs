@@ -112,7 +112,9 @@ pub(crate) fn release_now(app: &tauri::AppHandle) {
         }
         save_geometry(&w);
         // destroy 不走 close-requested，不会被「关闭时后台运行」拦下
-        let _ = w.destroy();
+        if let Err(e) = w.destroy() {
+            crate::log_warn!("[idle] 销毁主窗口失败：{e}");
+        }
         Some(())
     })();
 
@@ -122,7 +124,41 @@ pub(crate) fn release_now(app: &tauri::AppHandle) {
         STATE.store(ST_NORMAL, Ordering::SeqCst);
         return;
     }
-    crate::log_print!("[idle] 界面已释放（WebView 进程退出）");
+    // 托盘菜单与快捷面板是独立窗口，而且**只隐藏、从不销毁**（它们要能被
+    // 反复唤起）。但 WebView2 的 browser / GPU / 网络 / 存储进程是整组共享的：
+    // 只要还有一个 WebView 活着，这组进程就不会退，释放主窗口也省不下内存。
+    // 这两个窗口本来就是懒创建的，这里一并销毁，下次用到会自动重建。
+    for label in [crate::popup::MENU_LABEL, crate::popup::PANEL_LABEL] {
+        if let Some(w) = app.get_webview_window(label) {
+            let visible = w.is_visible().unwrap_or(false);
+            if !visible {
+                if let Err(e) = w.destroy() {
+                    crate::log_warn!("[idle] 销毁 {label} 失败：{e}");
+                }
+            } else {
+                crate::log_print!("[idle] {label} 仍可见，保留");
+            }
+        }
+    }
+
+    // 诊断：WebView2 的 browser / GPU / 网络 / 存储进程是整组共享的 ——
+    // 只要还剩任何一个 WebView 窗口，这组进程就不会退。
+    //
+    // `destroy()` 是异步的：这一拍窗口仍留在 Tauri 的窗口表里，紧接着查会得到
+    // 一个假的「还有 main」。所以推迟一拍再看，否则日志会误导排障
+    // （实测：销毁后立刻查是 ["main"]，800ms 后是空，进程也确实退干净了）。
+    let app_check = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(800));
+        let left: Vec<String> = app_check.webview_windows().keys().cloned().collect();
+        if left.is_empty() {
+            crate::log_print!("[idle] 释放完成，已无 WebView 窗口");
+        } else {
+            crate::log_warn!("[idle] 释放后仍有 WebView 窗口：{left:?}（整组进程不会退出）");
+        }
+    });
+
+    crate::log_print!("[idle] 界面已释放");
 }
 
 /// 主窗口是否处于「暂无窗口」的状态（已释放或正在重建）。
@@ -175,16 +211,23 @@ fn build_main_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
         .find(|w| w.label == MAIN_LABEL)?
         .clone();
 
+    // 记下建窗起点：下面的 on_page_load 回调用它算出「从开始重建到界面可显示」
+    // 的耗时，写进日志。优化重建速度前先有基线，否则只能凭感觉调。
+    let started = std::time::Instant::now();
     let win = WebviewWindowBuilder::from_config(app, &cfg)
         .ok()?
         // 先隐藏，等页面渲染完再显示，避免白屏与主题色闪一下
         .visible(false)
-        .on_page_load(|w, payload| {
+        .on_page_load(move |w, payload| {
             if payload.event() != PageLoadEvent::Finished {
                 return;
             }
             let _ = w.show();
             let _ = w.set_focus();
+            crate::log_print!(
+                "[idle] 界面就绪，重建耗时 {} ms",
+                started.elapsed().as_millis()
+            );
         })
         .build()
         .ok()?;

@@ -18,6 +18,8 @@ use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, Web
 /// 放在这一层而不是各自 `const` 一份：失焦策略要按 label 区分（见 `closes_on_blur`），
 /// 两边各写一个 `"panel"` 字面量，哪天改名字就会出现「策略认不出这是面板」的静默失效。
 pub const PANEL_LABEL: &str = "panel";
+/// 托盘菜单窗口。与快捷面板一样是懒创建、只隐藏不销毁的独立窗口。
+pub const MENU_LABEL: &str = "tray-menu";
 
 /// 各弹出窗口「最近一次真正显示」的时刻。
 ///

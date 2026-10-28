@@ -166,18 +166,20 @@ struct BitmapInfo {
     colors: [u32; 3],
 }
 
+/// 窗口类。`clipboard` 建常驻的剪贴板窗口时也用它 —— 结构必须与
+/// Win32 的 `WNDCLASSW` 逐字段对应，两处不能各写一份。
 #[repr(C)]
-struct WndClassW {
-    style: u32,
-    wnd_proc: Option<extern "system" fn(isize, u32, usize, isize) -> isize>,
-    cls_extra: i32,
-    wnd_extra: i32,
-    instance: isize,
-    icon: isize,
-    cursor: isize,
-    background: isize,
-    menu_name: *const u16,
-    class_name: *const u16,
+pub(crate) struct WndClassW {
+    pub(crate) style: u32,
+    pub(crate) wnd_proc: Option<extern "system" fn(isize, u32, usize, isize) -> isize>,
+    pub(crate) cls_extra: i32,
+    pub(crate) wnd_extra: i32,
+    pub(crate) instance: isize,
+    pub(crate) icon: isize,
+    pub(crate) cursor: isize,
+    pub(crate) background: isize,
+    pub(crate) menu_name: *const u16,
+    pub(crate) class_name: *const u16,
 }
 
 #[repr(C)]

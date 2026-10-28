@@ -18,8 +18,16 @@ use tauri::{AppHandle, Emitter, Manager};
 // 全局状态
 // ---------------------------------------------------------------------------
 
-/// 主窗口 hwnd：写回剪贴板时 OpenClipboard 需要 owner 窗口
-static MAIN_HWND: OnceLock<isize> = OnceLock::new();
+/// 剪贴板窗口句柄：**常驻**的消息专用窗口，不是主窗口。
+///
+/// 为什么不能用主窗口：低占用模式会把主窗口连同 WebView 一起销毁，而
+/// `OpenClipboard(失效句柄)` 一律返回 0 —— 表现为「复制、回贴全部失败」；
+/// `GetClipboardOwner()` 也不再等于它，自己写回的内容会被当成新复制重复入库；
+/// `AddClipboardFormatListener` 同样失效，只剩低频心跳兜底。
+///
+/// 消息专用窗口（`HWND_MESSAGE`）不进任务栏、不显示，生命周期等于进程，
+/// 因此释放界面、重建界面都不影响剪贴板读写。
+static CLIP_HWND: OnceLock<isize> = OnceLock::new();
 /// AppHandle：emit 事件用
 static APP: OnceLock<AppHandle> = OnceLock::new();
 /// 存储目录（app_data_dir/clipboard）
@@ -1052,10 +1060,12 @@ fn spawn_thumb_worker() {
 
 pub fn init(app: &AppHandle) {
     let _ = APP.set(app.clone());
-    if let Some(w) = app.get_webview_window("main") {
-        if let Ok(h) = w.hwnd() {
-            let _ = MAIN_HWND.set(h.0 as isize);
-        }
+    // 常驻剪贴板窗口：与主窗口解耦，界面被释放也不影响复制/回贴
+    let clip = create_clip_window();
+    if clip == 0 {
+        crate::log_warn!("[clipboard] 剪贴板窗口创建失败：复制与回贴将不可用");
+    } else {
+        let _ = CLIP_HWND.set(clip as isize);
     }
 
     // 目录优先级：用户自定义缓存目录 > app_data_dir/clipboard（同 v1 imageCacheDir）
@@ -1168,7 +1178,7 @@ pub fn init(app: &AppHandle) {
 
     // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
     unsafe {
-        let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+        let hwnd = CLIP_HWND.get().copied().unwrap_or(0);
         if AddClipboardFormatListener(hwnd) == 0 {
             crate::log_warn!(
                 "[clipboard] AddClipboardFormatListener 失败 hwnd={hwnd} last_err={}",
@@ -1238,7 +1248,7 @@ pub fn on_clipboard_update() {
         // 为什么不能只靠 mark_skip() 的序号比对：copy_back 跑在 Tauri 的工作线程上，
         // 而 WM_CLIPBOARDUPDATE 是投递到主线程的——主线程完全可能在 mark_skip() 执行之前
         // 就处理掉这条消息。owner 由系统在 SetClipboardData 时原子设置，没有这个窗口期。
-        let me = MAIN_HWND.get().copied().unwrap_or(0);
+        let me = CLIP_HWND.get().copied().unwrap_or(0);
         if me != 0 && GetClipboardOwner() == me {
             if !RECORD_OWN_WRITE.swap(false, Ordering::SeqCst) {
                 LAST_SEQ.store(seq, Ordering::Relaxed);
@@ -3238,7 +3248,7 @@ fn ensure_thumb(dir: &std::path::Path, item: &HistoryItem) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 unsafe fn write_text_to_clipboard(text: &str) -> Result<(), String> {
-    let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+    let hwnd = CLIP_HWND.get().copied().unwrap_or(0);
     if OpenClipboard(hwnd) == 0 {
         return Err("OpenClipboard 失败".into());
     }
@@ -3284,7 +3294,7 @@ unsafe fn write_clipboard_formats(items: &[(u32, Vec<u8>)]) -> Result<(), String
     if items.is_empty() {
         return Err("没有可写入的格式".into());
     }
-    let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+    let hwnd = CLIP_HWND.get().copied().unwrap_or(0);
     if OpenClipboard(hwnd) == 0 {
         return Err("OpenClipboard 失败".into());
     }
@@ -3383,7 +3393,7 @@ unsafe fn write_rtf_to_clipboard(rtf: &str, plain: &str) -> Result<(), String> {
 }
 
 unsafe fn write_files_to_clipboard(files: &[String]) -> Result<(), String> {
-    let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+    let hwnd = CLIP_HWND.get().copied().unwrap_or(0);
     if OpenClipboard(hwnd) == 0 {
         return Err("OpenClipboard 失败".into());
     }
@@ -3454,7 +3464,7 @@ unsafe fn write_dib_to_clipboard(dib: &[u8]) -> Result<(), String> {
 /// 共用一个函数体而不是各写一份：GMEM/加锁/SetClipboardData 的顺序错了会静默失败
 /// （剪贴板里是空的，或格式写不进去），这类代码只该有一份。
 unsafe fn write_dib_raw(dib: &[u8], record: bool) -> Result<(), String> {
-    let hwnd = MAIN_HWND.get().copied().unwrap_or(0);
+    let hwnd = CLIP_HWND.get().copied().unwrap_or(0);
     if OpenClipboard(hwnd) == 0 {
         return Err("OpenClipboard 失败".into());
     }
@@ -4831,6 +4841,63 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
 
 const GMEM_MOVEABLE: u32 = 0x0002;
 
+/// 系统通知「剪贴板内容变了」的消息号。
+const WM_CLIPBOARDUPDATE: u32 = 0x031D;
+/// `CreateWindowExW` 的父窗口参数：消息专用窗口（不显示、不进任务栏）。
+const HWND_MESSAGE: isize = -3;
+
+/// 剪贴板窗口的 WndProc。
+///
+/// 只做一件事：把 `WM_CLIPBOARDUPDATE` 转给读取逻辑。监听挂在这个常驻窗口上，
+/// 主窗口销毁后事件仍然送达（原先挂在主窗口钩子上，释放界面后只剩心跳兜底）。
+extern "system" fn clip_owner_proc(hwnd: isize, msg: u32, wp: usize, lp: isize) -> isize {
+    if msg == WM_CLIPBOARDUPDATE {
+        on_clipboard_update();
+        return 0;
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+}
+
+/// 建常驻的剪贴板窗口。返回 0 表示失败。
+fn create_clip_window() -> isize {
+    use crate::shot_native::WndClassW;
+    let class: Vec<u16> = "QingTieClipboardOwner"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let instance = GetModuleHandleW(std::ptr::null());
+        let wc = WndClassW {
+            style: 0,
+            wnd_proc: Some(clip_owner_proc),
+            cls_extra: 0,
+            wnd_extra: 0,
+            instance,
+            icon: 0,
+            cursor: 0,
+            background: 0,
+            menu_name: std::ptr::null(),
+            class_name: class.as_ptr(),
+        };
+        // 重复注册返回 0，无害（与截图覆盖层同一套写法）
+        RegisterClassW(&wc);
+        CreateWindowExW(
+            0,
+            class.as_ptr(),
+            class.as_ptr(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE,
+            0,
+            instance,
+            0,
+        )
+    }
+}
+
 extern "system" {
     fn OpenClipboard(hwnd: isize) -> i32;
     fn AddClipboardFormatListener(hwnd: isize) -> i32;
@@ -4843,6 +4910,23 @@ extern "system" {
     fn EnumClipboardFormats(format: u32) -> u32;
     fn GetClipboardFormatNameW(format: u32, lpszFormatName: *mut u16, cchMaxCount: i32) -> i32;
     fn GetClipboardSequenceNumber() -> u32;
+    fn RegisterClassW(class: *const crate::shot_native::WndClassW) -> u16;
+    fn CreateWindowExW(
+        ex_style: u32,
+        class_name: *const u16,
+        window_name: *const u16,
+        style: u32,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        parent: isize,
+        menu: isize,
+        instance: isize,
+        param: isize,
+    ) -> isize;
+    fn DefWindowProcW(hwnd: isize, msg: u32, w: usize, l: isize) -> isize;
+    fn GetModuleHandleW(name: *const u16) -> isize;
     fn GetClipboardOwner() -> isize;
     fn GetWindowThreadProcessId(hwnd: isize, lpdwProcessId: *mut u32) -> u32;
     fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
