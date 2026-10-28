@@ -2605,6 +2605,23 @@ function settingsGeneralHtml(s) {
           true,
           "set-shot-mode"
         ) +
+        rowCtl(
+          "截图格式",
+          "BMP：无损、最快；PNG：无损，体积约为 BMP 的 1/5；JPG：有损、最小。只影响截图，复制来的图片保持原样",
+          `<div class="seg" id="set-shot-format">
+            <button type="button" data-fmt="bmp" ${
+              (s.shotFormat || "bmp") === "bmp" ? 'class="on"' : ""
+            }>BMP</button>
+            <button type="button" data-fmt="png" ${
+              s.shotFormat === "png" ? 'class="on"' : ""
+            }>PNG</button>
+            <button type="button" data-fmt="jpg" ${
+              s.shotFormat === "jpg" ? 'class="on"' : ""
+            }>JPG</button>
+          </div>`,
+          true,
+          "set-shot-format"
+        ) +
         // 只对系统截图有意义：内置覆盖层本来就能右键取消
         rowCheck(
           "set-shot-rclick",
@@ -3773,6 +3790,26 @@ function bindSettings(view) {
         toast(mode === "system" ? "截图改为系统工具" : "截图改为内置覆盖层");
       } catch (err) {
         toast("切换失败：" + err);
+      }
+    });
+  }
+
+  // 截图格式：只决定截图落盘的编码，复制来的图片不受影响
+  const shotFmt = view.querySelector("#set-shot-format");
+  if (shotFmt) {
+    shotFmt.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-fmt]");
+      if (!btn) return;
+      const fmt = btn.dataset.fmt;
+      try {
+        await invoke("set_shot_format", { value: fmt });
+        settings = await invoke("get_settings");
+        shotFmt
+          .querySelectorAll("button[data-fmt]")
+          .forEach((b) => b.classList.toggle("on", b === btn));
+        toast(`截图格式：${fmt.toUpperCase()}`);
+      } catch (err) {
+        toast("保存失败：" + err);
       }
     });
   }

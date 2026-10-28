@@ -220,6 +220,15 @@ pub struct Config {
     /// 只在规则变更时递增，正常运行不会触发。
     #[serde(default)]
     pub subtype_version: u32,
+    /// 截图落盘格式：`bmp`（默认）/ `png` / `jpg`。
+    ///
+    /// 只影响**截图**。其它来源的图片保持原样（微信给的是 JPEG 就存 JPEG）——
+    /// 它们本来就有原始编码，重新编码只会掉画质。
+    ///
+    /// 默认 BMP 是保持已发布版本的行为：无损、编码几乎零耗时。PNG 同样无损但
+    /// 体积约为 BMP 的 1/5，代价是编码要几十到几百毫秒（在后台线程，不卡界面）。
+    #[serde(default = "default_shot_format")]
+    pub shot_format: String,
     /// 图片是否按类型分目录存放。
     ///
     /// 开（默认）：截图 → `images/shot/`，其余 → `images/copy/`。
@@ -307,6 +316,11 @@ fn default_release_idle() -> u32 {
 
 fn default_retention() -> u32 {
     3
+}
+
+/// 截图格式的默认值：沿用 BMP，不改变已发布版本的行为。
+fn default_shot_format() -> String {
+    "bmp".into()
 }
 
 fn default_theme_mode() -> String {
@@ -426,6 +440,7 @@ impl Default for Config {
             delete_files_permanent: false,
             // 0 = 尚未按当前规则算过，首次启动会重算一遍存量
             subtype_version: 0,
+            shot_format: default_shot_format(),
             images_split_dirs: true,
             image_layout_ver: 0,
             release_idle_secs: default_release_idle(),
@@ -653,6 +668,7 @@ pub fn get_settings() -> serde_json::Value {
         "themeMode": cfg.theme_mode,
         "releaseIdleSecs": cfg.release_idle_secs,
         "imagesSplitDirs": cfg.images_split_dirs,
+        "shotFormat": cfg.shot_format,
     })
 }
 
@@ -945,6 +961,18 @@ pub fn set_release_idle_secs(value: u32) -> Result<(), String> {
         }
     );
     update(|c| c.release_idle_secs = value);
+    Ok(())
+}
+
+/// 截图落盘格式。
+#[tauri::command]
+pub fn set_shot_format(value: String) -> Result<(), String> {
+    let v = match value.as_str() {
+        "bmp" | "png" | "jpg" => value,
+        other => return Err(format!("不支持的截图格式：{other}")),
+    };
+    crate::log_print!("[settings] 截图格式：{v}");
+    update(|c| c.shot_format = v);
     Ok(())
 }
 
