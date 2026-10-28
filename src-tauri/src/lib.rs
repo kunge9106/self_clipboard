@@ -295,6 +295,7 @@ pub fn run() {
             settings::set_tray_on_close,
             settings::set_release_idle_secs,
             settings::set_images_split_dirs,
+            clipboard::confirm_cache_move,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,

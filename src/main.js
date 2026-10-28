@@ -2254,6 +2254,41 @@ function hideMoveProgress() {
   document.getElementById("move-mask")?.remove();
 }
 
+/**
+ * 缓存目录迁移完成后的确认框。
+ *
+ * 用自绘而不是系统消息框：原生框与轻贴的玻璃界面是两套视觉语言。
+ * 后端在等前端这一步（最多 20 秒），点「重启」才真正重启 —— 用户得先知道
+ * 「自动重启不会清除任何数据」，否则换目录看起来像一次危险操作。
+ */
+function showCacheMoved(path) {
+  hideMoveProgress();
+  const mask = document.createElement("div");
+  mask.id = "move-mask";
+  mask.className = "move-mask";
+  mask.innerHTML = `
+    <div class="move-box">
+      <div class="move-title">缓存目录已迁移</div>
+      <div class="move-path"></div>
+      <div class="move-desc">即将自动重启以使用新目录。<br>自动重启不会清除任何数据。</div>
+      <div class="move-actions">
+        <button class="btn-primary" id="move-restart">重启</button>
+      </div>
+    </div>`;
+  // 路径用 textContent 而不是拼进模板：目录名里可能出现尖括号之类的字符
+  mask.querySelector(".move-path").textContent = path;
+  document.body.appendChild(mask);
+  mask.querySelector("#move-restart").onclick = () => {
+    const btn = mask.querySelector("#move-restart");
+    btn.textContent = "正在重启…";
+    btn.disabled = true;
+    invoke("confirm_cache_move").catch(() => {
+      btn.textContent = "重启";
+      btn.disabled = false;
+    });
+  };
+}
+
 function toast(msg) {
   let el = document.querySelector(".toast");
   if (!el) {
@@ -4068,6 +4103,11 @@ async function main() {
   await listen("cache-move", (e) => {
     const { done = 0, total = 0 } = e.payload || {};
     showMoveProgress(done, total);
+  });
+
+  // 迁移完成：弹自绘确认框，用户点「重启」后后端才重启
+  await listen("cache-moved", (e) => {
+    showCacheMoved(e.payload?.path || "");
   });
 
   // 增量：复制新内容时 Rust 推事件，直接插到顶部
