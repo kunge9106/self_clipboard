@@ -3396,7 +3396,8 @@ fn prune_empty_image_dirs(dir: &Path) {
             continue;
         }
         if fs::remove_dir(&p).is_ok() {
-            crate::log_print!("[clipboard] 已删除空目录 images/{sub}");
+            // sub 已经带着 `images/` 前缀，别再加一层
+            crate::log_print!("[clipboard] 已删除空目录 {sub}");
         }
     }
 }
