@@ -3009,20 +3009,22 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
             // 工作线程可能滞后几十毫秒，那时候剪贴板早被下一次复制换掉了。
             item.shot = shot;
             let from_shot = shot;
-            let rel = image_rel(&dir, ts, "bmp", from_shot, split_dirs);
-            if let Ok(bmp) = dib_to_bmp(&bytes) {
-                if let Err(e) = write_image(&dir, &rel, &bmp) {
-                    crate::log_err!("clipboard", "位图落盘失败 {rel}：{e}");
-                }
-                item.img_path = Some(rel);
+            // 截图按设置选格式；其它来源（复制的位图）沿用 BMP —— 它们本就没有
+            // 原始编码可保留，BMP 最快且无损。
+            let want = if shot {
+                crate::settings::get().shot_format
             } else {
-                // 兜底：直接存 DIB，前端无法显示但至少保留
-                let rel = image_rel(&dir, ts, "dib", from_shot, split_dirs);
-                if let Err(e) = write_image(&dir, &rel, &bytes) {
-                    crate::log_err!("clipboard", "DIB 兜底落盘失败 {rel}：{e}");
-                }
-                item.img_path = Some(rel);
+                "bmp".to_string()
+            };
+            // 编码失败一律回退 BMP；连 BMP 都拼不出来才存裸 DIB（前端显示不了，
+            // 但数据还在，总比丢了好）
+            let (ext, data) = encode_dib(&bytes, &want)
+                .unwrap_or_else(|| ("dib".to_string(), bytes.clone()));
+            let rel = image_rel(&dir, ts, &ext, from_shot, split_dirs);
+            if let Err(e) = write_image(&dir, &rel, &data) {
+                crate::log_err!("clipboard", "图片落盘失败 {rel}：{e}");
             }
+            item.img_path = Some(rel);
         }
         // ImageFile / ImageRaw 是「待处理」形态，经 resolve() 后会变成
         // Image / ImageOriginal / Files 才到这儿；留空分支兜底，不走 panic。
@@ -3110,6 +3112,37 @@ fn dib_to_bmp(dib: &[u8]) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+/// 把 DIB 编码成目标格式，返回（扩展名，字节）。
+///
+/// 不认识的格式、或编码失败，一律回退 BMP —— 绝不能因为「用户选了 PNG」这种
+/// 设置问题把图丢掉。连 BMP 都拼不出来时返回 None，由调用方存裸 DIB。
+///
+/// 只有**截图**走这里。其它来源的图片保持原样：微信给的是 JPEG 就存 JPEG，
+/// 重新编码只会掉画质。
+fn encode_dib(dib: &[u8], want: &str) -> Option<(String, Vec<u8>)> {
+    let bmp = dib_to_bmp(dib).ok()?;
+    if want == "bmp" {
+        return Some(("bmp".to_string(), bmp));
+    }
+    let Ok(img) = image::load_from_memory(&bmp) else {
+        return Some(("bmp".to_string(), bmp));
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    let ok = match want {
+        "png" => img.write_to(&mut out, image::ImageFormat::Png).is_ok(),
+        // JPEG 没有 alpha 通道，带透明度的图必须先拍成 RGB，否则编码直接报错
+        _ => image::DynamicImage::ImageRgb8(img.to_rgb8())
+            .write_to(&mut out, image::ImageFormat::Jpeg)
+            .is_ok(),
+    };
+    if ok {
+        let ext = if want == "png" { "png" } else { "jpg" };
+        Some((ext.to_string(), out.into_inner()))
+    } else {
+        Some(("bmp".to_string(), bmp))
+    }
 }
 
 /// DIB 超上限时按比例降采样（见 MAX_SIDE 注释）。
