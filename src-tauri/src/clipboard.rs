@@ -4792,12 +4792,20 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
     crate::settings::update(|c| c.cache_dir = Some(new_dir_str.clone()));
     crate::log_print!("[clipboard] 缓存目录已迁移至 {new_dir_str}，即将重启");
 
-    // DIR 是 OnceLock，运行期不可变：迁移完成后重启进程，让新目录在下次启动生效
+    // DIR 是 OnceLock，运行期改不了：只能退出，让新目录在下次启动生效。
+    //
+    // 这里**不能**用 `app.restart()`：它 spawn 新进程与退出旧进程之间有竞态，
+    // 新进程常常在旧进程释放单例锁之前就启动，于是判定「已有同版本实例在运行」
+    // → 唤回旧窗口 → 自己退出；旧进程此时也在退出流程里，结果两个都没了。
+    // 实测过一次：迁移成功、应用消失。改成提示用户手动重开，一步操作换确定性。
+    SKIP_CLEAN_ON_EXIT.store(true, Ordering::SeqCst);
+    crate::log_print!("[clipboard] 缓存目录已迁移，应用即将退出；请重新打开轻贴以使用新目录");
     let handle = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        // 留够时间让界面上那条 toast 被看见
+        std::thread::sleep(std::time::Duration::from_millis(1500));
         crate::idle_release::note_exiting();
-        handle.restart();
+        handle.exit(0);
     });
     Ok(Some((new_dir_str, true)))
 }
@@ -4951,12 +4959,24 @@ pub fn open_log_dir() -> Result<(), String> {
 /// 日志只会在用户于文件管理器里手动删除时才消失。
 const CONTENT_DIRS: [&str; 3] = ["data", "images", "files"];
 
+/// 迁移缓存目录后是否跳过「退出时清理」。
+///
+/// 换目录的收尾是退出应用（`DIR` 是 OnceLock，运行期改不了）。若用户开着
+/// `clean_on_close`，那次退出会把**刚迁过去的数据整个清空** —— 数据没丢在
+/// 迁移里，丢在迁移之后。所以迁移完成时置位，只跳过这一次。
+static SKIP_CLEAN_ON_EXIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 在 RunEvent::Exit 时调用。clean_on_close 开启则清空全部内容文件与历史索引。
 pub fn on_app_exit() {
     // 落盘已挪到后台线程，退出前得等它跑完，否则「刚复制就退出」会丢记录。
     // 上限 2 秒：大图解码可能较久，但不至于让退出卡住。
     flush_pending(std::time::Duration::from_secs(2));
 
+    if SKIP_CLEAN_ON_EXIT.swap(false, Ordering::SeqCst) {
+        crate::log_print!("[clipboard] 本次退出由「迁移缓存目录」触发，跳过清理");
+        return;
+    }
     let cfg = crate::settings::get();
     if !cfg.clean_on_close {
         return;

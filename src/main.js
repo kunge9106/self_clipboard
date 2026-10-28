@@ -3876,7 +3876,7 @@ function bindSettings(view) {
           const [path, moved] = res;
           toast(
             moved
-              ? `已迁移到「${path}」，即将重启…`
+              ? `已迁移到「${path}」，请重新打开轻贴`
               : "已经是当前缓存目录，无需更改"
           );
         }
