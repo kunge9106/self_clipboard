@@ -2574,6 +2574,31 @@ html:not(.hovers-off) .btn-danger:hover {
   color: var(--text-dim);
 }
 
+/* 迁移完成后的确认框：路径单独一行，说明两行，按钮靠右 */
+.move-path {
+  margin-top: 10px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: var(--glass);
+  border: 1px solid var(--stroke);
+  color: var(--text);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.move-desc {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+
+.move-actions {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* 滚动条：细圆角半透明，融入玻璃风格 */
 ::-webkit-scrollbar {
   width: 6px;

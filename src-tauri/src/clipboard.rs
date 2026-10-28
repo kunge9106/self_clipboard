@@ -242,6 +242,17 @@ pub struct HistoryItem {
     /// 用来做搜索（按文件名）和快速回写；真正的实体清单在 files_path 指向的文件里。
     #[serde(default)]
     pub files: Option<Vec<String>>,
+    /// 本条是否是**截图**（轻贴 Alt+Q / 微信 / QQ / 系统截图工具）。
+    ///
+    /// 为什么要存下来而不是「看文件在哪个目录」：关掉「图片分类存放」时图片会
+    /// 搬回 `images/` 根目录，路径就不再携带来源；再打开时若按路径推断，分好
+    /// 的截图会全部被当成复制塞进 `copy/`。这是用户实测反馈的问题。
+    ///
+    /// `skip_serializing_if` 是刻意的：绝大多数内容不是截图，没必要给每条都往
+    /// 加密索引里写一个 `"shot":false`。`#[serde(default)]` 必须加 —— 老索引
+    /// 没有这个字段，缺了会让整份索引解析失败、历史全丢。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shot: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,6 +1194,7 @@ pub fn init(app: &AppHandle) {
         save_index(&dir, &hist);
     }
     if layout_stale {
+        prune_empty_image_dirs(&dir);
         crate::settings::update(|c| c.image_layout_ver = IMAGE_LAYOUT_VERSION);
         if img_moved > 0 {
             crate::log_print!("[clipboard] 图片已按当前设置整理，迁移 {img_moved} 条");
@@ -2907,6 +2919,8 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
         preview: String::new(),
         preview_truncated: false,
         size: 0,
+        // 具体值在图片分支里按 `shot` 参数写入
+        shot: false,
         text_path: None,
         html_path: None,
         rtf_path: None,
@@ -2979,6 +2993,8 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
             item.kind = "image".into();
             item.size = bytes.len() as u64;
             item.preview = "[图片]".into();
+            // 来源存进条目：关掉分类开关后路径不再携带它，靠这个字段才回得来
+            item.shot = shot;
             let rel = image_rel(&dir, ts, &ext, shot, split_dirs);
             match write_image(&dir, &rel, &bytes) {
                 Ok(()) => item.img_path = Some(rel),
@@ -2991,6 +3007,7 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
             item.preview = "[图片]".into();
             // 来源在捕获那一刻就判好了（见 `on_clipboard_update`），这里直接用：
             // 工作线程可能滞后几十毫秒，那时候剪贴板早被下一次复制换掉了。
+            item.shot = shot;
             let from_shot = shot;
             let rel = image_rel(&dir, ts, "bmp", from_shot, split_dirs);
             if let Ok(bmp) = dib_to_bmp(&bytes) {
@@ -3306,7 +3323,9 @@ const IMAGE_LAYOUT_VERSION: u32 = 1;
 ///
 /// 返回迁移条数。
 fn migrate_image_layout(dir: &PathBuf, hist: &mut Vec<HistoryItem>, split: bool) -> usize {
-    let mut moved = 0usize;
+    // 返回「改动条数」：既包括搬了文件的，也包括只补了 shot 标记的 ——
+    // 后者也要写索引，否则下次启动还会重算一遍
+    let mut changed = 0usize;
     for item in hist.iter_mut() {
         let Some(old_rel) = item.img_path.clone() else {
             continue;
@@ -3318,8 +3337,14 @@ fn migrate_image_layout(dir: &PathBuf, hist: &mut Vec<HistoryItem>, split: bool)
         if rest.starts_with("rich/") || rest.starts_with("thumbs/") {
             continue;
         }
-        // 来源：已在 `shot/` 里说明它是截图；其余（`copy/`、根目录）按复制处理
-        let from_shot = rest.starts_with("shot/");
+        // 来源以条目字段为准。老索引没有 `shot`，此时路径是唯一线索：已经在
+        // `shot/` 里的补上标记 —— 否则升上来第一轮整理会把它们全搬进 `copy/`。
+        let mut touched = false;
+        if !item.shot && rest.starts_with("shot/") {
+            item.shot = true;
+            touched = true;
+        }
+        let from_shot = item.shot;
         let stem = Path::new(rest)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -3328,6 +3353,9 @@ fn migrate_image_layout(dir: &PathBuf, hist: &mut Vec<HistoryItem>, split: bool)
         // 已经在正确位置：目录对、文件名就是该有的日期（撞名的 `-2` 后缀不算变化）
         let base = stem.split('-').next().unwrap_or(stem);
         if cur_dir == image_dir(split, from_shot) && base == local_stamp(item.ts) {
+            if touched {
+                changed += 1;
+            }
             continue;
         }
         let ext = Path::new(rest)
@@ -3347,13 +3375,30 @@ fn migrate_image_layout(dir: &PathBuf, hist: &mut Vec<HistoryItem>, split: bool)
         match fs::rename(&src, &dst) {
             Ok(()) => {
                 item.img_path = Some(new_rel);
-                moved += 1;
+                changed += 1;
             }
             // 单条失败不阻断整体：该条继续用旧路径，仍然能显示
             Err(e) => crate::log_warn!("[clipboard] 图片迁移跳过 {old_rel}：{e}"),
         }
     }
-    moved
+    changed
+}
+
+/// 删掉已经是空的分类目录。
+///
+/// 关掉分类开关后图片都搬回根目录，留两个空目录没有意义。`fs::remove_dir`
+/// 只删空目录 —— 里面有东西（还有没搬完的、或用户自己放的文件）就失败，
+/// 失败当正常情况处理，不报错。
+fn prune_empty_image_dirs(dir: &Path) {
+    for sub in ["images/shot", "images/copy"] {
+        let p = dir.join(sub);
+        if !p.is_dir() {
+            continue;
+        }
+        if fs::remove_dir(&p).is_ok() {
+            crate::log_print!("[clipboard] 已删除空目录 images/{sub}");
+        }
+    }
 }
 
 /// 按当前设置重新整理图片目录，并记下布局版本。返回搬了几条。
@@ -3371,6 +3416,7 @@ pub fn organize_image_layout() -> usize {
         Err(p) => p.into_inner(),
     };
     let moved = migrate_image_layout(dir, &mut h, split);
+    prune_empty_image_dirs(dir);
     // rename 不搬数据，耗时只跟条目数相关；真正的大头通常是索引整份重新加密写盘
     // （条数越多越慢）。这两段分开记，以后要优化才知道该动哪一段。
     let files_done = started.elapsed();
@@ -4305,6 +4351,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
             pinned_views: Vec::new(),
             favorite: false,
             edited: false,
+            shot: false,
             subtype: Some(detect_subtype(&text).unwrap_or("").to_string()),
             preview,
             preview_truncated,
@@ -4377,6 +4424,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 pinned_views: Vec::new(),
                 favorite: false,
                 edited: false,
+                shot: false,
                 subtype: None,
                 preview: if files.len() == 1 {
                     name
@@ -4442,6 +4490,8 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 pinned_views: Vec::new(),
                 favorite: false,
                 edited: false,
+                // 重建时路径是唯一线索：在 shot/ 里就说明它是截图
+                shot: sub == "images/shot",
                 subtype: None,
                 preview: "[图片]".into(),
                 preview_truncated: false,
@@ -4802,31 +4852,25 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
     // 不调 `note_user_quit`，`clean_on_close` 不会生效。
     crate::log_print!("[clipboard] 缓存目录已迁移，等待用户确认后重启");
 
-    // 用原生弹框而不是 toast：重启会关掉整个窗口，toast 一闪就没，用户来不及看
-    // 发生了什么。弹框能停在那儿，把「自动重启不会清除任何数据」这句说清楚 ——
-    // 换目录本身是低频动作，多一次点确认不算负担。
-    //
-    // `blocking_show` 不能在主线程调（会死锁），挪到阻塞线程。
-    let app_for_dialog = app.clone();
-    let path_for_msg = new_dir_str.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        use tauri_plugin_dialog::DialogExt;
-        app_for_dialog
-            .dialog()
-            .message(format!(
-                "已迁移到：\n{path_for_msg}\n\n即将自动重启以使用新目录。\n自动重启不会清除任何数据。"
-            ))
-            .title("缓存目录已迁移")
-            .blocking_show();
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    // 交给前端弹自绘确认框：原生消息框与轻贴的玻璃界面是两套语言。
+    // 前端点「重启」后调 `confirm_cache_move`。
+    let _ = app.emit(
+        "cache-moved",
+        serde_json::json!({ "path": new_dir_str.as_str() }),
+    );
 
-    // 用户已确认 → 让出实例锁再重启，否则新进程会撞上旧进程的锁而自己退出
+    // 兜底：前端若因故没弹框或没响应，20 秒后自己重启。
+    //
+    // **不能无限等**：此刻 `DIR` 还指向已经被搬空的旧目录，继续运行会把新内容
+    // 写回旧目录 —— 变成「配置说 A、实际写 B」，两处数据各一半。
     let handle = app.clone();
     std::thread::spawn(move || {
-        // 让这个命令的返回值先送到前端，再退出
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        for _ in 0..200 {
+            if CONFIRM_RESTART.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         crate::idle_release::note_exiting();
         crate::singleton::yield_instance_lock();
         handle.restart();
@@ -4994,6 +5038,17 @@ static USER_QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// 标记「接下来这次退出是用户主动要求的」，`clean_on_close` 才有机会生效。
 pub fn note_user_quit() {
     USER_QUIT.store(true, Ordering::SeqCst);
+}
+
+/// 迁移缓存目录后，前端是否已经点了「重启」。
+///
+/// 后端只负责等：前端弹自绘确认框，用户点了就置位，兜底线程随即重启。
+static CONFIRM_RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 前端确认重启（迁移缓存目录之后）。
+#[tauri::command]
+pub fn confirm_cache_move() {
+    CONFIRM_RESTART.store(true, Ordering::SeqCst);
 }
 
 /// 在 RunEvent::Exit 时调用。clean_on_close 开启则清空全部内容文件与历史索引。
@@ -5603,6 +5658,10 @@ mod tests {
 
     /// 造一条图片条目，供目录迁移测试用。
     fn image_item(id: &str, ts: u64, img_path: String) -> HistoryItem {
+        image_item_shot(id, ts, img_path, false)
+    }
+
+    fn image_item_shot(id: &str, ts: u64, img_path: String, shot: bool) -> HistoryItem {
         HistoryItem {
             id: id.into(),
             kind: "image".into(),
@@ -5611,6 +5670,7 @@ mod tests {
             pinned_views: Vec::new(),
             favorite: false,
             edited: false,
+            shot,
             subtype: None,
             preview: "[图片]".into(),
             preview_truncated: false,
@@ -5727,6 +5787,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 关掉分类再打开，截图的「身份」不能丢。
+    ///
+    /// 用户实测反馈：原先靠「文件在不在 shot/ 里」推断来源，关掉开关时图片
+    /// 搬回根目录，路径不再携带来源，再打开就全被当成复制塞进 copy/。
+    /// 改成存 `shot` 字段后，来回切换都保持分类。
+    #[test]
+    fn shot_flag_survives_split_toggle() {
+        let dir = std::env::temp_dir().join(format!("qt-img-flag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("images/shot")).unwrap();
+
+        let ts = 1_697_000_000_000u64;
+        let dated = format!("images/shot/{}.bmp", local_stamp(ts));
+        std::fs::write(dir.join(&dated), b"x").unwrap();
+        let mut hist = vec![image_item_shot("1a135ba61f1-5", ts, dated.clone(), true)];
+
+        // 关掉开关 → 搬回根目录，但 shot 标记必须还在
+        assert_eq!(migrate_image_layout(&dir, &mut hist, false), 1);
+        assert!(hist[0].shot, "关掉分类不该丢掉「这是截图」");
+        let flat = hist[0].img_path.clone().unwrap();
+        assert!(!flat["images/".len()..].contains('/'), "应平铺在根目录");
+
+        // 再打开 → 回 shot/，不该进 copy/
+        assert_eq!(migrate_image_layout(&dir, &mut hist, true), 1);
+        assert_eq!(hist[0].img_path.as_deref(), Some(dated.as_str()));
+        assert!(dir.join(&dated).is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 老索引没有 `shot` 字段，但文件已经在 `shot/` 里 —— 首轮整理要补上标记，
+    /// 而不是把它搬进 `copy/`。
+    #[test]
+    fn legacy_shot_dir_gets_flagged_not_moved() {
+        let dir = std::env::temp_dir().join(format!("qt-img-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("images/shot")).unwrap();
+
+        let ts = 1_697_000_000_000u64;
+        let dated = format!("images/shot/{}.bmp", local_stamp(ts));
+        std::fs::write(dir.join(&dated), b"x").unwrap();
+        // shot 默认 false：模拟升级前写入的条目
+        let mut hist = vec![image_item("1a135da3ed6-11", ts, dated.clone())];
+
+        assert_eq!(migrate_image_layout(&dir, &mut hist, true), 1, "补标记算一次改动");
+        assert!(hist[0].shot, "应据路径补上截图标记");
+        assert_eq!(hist[0].img_path.as_deref(), Some(dated.as_str()), "路径不该变");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 拼一个 32bpp BI_RGB 的纯色 DIB，供指纹测试用。
     fn solid_dib(w: i32, h: i32, color: [u8; 4]) -> Vec<u8> {
         let px = (w as usize) * (h as usize) * 4;
@@ -5787,6 +5898,7 @@ mod tests {
             pinned_views: Vec::new(),
             favorite: false,
             edited: false,
+            shot: false,
             subtype: None,
             html_path: None,
             rtf_path: None,
