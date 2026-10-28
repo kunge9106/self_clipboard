@@ -48,7 +48,7 @@
 
   <g font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC','Source Han Sans SC',sans-serif">
     <text x="232" y="168" font-size="80" font-weight="600" letter-spacing="6" fill="#ffffff" fill-opacity="0.96">轻贴</text>
-    <text x="238" y="212" font-size="21" letter-spacing="1.2" fill="#8d9fbe">剪贴板历史管理 · 记录只留在本机</text>
+    <text x="233" y="212" font-size="21" letter-spacing="1.2" fill="#8d9fbe">剪贴板历史管理</text>
   </g>
 
   <!-- 右侧：三条件目示意，徽章配色与主界面色板一致 -->
