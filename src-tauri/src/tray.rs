@@ -204,6 +204,7 @@ pub fn tray_show_main(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn tray_quit(app: AppHandle) -> Result<(), String> {
     crate::log_print!("[tray] 用户从托盘菜单退出");
+    crate::idle_release::note_exiting();
     crate::clipboard::on_app_exit();
     app.exit(0);
     Ok(())

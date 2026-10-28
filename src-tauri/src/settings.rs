@@ -898,6 +898,7 @@ pub fn set_clean_confirm_exit(value: bool) -> Result<(), String> {
 /// 前端确认弹窗后调用：立即执行退出清理并退出进程
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
+    crate::idle_release::note_exiting();
     crate::clipboard::on_app_exit();
     app.exit(0);
     Ok(())

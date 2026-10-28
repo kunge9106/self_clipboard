@@ -1158,6 +1158,7 @@ pub fn install_downloaded(app: tauri::AppHandle, path: String) -> Result<(), Str
     std::thread::spawn(move || {
         // 给安装器一点时间完成初始化再退出，免得它刚起来就判定「轻贴正在运行」
         std::thread::sleep(std::time::Duration::from_millis(1500));
+        crate::idle_release::note_exiting();
         app.exit(0);
     });
     Ok(())

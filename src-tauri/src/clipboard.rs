@@ -4410,6 +4410,7 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
     let handle = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(600));
+        crate::idle_release::note_exiting();
         handle.restart();
     });
     Ok(Some((new_dir_str, true)))

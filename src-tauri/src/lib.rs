@@ -369,7 +369,9 @@ pub fn run() {
                     // 自己销毁的，后端线程与托盘都还在 —— 必须拦住，否则一释放
                     // 整个程序就没了。用户主动退出（托盘菜单）不在此列。
                     tauri::RunEvent::ExitRequested { api, .. } => {
-                        if idle_release::is_released() {
+                        // 只拦「窗口是我们释放掉的」这种情况；用户主动退出
+                        //（托盘退出 / 安装更新 / 迁移缓存后重启）必须放行
+                        if !idle_release::is_exiting() && idle_release::is_released() {
                             api.prevent_exit();
                         }
                     }

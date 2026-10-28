@@ -24,7 +24,7 @@
 //! `PageLoadEvent::Finished` 再 `show()`。直接建就显示会闪一下白屏或
 //! 错误主题色，因为页面还没渲染完。
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -52,15 +52,35 @@ const ST_REBUILDING: u8 = 2;
 
 static STATE: AtomicU8 = AtomicU8::new(ST_NORMAL);
 
+/// 应用是否正在**主动退出**。
+///
+/// `app.exit()` 与 `app.restart()` 同样会触发 `RunEvent::ExitRequested`，
+/// 而低占用模式在那里默认 `prevent_exit()` —— 不先标记的话，释放在外时点
+/// 「退出」会被自己拦住，程序退不掉；更糟的是 `on_app_exit()` 的清理已经
+/// 先跑了（数据清了、程序还在）。关机与安装更新同理。
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+/// 标记「接下来这次退出是用户/系统要求的」，必须放行。
+pub(crate) fn note_exiting() {
+    EXITING.store(true, Ordering::SeqCst);
+}
+
+pub(crate) fn is_exiting() -> bool {
+    EXITING.load(Ordering::SeqCst)
+}
+
 /// 计时器代次。每次重新计时 +1，旧线程醒来发现代次变了就放弃，
 /// 比「取消一个定时器」简单，也不必维护线程句柄。
 static GEN: AtomicU64 = AtomicU64::new(0);
 
-/// 释放前记下的窗口几何（x, y, width, height，逻辑像素）。
+/// 释放前记下的窗口几何（x, y, width, height，**物理像素**）。
 ///
 /// 项目没有窗口状态持久化（未用 window-state 插件），不记下来重建后
 /// 窗口会跳回 `tauri.conf.json` 里的默认位置 —— 用户调过的位置就丢了。
-static GEOM: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
+///
+/// 存物理而不是逻辑：重建出来的窗口最初落在**主屏**，若释放前在 150% 的
+/// 副屏上，逻辑坐标会按主屏的 100% 换算，窗口直接错位。物理坐标与 DPI 无关。
+static GEOM: Mutex<Option<(i32, i32, u32, u32)>> = Mutex::new(None);
 
 /// 空闲多久后释放（秒）。0 = 从不释放。
 fn idle_secs() -> u64 {
@@ -244,15 +264,8 @@ fn build_main_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
 fn save_geometry(w: &WebviewWindow) {
     let Ok(pos) = w.outer_position() else { return };
     let Ok(size) = w.inner_size() else { return };
-    let scale = w.scale_factor().unwrap_or(1.0);
-    let v = (
-        pos.x as f64 / scale,
-        pos.y as f64 / scale,
-        size.width as f64 / scale,
-        size.height as f64 / scale,
-    );
     if let Ok(mut g) = GEOM.lock() {
-        *g = Some(v);
+        *g = Some((pos.x, pos.y, size.width, size.height));
     }
 }
 
@@ -265,6 +278,6 @@ fn restore_geometry(w: &WebviewWindow) {
         },
         Err(_) => return,
     };
-    let _ = w.set_position(tauri::LogicalPosition::new(v.0, v.1));
-    let _ = w.set_size(tauri::LogicalSize::new(v.2, v.3));
+    let _ = w.set_position(tauri::PhysicalPosition::new(v.0, v.1));
+    let _ = w.set_size(tauri::PhysicalSize::new(v.2, v.3));
 }
