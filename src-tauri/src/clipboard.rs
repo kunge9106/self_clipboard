@@ -115,7 +115,7 @@ const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
 /// 元组第三项 = 是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
-static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip, bool)>> = OnceLock::new();
+static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip, bool, bool)>> = OnceLock::new();
 /// 缩略图生成线程的投递端。与捕获线程分开：捕获线程只做「落盘 + 通知前端」必须快，
 /// 缩略图解码慢、且不影响条目出现，所以单独排队，避免拖慢快速连续复制。
 static THUMB_TX: OnceLock<std::sync::mpsc::Sender<HistoryItem>> = OnceLock::new();
@@ -673,7 +673,7 @@ pub fn set_clipboard_text(text: String, changed: bool) -> Result<(), String> {
             // 本次自写在「事件」与「兜底轮询」两条通道上都会被认出并跳过，
             // 所以不会出现「系统自读一条 + 手动入库一条」变成两条。
             if changed {
-                dispatch_raw(RawClip::Text { text, html: None, rtf: None }, true);
+                dispatch_raw(RawClip::Text { text, html: None, rtf: None }, true, false);
             }
             Ok(())
         }
@@ -1024,18 +1024,19 @@ fn spawn_clipboard_watchdog() {
 fn spawn_worker() {
     // app 走全局 APP（OnceLock，在 init 首行写入）；worker 在订阅监听之前
     // 启动，所以取用时必定已就绪。
-    // 元组第三项：这条是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
-    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip, bool)>();
+    // 元组第三项：这条是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）；
+    // 第四项：这次是不是截图（决定图片落 `shot/` 还是 `copy/`）。
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip, bool, bool)>();
     std::thread::Builder::new()
         .name("clipboard-store".into())
         .spawn(move || {
-            while let Ok((captured_ms, raw, edited)) = rx.recv() {
+            while let Ok((captured_ms, raw, edited, shot)) = rx.recv() {
                 // guard 保证 PENDING 一定减回去 —— handle_clip 里判重拦截会
                 // 提前 return，手写 fetch_sub 迟早漏掉一次。
                 let _guard = PendingGuard;
                 // handle_clip 内部完成：解码 → 同图判重 → 落盘 → emit。
                 // 这里只负责串行投递，保证与复制顺序一致。
-                handle_clip(captured_ms, raw, edited);
+                handle_clip(captured_ms, raw, edited, shot);
             }
         })
         .map_err(|e| crate::log_warn!("[clipboard] 落盘工作线程启动失败：{e}"))
@@ -1271,6 +1272,9 @@ pub fn on_clipboard_update() {
     if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
         return;
     }
+    // 这次内容是不是**我们自己**写回剪贴板的（回贴 / 编辑保存 / 截图）。
+    // 回贴的图不能被当成截图 —— 它只是历史里某张图的副本。
+    let mut own_write = false;
     unsafe {
         // 剪贴板 owner 就是我们自己窗口 → 这是「点击条目复制回去」写下的内容，不能再当成
         // 一次新的系统复制回灌成重复条目。
@@ -1283,7 +1287,8 @@ pub fn on_clipboard_update() {
                 LAST_SEQ.store(seq, Ordering::Relaxed);
                 return;
             }
-            // 通行证生效：这是截图写进来的，继续往下走当成一次新复制
+            // 通行证生效：这是自己写进来的，继续往下走当成一次新复制
+            own_write = true;
         }
         if seq == SKIP_SEQ.load(Ordering::Relaxed) {
             SKIP_SEQ.store(0, Ordering::Relaxed);
@@ -1298,7 +1303,7 @@ pub fn on_clipboard_update() {
     if READING.swap(true, Ordering::AcqRel) {
         return;
     }
-    let (raw, diag) = unsafe { read_clipboard() };
+    let (raw, diag, origin) = unsafe { read_clipboard() };
     if raw.is_some() {
         // ✅ 读成功：**必须在放开 READING 之前**推进序号。
         //
@@ -1314,7 +1319,16 @@ pub fn on_clipboard_update() {
     READING.store(false, Ordering::Release);
     match raw {
         Some(raw) => {
-            dispatch_raw(raw, false);
+            // 截图判定：自己写回的只认 `SHOT_AT`（回贴不能算截图），
+            // 别人写进来的看剪贴板格式特征（见 `classify_shot`）。
+            // 判定必须在这里做 —— 此刻剪贴板还没被别人换掉，
+            // 等到工作线程落盘时再查就晚了。
+            let shot = if own_write {
+                take_shot_mark()
+            } else {
+                classify_shot(&origin)
+            };
+            dispatch_raw(raw, false, shot);
         }
         None => {
             // ❌ **不推进 LAST_SEQ** → 轮询下一拍自动重试，直到读到、或剪贴板被新复制替换。
@@ -1346,15 +1360,15 @@ pub fn on_clipboard_update() {
 ///
 /// `edited`：true 表示这条来自「复制并编辑」的保存动作，落成条目后带
 /// 「已编辑」标记；**外部复制**一律传 false。
-fn dispatch_raw(raw: RawClip, edited: bool) {
+fn dispatch_raw(raw: RawClip, edited: bool, shot: bool) {
     let captured_ms = now_ms();
     if let Some(tx) = WORKER.get() {
-        if tx.send((captured_ms, raw, edited)).is_ok() {
+        if tx.send((captured_ms, raw, edited, shot)).is_ok() {
             PENDING.fetch_add(1, Ordering::Relaxed);
         }
     } else {
         // 工作线程还没起来（正常不会发生——init 里先启线程再订阅监听）
-        handle_clip(captured_ms, raw, edited);
+        handle_clip(captured_ms, raw, edited, shot);
     }
 }
 
@@ -1381,7 +1395,7 @@ pub fn flush_pending(timeout: std::time::Duration) {
 /// 顺序很重要：先 `resolve`（解码），再做图片指纹判重 —— 指纹要基于像素
 /// 内容算，未解码前拿不到。
 /// `edited` 透传给 `store_raw`：为 true 时新条目带「已编辑」标记。
-fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
+fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
     let Some(raw) = resolve(raw) else {
         // resolve 只在「临时文件读不出」或「不是图片」且「文件复制」关闭时返回 None，
         // 即按用户设置主动跳过。记一条，便于区分「被设置跳过」与「识别失败」。
@@ -1506,7 +1520,7 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
         }
     }
 
-    let item = store_raw(raw, edited);
+    let item = store_raw(raw, edited, shot);
     if let Some(app) = APP.get() {
         let _ = app.emit("clipboard-update", item.clone());
     }
@@ -2015,18 +2029,26 @@ unsafe fn clipboard_owner_exe() -> String {
 ///
 /// 这里只保留 `open_clipboard_retry`：那是「拿不到全局锁」的微退避（~30ms），
 /// 属于同一次读取内的必要礼让，不是重试链。
-unsafe fn read_clipboard() -> (Option<RawClip>, String) {
+unsafe fn read_clipboard() -> (Option<RawClip>, String, ClipOrigin) {
     // 「文件复制」开关（设置页，默认关闭）：关掉后完全不看 CF_HDROP。
     // 在 OpenClipboard 之前读取，避免持有剪贴板锁时再去碰 settings 的互斥锁。
     let file_copy = crate::settings::get().file_copy;
 
+    let empty_origin = || ClipOrigin {
+        formats: Vec::new(),
+        owner_exe: String::new(),
+    };
     if !open_clipboard_retry() {
-        return (None, "OpenClipboard 重试耗尽(对方应用长时间持锁)".into());
+        return (
+            None,
+            "OpenClipboard 重试耗尽(对方应用长时间持锁)".into(),
+            empty_origin(),
+        );
     }
     // 延迟渲染需要 owner 重新拿到锁才能把数据补进来，所以读完必须立刻松锁。
-    let (raw, diag, _suspicious) = read_clipboard_once(file_copy);
+    let (raw, diag, _suspicious, origin) = read_clipboard_once(file_copy);
     CloseClipboard();
-    (raw, diag)
+    (raw, diag, origin)
 }
 
 /// 单次读剪贴板。**调用方须保证已 OpenClipboard 成功**，本函数不负责开关剪贴板。
@@ -2095,7 +2117,7 @@ unsafe fn read_clip_text_format(name: &str) -> Option<String> {
     inner(name)
 }
 
-unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool) {
+unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool, ClipOrigin) {
     const CF_UNICODETEXT: u32 = 13;
     const CF_DIB: u32 = 8;
     const CF_HDROP: u32 = 15;
@@ -2252,7 +2274,15 @@ unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool
         None
     })();
 
-    (result, diag, suspicious)
+    (
+        result,
+        diag,
+        suspicious,
+        ClipOrigin {
+            formats: fmts,
+            owner_exe: owner,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2865,7 +2895,7 @@ fn refresh_text_subtypes(dir: &PathBuf, hist: &mut [HistoryItem]) -> usize {
     changed
 }
 
-fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
+fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
     let dir = DIR.get().unwrap().clone();
     let ts = now_ms();
     let id = make_id(ts);
@@ -2955,8 +2985,8 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
             item.kind = "image".into();
             item.size = bytes.len() as u64;
             item.preview = "[图片]".into();
-            let rel = image_rel(&dir, ts, &ext, take_shot_mark(), split_dirs);
-            match fs::write(dir.join(&rel), &bytes) {
+            let rel = image_rel(&dir, ts, &ext, shot, split_dirs);
+            match write_image(&dir, &rel, &bytes) {
                 Ok(()) => item.img_path = Some(rel),
                 Err(e) => crate::log_err!("clipboard", "图片原图落盘失败 {rel}：{e}"),
             }
@@ -2965,17 +2995,19 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
             item.kind = "image".into();
             item.size = bytes.len() as u64;
             item.preview = "[图片]".into();
-            let from_shot = take_shot_mark();
+            // 来源在捕获那一刻就判好了（见 `on_clipboard_update`），这里直接用：
+            // 工作线程可能滞后几十毫秒，那时候剪贴板早被下一次复制换掉了。
+            let from_shot = shot;
             let rel = image_rel(&dir, ts, "bmp", from_shot, split_dirs);
             if let Ok(bmp) = dib_to_bmp(&bytes) {
-                if let Err(e) = fs::write(dir.join(&rel), &bmp) {
+                if let Err(e) = write_image(&dir, &rel, &bmp) {
                     crate::log_err!("clipboard", "位图落盘失败 {rel}：{e}");
                 }
                 item.img_path = Some(rel);
             } else {
                 // 兜底：直接存 DIB，前端无法显示但至少保留
                 let rel = image_rel(&dir, ts, "dib", from_shot, split_dirs);
-                if let Err(e) = fs::write(dir.join(&rel), &bytes) {
+                if let Err(e) = write_image(&dir, &rel, &bytes) {
                     crate::log_err!("clipboard", "DIB 兜底落盘失败 {rel}：{e}");
                 }
                 item.img_path = Some(rel);
@@ -3326,6 +3358,20 @@ fn migrate_image_layout(
         }
     }
     (moved, stale)
+}
+
+/// 图片落盘：父目录不存在时先建。
+///
+/// `images/shot/` 与 `images/copy/` 是懒创建的 —— 直接 `fs::write` 会得到
+/// 「系统找不到指定的路径」（os error 3）。那种失败很隐蔽：条目照样入库、
+/// 界面上只是一张占位图，日志里才有一行 ERROR。`images/` 根目录一直存在，
+/// 所以分成子目录之前从没撞上过。
+fn write_image(dir: &Path, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let path = dir.join(rel);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, bytes)
 }
 
 /// 缩略图的统一存放路径：**图片目录下的子文件夹** `images/thumbs/`。
@@ -3711,6 +3757,66 @@ pub fn write_shot_to_clipboard(dib: &[u8]) -> Result<(), String> {
         SHOT_AT.store(0, Ordering::SeqCst);
     }
     r
+}
+
+/// 剪贴板来源的结构化信息：格式名列表 + 所有者进程名。
+///
+/// 两者都必须在 `OpenClipboard` 期间取到 —— 一松手，内容可能已经被下一次
+/// 复制换掉了，事后再查就是别人的。
+struct ClipOrigin {
+    /// `enum_clipboard_formats` 的输出：标准格式是裸名（`CF_DIB`），
+    /// 私有/注册格式带双引号（`"WeChatScreenshotFormat"`）。
+    formats: Vec<String>,
+    /// 所有者进程名。空串 = 没有窗口持有剪贴板（PrtSc 与 QQ 截图就是这样写进来的），
+    /// 或者权限不足查不到。
+    owner_exe: String,
+}
+
+/// 这次图片算不算「截图」—— 决定落 `images/shot/` 还是 `images/copy/`。
+///
+/// 判据是剪贴板上的**格式名**，不是进程名。实测（Win10 19045，2026-10-28）：
+///
+/// | 操作 | 所有者 | 可用的区分特征 |
+/// |---|---|---|
+/// | 微信截图 | Weixin.exe | 私有格式 `WeChatScreenshotFormat` |
+/// | 微信复制图片 | Weixin.exe | 没有那个格式，改给 `CF_HDROP` |
+/// | QQ 截图 | 无 | 只有裸位图 |
+/// | QQ 复制图片 | 无 | 带 `QQ_Unicode_RichEdit_Format` / `HTML Format` |
+/// | Win+Shift+S | svchost.exe | 注册格式 `PNG` + `Ole Private Data` |
+///
+/// 三条规则按可靠性排序，任一命中即算截图：
+/// 1. **微信的专属格式** —— 零误判，它只在截图时出现
+/// 2. **系统截图工具**会写注册格式 `PNG`（普通「复制图片」一般只给 CF_DIB），
+///    并同时带 `Ole Private Data`
+/// 3. **没有窗口持有者的裸位图** —— PrtSc 与 QQ 截图都不经自己的窗口写剪贴板；
+///    有窗口的程序（画图、PS）复制图片一定带自己的 owner，不会命中
+///
+/// 三条都不命中就是普通复制。宁漏判不错判：目录名写错比 copy/ 里多几个文件
+/// 更让人困惑。
+fn classify_shot(origin: &ClipOrigin) -> bool {
+    // 私有/注册格式在枚举时带了双引号，比较前先剥掉。
+    // 写成局部 fn 而不是闭包：闭包返回借用说不清生命周期。
+    fn unq(s: &str) -> &str {
+        s.trim_matches('"')
+    }
+    let has = |name: &str| origin.formats.iter().any(|f| unq(f) == name);
+
+    // 1) 微信截图：专属私有格式，只有截图才写
+    if has("WeChatScreenshotFormat") {
+        return true;
+    }
+    // 2) 系统截图工具（Win+Shift+S 等）
+    if has("PNG") && has("Ole Private Data") {
+        return true;
+    }
+    // 3) 无窗口持有者的裸位图：PrtSc、QQ 截图
+    let bitmap_only = !origin.formats.is_empty()
+        && origin
+            .formats
+            .iter()
+            .all(|f| matches!(unq(f), "CF_BITMAP" | "CF_DIB" | "CF_DIBV5" | "CF_PALETTE"));
+    bitmap_only
+        && (origin.owner_exe.is_empty() || origin.owner_exe.eq_ignore_ascii_case("svchost.exe"))
 }
 
 /// 取用「这次落盘的是不是截图」的标记，取完即清。
@@ -5247,6 +5353,92 @@ mod tests {
         // 内部 id 与随便一串东西都不该被当成日期
         assert!(ts_from_stamp("1a126311c6c-3").is_none());
         assert!(ts_from_stamp("hello").is_none());
+    }
+
+    /// 截图判定：用例全部来自 2026-10-28 的实测剪贴板数据。
+    ///
+    /// 注意格式名的真实形态：标准格式是裸名（`CF_DIB`），私有/注册格式带双引号
+    /// （`"WeChatScreenshotFormat"`）—— 这是 `enum_clipboard_formats` 的输出习惯。
+    #[test]
+    fn classify_shot_matches_measured_sources() {
+        let cases: &[(&str, Vec<&str>, &str, bool)] = &[
+            (
+                "微信截图",
+                vec![
+                    "\"DataObject\"",
+                    "CF_DIB",
+                    "\"application/x-capturer-status\"",
+                    "\"WeChatScreenshotFormat\"",
+                    "CF_BITMAP",
+                    "CF_DIBV5",
+                ],
+                "Weixin.exe",
+                true,
+            ),
+            (
+                "微信复制图片",
+                vec![
+                    "\"DataObject\"",
+                    "CF_HDROP",
+                    "\"UniformResourceLocatorW\"",
+                    "CF_DIB",
+                    "\"Ole Private Data\"",
+                    "CF_BITMAP",
+                    "CF_DIBV5",
+                ],
+                "Weixin.exe",
+                false,
+            ),
+            (
+                "QQ 截图（无所有者、只有裸位图）",
+                vec!["CF_BITMAP", "CF_DIB", "CF_DIBV5"],
+                "",
+                true,
+            ),
+            (
+                "QQ 复制图片",
+                vec![
+                    "\"QQ_Unicode_RichEdit_Format\"",
+                    "\"HTML Format\"",
+                    "\"Preferred DropEffect\"",
+                    "CF_HDROP",
+                    "CF_BITMAP",
+                    "CF_DIB",
+                    "CF_DIBV5",
+                ],
+                "",
+                false,
+            ),
+            (
+                "Win+Shift+S",
+                vec![
+                    "\"DataObject\"",
+                    "\"Preferred DropEffect\"",
+                    "CF_BITMAP",
+                    "\"PNG\"",
+                    "\"Ole Private Data\"",
+                    "CF_DIB",
+                    "CF_DIBV5",
+                ],
+                "svchost.exe",
+                true,
+            ),
+            (
+                "画图里复制选区（有 owner，裸位图也不该算截图）",
+                vec!["CF_BITMAP", "CF_DIB", "CF_DIBV5"],
+                "mspaint.exe",
+                false,
+            ),
+            ("空格式", vec![], "", false),
+        ];
+
+        for (name, formats, owner, want) in cases {
+            let origin = ClipOrigin {
+                formats: formats.iter().map(|s| s.to_string()).collect(),
+                owner_exe: owner.to_string(),
+            };
+            assert_eq!(classify_shot(&origin), *want, "用例：{name}");
+        }
     }
 
     /// 截图标记：取过即清、超时不再认。

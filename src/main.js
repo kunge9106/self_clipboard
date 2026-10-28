@@ -2665,7 +2665,7 @@ function settingsDataHtml(s) {
         rowCheck(
           "set-images-split",
           "图片分类存放",
-          "截图放 <b>shot/</b>，其它图片放 <b>copy/</b>；文件名一律按日期时间。关闭则全部平铺在 images/ 下",
+          "微信 / QQ / 系统截图放 <b>shot/</b>，其它图片放 <b>copy/</b>；文件名一律按日期时间。关闭则全部平铺在 images/ 下",
           s.imagesSplitDirs
         )
     ),
