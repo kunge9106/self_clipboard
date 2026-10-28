@@ -2402,6 +2402,29 @@ function settingsGeneralHtml(s) {
           "关闭时收进托盘",
           "关掉窗口后在后台继续记录；右键托盘图标可打开菜单",
           s.trayOnClose
+        ) +
+        rowCheck(
+          "set-release-idle",
+          "后台释放界面",
+          "收起后关掉界面进程，常驻内存约 400 MB 降到 40 MB；唤回时要重建，慢约 0.3 秒",
+          (s.releaseIdleSecs || 0) > 0
+        ) +
+        rowCtl(
+          "释放等待",
+          "收起后多久释放界面",
+          `<div class="seg" id="set-release-secs">
+            <button type="button" data-secs="1" ${
+              s.releaseIdleSecs === 1 ? 'class="on"' : ""
+            }>立即</button>
+            <button type="button" data-secs="30" ${
+              s.releaseIdleSecs === 30 ? 'class="on"' : ""
+            }>30 秒</button>
+            <button type="button" data-secs="300" ${
+              s.releaseIdleSecs === 300 ? 'class="on"' : ""
+            }>5 分钟</button>
+          </div>`,
+          true,
+          "set-release-secs"
         )
     ),
     block(
@@ -3499,6 +3522,56 @@ function bindSettings(view) {
   bindCheck("set-panel-stay", "set_panel_stay_on_blur");
   // 截图右键取消：同样只存布尔，下次唤起截图时按新值决定装不装钩子
   bindCheck("set-shot-rclick", "set_screenshot_right_click_cancel");
+
+  // 后台释放界面：开关与档位是同一件事的两种粒度 —— 关 = 0，开 = 秒数。
+  // 关掉时只写 0、不记「上次是哪一档」，所以再打开沿用当前值，没开过就给 30 秒。
+  const releaseCheck = view.querySelector("#set-release-idle");
+  const releaseSeg = view.querySelector("#set-release-secs");
+  if (releaseCheck && releaseSeg) {
+    const releaseRow = releaseSeg.closest(".row");
+    const syncRelease = () => {
+      releaseRow?.toggleAttribute("data-disabled", !releaseCheck.checked);
+    };
+    syncRelease();
+
+    const applyRelease = async (value, tip) => {
+      try {
+        await invoke("set_release_idle_secs", { value });
+        settings = await invoke("get_settings");
+        releaseSeg
+          .querySelectorAll("button[data-secs]")
+          .forEach((b) =>
+            b.classList.toggle("on", Number(b.dataset.secs) === value)
+          );
+        syncRelease();
+        toast(tip);
+      } catch (e) {
+        console.error(e);
+        toast("保存失败");
+      }
+    };
+
+    releaseCheck.addEventListener("change", () => {
+      if (releaseCheck.checked) {
+        const prev = Number(settings?.releaseIdleSecs || 0);
+        applyRelease(prev > 0 ? prev : 30, "已开启后台释放");
+      } else {
+        applyRelease(0, "已关闭后台释放");
+      }
+    });
+
+    releaseSeg.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-secs]");
+      if (!btn || !releaseCheck.checked) return;
+      const secs = Number(btn.dataset.secs);
+      applyRelease(
+        secs,
+        secs === 1
+          ? "收起后立即释放"
+          : `收起后 ${secs === 300 ? "5 分钟" : secs + " 秒"}释放`
+      );
+    });
+  }
 
   // 截图方式：内置覆盖层 / 系统工具。「右键取消」只对前者之外的系统版有意义
   // （内置版本来就能右键取消），所以切到内置时把那一行整行置灰。

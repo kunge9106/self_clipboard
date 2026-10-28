@@ -293,6 +293,7 @@ pub fn run() {
             settings::get_settings,
             settings::dismiss_onboarding,
             settings::set_tray_on_close,
+            settings::set_release_idle_secs,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,
@@ -342,6 +343,9 @@ pub fn run() {
         about::prune_stale_installers();
         // 托盘图标常驻：程序一运行就显示（不再依赖「关闭时后台运行」开关）
         tray::create_tray(app.handle());
+        // 重复启动的唤醒监听：命名事件与窗口是否存在无关，
+        // 低占用模式释放界面后照样能唤回
+        singleton::spawn_wake_listener(app.handle().clone());
         // 全局快捷键：独立线程跑消息循环，触发时复用托盘那套「唤回主窗口」
         hotkey::init(app.handle().clone());
         // 启动后自动检查一次更新：后台线程、静默 —— 有新版才发通知，

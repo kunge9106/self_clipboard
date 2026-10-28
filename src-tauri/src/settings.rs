@@ -220,7 +220,7 @@ pub struct Config {
     /// 只在规则变更时递增，正常运行不会触发。
     #[serde(default)]
     pub subtype_version: u32,
-    /// 主窗口隐藏多久后释放它的 WebView（秒）。0 = 从不释放（沿用既有行为）。
+    /// 主窗口隐藏多久后释放它的 WebView（秒）。0 = 关闭（默认）。
     ///
     /// 释放后只留后端与托盘：常驻占用从 411 MB 降到 40 MB 上下（实测 373 MB
     /// 属于 WebView2 的进程组，自己的 Rust 代码只占 38 MB）。代价是下次唤起
@@ -278,9 +278,12 @@ pub struct UpdateCache {
     pub checked_at: u64,
 }
 
-/// 后台释放界面的默认等待时长（秒）。
+/// 后台释放界面的默认等待时长（秒）。0 = 关闭。
+///
+/// 默认关闭：这是可选的省内存开关，打开后唤起会多一次重建（200–400 ms），
+/// 不该在用户没要求的情况下改变既有手感。
 fn default_release_idle() -> u32 {
-    30
+    0
 }
 
 fn default_retention() -> u32 {
@@ -627,6 +630,7 @@ pub fn get_settings() -> serde_json::Value {
         "tourVersion": TOUR_VERSION,
         "ignoreDpiScale": cfg.ignore_dpi_scale,
         "themeMode": cfg.theme_mode,
+        "releaseIdleSecs": cfg.release_idle_secs,
     })
 }
 
@@ -896,6 +900,26 @@ pub fn set_clean_confirm_exit(value: bool) -> Result<(), String> {
 pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
     crate::clipboard::on_app_exit();
     app.exit(0);
+    Ok(())
+}
+
+/// 后台释放界面（低占用开关）。
+///
+/// 取值：0 = 关闭（默认），1 = 收起后立即释放，30 / 300 = 收起后多少秒释放。
+/// 只存值 —— 释放与重建的时机由 `idle_release` 按当时的配置决定。关掉开关时
+/// 若界面已被释放，不必立刻重建：下次唤起时 `ensure_window` 自然会建回来，
+/// 提前建反而会让用户看到一次「关了却又自己出现」。
+#[tauri::command]
+pub fn set_release_idle_secs(value: u32) -> Result<(), String> {
+    crate::log_print!(
+        "[settings] 后台释放界面：{}",
+        match value {
+            0 => "关闭".to_string(),
+            1 => "收起后立即释放".to_string(),
+            n => format!("收起后 {n} 秒释放"),
+        }
+    );
+    update(|c| c.release_idle_secs = value);
     Ok(())
 }
 

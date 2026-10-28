@@ -24,7 +24,7 @@
 //! `PageLoadEvent::Finished` 再 `show()`。直接建就显示会闪一下白屏或
 //! 错误主题色，因为页面还没渲染完。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -34,11 +34,23 @@ use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
 /// 主窗口 label。
 pub(crate) const MAIN_LABEL: &str = "main";
 
-/// 主窗口当前是否处于「已释放」状态。
-///
-/// `RunEvent::ExitRequested` 靠它区分两种关闭：
-/// 真值 = 我们自己销毁的，应用要继续跑；假值 = 用户要退出，放行。
-static RELEASED: AtomicBool = AtomicBool::new(false);
+// ── 三态状态机 ───────────────────────────────────────────────────────────
+//
+// 用 `AtomicU8` + CAS 而不是一个布尔量：释放倒计时到期与用户点托盘是两条
+// 独立的线程路径，布尔量会让两边同时动手 —— 一边在销毁、一边在建窗，
+// 结果是窗口对象错乱或同名 label 创建失败。CAS 保证同一时刻只有一方能推进。
+//
+// 这套状态机取自 Clash Verge Rev 的 lightweight mode，它同样是在托盘常驻
+// 应用里销毁并重建主窗口。
+
+/// 正常：窗口存在（可见或隐藏）
+const ST_NORMAL: u8 = 0;
+/// 已释放：窗口由我们销毁，当前不存在
+const ST_RELEASED: u8 = 1;
+/// 正在重建：窗口暂时不存在，建完会回到 NORMAL
+const ST_REBUILDING: u8 = 2;
+
+static STATE: AtomicU8 = AtomicU8::new(ST_NORMAL);
 
 /// 计时器代次。每次重新计时 +1，旧线程醒来发现代次变了就放弃，
 /// 比「取消一个定时器」简单，也不必维护线程句柄。
@@ -77,30 +89,48 @@ pub(crate) fn note_hidden(app: tauri::AppHandle) {
     crate::log_print!("[idle] 窗口已隐藏，{secs} 秒后释放界面");
 }
 
-/// 窗口转入显示：取消释放倒计时，必要时重建窗口。
+/// 窗口转入显示：取消释放倒计时。
 pub(crate) fn note_shown() {
     GEN.fetch_add(1, Ordering::SeqCst);
 }
 
 /// 立即释放：销毁主窗口，只留后端与托盘。
 pub(crate) fn release_now(app: &tauri::AppHandle) {
-    let Some(w) = app.get_webview_window(MAIN_LABEL) else {
-        return;
-    };
-    // 不释放仍可见的窗口：那是用户正在用的界面
-    if w.is_visible().unwrap_or(false) {
+    // 已在释放中或正在重建 → 让那一方完成，别抢
+    if STATE
+        .compare_exchange(ST_NORMAL, ST_RELEASED, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return;
     }
-    save_geometry(&w);
-    // destroy 不走 close-requested，不会被「关闭时后台运行」拦下
-    let _ = w.destroy();
-    RELEASED.store(true, Ordering::SeqCst);
+
+    let destroyed = (|| {
+        let w = app.get_webview_window(MAIN_LABEL)?;
+        // 不释放仍可见的窗口：那是用户正在用的界面
+        if w.is_visible().unwrap_or(false) {
+            return None;
+        }
+        save_geometry(&w);
+        // destroy 不走 close-requested，不会被「关闭时后台运行」拦下
+        let _ = w.destroy();
+        Some(())
+    })();
+
+    if destroyed.is_none() {
+        // 没释放成功却停在 RELEASED，界面会永远被当成「已释放」——
+        // 那样下一次 ensure_window 会去重建一个本来就存在的窗口，撞 label
+        STATE.store(ST_NORMAL, Ordering::SeqCst);
+        return;
+    }
     crate::log_print!("[idle] 界面已释放（WebView 进程退出）");
 }
 
-/// 主窗口是否已被释放。`ExitRequested` 与重建逻辑都看它。
+/// 主窗口是否处于「暂无窗口」的状态（已释放或正在重建）。
+///
+/// `RunEvent::ExitRequested` 靠它区分两种关闭：真值 = 我们自己销毁的，
+/// 应用要继续跑；假值 = 用户要退出，放行。
 pub(crate) fn is_released() -> bool {
-    RELEASED.load(Ordering::SeqCst)
+    STATE.load(Ordering::SeqCst) != ST_NORMAL
 }
 
 /// 确保主窗口存在；已被释放则重建。
@@ -110,11 +140,33 @@ pub(crate) fn ensure_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
     if let Some(w) = app.get_webview_window(MAIN_LABEL) {
         return Some(w);
     }
-    if !is_released() {
-        // 不是我们释放的（比如启动早期），别硬建
+    // 只有「已释放」才重建。正在重建时直接返回：那边建完自己会 show，
+    // 这里再建一次只会撞同名 label。
+    if STATE
+        .compare_exchange(ST_RELEASED, ST_REBUILDING, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return None;
     }
 
+    match build_main_window(app) {
+        Some(w) => {
+            STATE.store(ST_NORMAL, Ordering::SeqCst);
+            crate::log_print!("[idle] 界面已重建");
+            Some(w)
+        }
+        None => {
+            // 建窗失败：退回「已释放」，下次唤起还能再试
+            STATE.store(ST_RELEASED, Ordering::SeqCst);
+            crate::log_warn!("[idle] 界面重建失败");
+            None
+        }
+    }
+}
+
+fn build_main_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
+    // 用配置里的窗口定义重建，保证无边框、透明、尺寸等与原窗口一致；
+    // 手写 builder 一定会漏掉某几项（装饰、transparent、min size…）
     let cfg = app
         .config()
         .app
@@ -137,12 +189,11 @@ pub(crate) fn ensure_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
         .build()
         .ok()?;
 
-    // 材质 / 圆角 / DPI / 焦点钩子 / 窗口事件监听，一次全部恢复
+    // 材质 / 圆角 / DPI 策略 / 焦点钩子 / 窗口事件监听，一次全部恢复。
+    // 这几项原本只在启动时对 main 窗口做过一遍，重建的窗口是新的 hwnd，
+    // 不重跑就等于换了个没有材质、没有缩放热区的裸窗口。
     crate::setup_effects(app);
     restore_geometry(&win);
-
-    RELEASED.store(false, Ordering::SeqCst);
-    crate::log_print!("[idle] 界面已重建");
     Some(win)
 }
 
