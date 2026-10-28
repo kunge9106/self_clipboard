@@ -240,17 +240,20 @@ fn stamp() -> String {
 }
 
 /// Win32 SYSTEMTIME。字段即日历值，无需再做换算。
+///
+/// 对 crate 内开放：图片按日期时间命名（`clipboard` 里把条目的时间戳转成本地
+/// 日历值）也要用同一个结构 —— FFI 契约结构各写一份迟早对不上字段顺序。
 #[repr(C)]
 #[derive(Default)]
-struct SystemTimeLocal {
-    w_year: u16,
-    w_month: u16,
-    w_day_of_week: u16,
-    w_day: u16,
-    w_hour: u16,
-    w_minute: u16,
-    w_second: u16,
-    w_milliseconds: u16,
+pub(crate) struct SystemTimeLocal {
+    pub(crate) w_year: u16,
+    pub(crate) w_month: u16,
+    pub(crate) w_day_of_week: u16,
+    pub(crate) w_day: u16,
+    pub(crate) w_hour: u16,
+    pub(crate) w_minute: u16,
+    pub(crate) w_second: u16,
+    pub(crate) w_milliseconds: u16,
 }
 
 #[cfg(windows)]
@@ -261,7 +264,7 @@ extern "system" {
 /// days since 1970-01-01 → (年, 月, 日)，Howard Hinnant 的算法。
 /// 仅供非 Windows 回退路径使用。
 #[cfg(not(windows))]
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64;

@@ -2223,6 +2223,37 @@ document.addEventListener("contextmenu", (e) => {
 });
 
 let toastTimer = null;
+/**
+ * 缓存迁移进度遮罩。第一次调用时创建，之后只更新数字与条宽。
+ *
+ * 迁移成功后应用会自行重启，所以没有「完成后隐藏」这一支；失败时由调用方
+ * 调 `hideMoveProgress` 收掉。
+ */
+function showMoveProgress(done, total) {
+  let mask = document.getElementById("move-mask");
+  if (!mask) {
+    mask = document.createElement("div");
+    mask.id = "move-mask";
+    mask.className = "move-mask";
+    mask.innerHTML = `
+      <div class="move-box">
+        <div class="move-title">正在迁移缓存</div>
+        <div class="move-bar"><div class="move-fill"></div></div>
+        <div class="move-sub"></div>
+      </div>`;
+    document.body.appendChild(mask);
+  }
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  mask.querySelector(".move-fill").style.width = pct + "%";
+  const mb = (n) => (n / 1048576).toFixed(0);
+  mask.querySelector(".move-sub").textContent =
+    total > 0 ? `${mb(done)} / ${mb(total)} MB` : "准备中…";
+}
+
+function hideMoveProgress() {
+  document.getElementById("move-mask")?.remove();
+}
+
 function toast(msg) {
   let el = document.querySelector(".toast");
   if (!el) {
@@ -2661,7 +2692,13 @@ function settingsDataHtml(s) {
           <button class="btn-ghost" id="btn-open-log">日志目录</button>
         </div>
         <div class="cache-log-hint"><b>缓存与日志相互独立</b>：清空、保留天数、退出清理都不会影响日志，日志仅能手动删除。</div>
-      </div>`
+      </div>` +
+        rowCheck(
+          "set-images-split",
+          "图片分类存放",
+          "微信 / QQ / 系统截图放 <b>shot/</b>，其它图片放 <b>copy/</b>；文件名一律按日期时间。关闭则全部平铺在 images/ 下",
+          s.imagesSplitDirs
+        )
     ),
     block(
       "清理",
@@ -3530,6 +3567,30 @@ function bindSettings(view) {
   bindCheck("set-autostart", "set_autostart");
   bindCheck("set-tray", "set_tray_on_close");
   bindCheck("set-file-copy", "set_file_copy");
+
+  // 图片分类存放：切换后后端会立刻整理存量图片（rename，不搬数据）。
+  // 单独绑定而不是用 bindCheck：整理期间界面上要有反馈，不能让人以为没反应。
+  const splitCheck = view.querySelector("#set-images-split");
+  if (splitCheck) {
+    splitCheck.onchange = async () => {
+      const want = splitCheck.checked;
+      toast("正在整理图片…");
+      try {
+        const moved = await invoke("set_images_split_dirs", { value: want });
+        settings = await invoke("get_settings");
+        toast(
+          moved > 0
+            ? `已整理 ${moved} 张图片`
+            : want
+              ? "图片分类存放已开启"
+              : "图片分类存放已关闭"
+        );
+      } catch (e) {
+        splitCheck.checked = !want;
+        toast("保存失败：" + e);
+      }
+    };
+  }
   bindCheck("set-delete-files", "set_delete_files_with_item");
 
   // 「处理方式」是从属选项：主开关关着时整组置灰且不可点（CSS 里 pointer-events: none 兜底）。
@@ -3812,14 +3873,14 @@ function bindSettings(view) {
       try {
         const res = await invoke("pick_cache_dir");
         if (res) {
-          const [path, moved] = res;
-          toast(
-            moved
-              ? `已迁移到「${path}」，即将重启…`
-              : "已经是当前缓存目录，无需更改"
-          );
+          const [, moved] = res;
+          // 迁移成功时后端会弹原生确认框（说明去问与「不会清除数据」），
+          // 用户点完即自动重启，这里不必再补一条 toast
+          if (!moved) toast("已经是当前缓存目录，无需更改");
         }
       } catch (e) {
+        // 迁移中途失败时进度遮罩可能已经挂出来了，必须收掉，否则它挡住整个界面
+        hideMoveProgress();
         toast("更改目录失败：" + e);
       }
     };
@@ -4001,6 +4062,12 @@ async function main() {
   await listen("singleton-wake", () => {
     const modal = document.getElementById("singleton-modal");
     if (modal) modal.hidden = false;
+  });
+
+  // 迁移缓存目录时的进度：跨盘复制要几十秒，不能让人觉得卡死了
+  await listen("cache-move", (e) => {
+    const { done = 0, total = 0 } = e.payload || {};
+    showMoveProgress(done, total);
   });
 
   // 增量：复制新内容时 Rust 推事件，直接插到顶部

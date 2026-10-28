@@ -46,6 +46,14 @@ static SKIP_SEQ: AtomicU32 = AtomicU32::new(0);
 /// 但**截图**是唯一的例外：内容由我们自己写进剪贴板，用户却期望它立刻出现在列表里。
 /// 这个标记只被采集端消费一次，回贴时会主动清掉，防止残留把一次真实的回贴记成新条目。
 static RECORD_OWN_WRITE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 最近一次「自己写回剪贴板」是不是截图，值是那一刻的毫秒时间戳（0 = 无）。
+///
+/// 为什么用时间戳而不是布尔：布尔只表示「有过一次写回」，如果那次截图因为
+/// 某些原因没被捕获到，标记会一直挂着，之后用户手动复制的图片就会被误判成
+/// 截图。带时刻就有时效 —— 超过 [`SHOT_MARK_TTL_MS`] 自动失效。
+static SHOT_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 截图标记的有效期。截图写完剪贴板到被捕获通常是同一拍，留 3 秒足够宽裕。
+const SHOT_MARK_TTL_MS: u64 = 3_000;
 /// 「未识别」日志的去重序号：同一个序号只报一次，避免轮询期间每拍刷一条。
 static LAST_LOGGED_SEQ: AtomicU32 = AtomicU32::new(0);
 /// 「正在读剪贴板」互斥标记。
@@ -107,7 +115,7 @@ const LAST_IMG_KEEP: usize = 16;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
 /// 元组第三项 = 是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
-static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip, bool)>> = OnceLock::new();
+static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip, bool, bool)>> = OnceLock::new();
 /// 缩略图生成线程的投递端。与捕获线程分开：捕获线程只做「落盘 + 通知前端」必须快，
 /// 缩略图解码慢、且不影响条目出现，所以单独排队，避免拖慢快速连续复制。
 static THUMB_TX: OnceLock<std::sync::mpsc::Sender<HistoryItem>> = OnceLock::new();
@@ -665,7 +673,7 @@ pub fn set_clipboard_text(text: String, changed: bool) -> Result<(), String> {
             // 本次自写在「事件」与「兜底轮询」两条通道上都会被认出并跳过，
             // 所以不会出现「系统自读一条 + 手动入库一条」变成两条。
             if changed {
-                dispatch_raw(RawClip::Text { text, html: None, rtf: None }, true);
+                dispatch_raw(RawClip::Text { text, html: None, rtf: None }, true, false);
             }
             Ok(())
         }
@@ -1016,18 +1024,19 @@ fn spawn_clipboard_watchdog() {
 fn spawn_worker() {
     // app 走全局 APP（OnceLock，在 init 首行写入）；worker 在订阅监听之前
     // 启动，所以取用时必定已就绪。
-    // 元组第三项：这条是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
-    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip, bool)>();
+    // 元组第三项：这条是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）；
+    // 第四项：这次是不是截图（决定图片落 `shot/` 还是 `copy/`）。
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, RawClip, bool, bool)>();
     std::thread::Builder::new()
         .name("clipboard-store".into())
         .spawn(move || {
-            while let Ok((captured_ms, raw, edited)) = rx.recv() {
+            while let Ok((captured_ms, raw, edited, shot)) = rx.recv() {
                 // guard 保证 PENDING 一定减回去 —— handle_clip 里判重拦截会
                 // 提前 return，手写 fetch_sub 迟早漏掉一次。
                 let _guard = PendingGuard;
                 // handle_clip 内部完成：解码 → 同图判重 → 落盘 → emit。
                 // 这里只负责串行投递，保证与复制顺序一致。
-                handle_clip(captured_ms, raw, edited);
+                handle_clip(captured_ms, raw, edited, shot);
             }
         })
         .map_err(|e| crate::log_warn!("[clipboard] 落盘工作线程启动失败：{e}"))
@@ -1161,8 +1170,23 @@ pub fn init(app: &AppHandle) {
     if subtyped > 0 {
         crate::log_print!("[clipboard] 已为 {subtyped} 条存量文本判定「链接 / 代码」子类型");
     }
-    if backfilled > 0 || refreshed > 0 || subtyped > 0 {
+    // 图片目录布局：按当前设置把图片摆到应有的位置（日期命名 + 可选分目录）
+    let layout_stale = crate::settings::get().image_layout_ver < IMAGE_LAYOUT_VERSION;
+    let img_moved = if layout_stale {
+        let split = crate::settings::get().images_split_dirs;
+        migrate_image_layout(&dir, &mut hist, split)
+    } else {
+        0
+    };
+
+    if backfilled > 0 || refreshed > 0 || subtyped > 0 || img_moved > 0 {
         save_index(&dir, &hist);
+    }
+    if layout_stale {
+        crate::settings::update(|c| c.image_layout_ver = IMAGE_LAYOUT_VERSION);
+        if img_moved > 0 {
+            crate::log_print!("[clipboard] 图片已按当前设置整理，迁移 {img_moved} 条");
+        }
     }
 
     // 保留策略：按配置天数清理过期条目（0 = 永久保留）
@@ -1242,6 +1266,9 @@ pub fn on_clipboard_update() {
     if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
         return;
     }
+    // 这次内容是不是**我们自己**写回剪贴板的（回贴 / 编辑保存 / 截图）。
+    // 回贴的图不能被当成截图 —— 它只是历史里某张图的副本。
+    let mut own_write = false;
     unsafe {
         // 剪贴板 owner 就是我们自己窗口 → 这是「点击条目复制回去」写下的内容，不能再当成
         // 一次新的系统复制回灌成重复条目。
@@ -1254,7 +1281,8 @@ pub fn on_clipboard_update() {
                 LAST_SEQ.store(seq, Ordering::Relaxed);
                 return;
             }
-            // 通行证生效：这是截图写进来的，继续往下走当成一次新复制
+            // 通行证生效：这是自己写进来的，继续往下走当成一次新复制
+            own_write = true;
         }
         if seq == SKIP_SEQ.load(Ordering::Relaxed) {
             SKIP_SEQ.store(0, Ordering::Relaxed);
@@ -1269,7 +1297,7 @@ pub fn on_clipboard_update() {
     if READING.swap(true, Ordering::AcqRel) {
         return;
     }
-    let (raw, diag) = unsafe { read_clipboard() };
+    let (raw, diag, origin) = unsafe { read_clipboard() };
     if raw.is_some() {
         // ✅ 读成功：**必须在放开 READING 之前**推进序号。
         //
@@ -1285,7 +1313,16 @@ pub fn on_clipboard_update() {
     READING.store(false, Ordering::Release);
     match raw {
         Some(raw) => {
-            dispatch_raw(raw, false);
+            // 截图判定：自己写回的只认 `SHOT_AT`（回贴不能算截图），
+            // 别人写进来的看剪贴板格式特征（见 `classify_shot`）。
+            // 判定必须在这里做 —— 此刻剪贴板还没被别人换掉，
+            // 等到工作线程落盘时再查就晚了。
+            let shot = if own_write {
+                take_shot_mark()
+            } else {
+                classify_shot(&origin)
+            };
+            dispatch_raw(raw, false, shot);
         }
         None => {
             // ❌ **不推进 LAST_SEQ** → 轮询下一拍自动重试，直到读到、或剪贴板被新复制替换。
@@ -1317,15 +1354,15 @@ pub fn on_clipboard_update() {
 ///
 /// `edited`：true 表示这条来自「复制并编辑」的保存动作，落成条目后带
 /// 「已编辑」标记；**外部复制**一律传 false。
-fn dispatch_raw(raw: RawClip, edited: bool) {
+fn dispatch_raw(raw: RawClip, edited: bool, shot: bool) {
     let captured_ms = now_ms();
     if let Some(tx) = WORKER.get() {
-        if tx.send((captured_ms, raw, edited)).is_ok() {
+        if tx.send((captured_ms, raw, edited, shot)).is_ok() {
             PENDING.fetch_add(1, Ordering::Relaxed);
         }
     } else {
         // 工作线程还没起来（正常不会发生——init 里先启线程再订阅监听）
-        handle_clip(captured_ms, raw, edited);
+        handle_clip(captured_ms, raw, edited, shot);
     }
 }
 
@@ -1352,7 +1389,7 @@ pub fn flush_pending(timeout: std::time::Duration) {
 /// 顺序很重要：先 `resolve`（解码），再做图片指纹判重 —— 指纹要基于像素
 /// 内容算，未解码前拿不到。
 /// `edited` 透传给 `store_raw`：为 true 时新条目带「已编辑」标记。
-fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
+fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
     let Some(raw) = resolve(raw) else {
         // resolve 只在「临时文件读不出」或「不是图片」且「文件复制」关闭时返回 None，
         // 即按用户设置主动跳过。记一条，便于区分「被设置跳过」与「识别失败」。
@@ -1477,7 +1514,7 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool) {
         }
     }
 
-    let item = store_raw(raw, edited);
+    let item = store_raw(raw, edited, shot);
     if let Some(app) = APP.get() {
         let _ = app.emit("clipboard-update", item.clone());
     }
@@ -1986,18 +2023,26 @@ unsafe fn clipboard_owner_exe() -> String {
 ///
 /// 这里只保留 `open_clipboard_retry`：那是「拿不到全局锁」的微退避（~30ms），
 /// 属于同一次读取内的必要礼让，不是重试链。
-unsafe fn read_clipboard() -> (Option<RawClip>, String) {
+unsafe fn read_clipboard() -> (Option<RawClip>, String, ClipOrigin) {
     // 「文件复制」开关（设置页，默认关闭）：关掉后完全不看 CF_HDROP。
     // 在 OpenClipboard 之前读取，避免持有剪贴板锁时再去碰 settings 的互斥锁。
     let file_copy = crate::settings::get().file_copy;
 
+    let empty_origin = || ClipOrigin {
+        formats: Vec::new(),
+        owner_exe: String::new(),
+    };
     if !open_clipboard_retry() {
-        return (None, "OpenClipboard 重试耗尽(对方应用长时间持锁)".into());
+        return (
+            None,
+            "OpenClipboard 重试耗尽(对方应用长时间持锁)".into(),
+            empty_origin(),
+        );
     }
     // 延迟渲染需要 owner 重新拿到锁才能把数据补进来，所以读完必须立刻松锁。
-    let (raw, diag, _suspicious) = read_clipboard_once(file_copy);
+    let (raw, diag, _suspicious, origin) = read_clipboard_once(file_copy);
     CloseClipboard();
-    (raw, diag)
+    (raw, diag, origin)
 }
 
 /// 单次读剪贴板。**调用方须保证已 OpenClipboard 成功**，本函数不负责开关剪贴板。
@@ -2066,7 +2111,7 @@ unsafe fn read_clip_text_format(name: &str) -> Option<String> {
     inner(name)
 }
 
-unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool) {
+unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool, ClipOrigin) {
     const CF_UNICODETEXT: u32 = 13;
     const CF_DIB: u32 = 8;
     const CF_HDROP: u32 = 15;
@@ -2223,7 +2268,15 @@ unsafe fn read_clipboard_once(file_copy: bool) -> (Option<RawClip>, String, bool
         None
     })();
 
-    (result, diag, suspicious)
+    (
+        result,
+        diag,
+        suspicious,
+        ClipOrigin {
+            formats: fmts,
+            owner_exe: owner,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2836,10 +2889,12 @@ fn refresh_text_subtypes(dir: &PathBuf, hist: &mut [HistoryItem]) -> usize {
     changed
 }
 
-fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
+fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
     let dir = DIR.get().unwrap().clone();
     let ts = now_ms();
     let id = make_id(ts);
+    // 图片分类开关取一次：同一次落盘不该看到两个不同的值
+    let split_dirs = crate::settings::get().images_split_dirs;
     let mut item = HistoryItem {
         id: id.clone(),
         kind: String::new(),
@@ -2924,8 +2979,8 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
             item.kind = "image".into();
             item.size = bytes.len() as u64;
             item.preview = "[图片]".into();
-            let rel = format!("images/{}.{}", id, ext);
-            match fs::write(dir.join(&rel), &bytes) {
+            let rel = image_rel(&dir, ts, &ext, shot, split_dirs);
+            match write_image(&dir, &rel, &bytes) {
                 Ok(()) => item.img_path = Some(rel),
                 Err(e) => crate::log_err!("clipboard", "图片原图落盘失败 {rel}：{e}"),
             }
@@ -2934,16 +2989,19 @@ fn store_raw(raw: RawClip, edited: bool) -> HistoryItem {
             item.kind = "image".into();
             item.size = bytes.len() as u64;
             item.preview = "[图片]".into();
-            let rel = format!("images/{}.bmp", id);
+            // 来源在捕获那一刻就判好了（见 `on_clipboard_update`），这里直接用：
+            // 工作线程可能滞后几十毫秒，那时候剪贴板早被下一次复制换掉了。
+            let from_shot = shot;
+            let rel = image_rel(&dir, ts, "bmp", from_shot, split_dirs);
             if let Ok(bmp) = dib_to_bmp(&bytes) {
-                if let Err(e) = fs::write(dir.join(&rel), &bmp) {
+                if let Err(e) = write_image(&dir, &rel, &bmp) {
                     crate::log_err!("clipboard", "位图落盘失败 {rel}：{e}");
                 }
                 item.img_path = Some(rel);
             } else {
                 // 兜底：直接存 DIB，前端无法显示但至少保留
-                let rel = format!("images/{}.dib", id);
-                if let Err(e) = fs::write(dir.join(&rel), &bytes) {
+                let rel = image_rel(&dir, ts, "dib", from_shot, split_dirs);
+                if let Err(e) = write_image(&dir, &rel, &bytes) {
                     crate::log_err!("clipboard", "DIB 兜底落盘失败 {rel}：{e}");
                 }
                 item.img_path = Some(rel);
@@ -3125,6 +3183,237 @@ const THUMB_SIDE: u32 = 512;
 ///
 /// 任何一步失败都只返回 None、不影响落盘 —— 缩略图缺失时前端仍会回退到
 /// `ensure_thumb` 现场生成。
+/// UNIX 毫秒 → FILETIME。1601-01-01 到 1970-01-01 相差 11644473600 秒，
+/// FILETIME 的单位是 100 纳秒。
+const FT_UNIX_EPOCH_OFFSET_MS: u64 = 11_644_473_600_000;
+
+/// 条目时间戳 → 文件名用的本地日期时间 `20261028_223610`。
+///
+/// 必须用**本地时间**：文件是给人看的，用户在资源管理器里对照的是自己表上的时间。
+/// 走 `FileTimeToSystemTime` + `SystemTimeToTzSpecificLocalTime` 而不是自己算时区，
+/// 因为后者要处理夏令时规则，手写必然出错（`FileTimeToLocalFileTime` 用的是当前
+/// 夏令时状态而不是目标日期的，同样不能用）。
+fn local_stamp(ts_ms: u64) -> String {
+    let ft = (ts_ms + FT_UNIX_EPOCH_OFFSET_MS) * 10_000;
+    let mut utc = crate::logger::SystemTimeLocal::default();
+    let mut local = crate::logger::SystemTimeLocal::default();
+    let ok = unsafe {
+        FileTimeToSystemTime(&ft, &mut utc) != 0
+            && SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) != 0
+    };
+    // 转换失败就退回 UTC：文件名仍然是可读的日期，只是时区差几小时，
+    // 总比整条落盘失败强。
+    let t = if ok { local } else { utc };
+    format!(
+        "{:04}{:02}{:02}_{:02}{:02}{:02}",
+        t.w_year, t.w_month, t.w_day, t.w_hour, t.w_minute, t.w_second
+    )
+}
+
+/// 文件名里的日期时间 → 时间戳（毫秒）。反解失败返回 None。
+///
+/// 索引损坏时靠它从文件重建条目 —— 新的文件名不再含内部 id，时间只能从
+/// 名字里读回来。
+fn ts_from_stamp(stem: &str) -> Option<u64> {
+    // `20261028_223610` 或去重后的 `20261028_223610-2`
+    let base = stem.split('-').next()?;
+    let (d, t) = base.split_once('_')?;
+    if d.len() != 8 || t.len() != 6 {
+        return None;
+    }
+    let num = |s: &str| s.parse::<u16>().ok();
+    let local = crate::logger::SystemTimeLocal {
+        w_year: num(&d[0..4])?,
+        w_month: num(&d[4..6])?,
+        w_day_of_week: 0,
+        w_day: num(&d[6..8])?,
+        w_hour: num(&t[0..2])?,
+        w_minute: num(&t[2..4])?,
+        w_second: num(&t[4..6])?,
+        w_milliseconds: 0,
+    };
+    let mut utc = crate::logger::SystemTimeLocal::default();
+    if unsafe { TzSpecificLocalTimeToSystemTime(std::ptr::null(), &local, &mut utc) } == 0 {
+        return None;
+    }
+    // 日历值 → 天数 → 毫秒。日期用「每月天数的前缀和」，闰年另行判断。
+    let days = days_from_civil(utc.w_year as i64, utc.w_month as u32, utc.w_day as u32)?;
+    let secs = days * 86_400
+        + utc.w_hour as i64 * 3600
+        + utc.w_minute as i64 * 60
+        + utc.w_second as i64;
+    if secs < 0 {
+        return None;
+    }
+    Some(secs as u64 * 1000)
+}
+
+/// 公历日期 → 距 1970-01-01 的天数。Howard Hinnant 算法的正向版本
+/// （logger 里那份是反向的 `civil_from_days`，两者必须配套）。
+fn days_from_civil(y: i64, m: u32, d: u32) -> Option<i64> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || y < 1970 {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 } as i64; // 三月为 0
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// 图片落盘的相对路径：`images/shot/20261028_223610.bmp`。
+///
+/// - `from_shot`：这次落盘的是不是轻贴自己的截图。只有 `Alt+Q` 能确定 ——
+///   剪贴板里没有来源元数据，微信 / QQ 的截图与它们自己「复制图片」是同一个
+///   进程，分不出来，一律按复制处理。
+/// - 开关 `images_split_dirs` 关掉时全部平铺在 `images/` 下：文件名仍然带日期。
+/// - 同一秒里落两张（连按两次截图）会撞名，依次加 `-2`、`-3`。
+fn image_rel(dir: &Path, ts_ms: u64, ext: &str, from_shot: bool, split: bool) -> String {
+    let base = image_dir(split, from_shot);
+    let stamp = local_stamp(ts_ms);
+    let mut n = 1;
+    loop {
+        let name = if n == 1 {
+            format!("{stamp}.{ext}")
+        } else {
+            format!("{stamp}-{n}.{ext}")
+        };
+        let rel = format!("{base}/{name}");
+        // 撞名只会在同一秒内发生；上限是防御无限循环，正常一两轮就出结果
+        if !dir.join(&rel).exists() || n >= 999 {
+            return rel;
+        }
+        n += 1;
+    }
+}
+
+/// 图片目录布局的当前版本。改规则就把这里 +1，启动时按需迁移一次。
+const IMAGE_LAYOUT_VERSION: u32 = 1;
+
+/// 把图片按当前设置搬到应有的位置（`images/shot/`、`images/copy/` 或根目录），
+/// 文件名一律日期时间。幂等：已在目标位置的条目会被跳过。
+///
+/// 存量条目的来源已不可考（旧记录没有来源标记），**一律按「复制」归类** ——
+/// 只有用 `Alt+Q` 截的图才进 `shot/`。
+///
+/// 用 `rename` 而不是 `copy`：同盘 rename 是原子操作且毫秒级。copy 在 165 MB
+/// 上要几秒 —— 那就只能放在启动时慢慢跑，切开关时没法立即生效。
+///
+/// rename 留下的窗口（文件已移走、索引还没写盘）由 `rebuild_index_from_files`
+/// 兜住：它会扫 `shot/` 与 `copy/`，并从文件名解析时间重建条目。真被强杀也不丢图。
+///
+/// 返回迁移条数。
+fn migrate_image_layout(dir: &PathBuf, hist: &mut Vec<HistoryItem>, split: bool) -> usize {
+    let mut moved = 0usize;
+    for item in hist.iter_mut() {
+        let Some(old_rel) = item.img_path.clone() else {
+            continue;
+        };
+        let Some(rest) = old_rel.strip_prefix("images/") else {
+            continue;
+        };
+        // 富文本内联图与缩略图有各自的目录规则，不参与整理
+        if rest.starts_with("rich/") || rest.starts_with("thumbs/") {
+            continue;
+        }
+        // 来源：已在 `shot/` 里说明它是截图；其余（`copy/`、根目录）按复制处理
+        let from_shot = rest.starts_with("shot/");
+        let stem = Path::new(rest)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let cur_dir = old_rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        // 已经在正确位置：目录对、文件名就是该有的日期（撞名的 `-2` 后缀不算变化）
+        let base = stem.split('-').next().unwrap_or(stem);
+        if cur_dir == image_dir(split, from_shot) && base == local_stamp(item.ts) {
+            continue;
+        }
+        let ext = Path::new(rest)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("bmp")
+            .to_string();
+        let src = dir.join(&old_rel);
+        if !src.is_file() {
+            continue;
+        }
+        let new_rel = image_rel(dir, item.ts, &ext, from_shot, split);
+        let dst = dir.join(&new_rel);
+        if let Some(parent) = dst.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match fs::rename(&src, &dst) {
+            Ok(()) => {
+                item.img_path = Some(new_rel);
+                moved += 1;
+            }
+            // 单条失败不阻断整体：该条继续用旧路径，仍然能显示
+            Err(e) => crate::log_warn!("[clipboard] 图片迁移跳过 {old_rel}：{e}"),
+        }
+    }
+    moved
+}
+
+/// 按当前设置重新整理图片目录，并记下布局版本。返回搬了几条。
+///
+/// 初始化与「切换图片分类开关」都调它。切开关后不整理的话，用户会看到
+/// 「开关开了、旧图却还平铺在根目录」—— 而且那个状态要等到下次启动才修好。
+pub fn organize_image_layout() -> usize {
+    let (Some(dir), Some(hist)) = (DIR.get(), HISTORY.get()) else {
+        return 0;
+    };
+    let split = crate::settings::get().images_split_dirs;
+    let started = std::time::Instant::now();
+    let mut h = match hist.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let moved = migrate_image_layout(dir, &mut h, split);
+    // rename 不搬数据，耗时只跟条目数相关；真正的大头通常是索引整份重新加密写盘
+    // （条数越多越慢）。这两段分开记，以后要优化才知道该动哪一段。
+    let files_done = started.elapsed();
+    if moved > 0 {
+        let t = std::time::Instant::now();
+        save_index(dir, &h);
+        crate::log_print!(
+            "[clipboard] 图片整理：搬动 {moved} 条用时 {} ms，写索引 {} ms（共 {} 条历史）",
+            files_done.as_millis(),
+            t.elapsed().as_millis(),
+            h.len()
+        );
+    }
+    drop(h);
+    crate::settings::update(|c| c.image_layout_ver = IMAGE_LAYOUT_VERSION);
+    moved
+}
+
+/// 图片该放哪个目录。落盘与整理共用一处判断，免得两边走偏。
+fn image_dir(split: bool, from_shot: bool) -> &'static str {
+    if !split {
+        "images"
+    } else if from_shot {
+        "images/shot"
+    } else {
+        "images/copy"
+    }
+}
+
+/// 图片落盘：父目录不存在时先建。
+///
+/// `images/shot/` 与 `images/copy/` 是懒创建的 —— 直接 `fs::write` 会得到
+/// 「系统找不到指定的路径」（os error 3）。那种失败很隐蔽：条目照样入库、
+/// 界面上只是一张占位图，日志里才有一行 ERROR。`images/` 根目录一直存在，
+/// 所以分成子目录之前从没撞上过。
+fn write_image(dir: &Path, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let path = dir.join(rel);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, bytes)
+}
+
 /// 缩略图的统一存放路径：**图片目录下的子文件夹** `images/thumbs/`。
 /// 与图片原图（`images/`）放一起，便于整体迁移与清理。
 fn thumb_rel(id: &str) -> String {
@@ -3501,11 +3790,81 @@ unsafe fn write_dib_raw(dib: &[u8], record: bool) -> Result<(), String> {
 /// 不需要截图模块自己再走一遍存储。
 pub fn write_shot_to_clipboard(dib: &[u8]) -> Result<(), String> {
     RECORD_OWN_WRITE.store(true, Ordering::SeqCst);
+    SHOT_AT.store(now_ms(), Ordering::SeqCst);
     let r = unsafe { write_dib_raw(dib, true) };
     if r.is_err() {
         RECORD_OWN_WRITE.store(false, Ordering::SeqCst);
+        SHOT_AT.store(0, Ordering::SeqCst);
     }
     r
+}
+
+/// 剪贴板来源的结构化信息：格式名列表 + 所有者进程名。
+///
+/// 两者都必须在 `OpenClipboard` 期间取到 —— 一松手，内容可能已经被下一次
+/// 复制换掉了，事后再查就是别人的。
+struct ClipOrigin {
+    /// `enum_clipboard_formats` 的输出：标准格式是裸名（`CF_DIB`），
+    /// 私有/注册格式带双引号（`"WeChatScreenshotFormat"`）。
+    formats: Vec<String>,
+    /// 所有者进程名。空串 = 没有窗口持有剪贴板（PrtSc 与 QQ 截图就是这样写进来的），
+    /// 或者权限不足查不到。
+    owner_exe: String,
+}
+
+/// 这次图片算不算「截图」—— 决定落 `images/shot/` 还是 `images/copy/`。
+///
+/// 判据是剪贴板上的**格式名**，不是进程名。实测（Win10 19045，2026-10-28）：
+///
+/// | 操作 | 所有者 | 可用的区分特征 |
+/// |---|---|---|
+/// | 微信截图 | Weixin.exe | 私有格式 `WeChatScreenshotFormat` |
+/// | 微信复制图片 | Weixin.exe | 没有那个格式，改给 `CF_HDROP` |
+/// | QQ 截图 | 无 | 只有裸位图 |
+/// | QQ 复制图片 | 无 | 带 `QQ_Unicode_RichEdit_Format` / `HTML Format` |
+/// | Win+Shift+S | svchost.exe | 注册格式 `PNG` + `Ole Private Data` |
+///
+/// 三条规则按可靠性排序，任一命中即算截图：
+/// 1. **微信的专属格式** —— 零误判，它只在截图时出现
+/// 2. **系统截图工具**会写注册格式 `PNG`（普通「复制图片」一般只给 CF_DIB），
+///    并同时带 `Ole Private Data`
+/// 3. **没有窗口持有者的裸位图** —— PrtSc 与 QQ 截图都不经自己的窗口写剪贴板；
+///    有窗口的程序（画图、PS）复制图片一定带自己的 owner，不会命中
+///
+/// 三条都不命中就是普通复制。宁漏判不错判：目录名写错比 copy/ 里多几个文件
+/// 更让人困惑。
+fn classify_shot(origin: &ClipOrigin) -> bool {
+    // 私有/注册格式在枚举时带了双引号，比较前先剥掉。
+    // 写成局部 fn 而不是闭包：闭包返回借用说不清生命周期。
+    fn unq(s: &str) -> &str {
+        s.trim_matches('"')
+    }
+    let has = |name: &str| origin.formats.iter().any(|f| unq(f) == name);
+
+    // 1) 微信截图：专属私有格式，只有截图才写
+    if has("WeChatScreenshotFormat") {
+        return true;
+    }
+    // 2) 系统截图工具（Win+Shift+S 等）
+    if has("PNG") && has("Ole Private Data") {
+        return true;
+    }
+    // 3) 无窗口持有者的裸位图：PrtSc、QQ 截图
+    let bitmap_only = !origin.formats.is_empty()
+        && origin
+            .formats
+            .iter()
+            .all(|f| matches!(unq(f), "CF_BITMAP" | "CF_DIB" | "CF_DIBV5" | "CF_PALETTE"));
+    bitmap_only
+        && (origin.owner_exe.is_empty() || origin.owner_exe.eq_ignore_ascii_case("svchost.exe"))
+}
+
+/// 取用「这次落盘的是不是截图」的标记，取完即清。
+///
+/// 只在图片落盘时调用一次：截图写进剪贴板后，紧接着的那次捕获才是它。
+fn take_shot_mark() -> bool {
+    let at = SHOT_AT.swap(0, Ordering::SeqCst);
+    at != 0 && now_ms().saturating_sub(at) <= SHOT_MARK_TTL_MS
 }
 
 // ---------------------------------------------------------------------------
@@ -3863,7 +4222,15 @@ fn count_entities(dir: &PathBuf) -> usize {
             })
             .unwrap_or(0)
     };
-    count_in("data", Some("txt")) + count_in("files", Some("txt")) + count_in("images", None)
+    // 图片可能在三处：`images/` 根目录（旧布局或关掉分类）、`shot/`、`copy/`。
+    // 只数根目录的话，迁移之后所有图片都不计入 —— 索引真损坏时判据 `文件数 >
+    // 条目数` 就永远不成立，那些图会静默消失（`images/thumbs`、`images/rich`
+    // 是子目录，`is_file()` 已把它们排除在外）。
+    count_in("data", Some("txt"))
+        + count_in("files", Some("txt"))
+        + count_in("images", None)
+        + count_in("images/shot", None)
+        + count_in("images/copy", None)
 }
 
 /// 富文本实体落盘：把内联图拆出去单独存，HTML 只保留占位。
@@ -4029,17 +4396,36 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
         }
     }
 
-    // 图片 → 图片条目（跳过 thumbs 子目录：那不是条目实体）
-    if let Ok(rd) = fs::read_dir(dir.join("images")) {
+    // 图片 → 图片条目。
+    //
+    // 三个位置都要扫：分类布局把图片放进 `shot/` 与 `copy/`，只扫 `images/`
+    // 根目录会把全部新图片漏掉。`thumbs/` 与 `rich/` 不是条目实体，不在此列。
+    for sub in ["images", "images/shot", "images/copy"] {
+        let Ok(rd) = fs::read_dir(dir.join(sub)) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if !p.is_file() {
                 continue;
             }
-            let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            let Some(stem) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
                 continue;
             };
-            if known.contains(&id) || p.extension().and_then(|s| s.to_str()) == Some("txt") {
+            if p.extension().and_then(|s| s.to_str()) == Some("txt") {
+                continue;
+            }
+            // 旧文件名就是条目 id；新文件名是日期时间，时间只能从名字里读回来，
+            // id 由它重新生成（原 id 已经不可寻，缩略图会按新 id 重做一张）。
+            let (id, ts) = match ts_from_id(&stem) {
+                Some(ts) => (stem.clone(), ts),
+                None => match ts_from_stamp(&stem) {
+                    Some(ts) => (make_id(ts), ts),
+                    // 既不是内部 id 也不是日期时间 —— 来路不明的文件，不当条目
+                    None => continue,
+                },
+            };
+            if known.contains(&id) {
                 continue;
             }
             let size = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
@@ -4051,7 +4437,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
             found.push(HistoryItem {
                 id: id.clone(),
                 kind: "image".into(),
-                ts: ts_from_id(&id).unwrap_or_else(|| mtime_secs(&p)),
+                ts,
                 pinned: false,
                 pinned_views: Vec::new(),
                 favorite: false,
@@ -4064,7 +4450,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 html_path: None,
                 rtf_path: None,
                 rich_images: Vec::new(),
-                img_path: Some(format!("images/{id}.{ext}")),
+                img_path: Some(format!("{sub}/{stem}.{ext}")),
                 files_path: None,
                 files: None,
             });
@@ -4400,17 +4786,49 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
     };
 
     // ── 防线③在 move_dir_contents 内部（结构性杜绝无限递归）──
-    move_dir_contents(&old, &target_root).map_err(|e| format!("迁移缓存文件失败：{e}"))?;
+    move_dir_contents(&old, &target_root, &app).map_err(|e| format!("迁移缓存文件失败：{e}"))?;
 
     let new_dir_str = strip_ext_prefix(&target_root.to_string_lossy());
     crate::settings::update(|c| c.cache_dir = Some(new_dir_str.clone()));
     crate::log_print!("[clipboard] 缓存目录已迁移至 {new_dir_str}，即将重启");
 
-    // DIR 是 OnceLock，运行期不可变：迁移完成后重启进程，让新目录在下次启动生效
+    // DIR 是 OnceLock，运行期改不了：只能重启进程让新目录生效。
+    //
+    // 重启前必须**让出实例锁**。`restart()` 是「spawn 新进程 + 退出自己」，
+    // 新进程常在旧进程退出之前就检查单例锁 —— 不让出的话它会判定「已有实例」
+    // 并退出自己，而旧进程正在退出，结果两个都没了（实测过一次）。
+    //
+    // 用户主动退出才可能清理数据：这里只调 `note_exiting`（放行 ExitRequested），
+    // 不调 `note_user_quit`，`clean_on_close` 不会生效。
+    crate::log_print!("[clipboard] 缓存目录已迁移，等待用户确认后重启");
+
+    // 用原生弹框而不是 toast：重启会关掉整个窗口，toast 一闪就没，用户来不及看
+    // 发生了什么。弹框能停在那儿，把「自动重启不会清除任何数据」这句说清楚 ——
+    // 换目录本身是低频动作，多一次点确认不算负担。
+    //
+    // `blocking_show` 不能在主线程调（会死锁），挪到阻塞线程。
+    let app_for_dialog = app.clone();
+    let path_for_msg = new_dir_str.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        app_for_dialog
+            .dialog()
+            .message(format!(
+                "已迁移到：\n{path_for_msg}\n\n即将自动重启以使用新目录。\n自动重启不会清除任何数据。"
+            ))
+            .title("缓存目录已迁移")
+            .blocking_show();
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 用户已确认 → 让出实例锁再重启，否则新进程会撞上旧进程的锁而自己退出
     let handle = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        // 让这个命令的返回值先送到前端，再退出
+        std::thread::sleep(std::time::Duration::from_millis(300));
         crate::idle_release::note_exiting();
+        crate::singleton::yield_instance_lock();
         handle.restart();
     });
     Ok(Some((new_dir_str, true)))
@@ -4432,11 +4850,58 @@ fn dir_is_empty(dir: &Path) -> bool {
 ///   条目读回来——一旦 new 位于 old 内部，就必然自我嵌套、一层套一层。
 /// - **每层断言**：`old != new` 且 `new` 不在 `old` 内部，违反立即返回错误、绝不继续。
 /// - **深度上限**兜底，任何异常递归都会在此终止。
-fn move_dir_contents(old: &PathBuf, new: &PathBuf) -> std::io::Result<()> {
-    move_dir_contents_depth(old, new, 0)
+/// 迁移进度事件。跨盘搬迁要**真复制数据**（同盘才是 rename），174 MB 就要
+/// 几十秒；期间界面上什么都不显示，用户会以为程序卡死。
+const CACHE_MOVE_EVENT: &str = "cache-move";
+
+/// 迁移进度。按已复制的字节数上报，节流 120ms —— 小文件多的时候逐条发事件
+/// 会把 IPC 刷爆，而进度条 8 帧/秒已经够顺。
+struct MoveProgress<'a> {
+    done: u64,
+    total: u64,
+    last: std::time::Instant,
+    app: &'a AppHandle,
 }
 
-fn move_dir_contents_depth(old: &Path, new: &Path, depth: u32) -> std::io::Result<()> {
+impl MoveProgress<'_> {
+    fn emit_now(&self) {
+        use tauri::Emitter;
+        let _ = self.app.emit(
+            CACHE_MOVE_EVENT,
+            serde_json::json!({ "done": self.done, "total": self.total }),
+        );
+    }
+    fn add(&mut self, bytes: u64) {
+        self.done += bytes;
+        if self.last.elapsed().as_millis() >= 120 {
+            self.last = std::time::Instant::now();
+            self.emit_now();
+        }
+    }
+}
+
+fn move_dir_contents(old: &PathBuf, new: &PathBuf, app: &AppHandle) -> std::io::Result<()> {
+    let (_, total) = dir_stats(old);
+    let mut p = MoveProgress {
+        done: 0,
+        total,
+        last: std::time::Instant::now(),
+        app,
+    };
+    // 先发一次 0/total：界面立刻出现进度条，而不是等第一个文件搬完
+    p.emit_now();
+    move_dir_contents_depth(old, new, 0, &mut p)?;
+    p.done = total;
+    p.emit_now();
+    Ok(())
+}
+
+fn move_dir_contents_depth(
+    old: &Path,
+    new: &Path,
+    depth: u32,
+    progress: &mut MoveProgress,
+) -> std::io::Result<()> {
     const MAX_DEPTH: u32 = 64;
     if depth > MAX_DEPTH {
         return Err(std::io::Error::new(
@@ -4466,11 +4931,16 @@ fn move_dir_contents_depth(old: &Path, new: &Path, depth: u32) -> std::io::Resul
         };
         let to = new.join(name);
         if from.is_dir() {
-            move_dir_contents_depth(&from, &to, depth + 1)?;
+            move_dir_contents_depth(&from, &to, depth + 1, progress)?;
             fs::remove_dir_all(&from).ok();
-        } else if fs::rename(&from, &to).is_err() {
-            fs::copy(&from, &to)?;
-            let _ = fs::remove_file(&from);
+        } else {
+            let size = fs::metadata(&from).map(|m| m.len()).unwrap_or(0);
+            // 同盘 rename 是原子的、不搬数据；跨盘才会退化成真复制
+            if fs::rename(&from, &to).is_err() {
+                fs::copy(&from, &to)?;
+                let _ = fs::remove_file(&from);
+            }
+            progress.add(size);
         }
     }
     Ok(())
@@ -4513,12 +4983,30 @@ pub fn open_log_dir() -> Result<(), String> {
 /// 日志只会在用户于文件管理器里手动删除时才消失。
 const CONTENT_DIRS: [&str; 3] = ["data", "images", "files"];
 
+/// 本次退出是不是**用户主动**要求的（托盘「退出」/ 设置页「退出」）。
+///
+/// 「关闭时清理数据」只在这个场景生效。迁移缓存目录、装完更新、重启应用这些
+/// 退出都是程序自己发起的 —— 用户没打算清空什么，清掉一次就等于丢光历史。
+/// 曾经这里是反过来的（默认清理，迁移时打补丁跳过），漏一个场景就清一次数据；
+/// 现在改成默认不清理，只有明确的用户退出才清。
+static USER_QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 标记「接下来这次退出是用户主动要求的」，`clean_on_close` 才有机会生效。
+pub fn note_user_quit() {
+    USER_QUIT.store(true, Ordering::SeqCst);
+}
+
 /// 在 RunEvent::Exit 时调用。clean_on_close 开启则清空全部内容文件与历史索引。
 pub fn on_app_exit() {
     // 落盘已挪到后台线程，退出前得等它跑完，否则「刚复制就退出」会丢记录。
     // 上限 2 秒：大图解码可能较久，但不至于让退出卡住。
     flush_pending(std::time::Duration::from_secs(2));
 
+    if !USER_QUIT.swap(false, Ordering::SeqCst) {
+        // 迁移缓存目录 / 装完更新 / 重启应用：程序自己发起的退出，不动数据
+        crate::log_print!("[clipboard] 非用户主动退出（重启 / 升级 / 迁移），保留全部数据");
+        return;
+    }
     let cfg = crate::settings::get();
     if !cfg.clean_on_close {
         return;
@@ -4928,6 +5416,20 @@ extern "system" {
     ) -> isize;
     fn DefWindowProcW(hwnd: isize, msg: u32, w: usize, l: isize) -> isize;
     fn GetModuleHandleW(name: *const u16) -> isize;
+    /// UTC 的 FILETIME → 日历值（SYSTEMTIME）。
+    fn FileTimeToSystemTime(ft: *const u64, st: *mut crate::logger::SystemTimeLocal) -> i32;
+    /// UTC 日历值 → 本地日历值（传 null 用当前时区，含夏令时规则）。
+    fn SystemTimeToTzSpecificLocalTime(
+        tz: *const std::ffi::c_void,
+        utc: *const crate::logger::SystemTimeLocal,
+        local: *mut crate::logger::SystemTimeLocal,
+    ) -> i32;
+    /// 本地日历值 → UTC 日历值。反解文件名里的日期要用它。
+    fn TzSpecificLocalTimeToSystemTime(
+        tz: *const std::ffi::c_void,
+        local: *const crate::logger::SystemTimeLocal,
+        utc: *mut crate::logger::SystemTimeLocal,
+    ) -> i32;
     fn GetClipboardOwner() -> isize;
     fn GetWindowThreadProcessId(hwnd: isize, lpdwProcessId: *mut u32) -> u32;
     fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
@@ -4960,6 +5462,270 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 日期 → 天数的换算必须与已知锚点一致，否则索引重建时算出的时间会整体偏移。
+    #[test]
+    fn days_from_civil_matches_known_dates() {
+        assert_eq!(days_from_civil(1970, 1, 1), Some(0));
+        assert_eq!(days_from_civil(2000, 1, 1), Some(10957));
+        assert_eq!(days_from_civil(2026, 10, 28), Some(20754));
+        // 闰日：2024-02-29 存在，2024-03-01 紧接着它
+        let leap = days_from_civil(2024, 2, 29).unwrap();
+        assert_eq!(days_from_civil(2024, 3, 1), Some(leap + 1));
+        // 1970 之前与非法月份一律拒绝（那种文件不该被当成条目）
+        assert_eq!(days_from_civil(1969, 12, 31), None);
+        assert_eq!(days_from_civil(2026, 13, 1), None);
+    }
+
+    /// 文件名里的日期必须能原样读回时间戳：索引损坏后靠它重建图片条目，
+    /// 差一秒就是差一秒，差了就会把图排到错误的位置上。
+    #[test]
+    fn stamp_round_trip() {
+        for ts in [1_700_000_000_000u64, 1_793_200_000_000] {
+            let stamp = local_stamp(ts);
+            assert_eq!(stamp.len(), 15, "格式应为 20261028_223610，实际 {stamp}");
+            let back = ts_from_stamp(&stamp).expect("应能从文件名解析回来");
+            assert!(
+                back.abs_diff(ts) < 1000,
+                "{ts} → {stamp} → {back}，误差应在 1 秒内"
+            );
+        }
+        // 去重后缀不影响解析
+        assert!(ts_from_stamp("20261028_223610-2").is_some());
+        // 内部 id 与随便一串东西都不该被当成日期
+        assert!(ts_from_stamp("1a126311c6c-3").is_none());
+        assert!(ts_from_stamp("hello").is_none());
+    }
+
+    /// 截图判定：用例全部来自 2026-10-28 的实测剪贴板数据。
+    ///
+    /// 注意格式名的真实形态：标准格式是裸名（`CF_DIB`），私有/注册格式带双引号
+    /// （`"WeChatScreenshotFormat"`）—— 这是 `enum_clipboard_formats` 的输出习惯。
+    #[test]
+    fn classify_shot_matches_measured_sources() {
+        let cases: &[(&str, Vec<&str>, &str, bool)] = &[
+            (
+                "微信截图",
+                vec![
+                    "\"DataObject\"",
+                    "CF_DIB",
+                    "\"application/x-capturer-status\"",
+                    "\"WeChatScreenshotFormat\"",
+                    "CF_BITMAP",
+                    "CF_DIBV5",
+                ],
+                "Weixin.exe",
+                true,
+            ),
+            (
+                "微信复制图片",
+                vec![
+                    "\"DataObject\"",
+                    "CF_HDROP",
+                    "\"UniformResourceLocatorW\"",
+                    "CF_DIB",
+                    "\"Ole Private Data\"",
+                    "CF_BITMAP",
+                    "CF_DIBV5",
+                ],
+                "Weixin.exe",
+                false,
+            ),
+            (
+                "QQ 截图（无所有者、只有裸位图）",
+                vec!["CF_BITMAP", "CF_DIB", "CF_DIBV5"],
+                "",
+                true,
+            ),
+            (
+                "QQ 复制图片",
+                vec![
+                    "\"QQ_Unicode_RichEdit_Format\"",
+                    "\"HTML Format\"",
+                    "\"Preferred DropEffect\"",
+                    "CF_HDROP",
+                    "CF_BITMAP",
+                    "CF_DIB",
+                    "CF_DIBV5",
+                ],
+                "",
+                false,
+            ),
+            (
+                "Win+Shift+S",
+                vec![
+                    "\"DataObject\"",
+                    "\"Preferred DropEffect\"",
+                    "CF_BITMAP",
+                    "\"PNG\"",
+                    "\"Ole Private Data\"",
+                    "CF_DIB",
+                    "CF_DIBV5",
+                ],
+                "svchost.exe",
+                true,
+            ),
+            (
+                "画图里复制选区（有 owner，裸位图也不该算截图）",
+                vec!["CF_BITMAP", "CF_DIB", "CF_DIBV5"],
+                "mspaint.exe",
+                false,
+            ),
+            ("空格式", vec![], "", false),
+        ];
+
+        for (name, formats, owner, want) in cases {
+            let origin = ClipOrigin {
+                formats: formats.iter().map(|s| s.to_string()).collect(),
+                owner_exe: owner.to_string(),
+            };
+            assert_eq!(classify_shot(&origin), *want, "用例：{name}");
+        }
+    }
+
+    /// 截图标记：取过即清、超时不再认。
+    ///
+    /// 这两个性质缺一条都会出静默错误 —— 不清会一直把后续手动复制的图当成
+    /// 截图；不设时效则「截图没被捕获到」之后标记会永久挂着。
+    #[test]
+    fn shot_mark_is_consumed_and_expires() {
+        SHOT_AT.store(now_ms(), Ordering::SeqCst);
+        assert!(take_shot_mark(), "刚置位的标记应生效");
+        assert!(!take_shot_mark(), "取过就该清掉，不能重复生效");
+
+        SHOT_AT.store(
+            now_ms().saturating_sub(SHOT_MARK_TTL_MS + 1_000),
+            Ordering::SeqCst,
+        );
+        assert!(!take_shot_mark(), "超过有效期不应再认");
+        assert_eq!(SHOT_AT.load(Ordering::SeqCst), 0, "过期的那次也要清掉");
+    }
+
+    /// 造一条图片条目，供目录迁移测试用。
+    fn image_item(id: &str, ts: u64, img_path: String) -> HistoryItem {
+        HistoryItem {
+            id: id.into(),
+            kind: "image".into(),
+            ts,
+            pinned: false,
+            pinned_views: Vec::new(),
+            favorite: false,
+            edited: false,
+            subtype: None,
+            preview: "[图片]".into(),
+            preview_truncated: false,
+            size: 6,
+            text_path: None,
+            html_path: None,
+            rtf_path: None,
+            rich_images: Vec::new(),
+            img_path: Some(img_path),
+            files_path: None,
+            files: None,
+        }
+    }
+
+    /// 迁移必须：改名成日期、挪进 copy/、新文件真的落盘、旧文件留到索引写盘后才删。
+    #[test]
+    fn migrate_image_layout_moves_flat_images_into_dated_dir() {
+        let dir = std::env::temp_dir().join(format!("qt-img-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+
+        let old_id = "1a135878af0-0";
+        let old_rel = format!("images/{old_id}.bmp");
+        std::fs::write(dir.join(&old_rel), b"pixels").unwrap();
+        let ts = 1_697_000_000_000u64;
+        let mut hist = vec![image_item(old_id, ts, old_rel.clone())];
+
+        let moved = migrate_image_layout(&dir, &mut hist, true);
+        assert_eq!(moved, 1);
+        assert!(
+            !dir.join(&old_rel).is_file(),
+            "rename 之后旧位置不该再有文件"
+        );
+
+        let new_rel = hist[0].img_path.clone().unwrap();
+        assert!(new_rel.starts_with("images/copy/"), "应进 copy/：{new_rel}");
+        assert_eq!(
+            &new_rel["images/copy/".len()..new_rel.len() - 4],
+            local_stamp(ts),
+            "文件名应是条目时间对应的日期"
+        );
+        assert!(dir.join(&new_rel).is_file(), "新文件必须真的存在");
+
+        // 幂等：再跑一次什么都不该搬
+        let again = migrate_image_layout(&dir, &mut hist, true);
+        assert_eq!(again, 0, "第二次不应再迁移");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 开关关闭时只改名、不建子目录 —— 日期命名与分类是两个独立的事。
+    #[test]
+    fn migrate_image_layout_keeps_flat_when_split_off() {
+        let dir = std::env::temp_dir().join(format!("qt-img-flat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+
+        let old_id = "1a1358e7e60-4";
+        let old_rel = format!("images/{old_id}.bmp");
+        std::fs::write(dir.join(&old_rel), b"x").unwrap();
+        let ts = 1_698_000_000_000u64;
+        let mut hist = vec![image_item(old_id, ts, old_rel)];
+
+        let moved = migrate_image_layout(&dir, &mut hist, false);
+        assert_eq!(moved, 1);
+        let new_rel = hist[0].img_path.clone().unwrap();
+        assert!(
+            !new_rel["images/".len()..].contains('/'),
+            "开关关闭时应留在根目录：{new_rel}"
+        );
+        assert_eq!(
+            &new_rel["images/".len()..new_rel.len() - 4],
+            local_stamp(ts),
+            "文件名仍按日期"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 关掉分类开关时，已经分好目录的图片要搬回 `images/` 根目录。
+    ///
+    /// 只做单向（根目录 → 子目录）时，用户会看到「关了开关，图还在 shot/copy 里」，
+    /// 与开着的时候一样困惑。
+    #[test]
+    fn migrate_image_layout_moves_back_when_split_turned_off() {
+        let dir = std::env::temp_dir().join(format!("qt-img-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("images/copy")).unwrap();
+
+        let ts = 1_697_000_000_000u64;
+        let dated = format!("images/copy/{}.bmp", local_stamp(ts));
+        std::fs::write(dir.join(&dated), b"x").unwrap();
+        let mut hist = vec![image_item("1a1358e82e7-5", ts, dated.clone())];
+
+        // 关掉开关 → 搬回根目录
+        let moved = migrate_image_layout(&dir, &mut hist, false);
+        assert_eq!(moved, 1);
+        let flat = hist[0].img_path.clone().unwrap();
+        assert_eq!(flat, format!("images/{}.bmp", local_stamp(ts)));
+        assert!(!dir.join(&dated).is_file(), "旧位置应已清空");
+        assert!(dir.join(&flat).is_file(), "新位置应有文件");
+
+        // 再打开 → 搬进 copy/
+        let moved = migrate_image_layout(&dir, &mut hist, true);
+        assert_eq!(moved, 1);
+        assert_eq!(hist[0].img_path.as_deref(), Some(dated.as_str()));
+        assert!(dir.join(&dated).is_file());
+        assert!(!dir.join(&flat).is_file());
+
+        // 已经对位了就不该再动
+        let moved = migrate_image_layout(&dir, &mut hist, true);
+        assert_eq!(moved, 0, "位置正确时不应搬");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 拼一个 32bpp BI_RGB 的纯色 DIB，供指纹测试用。
     fn solid_dib(w: i32, h: i32, color: [u8; 4]) -> Vec<u8> {
