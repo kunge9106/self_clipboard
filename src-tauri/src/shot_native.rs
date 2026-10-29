@@ -200,6 +200,10 @@ struct MonitorInfo {
     flags: u32,
 }
 
+/// `MonitorFromPoint` 的「取最近显示器」标志。两处调用共用，避免一个写 2、
+/// 一个写常量之后改错。
+const MONITOR_DEFAULTTONEAREST: u32 = 2;
+
 #[repr(C)]
 struct KbdLlHookStruct {
     vk_code: u32,
@@ -570,8 +574,8 @@ fn monitor_at_cursor() -> Option<(i32, i32, i32, i32)> {
                 x: pt.left,
                 y: pt.top,
             },
-            2,
-        ); // MONITOR_DEFAULTTONEAREST
+            MONITOR_DEFAULTTONEAREST,
+        );
         if mon == 0 {
             return None;
         }
@@ -1855,7 +1859,8 @@ fn commit(hwnd: isize) {
 // 截图完成提示（自绘小窗口）
 // ---------------------------------------------------------------------------
 
-/// 提示文案。只说「复制成功没有」，尺寸与路径这些用户不关心。
+/// 截图完成后的提示文案。只说「复制成功没有」，尺寸与路径这些用户不关心。
+/// 快捷面板用的是同一个提示窗口，文案由调用方给（见 `toast_near_point`）。
 const TOAST_TEXT: &str = "已复制到剪贴板";
 /// 停留时长（毫秒）。
 const TOAST_MS: u32 = 1500;
@@ -1872,6 +1877,54 @@ struct ShotGeometry {
     scr_y: i32,
     scr_w: i32,
     scr_h: i32,
+}
+
+/// 在屏幕坐标附近弹一条自绘提示，1.5 秒后自动消失。
+///
+/// 供**面板之外**的路径使用（快捷面板复制完就要用）：面板可能随即收起，页面里的
+/// toast 会跟着消失，而提示必须在面板消失之后还看得见，所以复用截图那套分层窗口。
+///
+/// 锚点是光标或面板下沿的中点：提示宽度按实测文字宽算出来后以该点居中，
+/// 纵向落在下方 8px；下方放不下会翻到上方，再不行贴屏幕底部。
+pub fn toast_near_point(text: &str, x: i32, y: i32) {
+    // 夹取要在**该点所在的显示器**上算，否则多屏下会把提示推回主屏
+    let mut info = MonitorInfo {
+        size: std::mem::size_of::<MonitorInfo>() as u32,
+        monitor: WinRect::default(),
+        work: WinRect::default(),
+        flags: 0,
+    };
+    let (sx, sy, sw, sh) = unsafe {
+        let mon = MonitorFromPoint(Point { x, y }, MONITOR_DEFAULTTONEAREST);
+        if mon != 0 && GetMonitorInfoW(mon, &mut info) != 0 {
+            (
+                info.work.left,
+                info.work.top,
+                info.work.right - info.work.left,
+                info.work.bottom - info.work.top,
+            )
+        } else {
+            (0, 0, 0, 0)
+        }
+    };
+    if sw <= 0 || sh <= 0 {
+        crate::log_warn!("[toast] 取不到锚点所在显示器的工作区，提示不显示");
+        return;
+    }
+    let geo = ShotGeometry {
+        sel_x: x,
+        sel_y: y,
+        sel_w: 0,
+        sel_h: 0,
+        scr_x: sx,
+        scr_y: sy,
+        scr_w: sw,
+        scr_h: sh,
+    };
+    let owned = text.to_string();
+    std::thread::spawn(move || unsafe {
+        run_toast(&owned, &geo);
+    });
 }
 
 /// 在选区附近弹一个自绘提示，1.5 秒后自动消失。
@@ -1897,11 +1950,11 @@ fn spawn_copied_toast(geo: &ShotGeometry) {
         scr_h: geo.scr_h,
     };
     std::thread::spawn(move || unsafe {
-        run_toast(&g);
+        run_toast(TOAST_TEXT, &g);
     });
 }
 
-unsafe fn run_toast(geo: &ShotGeometry) {
+unsafe fn run_toast(text: &str, geo: &ShotGeometry) {
     // 窗口的 DPI awareness 在建窗那一刻冻结，与覆盖层同理
     pin_dpi_context();
 
@@ -1912,7 +1965,7 @@ unsafe fn run_toast(geo: &ShotGeometry) {
     // 不是太宽就是文字贴边
     let font_px = (13.0 * scale).round().max(1.0) as i32;
     let pad = (11.0 * scale).round() as i32;
-    let (text_w, text_h) = measure_ui_text(TOAST_TEXT, font_px);
+    let (text_w, text_h) = measure_ui_text(text, font_px);
     let tip_w = text_w + pad * 2;
     let tip_h = text_h.max(font_px) + pad;
     if tip_w <= 0 || tip_h <= 0 {
@@ -1976,7 +2029,7 @@ unsafe fn run_toast(geo: &ShotGeometry) {
         return;
     }
     // 内容画一次就够：静态文字，不需要重绘机制
-    if !paint_layered_toast(hwnd, tip_w, tip_h, font_px) {
+    if !paint_layered_toast(hwnd, tip_w, tip_h, font_px, text) {
         unsafe { DestroyWindow(hwnd) };
         return;
     }
@@ -2014,7 +2067,7 @@ extern "system" fn toast_proc(hwnd: isize, msg: u32, wp: usize, lp: isize) -> is
 }
 
 /// 把提示内容画进 32bpp 位图，再交给 `UpdateLayeredWindow` 合成。
-unsafe fn paint_layered_toast(hwnd: isize, w: i32, h: i32, font_px: i32) -> bool {
+unsafe fn paint_layered_toast(hwnd: isize, w: i32, h: i32, font_px: i32, text: &str) -> bool {
     let screen = CreateDCW(
         display_name().as_ptr(),
         std::ptr::null(),
@@ -2109,7 +2162,7 @@ unsafe fn paint_layered_toast(hwnd: isize, w: i32, h: i32, font_px: i32) -> bool
             right: w,
             bottom: h,
         },
-        TOAST_TEXT,
+        text,
         text_color,
     );
     if font != 0 {

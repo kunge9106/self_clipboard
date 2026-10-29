@@ -116,6 +116,20 @@ pub(crate) fn note_shown() {
 
 /// 立即释放：销毁主窗口，只留后端与托盘。
 pub(crate) fn release_now(app: &tauri::AppHandle) {
+    // 面板 / 托盘菜单还开着 → 用户正在用，这一轮不释放。
+    //
+    // 为什么不「一起销毁」：那会当着用户的面把正在操作的界面抽走；不销毁又省不下
+    // 内存 —— WebView2 的进程组是整组共享的，留一个 WebView 就退不掉。折中是放弃
+    // 这一轮：下次收起窗口时 `note_hidden` 会重新计时。
+    for label in [crate::popup::MENU_LABEL, crate::popup::PANEL_LABEL] {
+        if let Some(w) = app.get_webview_window(label) {
+            if w.is_visible().unwrap_or(false) {
+                crate::log_print!("[idle] {label} 仍可见，用户在用，本次不释放");
+                return;
+            }
+        }
+    }
+
     // 已在释放中或正在重建 → 让那一方完成，别抢
     if STATE
         .compare_exchange(ST_NORMAL, ST_RELEASED, Ordering::SeqCst, Ordering::SeqCst)
@@ -150,13 +164,8 @@ pub(crate) fn release_now(app: &tauri::AppHandle) {
     // 这两个窗口本来就是懒创建的，这里一并销毁，下次用到会自动重建。
     for label in [crate::popup::MENU_LABEL, crate::popup::PANEL_LABEL] {
         if let Some(w) = app.get_webview_window(label) {
-            let visible = w.is_visible().unwrap_or(false);
-            if !visible {
-                if let Err(e) = w.destroy() {
-                    crate::log_warn!("[idle] 销毁 {label} 失败：{e}");
-                }
-            } else {
-                crate::log_print!("[idle] {label} 仍可见，保留");
+            if let Err(e) = w.destroy() {
+                crate::log_warn!("[idle] 销毁 {label} 失败：{e}");
             }
         }
     }
@@ -242,6 +251,9 @@ fn build_main_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
             if payload.event() != PageLoadEvent::Finished {
                 return;
             }
+            // 显示前兜一手尺寸：读数异常时按设计尺寸铺开，别让用户看到一个
+            // 只剩标题栏的窗口
+            ensure_reasonable_size(&w);
             let _ = w.show();
             let _ = w.set_focus();
             crate::log_print!(
@@ -260,14 +272,81 @@ fn build_main_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
     Some(win)
 }
 
-/// 记下窗口位置与大小。取不到就保持上次的值，不覆盖成 None。
+/// 重建出的窗口尺寸低于可信下限时，按配置里的设计尺寸铺开。
+///
+/// 为什么要这一步：`restore_geometry` 恢复的是记下的几何，而记下的那条可能本身
+/// 就偏小（旧版本在最小化时记的，已夹取过的不会），或者 DPI 策略在显示器信息
+/// 还没就绪时把窗口压到了兜底值。宁可回到设计尺寸，也不能给用户一个巴掌大的窗口。
+/// 在 `PageLoadEvent::Finished` 之后调用：那时窗口已定位到目标屏，`scale_factor`
+/// 才是这块屏的真实值。
+fn ensure_reasonable_size(w: &WebviewWindow) {
+    let Ok(cur) = w.inner_size() else { return };
+    if cur.width >= MIN_TRUST_W && cur.height >= MIN_TRUST_H {
+        return;
+    }
+    let scale = w.scale_factor().unwrap_or(1.0);
+    let cfg = w
+        .app_handle()
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|c| c.label == MAIN_LABEL)
+        .cloned();
+    if let Some(c) = cfg {
+        let _ = w.set_size(tauri::PhysicalSize::new(
+            (c.width * scale).round() as u32,
+            (c.height * scale).round() as u32,
+        ));
+        crate::log_warn!(
+            "[idle] 重建后尺寸异常（{}×{}），按设计尺寸 {}×{} 兜底",
+            cur.width,
+            cur.height,
+            c.width,
+            c.height
+        );
+    }
+}
+
+/// 记下窗口位置与大小。取不到、或读数不可信时保持上次的值。
+///
+/// 两个「不可信」的来源都在实测里出现过：
+/// 1. **最小化**状态下 `inner_size()` 返回被压扁的尺寸（约 160×28），照它重建，
+///    唤回来只有一个巴掌大的窗口 —— 现象是「关掉再打开，只剩一条标题栏」；
+/// 2. 窗口还没完成首次布局时读到 0。
+///
+/// 所以低于一个明显不合理的下限就整条丢掉，宁可回到配置里的默认尺寸。
 fn save_geometry(w: &WebviewWindow) {
+    if w.is_minimized().unwrap_or(false) {
+        crate::log_print!("[idle] 窗口处于最小化，几何不记入（读数不可信）");
+        return;
+    }
     let Ok(pos) = w.outer_position() else { return };
     let Ok(size) = w.inner_size() else { return };
+    if size.width < MIN_TRUST_W || size.height < MIN_TRUST_H {
+        crate::log_warn!(
+            "[idle] 窗口尺寸异常（{}×{}），几何不记入",
+            size.width,
+            size.height
+        );
+        return;
+    }
     if let Ok(mut g) = GEOM.lock() {
         *g = Some((pos.x, pos.y, size.width, size.height));
     }
+    crate::log_print!(
+        "[idle] 记下窗口几何 {}×{} @{},{}",
+        size.width,
+        size.height,
+        pos.x,
+        pos.y
+    );
 }
+
+/// 几何读数的可信下限（物理像素）。配置里的最小尺寸是 880×580，这里故意压得更低：
+/// 用户可能用更小的尺寸运行，只有「明显是压扁的读数」才该被丢掉。
+const MIN_TRUST_W: u32 = 640;
+const MIN_TRUST_H: u32 = 400;
 
 /// 按记下的几何摆回窗口。
 fn restore_geometry(w: &WebviewWindow) {
@@ -278,6 +357,11 @@ fn restore_geometry(w: &WebviewWindow) {
         },
         Err(_) => return,
     };
+    // 兜底夹一手：存量配置里可能已经躺着一条异常尺寸（旧版本记进去的），
+    // 不夹的话每次唤回都是那个巴掌大的窗口
+    let width = v.2.max(MIN_TRUST_W);
+    let height = v.3.max(MIN_TRUST_H);
     let _ = w.set_position(tauri::PhysicalPosition::new(v.0, v.1));
-    let _ = w.set_size(tauri::PhysicalSize::new(v.2, v.3));
+    let _ = w.set_size(tauri::PhysicalSize::new(width, height));
+    crate::log_print!("[idle] 恢复窗口几何 {width}×{height} @{},{}", v.0, v.1);
 }
