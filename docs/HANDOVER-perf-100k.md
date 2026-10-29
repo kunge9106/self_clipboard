@@ -1,0 +1,72 @@
+# 交接：十万条历史数据的性能改造
+
+面向接手本改动的人。代码在分支 `perf/history-pagination`（未合并、未发版）。
+
+## 为什么做这件事
+
+同事几天之内攒了几千条，按这个速度两周内会到十万级。改造前每次变更都要把整份
+索引（DPAPI 加密）重写一遍，十万条时一次 344 ms，且每次复制都取全量给前端。
+
+## 改了什么
+
+| 层 | 改动 | 文件 |
+|---|---|---|
+| 加密 | DPAPI 只包一把 32 B 密钥（`key.bin`），数据用 AES-256-GCM 自封装容器 | `src-tauri/src/crypto.rs`（新） |
+| 存储 | 快照 `index.bin` + 追加日志 `index.wal`；每条 op 带单调序号，重放只应用更新的帧 | `src-tauri/src/store.rs`（新） |
+| 常驻 | `Vec<HistoryItem>` → `Vec<Meta>`，路径按 id 推导（`RelPath` 三态：Canonical / Absent / Custom） | `src-tauri/src/store.rs`、`clipboard.rs` |
+| 查询 | 新增 `get_history_window` / `history_count` / `count_by_filter` / `list_ids` / `delete_by_filter` / `filter_stats` / `history_limit` | `src-tauri/src/query.rs`（新） |
+| 前端 | 虚拟列表（**本版未启用**，见下） | `src/virtual-list.js`（新）、`src/history-api.js`（新） |
+
+## 实测数据（release，本机 Win）
+
+| 指标 | 改造前 | 改造后 |
+|---|---|---|
+| 复制一条（1 万 / 10 万条） | 213 / 344 ms | **2.04 / 2.04 ms**（与条数无关） |
+| 索引读回（10 万条） | 251 ms | 147 ms（含投影） |
+| 常驻（10 万条） | — | 64 MB（612 B/条，实测 `bench_resident_memory`） |
+| 窗口取数（10 万条，limit 200） | 全量 38 MB 过 IPC | P50 0.4 ms / P99 1.2 ms（带搜索 P99 3.9 ms） |
+
+复跑方式：`cargo test --release --lib bench_scale -- --ignored --nocapture`，
+同理 `bench_resident_memory` / `bench_window_latency`。
+
+## 虚拟列表为什么没启用
+
+实机反馈三处视觉都不对：行距过大、卡片叠在一起、窗口四周露出透明材质
+（卡片改成绝对定位后不再由 flex 填充，卡片之间的空隙直接露出窗口材质）。
+已定位到偏移表与真实行高对不上，并修了一处地基问题（实测行高按下标记，
+行池节点复用后同一���标可能装着另一条内容 → 改成同时记 id，重排时只采用
+id 对得上的高度）。但整体重做需要单独的界面工作，本版**不启用**。
+
+- 开关：`src/main.js:959` 的 `USE_WINDOW_API`，当前为 `false`。
+- 旧渲染路径一行未改，随时可切回。
+- 需要启用时，先把行高体系与空隙填充重做，再逐项实机验收。
+
+## 回滚方式
+
+- 整体回退：`git revert` 本分支上的存储相关提交，或直接切回 `develop`。
+- 存储格式回退：旧索引保留在 `index.v1.json`（迁移时改名保留，不删）。
+- 前端回退：`USE_WINDOW_API = false`（无需回退提交）。
+
+## 失败与降级矩阵
+
+| 情况 | 行为 |
+|---|---|
+| `key.bin` 丢失 / 解不开（换账户、换机器） | 索引改名 `index.nokey.bin` 保留，走 `rebuild_index_from_files` 重建（正文回来，置顶与收藏丢失），ERROR 日志 + 前端横幅；**绝不覆盖 key.bin、绝不静默生成新密钥** |
+| 索引 GCM 校验失败 / 结构损坏 | 改名 `index.bin.corrupt` 保留 + 重建，不 panic |
+| WAL 尾帧残缺 | 截断到最后一条完整帧 + WARN + 立刻整理 |
+| WAL 中间帧坏 | 另存 `index.wal.corrupt` + ERROR，用「快照 + 完好前缀」继续，随后立刻整理 |
+| 密文被搬到别的路径 | AAD 绑定相对路径，解不开（`Tampered`） |
+
+## 已知未验证项（需真机确认）
+
+- 多屏 / DPI 缩放下的行高与布局
+- 后台释放后唤醒的首次渲染
+- 十万条真实数据的滚动手感（只有单元测试与 DOM 替身的规模证据）
+- 任务栏再点收回的消息序列（本次按 `WM_SYSCOMMAND`/`SC_MINIMIZE` 实现，日志会记）
+- 「点当前前台窗口的任务栏按钮」在不同 Windows 版本上的消息差异
+
+## 提交序列
+
+`c3bb5d8` 加密内核 → `dc35987` v2 快照与迁移 → `8ee6ee3` WAL → `d556c49` Meta 常驻
+与上限 → `306ce73` 查询层 → `0fb3adf` 前端窗口化（未启用）→ `7a2a225` 关掉虚拟列表
+→ `cb8026c` 上限默认 1 万与任务栏收回。

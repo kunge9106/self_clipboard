@@ -938,6 +938,49 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 
 ---
 
+## 九·五、十万条量级的存储与查询（已实现）
+
+### 存储层
+
+索引从「整份 DPAPI 加密的 `index.json`」换成两层：
+
+- **密钥与数据分离**（`crypto.rs`）：DPAPI 只包一把 32 B 密钥（`key.bin`），数据用
+  AES-256-GCM 自封装容器（头 60 B：魔数 / 算法 / key_id / write_seq / plain_len /
+  nonce / tag）。AAD 绑定「容器头 + 域串 + 相对路径」，密文搬到别的路径就解不开。
+  旧格式（v1 DPAPI、v0 明文）一次性迁移，旧文件改名 `index.v1.json` 保留。
+- **快照 + 追加日志**（`store.rs`）：`index.bin` 是快照，`index.wal` 记增量 op
+  （insert / patch / pins / favorite / delete / clear，全部幂等）。每条 op 带单调序号，
+  快照记录已覆盖到哪个序号，重放只应用更新的帧 —— 快照写完而日志未截断时被强杀，
+  也不会把已进快照的 `clear` 再执行一遍。整理（compaction）在后台线程，
+  只截断检查点之前的前缀，期间新追加的帧原样保留。
+
+### 常驻形态
+
+`HISTORY` 是 `Vec<Meta>`：路径按 id 推导（`RelPath` 三态：Canonical / Absent / Custom），
+只有与存量值**逐字相同**才折叠，不相同的一律保留原值 —— 推导错了最坏是「不吃省内存
+的好处」，不会变成「读不到正文」。实测 612 B/条，十万条约 64 MB。
+
+### 查询层
+
+`query.rs` 提供窗口取数（`get_history_window`，keyset 游标 + 锚点三态 Ok / Drift /
+Missing）、搜索下推（`contains_ci`，零分配）、计数与批量操作（`history_count` /
+`count_by_filter` / `list_ids` / `delete_by_filter` / `filter_stats`）。
+搜索规则与原前端 `filtered()` 用 2000 组随机数据逐条比对过。
+
+### 条数上限
+
+默认 1 万条（`0` = 不限），设置 → 数据 → 记录可改。超限时弹一次清理建议：
+写清当前条数、将清理多少条、置顶与收藏豁免、不可撤销；「暂不清理」把时间戳落盘，
+7 天内不再打扰。影响说明分四档，数字来自实测（612 B/条 + 约 30 MB 进程基线）。
+
+### 虚拟列表（已实现，本版未启用）
+
+`virtual-list.js` + `history-api.js` 已落地，但实机反馈行距、叠行、窗口四周露出
+材质三处不对，**本版不启用**（`src/main.js:959` 的 `USE_WINDOW_API = false`）。
+旧渲染路径一行未改。已修的地基问题：实测行高原本按下标记，行池节点复用后同一
+下标可能装着另一条内容，偏移表却按旧内容排布 —— 改成同时记 id，重排时只采用
+id 对得上的高度。
+
 ## 十、IPC 命令清单（`lib.rs`）
 
 | 命令 | 作用 |
