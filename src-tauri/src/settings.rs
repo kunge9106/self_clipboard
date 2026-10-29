@@ -263,6 +263,16 @@ pub struct Config {
     /// 与 `subtype_version` 同一套做法：改规则就加一版，启动时按需迁移一次。
     #[serde(default)]
     pub image_layout_ver: u32,
+    /// 历史条数上限。`0` = 不限；默认 100000。
+    ///
+    /// 为什么需要上限：10 万条之后 Rust 侧的元数据就要几十 MB 常驻，而「搜索覆盖
+    /// 全部历史」意味着这份内存不能被释放。上限是「用多少内存」与「记得多远」之间
+    /// 唯一的旋钮，交给用户而不是写死。
+    ///
+    /// 清理只删**最旧的非置顶、非收藏**条目：置顶与收藏是用户主动标记「要留着」的，
+    /// 被自动清理掉等于背弃那个标记。可删的删完仍超限时停手并记 WARN（宁可不删）。
+    #[serde(default = "default_max_items")]
+    pub max_items: u32,
     /// 历史索引的存储格式版本。0/1 = 旧的 `index.json`（整份 DPAPI），2 = `index.bin`（v2 容器）。
     ///
     /// 只用于诊断与日志：**真正的迁移判据是磁盘上的文件**（有 `index.bin` 就是 v2，
@@ -353,6 +363,12 @@ fn default_shot_format() -> String {
 
 fn default_theme_mode() -> String {
     "system".into()
+}
+
+/// 默认条数上限。10 万条是本方案的目标容量（再往上要换索引格式），
+/// 而 10 万条的元数据常驻约 33–55 MB —— 这是「能接受」与「失控」之间的分界。
+fn default_max_items() -> u32 {
+    100_000
 }
 
 fn default_true() -> bool {
@@ -473,6 +489,7 @@ impl Default for Config {
             shot_format: default_shot_format(),
             images_split_dirs: true,
             image_layout_ver: 0,
+            max_items: default_max_items(),
             storage_version: 0,
             release_idle_secs: default_release_idle(),
             pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
@@ -668,6 +685,7 @@ pub fn get_settings() -> serde_json::Value {
         "cleanIncludePinned": cfg.clean_include_pinned,
         "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
+        "maxItems": cfg.max_items,
         "hotkeyEnabled": cfg.hotkey_enabled,
         "hotkey": cfg.hotkey,
         "panelStayOnBlur": cfg.panel_stay_on_blur,

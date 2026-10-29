@@ -87,7 +87,7 @@ impl LoadStatus {
 
 /// `load_index` 的返回：条目 + 走的哪条路。
 pub struct Loaded {
-    pub items: Vec<HistoryItem>,
+    pub items: Vec<Meta>,
     pub status: LoadStatus,
     /// 日志里有需要固化的东西：有未整理的帧、尾帧被截断、或中间帧损坏。
     /// 调用方应在**后台**做一次 compaction（不要卡启动）。
@@ -276,6 +276,22 @@ impl Meta {
         self.files_path.resolve(|| files_rel(&self.id))
     }
 
+    pub fn set_text_path(&mut self, v: Option<String>) {
+        self.text_path = RelPath::of(&v, text_rel(&self.id));
+    }
+
+    pub fn set_html_path(&mut self, v: Option<String>) {
+        self.html_path = RelPath::of(&v, html_rel(&self.id));
+    }
+
+    pub fn set_rtf_path(&mut self, v: Option<String>) {
+        self.rtf_path = RelPath::of(&v, rtf_rel(&self.id));
+    }
+
+    pub fn set_files_path(&mut self, v: Option<String>) {
+        self.files_path = RelPath::of(&v, files_rel(&self.id));
+    }
+
     /// 是否保留了非常规路径（诊断用：正常数据应当恒为 false）。
     pub fn has_custom_path(&self) -> bool {
         self.text_path.is_custom()
@@ -294,7 +310,7 @@ impl Meta {
 ///
 /// 同 `ts` 的条目插在最前面：id 是 `hex(ts)-counter`，同时在毫秒内 counter 递增，
 /// 所以「新的在前」就是「同 ts 时新的先插入」。
-pub fn insert_ordered(items: &mut Vec<HistoryItem>, item: HistoryItem) -> usize {
+pub fn insert_ordered(items: &mut Vec<Meta>, item: Meta) -> usize {
     let at = items.partition_point(|i| i.ts > item.ts);
     items.insert(at, item);
     at
@@ -383,11 +399,6 @@ pub fn save_snapshot(dir: &Path, metas: &[Meta], key: &Key, write_seq: u64) -> i
     write_snapshot(dir, &items, key, write_seq)
 }
 
-/// 手里已经是完整 `HistoryItem` 时的快路径：省掉一次 Meta 往返（十万条要几十毫秒）。
-pub fn save_items(dir: &Path, items: &[HistoryItem], key: &Key, write_seq: u64) -> io::Result<()> {
-    write_snapshot(dir, items, key, write_seq)
-}
-
 fn write_snapshot(dir: &Path, items: &[HistoryItem], key: &Key, write_seq: u64) -> io::Result<()> {
     // 紧凑 JSON：`to_string_pretty` 多 22% 体积、多 7 ms，而这份东西加密之后
     // 没人会去人眼阅读 —— 唯一的读者是 serde。留明文副本用于排障的诉求由
@@ -427,18 +438,19 @@ fn write_snapshot(dir: &Path, items: &[HistoryItem], key: &Key, write_seq: u64) 
 /// （否则一个已经进了快照的 `clear` 会被再放一遍，把整份历史抹掉）。
 /// 第③步用「重写尾部 + rename」而不是原地截断：整理期间新追加的帧在 `0..` 之后，
 /// 原样留着。
-pub fn persist(dir: &Path, items: &[HistoryItem]) -> Result<(), SaveError> {
+pub fn persist(dir: &Path, metas: &[Meta]) -> Result<(), SaveError> {
     let key = key_for(dir).ok_or(SaveError::NoKey)?;
     let cp = checkpoint(dir)?;
-    save_items(dir, items, &key, cp.seq)?;
+    // 常驻是 Meta，磁盘形态仍是完整 HistoryItem：投影在这里发生一次。
+    save_snapshot(dir, metas, &key, cp.seq)?;
     truncate_wal_prefix(dir, cp.wal_len)?;
-    finish_migration(dir, items.len(), cp.seq);
+    finish_migration(dir, metas.len(), cp.seq);
     Ok(())
 }
 
 /// 后台整理：语义与 [`persist`] 完全一致，只是个说得清用途的名字。
-pub fn compact(dir: &Path, items: &[HistoryItem]) -> Result<(), SaveError> {
-    persist(dir, items)
+pub fn compact(dir: &Path, metas: &[Meta]) -> Result<(), SaveError> {
+    persist(dir, metas)
 }
 
 /// 快照已经写到磁盘之后才做的事：把旧索引改名保留、记下 `storage_version`。
@@ -487,7 +499,9 @@ pub fn load_index(dir: &Path) -> Loaded {
     // 它永远不该被当成数据源，先清掉再继续（清不掉也不影响后面的判断）。
     let _ = fs::remove_file(dir.join(INDEX_BIN_TMP));
     let base = load_base(dir);
-    let mut items = base.items;
+    // 磁盘形态（HistoryItem）→ 常驻形态（Meta）：整条加载链只在这里投影一次，
+    // 之后的重放、修复、IPC 投影都基于 Meta。
+    let mut items: Vec<Meta> = base.items.iter().map(Meta::from_item).collect();
     let snapshot_seq = base.seq;
     // 重放：只应用「快照还没覆盖」的帧。日志里共几帧、有没有坏帧由它一并回报。
     let force_compact = replay_wal(dir, &mut items, snapshot_seq);
@@ -867,33 +881,35 @@ pub struct PatchSet {
 }
 
 impl PatchSet {
-    fn apply(&self, item: &mut HistoryItem) {
+    fn apply(&self, meta: &mut Meta) {
         if let Some(v) = &self.preview {
-            item.preview = v.clone();
+            meta.preview = v.clone();
         }
         if let Some(v) = self.preview_truncated {
-            item.preview_truncated = v;
+            meta.preview_truncated = v;
         }
         if let Some(v) = self.size {
-            item.size = v;
+            meta.size = v;
         }
         if let Some(v) = &self.subtype {
-            item.subtype = Some(v.clone());
+            meta.subtype = Some(v.clone());
         }
+        // 路径走 setter：常驻形态里存的是「标准 / 没有 / 非常规」三态，
+        // 直接写字符串会绕过推导规则
         if let Some(v) = &self.text_path {
-            item.text_path = Some(v.clone());
+            meta.set_text_path(Some(v.clone()));
         }
         if let Some(v) = &self.html_path {
-            item.html_path = Some(v.clone());
+            meta.set_html_path(Some(v.clone()));
         }
         if let Some(v) = &self.rtf_path {
-            item.rtf_path = Some(v.clone());
+            meta.set_rtf_path(Some(v.clone()));
         }
         if let Some(v) = &self.rich_images {
-            item.rich_images = v.clone();
+            meta.rich_images = v.clone();
         }
         if let Some(v) = self.edited {
-            item.edited = v;
+            meta.edited = v;
         }
     }
 }
@@ -1075,14 +1091,17 @@ fn scan_wal(raw: &[u8], key: &Key, mut on_op: impl FnMut(u64, Op)) -> (WalIssue,
 }
 
 /// 把所有 op 应用到内存列表。**幂等**：同样的 op 再来一次结果不变。
-fn apply_op(items: &mut Vec<HistoryItem>, op: Op) {
+fn apply_op(items: &mut Vec<Meta>, op: Op) {
     match op {
         Op::Insert { item } => {
+            // 帧里装的是完整 HistoryItem（磁盘与回滚兼容），落到内存时投影一次。
+            // 投影只有 `Meta::from_item` 这一份实现，别处不重复搬字段。
+            let meta = Meta::from_item(&item);
             // upsert：同 id 就地替换（保持顺序），否则按 ts 插入正确位置
-            match items.iter_mut().find(|i| i.id == item.id) {
-                Some(slot) => *slot = item,
+            match items.iter_mut().find(|i| i.id == meta.id) {
+                Some(slot) => *slot = meta,
                 None => {
-                    insert_ordered(items, item);
+                    insert_ordered(items, meta);
                 }
             }
         }
@@ -1265,7 +1284,7 @@ fn count_frames(bytes: &[u8]) -> u64 {
 /// 所以「快照写完、WAL 还没来得及截断就被强杀」不会让状态倒退。
 ///
 /// 返回 `true` 表示建议立刻整理（尾帧被截断 / 中间帧坏掉）。
-fn replay_wal(dir: &Path, items: &mut Vec<HistoryItem>, snapshot_seq: u64) -> bool {
+fn replay_wal(dir: &Path, items: &mut Vec<Meta>, snapshot_seq: u64) -> bool {
     let path = dir.join(WAL_FILE);
     let raw = match fs::read(&path) {
         Ok(v) => v,
@@ -1352,9 +1371,47 @@ fn replay_wal(dir: &Path, items: &mut Vec<HistoryItem>, snapshot_seq: u64) -> bo
     need_compact
 }
 
+/// 超出条数上限时「该删哪些」。
+pub struct Overflow {
+    /// 应删的 id，**从最旧开始**（列表按 ts 降序，所以是从尾部往前挑）。
+    pub ids: Vec<String>,
+    /// 保护条目全跳过之后仍缺的条数。`> 0` 说明清完还是超限，只能停手。
+    pub shortfall: usize,
+}
+
+/// 挑出该删的条目：最旧的非置顶、非收藏。
+///
+/// 为什么从最旧挑：用户要找的几乎总是「最近的」；而置顶/收藏是用户明确说过
+/// 「这条要留着」的 —— 自动清理碰它们等于背弃那个标记，所以宁可超限也不删。
+/// `max = 0` 表示不限。
+pub fn select_overflow(items: &[Meta], max: usize) -> Overflow {
+    if max == 0 || items.len() <= max {
+        return Overflow {
+            ids: Vec::new(),
+            shortfall: 0,
+        };
+    }
+    let mut need = items.len() - max;
+    let mut ids = Vec::with_capacity(need);
+    for item in items.iter().rev() {
+        if need == 0 {
+            break;
+        }
+        if !item.pinned_views.is_empty() || item.favorite {
+            continue;
+        }
+        ids.push(item.id.clone());
+        need -= 1;
+    }
+    Overflow {
+        ids,
+        shortfall: need,
+    }
+}
+
 /// 由一个 `HistoryItem` 的变化推出最小的 op：只改了收藏就写 `Fav`，只改了置顶就写
 /// `Pins`，其余写整条（upsert）。返回 `None` 表示什么都没变，不必落盘。
-pub fn diff_op(before: &HistoryItem, after: &HistoryItem) -> Option<Op> {
+pub fn diff_op(before: &Meta, after: &Meta) -> Option<Op> {
     if before == after {
         return None;
     }
@@ -1374,8 +1431,10 @@ pub fn diff_op(before: &HistoryItem, after: &HistoryItem) -> Option<Op> {
             views: after.pinned_views.clone(),
         });
     }
+    // 其余变化（正文/预览/子类型/富文本/图片路径）写整条 upsert：帧里是完整
+    // HistoryItem，这一处投影是唯一一次「Meta → 磁盘形态」的转换入口。
     Some(Op::Insert {
-        item: after.clone(),
+        item: after.to_item(),
     })
 }
 
@@ -1424,6 +1483,11 @@ mod tests {
     fn forget_key_cache() {
         let mut g = KEY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         *g = None;
+    }
+
+    /// 磁盘形态 → 常驻形态（测试里只用一个入口投影，跟生产路径一致）。
+    fn metas(items: &[HistoryItem]) -> Vec<Meta> {
+        items.iter().map(Meta::from_item).collect()
     }
 
     fn item(id: &str, text: &str) -> HistoryItem {
@@ -1517,7 +1581,7 @@ mod tests {
             assert_eq!(again.status, LoadStatus::V2, "第 {round} 次应直接读 v2");
             assert!(!again.status.needs_snapshot());
             assert_eq!(again.items.len(), 3);
-            for (a, b) in again.items.iter().zip(sample.iter()) {
+            for (a, b) in again.items.iter().zip(metas(&sample).iter()) {
                 assert_eq!(a.id, b.id);
                 assert_eq!(a.kind, b.kind);
                 assert_eq!(a.ts, b.ts);
@@ -1529,12 +1593,12 @@ mod tests {
                 assert_eq!(a.edited, b.edited);
                 assert_eq!(a.subtype, b.subtype);
                 assert_eq!(a.shot, b.shot);
-                assert_eq!(a.text_path, b.text_path);
-                assert_eq!(a.html_path, b.html_path);
-                assert_eq!(a.rtf_path, b.rtf_path);
+                assert_eq!(a.text_rel(), b.text_rel());
+                assert_eq!(a.html_rel(), b.html_rel());
+                assert_eq!(a.rtf_rel(), b.rtf_rel());
                 assert_eq!(a.rich_images, b.rich_images);
                 assert_eq!(a.img_path, b.img_path);
-                assert_eq!(a.files_path, b.files_path);
+                assert_eq!(a.files_rel(), b.files_rel());
                 assert_eq!(a.files, b.files);
             }
         }
@@ -1622,7 +1686,7 @@ mod tests {
     fn missing_key_keeps_snapshot_and_rebuilds() {
         let dir = TempDir::new("nokey");
         let sample = sample_items();
-        persist(dir.path(), &sample).unwrap();
+        persist(dir.path(), &metas(&sample)).unwrap();
         let old_key = key_for(dir.path()).expect("密钥应可用");
         let old_id = old_key.key_id();
 
@@ -1640,7 +1704,7 @@ mod tests {
         assert_ne!(new_key.key_id(), old_id, "必须是一把新钥匙");
 
         // 从内容实体重建：这里没有实体文件，重建结果为 0 条，但要能落盘
-        let mut items: Vec<HistoryItem> = loaded.items;
+        let mut items = loaded.items;
         crate::clipboard::rebuild_index_from_files(dir.path(), &mut items);
         persist(dir.path(), &items).unwrap();
         assert_eq!(load_index(dir.path()).status, LoadStatus::V2);
@@ -1650,7 +1714,7 @@ mod tests {
     #[test]
     fn tampered_snapshot_is_kept_and_rebuilds() {
         let dir = TempDir::new("tamper");
-        persist(dir.path(), &sample_items()).unwrap();
+        persist(dir.path(), &metas(&sample_items())).unwrap();
         let mut raw = fs::read(dir.path().join(INDEX_BIN)).unwrap();
         let last = raw.len() - 1;
         raw[last] ^= 0x01;
@@ -1726,11 +1790,11 @@ mod tests {
     /// 时钟回拨：按 ts 插入后整体仍严格降序，新条目按真实时间落到正确位置。
     #[test]
     fn clock_rollback_keeps_order() {
-        let mut list: Vec<HistoryItem> = Vec::new();
+        let mut list: Vec<Meta> = Vec::new();
         for (id, ts) in [("a-1", 2000u64), ("b-2", 1900), ("c-3", 1800)] {
             let mut it = item(id, "x");
             it.ts = ts;
-            insert_ordered(&mut list, it);
+            insert_ordered(&mut list, Meta::from_item(&it));
         }
         // 正常情况（新条目 ts 最大）：插在最前，与老的 insert(0) 一致
         assert_eq!(
@@ -1741,7 +1805,7 @@ mod tests {
         // 时钟回拨：新条目 ts 落在中间 → 插到中间，整体仍严格降序
         let mut back = item("d-4", "x");
         back.ts = 1850;
-        insert_ordered(&mut list, back);
+        insert_ordered(&mut list, Meta::from_item(&back));
         assert_eq!(
             list.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
             vec!["a-1", "b-2", "d-4", "c-3"]
@@ -1751,7 +1815,7 @@ mod tests {
         // 同 ts：新的排在同 ts 的最前面
         let mut same = item("e-5", "x");
         same.ts = 2000;
-        insert_ordered(&mut list, same);
+        insert_ordered(&mut list, Meta::from_item(&same));
         assert_eq!(list[0].id, "e-5");
         assert_eq!(list[1].id, "a-1");
     }
@@ -1774,7 +1838,7 @@ mod tests {
         a.ts = 2000;
         let mut b = item("b-2", "第二条");
         b.ts = 1000;
-        persist(dir.path(), &[a.clone(), b.clone()]).unwrap();
+        persist(dir.path(), &metas(&[a.clone(), b.clone()])).unwrap();
         assert_eq!(wal_len(dir.path()), 0, "整理后日志应为空");
 
         let new_item = {
@@ -1808,8 +1872,8 @@ mod tests {
         }
         assert!(wal_len(dir.path()) > 0);
 
-        // 期望状态：把同样的 op 应用到内存副本上
-        let mut expect = vec![a, b];
+        // 期望状态：把同样的 op 应用到内存副本上（常驻形态）
+        let mut expect = metas(&[a, b]);
         for op in ops {
             apply_op(&mut expect, op);
         }
@@ -1892,10 +1956,12 @@ mod tests {
         append(dir.path(), op_insert("b-2", "二", 2000)).unwrap();
         append(dir.path(), op_insert("c-3", "三", 3000)).unwrap();
 
-        // 翻掉第一帧密文里的一个字节：这一帧的 tag 就不过了
+        // 翻掉**第二帧**密文里的一个字节：第一帧完好、第二帧起不可信
         let path = dir.path().join(WAL_FILE);
         let mut raw = fs::read(&path).unwrap();
-        raw[40] ^= 0x01;
+        let first_len = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as usize;
+        let second = WAL_HEADER_LEN + first_len;
+        raw[second + 40] ^= 0x01;
         fs::write(&path, &raw).unwrap();
 
         let loaded = load_index(dir.path());
@@ -1909,8 +1975,18 @@ mod tests {
             "现场文件必须是原样字节"
         );
         assert!(!path.exists(), "坏日志不该留在原地继续被重放");
-        assert!(loaded.items.is_empty(), "坏帧之前没有可用帧，结果应为空");
-        assert!(loaded.needs_compaction, "坏了要重写快照");
+        assert_eq!(loaded.items.len(), 1, "坏帧之前的完好前缀要保住");
+        assert_eq!(loaded.items[0].id, "a-1");
+        assert!(loaded.needs_compaction, "坏了要立刻重写快照");
+
+        // 继续之后的第一次整理：快照里不再引用坏帧之后的任何 op。
+        // 这是「别让同一个丢失窗口一直挂着」的落点 —— 整理完再加载，
+        // b-2 / c-3 不能因为日志被截断而以任何方式复活。
+        compact(dir.path(), &loaded.items).unwrap();
+        assert_eq!(wal_len(dir.path()), 0, "整理后日志应清空");
+        let again = load_index(dir.path());
+        assert_eq!(again.items.len(), 1, "坏帧之后的 op 不得复活");
+        assert!(again.items.iter().all(|m| m.id == "a-1"));
     }
 
     /// 整理前后状态相等；整理期间追加的帧不丢。
@@ -1932,7 +2008,7 @@ mod tests {
         assert!(wal_after_append > cp.wal_len);
 
         let key = key_for(dir.path()).unwrap();
-        save_items(dir.path(), &state, &key, cp.seq).unwrap();
+        save_snapshot(dir.path(), &state, &key, cp.seq).unwrap();
         truncate_wal_prefix(dir.path(), cp.wal_len).unwrap();
 
         // 快照覆盖了 a/b，日志里只剩「整理期间」那一条
@@ -1954,7 +2030,7 @@ mod tests {
         let dir = TempDir::new("wal-clear");
         let mut a = item("a-1", "一");
         a.ts = 1000;
-        persist(dir.path(), &[a]).unwrap();
+        persist(dir.path(), &metas(&[a])).unwrap();
         assert_eq!(load_index(dir.path()).items.len(), 1);
 
         // clear 之后又来一条新的
@@ -1967,7 +2043,7 @@ mod tests {
         // 模拟「快照已包含 clear，但 WAL 还没来得及截断就被强杀」：
         // 直接用当前状态写快照（write_seq = 1，正好覆盖 clear 那一帧），日志原样留着
         let key = key_for(dir.path()).unwrap();
-        save_items(dir.path(), &after_clear, &key, 1).unwrap();
+        save_snapshot(dir.path(), &after_clear, &key, 1).unwrap();
         assert!(wal_len(dir.path()) > 0, "日志仍在（模拟截断失败）");
 
         let loaded = load_index(dir.path());
@@ -2007,7 +2083,7 @@ mod tests {
         ];
         append_many(dir.path(), &ops).expect("批量追加");
 
-        let mut expect: Vec<HistoryItem> = Vec::new();
+        let mut expect: Vec<Meta> = Vec::new();
         for op in ops.clone() {
             apply_op(&mut expect, op);
         }
@@ -2034,7 +2110,7 @@ mod tests {
             "坏密钥文件不应静默换成新密钥"
         );
 
-        match persist(broken.path(), &[item("x-1", "y")]) {
+        match persist(broken.path(), &metas(&[item("x-1", "y")])) {
             Err(SaveError::NoKey) => {}
             other => panic!("应报 NoKey，实际 {:?}", other.err()),
         }
