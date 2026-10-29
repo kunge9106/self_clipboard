@@ -2496,12 +2496,12 @@ function settingsGeneralHtml(s) {
       // 两个热键共用一套「开关 + 录制」控件，绑定逻辑也只写一份（见 bindHotkeyRow）。
       rowCheck(
         "set-hotkey-enabled",
-        "唤起面板",
-        "按下后光标旁列出最近的内容；回车代替 Ctrl+V 粘到唤出前的窗口 —— 那里没有输入焦点就不会有反应",
+        "快捷面板",
+        "按下后光标旁列出最近的内容；点击条目或按回车，直接粘进唤出前的输入框，焦点不在输入框时只复制",
         s.hotkeyEnabled
       ) +
         rowCtl(
-          "唤起面板的快捷键",
+          "快捷键",
           "点击后按下想要的组合（至少含一个修饰键）；按 Esc 取消",
           `<button type="button" class="btn-ghost hotkey-btn" id="set-hotkey"${
             s.hotkeyEnabled ? "" : " disabled"
@@ -2512,8 +2512,8 @@ function settingsGeneralHtml(s) {
         // 从属项：它调的正是上一行那个面板的失焦行为，所以缩进一级
         rowCheck(
           "set-panel-stay",
-          "面板失焦不收起",
-          "默认点别处即收起；打开后可先去别的窗口看一眼再回来选。Esc 或再按一次唤起快捷键收起",
+          "失焦不收起",
+          "默认点别处即收起；打开后可先去别的窗口看一眼再回来选。Esc 或再按一次快捷键收起",
           s.panelStayOnBlur,
           true
         ) +
@@ -2522,7 +2522,7 @@ function settingsGeneralHtml(s) {
         rowCheck(
           "set-panel-keep",
           "点选后保持打开",
-          "粘回原窗口后不收起，可以接着选下一条；需先打开上面的「面板失焦不收起」",
+          "粘进输入框后不收起，可以接着选下一条；需先打开上面的「失焦不收起」",
           s.panelKeepAfterCopy,
           true
         ) +
@@ -3631,7 +3631,7 @@ function bindSettings(view) {
       }
     });
   }
-  // 两个热键（唤起面板 / 截图）共用同一套绑定 —— 交互细节多（只按修饰键先显示、
+  // 两个热键（快捷面板 / 截图）共用同一套绑定 —— 交互细节多（只按修饰键先显示、
   // Esc 取消、失败回滚、录制期挂起），各写一遍必然漂移。
   bindHotkeyRow(view, {
     enabledId: "set-hotkey-enabled",
@@ -3648,7 +3648,7 @@ function bindSettings(view) {
     get: () => settings.screenshotHotkey,
   });
   // 热键被别的程序占用：注册发生在后端启动那一刻，前端没有回调可拿，
-  // 所以主动问一次，把原因标在「唤起面板」那一行下面。
+  // 所以主动问一次，把原因标在「快捷面板」那一行下面。
   invoke("hotkey_status")
     .then((err) => {
       const row = view.querySelector("#set-hotkey-enabled")?.closest(".row");

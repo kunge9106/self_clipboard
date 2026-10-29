@@ -160,7 +160,7 @@ export function checkPanelCloseKey(combo, { callUpHotkey = "" } = {}) {
   }
   const callUp = parseCombo(callUpHotkey);
   if (callUp && callUp.main === parsed.main && callUp.mods.join("+") === parsed.mods.join("+")) {
-    return "与唤起面板的快捷键相同，按下会同时触发";
+    return "与弹出面板的快捷键相同，按下会同时触发";
   }
   return null;
 }
