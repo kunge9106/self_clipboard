@@ -1730,11 +1730,33 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
         }
         if crate::taskbar::is_shellhook(msg) {
             if wparam == crate::taskbar::HSHELL_RUDEAPPACTIVATED && lparam == hwnd {
+                // 启动闸门：应用启动时外壳也会发这条事件，那时窗口正要显示，
+                // 误收就变成「进程在、窗口永远打不开」。
+                if !crate::taskbar::is_ready() {
+                    return 0;
+                }
                 extern "system" {
                     fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+                    fn IsWindowVisible(hwnd: isize) -> i32;
+                    fn GetForegroundWindow() -> isize;
+                }
+                let visible = unsafe { IsWindowVisible(hwnd) } != 0;
+                if !visible {
+                    // 收着的时候点图标 = 唤回。走托盘那条路径（含材质补齐、
+                    // unminimize、抢焦点），不要自己 ShowWindow。
+                    if let Some(app) = HOOK_APP.get() {
+                        crate::tray::show_main(app);
+                    }
+                    crate::log_print!("[taskbar] 点任务栏图标 → 唤回窗口");
+                    return 0;
+                }
+                // 窗口可见但不在前台 = 用户想去这个程序，这时点图标是要**唤回**它，
+                // 不是收走它。交给系统正常激活即可。
+                if unsafe { GetForegroundWindow() } != hwnd {
+                    return 0;
                 }
                 unsafe { ShowWindow(hwnd, SW_HIDE); }
-                crate::log_print!("[taskbar] 再次点击任务栏图标 → 收进托盘");
+                crate::log_print!("[taskbar] 点任务栏图标 → 收进托盘");
                 return 0;
             }
         }

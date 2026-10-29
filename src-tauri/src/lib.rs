@@ -375,6 +375,16 @@ pub fn run() {
         if let Ok(p) = app.path().app_data_dir() {
             logger::hint_config_file(p.join("config.json"));
         }
+        // 任务栏事件闸门：启动这一小段时间内不响应（应用启动时外壳也会发
+        // HSHELL_RUDEAPPACTIVATED，误收会让窗口永远打不开）
+        {
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                taskbar::mark_ready();
+                let _ = handle;
+            });
+        }
         settings::init(app.handle());
         clipboard::init(app.handle());
         log_startup_banner();

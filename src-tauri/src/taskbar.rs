@@ -17,12 +17,29 @@
 //! 消息号是运行时注册的（`RegisterWindowMessage`），编译期没有常量，必须在
 //! 窗口过程里按值比较 —— 这也是官方文档给出的写法。
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// `HSHELL_RUDEAPPACTIVATED`：用户点了任务栏上某个已运行程序的按钮。
 pub const HSHELL_RUDEAPPACTIVATED: usize = 0x8004;
 /// `RegisterWindowMessage("SHELLHOOK")` 的返回值。运行时才有，故用原子变量存。
 static SHELLHOOK_MSG: AtomicU32 = AtomicU32::new(0);
+
+/// 启动闸门：应用刚起来的这一小段时间内不处理任务栏事件。
+///
+/// 原因：`HSHELL_RUDEAPPACTIVATED` 不只在你点任务栏时来 —— **应用启动时外壳也会
+/// 发一次**（新窗口被激活）。不设闸门的话，程序刚要显示窗口就把它收进托盘，
+/// 表现是「双击图标后进程在、窗口却永远打不开」。
+static READY: AtomicBool = AtomicBool::new(false);
+
+/// 启动完成，可以响应任务栏事件了。
+pub fn mark_ready() {
+    READY.store(true, Ordering::SeqCst);
+}
+
+/// 是否可以响应任务栏事件。
+pub fn is_ready() -> bool {
+    READY.load(Ordering::SeqCst)
+}
 
 extern "system" {
     fn RegisterWindowMessageW(lp: *const u16) -> u32;
