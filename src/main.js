@@ -2497,7 +2497,7 @@ function settingsGeneralHtml(s) {
       rowCheck(
         "set-hotkey-enabled",
         "快捷面板",
-        "按下后光标旁列出最近的内容；点击条目或按回车，直接粘进唤出前的输入框，焦点不在输入框时只复制",
+        "按下快捷键后列出最近内容面板；在输入状态时点击条目或按回车，直接粘贴到输入框，焦点不在输入框时则复制到剪贴板",
         s.hotkeyEnabled
       ) +
         rowCtl(
