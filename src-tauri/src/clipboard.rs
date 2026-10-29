@@ -321,6 +321,20 @@ pub fn get_history() -> Vec<HistoryItem> {
         .unwrap_or_default()
 }
 
+/// 只读地看一眼常驻列表（查询层用）。
+///
+/// 为什么给函数而不是把 `HISTORY` 暴露出去：锁的纪律要留在这一个文件里 ——
+/// 谁能拿锁、拿多久，是本地存储的事，不该散到查询层去决定。
+pub(crate) fn with_history<T>(f: impl FnOnce(&[crate::store::Meta]) -> T) -> T {
+    match HISTORY.get() {
+        Some(h) => match h.lock() {
+            Ok(g) => f(&g),
+            Err(poisoned) => f(&poisoned.into_inner()),
+        },
+        None => f(&[]),
+    }
+}
+
 /// 处理条目引用的本地文件（回收站 / 永久删除），返回给前端的提示串。
 ///
 /// **两道闸**，缺一不可：
@@ -955,7 +969,10 @@ pub fn delete_items(
         .map(|id| crate::store::Op::Delete { id: id.clone() })
         .collect();
     match crate::store::append_many(&dir, &ops) {
-        Ok(()) => LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed),
+        Ok(()) => {
+            LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed);
+            crate::query::bump_epoch();
+        }
         Err(e) => crate::log_err!("clipboard", "批量删除的日志追加失败（{e}）"),
     }
     crate::log_print!("[clipboard] 批量删除 {removed} 条");
@@ -4265,6 +4282,8 @@ fn append_op(dir: &Path, op: crate::store::Op) {
     match crate::store::append(dir, op) {
         Ok(()) => {
             LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed);
+            // 列表内容变了 → 版本号 +1（前端据此让页缓存失效）
+            crate::query::bump_epoch();
             // 帧数 / 字节数到阈值 → 后台整理。判断只看内存里的计数，不进 IO。
             if crate::store::wal_needs_compact(dir) {
                 spawn_compact(dir.to_path_buf());
@@ -4392,6 +4411,7 @@ fn enforce_limit(dir: &Path, hist: &mut Vec<crate::store::Meta>, max: usize) {
     match crate::store::append_many(dir, &ops) {
         Ok(()) => {
             LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed);
+            crate::query::bump_epoch();
             if overflow.shortfall > 0 {
                 crate::log_warn!(
                     "[clipboard] 上限清理：删掉最旧的 {} 条，仍有 {} 条是置顶/收藏不能删（现 {} / {} 条）",
@@ -4807,6 +4827,65 @@ fn patch_item<F: FnOnce(&mut crate::store::Meta)>(id: &str, f: F) -> Result<(), 
     Ok(())
 }
 
+/// 按筛选条件删除（「清空当前视图」用）。
+///
+/// 为什么不让前端把 id 传上来：10 万条 id 就是几 MB 的 IPC，而且「取全量 id → 再传回来」
+/// 中间隔着一次并发写入就会删错。这里由后端按同一套筛选语义自己算。
+///
+/// 两道闸与 `delete_items` 完全一致：前端必须显式要求（`delete_local_files`），
+/// 且设置里已开启 `delete_files_with_item`。后端不信任任何一侧。
+#[tauri::command]
+pub fn delete_by_filter(
+    filter: crate::query::HistoryFilter,
+    delete_local_files: Option<bool>,
+) -> Result<crate::query::DeleteReport, String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    let ids = crate::query::matching_ids(&hist, &filter);
+    if ids.is_empty() {
+        return Ok(crate::query::DeleteReport {
+            deleted: 0,
+            note: None,
+        });
+    }
+    // 先把目标整条捞出来：本地文件必须在条目被移除**之前**按它自己记录的路径处理
+    let doomed: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let targets: Vec<crate::store::Meta> = hist
+        .iter()
+        .filter(|m| doomed.contains(m.id.as_str()))
+        .cloned()
+        .collect();
+    // 两道闸都在 `purge_local_files` 里：前端显式要求 + 设置里已开启
+    let note = if delete_local_files.unwrap_or(false) {
+        purge_local_files(&targets)
+    } else {
+        None
+    };
+    for m in &targets {
+        remove_item_files(&dir, m);
+    }
+    hist.retain(|m| !doomed.contains(m.id.as_str()));
+    drop(hist);
+
+    // 每条一个 Delete 帧、整批一次 fsync。清空一个大视图可能一次写出几 MB 日志，
+    // 紧接着的 compaction 会立刻把它固化掉（日志上限 2 MB 就是干这个的）。
+    let ops: Vec<crate::store::Op> = ids
+        .iter()
+        .map(|id| crate::store::Op::Delete { id: id.clone() })
+        .collect();
+    match crate::store::append_many(&dir, &ops) {
+        Ok(()) => {
+            LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed);
+            crate::query::bump_epoch();
+        }
+        // 内存里已经删了、磁盘上没有：下次启动这些条目会回来。必须让调用方知道。
+        Err(e) => return Err(format!("已删除 {} 条，但日志追加失败（{e}）", ids.len())),
+    }
+    let deleted = ids.len() as u64;
+    crate::log_print!("[clipboard] 按筛选条件删除 {deleted} 条");
+    Ok(crate::query::DeleteReport { deleted, note })
+}
+
 // ---------------------------------------------------------------------------
 // 保留策略（迁移自 v1 RETENTION_DAYS = 3）
 // ---------------------------------------------------------------------------
@@ -4820,6 +4899,7 @@ pub fn prune_retention(days: u32) {
         let mut hist = HISTORY.get().unwrap().lock().unwrap();
         let before = hist.len();
         *hist = prune_history(hist.clone(), dir, days, include_pinned);
+        crate::query::bump_epoch();
         let removed = before - hist.len();
         if removed > 0 {
             crate::log_print!("[clipboard] 保留策略清理 {removed} 条过期条目");
@@ -7363,7 +7443,7 @@ fn bench_scale() {
         let t_clone = t.elapsed();
         let t = Instant::now();
         crate::store::compact(&dir, &cloned).unwrap();
-        let t_compact = t.elapsed();
+        let t_compaction = t.elapsed();
 
         let t = Instant::now();
         let mut filtered: Vec<&crate::store::Meta> =
@@ -7397,7 +7477,7 @@ fn bench_scale() {
         );
         println!(
             "        compaction：{} ms（其中克隆当前状态 {} ms，写盘不持锁）",
-            t_compact.as_millis(),
+            t_compaction.as_millis(),
             t_clone.as_millis()
         );
         let _ = std::fs::remove_file(dir.join(crate::store::INDEX_BIN));

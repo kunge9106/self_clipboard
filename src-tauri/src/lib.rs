@@ -13,6 +13,9 @@ mod clipboard;
 // 为「别的平台也能编译」去把这层抽象出来只会多一层壳。
 #[cfg(windows)]
 mod store;
+// 查询层（窗口取数 + 搜索下推）。与 store 一样依赖 clipboard 的常驻列表，仅 Windows。
+#[cfg(windows)]
+mod query;
 #[cfg(windows)]
 mod singleton;
 #[cfg(windows)]
@@ -286,6 +289,11 @@ pub fn run() {
             clipboard::get_history,
             clipboard::copy_diagnostics,
             clipboard::history_limit,
+            query::get_history_window,
+            query::history_count,
+            query::count_by_filter,
+            query::list_ids,
+            clipboard::delete_by_filter,
             clipboard::delete_item,
             clipboard::delete_items,
             clipboard::toggle_pin,
