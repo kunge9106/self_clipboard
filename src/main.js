@@ -4620,6 +4620,8 @@ document.addEventListener("click", async (e) => {
     }
     try {
       items = await invoke("get_history");
+      // 删完之后所有页都可能变了：不失效缓存的话，列表要切一次视图才刷新
+      api.invalidate();
       render();
     } catch {
       /* 刷新失败不阻塞提示 */
@@ -4668,6 +4670,8 @@ document.addEventListener("click", async (e) => {
     }
     try {
       items = await invoke("get_history");
+      // 删完之后所有页都可能变了：不失效缓存的话，列表要切一次视图才刷新
+      api.invalidate();
       render();
     } catch {
       /* 刷新失败不阻塞提示 */
