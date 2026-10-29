@@ -6842,6 +6842,15 @@ fn bench_scale() {
         save_index(&dir, &hist);
         let t_save = t.elapsed();
 
+        // 对照组：不加密，直接写紧凑 JSON（用来看「加密」到底占多少）
+        let t = Instant::now();
+        {
+            let tmp = dir.join("index-plain.tmp");
+            std::fs::write(&tmp, compact.as_bytes()).unwrap();
+            std::fs::rename(&tmp, dir.join("index-plain.json")).unwrap();
+        }
+        let t_save_plain = t.elapsed();
+
         let t = Instant::now();
         let raw = std::fs::read(dir.join("index.json")).unwrap();
         let plain = decode_text_bytes(&raw).unwrap();
@@ -6869,7 +6878,9 @@ fn bench_scale() {
             t_load.as_millis(),
             t_sort.as_millis(),
         );
+        println!("        不加密保存（紧凑 JSON 直写）：{} ms", t_save_plain.as_millis());
         let _ = std::fs::remove_file(dir.join("index.json"));
+        let _ = std::fs::remove_file(dir.join("index-plain.json"));
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
