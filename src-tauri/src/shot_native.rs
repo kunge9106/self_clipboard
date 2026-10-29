@@ -1923,7 +1923,53 @@ pub fn toast_near_point(text: &str, x: i32, y: i32) {
     };
     let owned = text.to_string();
     std::thread::spawn(move || unsafe {
-        run_toast(&owned, &geo);
+        run_toast(&owned, &geo, false);
+    });
+}
+
+/// 在该屏工作区**底部居中**弹一条提示，1.5 秒后自动消失。
+///
+/// 快捷面板收起后的落点：面板已经没了，提示若还悬在它原来的位置就是「浮在半空」。
+/// 贴工作区底部是系统级提示的通用位置（Material 的 Snackbar、浏览器窗口里的
+/// 「已复制」都是这个语义），也离刚粘出去的内容最远，不会盖住。
+///
+/// `hint_x` / `hint_y` 只用来判断落在哪块屏：多屏下必须用面板原来所在的显示器，
+/// 否则会把提示甩回主屏。
+pub fn toast_at_work_area_bottom(text: &str, hint_x: i32, hint_y: i32) {
+    let mut info = MonitorInfo {
+        size: std::mem::size_of::<MonitorInfo>() as u32,
+        monitor: WinRect::default(),
+        work: WinRect::default(),
+        flags: 0,
+    };
+    let ok = unsafe {
+        let mon = MonitorFromPoint(
+            Point {
+                x: hint_x,
+                y: hint_y,
+            },
+            MONITOR_DEFAULTTONEAREST,
+        );
+        mon != 0 && GetMonitorInfoW(mon, &mut info) != 0
+    };
+    if !ok || info.work.right <= info.work.left || info.work.bottom <= info.work.top {
+        crate::log_warn!("[toast] 取不到提示所在显示器的工作区，提示不显示");
+        return;
+    }
+    let geo = ShotGeometry {
+        // 锚点取工作区下沿：`above = true` 让它往上排，留 8px 边距
+        sel_x: (info.work.left + info.work.right) / 2,
+        sel_y: info.work.bottom - 4,
+        sel_w: 0,
+        sel_h: 0,
+        scr_x: info.work.left,
+        scr_y: info.work.top,
+        scr_w: info.work.right - info.work.left,
+        scr_h: info.work.bottom - info.work.top,
+    };
+    let owned = text.to_string();
+    std::thread::spawn(move || unsafe {
+        run_toast(&owned, &geo, true);
     });
 }
 
@@ -1950,11 +1996,11 @@ fn spawn_copied_toast(geo: &ShotGeometry) {
         scr_h: geo.scr_h,
     };
     std::thread::spawn(move || unsafe {
-        run_toast(TOAST_TEXT, &g);
+        run_toast(TOAST_TEXT, &g, false);
     });
 }
 
-unsafe fn run_toast(text: &str, geo: &ShotGeometry) {
+unsafe fn run_toast(text: &str, geo: &ShotGeometry, above: bool) {
     // 窗口的 DPI awareness 在建窗那一刻冻结，与覆盖层同理
     pin_dpi_context();
 
@@ -1972,10 +2018,15 @@ unsafe fn run_toast(text: &str, geo: &ShotGeometry) {
         return;
     }
 
-    // 位置：贴选区下边缘居中；下方放不下就翻到上边缘；再不行贴屏幕底部
+    // 位置：`above` 决定优先方向 —— 截图与面板贴着锚点往下，屏幕底部那条往上。
+    // 两个方向都放不下时贴屏幕下沿兜底。
     let gap = (8.0 * scale).round() as i32;
     let mut left = geo.sel_x + (geo.sel_w - tip_w) / 2;
-    let mut top = geo.sel_y + geo.sel_h + gap;
+    let mut top = if above {
+        geo.sel_y - tip_h - gap
+    } else {
+        geo.sel_y + geo.sel_h + gap
+    };
     if top + tip_h > geo.scr_y + geo.scr_h {
         top = geo.sel_y - tip_h - gap;
     }

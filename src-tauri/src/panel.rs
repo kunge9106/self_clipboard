@@ -220,11 +220,27 @@ fn cursor_point() -> (i32, i32) {
     (200, 200)
 }
 
-/// 出一张复制结果提示。文案与落点都由调用方决定 —— 落点取不到（面板还没建过）
-/// 才退回光标。
-fn toast(anchor: Option<(i32, i32)>, text: &str) {
-    let (x, y) = anchor.unwrap_or_else(cursor_point);
-    crate::shot_native::toast_near_point(text, x, y);
+/// 复制结果的提示。落到哪里取决于面板会不会留着：
+///
+/// - **面板留着**（「点选后保持打开」）：贴面板下沿。此时提示是面板「这一行动作的
+///   结果」，贴着容器最自然，也不会盖住下面的列表。
+/// - **面板要收起**：落到该屏工作区底部居中。面板一收，原来那块地方什么都没有了，
+///   提示悬在原处就是「浮在半空」；底部居中是系统级提示的通用位置（Snackbar 语义），
+///   也离刚粘出去的内容最远。
+///
+/// 两种落点的共同点是**都不跟着鼠标走**：鼠标停在哪只代表输入位置，不代表用户
+/// 正在看哪里（键盘选中时它可能还停在唤起面板的地方）。
+fn toast_after_copy(panel: Option<(i32, i32)>, keep_open: bool) {
+    const TEXT: &str = "已复制到剪贴板";
+    match panel {
+        Some((x, bottom)) if keep_open => crate::shot_native::toast_near_point(TEXT, x, bottom),
+        Some((x, bottom)) => crate::shot_native::toast_at_work_area_bottom(TEXT, x, bottom),
+        // 面板还没建过（极少见）：用光标判断落在哪块屏
+        None => {
+            let (x, y) = cursor_point();
+            crate::shot_native::toast_at_work_area_bottom(TEXT, x, y);
+        }
+    }
 }
 
 /// 把某条内容复制进剪贴板，再粘回唤出前的窗口。
@@ -235,6 +251,8 @@ fn toast(anchor: Option<(i32, i32)>, text: &str) {
 pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
     // 必须在收起之前取：收起后窗口就没了，落点会退化成光标位置
     let anchor = panel_anchor(app);
+    // 这一条要不要收起决定了提示落哪：读了就不受后面动作影响
+    let keep_open = crate::settings::get().panel_keep_after_copy;
 
     // 走与右键「复制」完全相同的路径：格式处理（原样 / 纯文本 / 内联图还原）
     // 只有一份实现，两边不会漂移。
@@ -252,7 +270,7 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
     if target == 0 {
         // 没有可回的目标：内容已经在剪贴板里，用户自己按 Ctrl+V 即可
         crate::log_print!("[panel] 无目标窗口，已只复制不粘贴");
-        toast(anchor, "已复制到剪贴板");
+        toast_after_copy(anchor, keep_open);
         return Ok(());
     }
 
@@ -262,7 +280,7 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(80));
         if GetForegroundWindow() != target {
             crate::log_warn!("[panel] 焦点没能切回原窗口，跳过模拟粘贴（内容已在剪贴板）");
-            toast(anchor, "已复制到剪贴板");
+            toast_after_copy(anchor, keep_open);
             return Ok(());
         }
         // 顺序：Ctrl 按下 → V 按下 → V 抬起 → Ctrl 抬起。
@@ -272,9 +290,9 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
         }
     }
     crate::log_print!("[panel] 已粘贴回原窗口");
-    // 文案统一成「已复制到剪贴板」：粘贴是否真的落到目标窗口取决于对方，
-    // 而复制这一步是确定成功的，提示只说确定的事
-    toast(anchor, "已复制到剪贴板");
+    // 文案只说确定的事：粘贴是否真的落到目标窗口取决于对方程序，
+    // 而复制这一步是确定成功的
+    toast_after_copy(anchor, keep_open);
     Ok(())
 }
 
