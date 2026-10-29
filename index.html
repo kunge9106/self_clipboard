@@ -103,12 +103,14 @@
           <footer class="statusbar">
             <span class="statusbar-left" id="status-count">共 0 条</span>
             <span class="statusbar-version" id="status-version"></span>
-            <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清结果；置顶/收藏除外）">
-              <svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>
-            </button>
-            <button class="statusbar-clear" id="btn-clean-age" title="清理旧条目（按天数，置顶/收藏除外）">
-              <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 4.8V8l2.4 1.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-            </button>
+            <div class="statusbar-actions">
+              <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清结果；置顶/收藏除外）">
+                <svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>
+              </button>
+              <button class="statusbar-clear" id="btn-clean-age" title="清理旧条目（按天数，置顶/收藏除外）">
+                <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.4 1.6"/></svg>
+              </button>
+            </div>
           </footer>
         </main>
       </div>

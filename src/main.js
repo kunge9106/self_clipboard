@@ -4731,3 +4731,10 @@ async function refreshAgeCleanPreview(modal) {
   }
   modal.dataset.days = String(days);
 }
+
+// 自定义天数：改数字就重算预览（输入是 input 事件，不是 click）
+document.addEventListener("input", (e) => {
+  if (e.target?.id !== "clean-age-days") return;
+  const modal = document.getElementById("age-clean-modal");
+  if (modal && !modal.hidden) void refreshAgeCleanPreview(modal);
+});
