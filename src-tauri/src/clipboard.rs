@@ -151,7 +151,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryItem {
     pub id: String,
     pub kind: String, // "text" | "image" | "files"
@@ -1122,7 +1122,13 @@ pub fn init(app: &AppHandle) {
     }
     let _ = DIR.set(dir.clone());
 
-    let mut hist = load_index(&dir);
+    // 载入：v2 快照 → 旧格式（一次性迁移）→ 没有。任何一种失败都不 panic，
+    // 也不静默生成新密钥（见 store::load_index）。
+    let loaded = crate::store::load_index(&dir);
+    let mut hist = loaded.items;
+    // 这一次启动结束时要不要补写一份 v2 快照：首次运行、刚迁移完、索引需要重建，
+    // 三种情况都得写，否则下次启动又走一遍同样的分支。
+    let mut need_snapshot = loaded.status.needs_snapshot();
     // 索引条目数明显少于缓存目录里的内容文件 → 索引坏了，按文件补齐。
     //
     // 不只看「索引为空」：用户实测的损坏形态是索引被截断、只剩最后几条
@@ -1136,11 +1142,16 @@ pub fn init(app: &AppHandle) {
         let rebuilt = rebuild_index_from_files(&dir, &mut hist);
         if rebuilt > 0 {
             crate::log_warn!(
-                "[clipboard] 索引只有 {before} 条、缓存目录有 {entity_count} 个内容文件 → 判为索引损坏，已补回 {rebuilt} 条（共 {} 条）；旧索引备份为 index.json.corrupt",
+                "[clipboard] 索引只有 {before} 条、缓存目录有 {entity_count} 个内容文件 → 判为索引损坏，已补回 {rebuilt} 条（共 {} 条）",
                 hist.len()
             );
-            let _ = fs::copy(dir.join("index.json"), dir.join("index.json.corrupt"));
-            save_index(&dir, &hist);
+            // 现场文件：store::load_index 在读不出来时已经留过一份；这里补的是
+            // 「能读但条数不对」的情况，把旧快照也原样留一份方便事后比对。
+            let bin = dir.join(crate::store::INDEX_BIN);
+            if bin.is_file() {
+                let _ = fs::copy(&bin, dir.join(crate::store::INDEX_CORRUPT));
+            }
+            need_snapshot = true;
         }
     }
     // 老版本 index.json 把文件路径内联在 files 里、没有落盘清单 → 补一份，
@@ -1190,7 +1201,7 @@ pub fn init(app: &AppHandle) {
         0
     };
 
-    if backfilled > 0 || refreshed > 0 || subtyped > 0 || img_moved > 0 {
+    if backfilled > 0 || refreshed > 0 || subtyped > 0 || img_moved > 0 || need_snapshot {
         save_index(&dir, &hist);
     }
     if layout_stale {
@@ -1627,7 +1638,7 @@ fn replace_latest_text(text: &str, html: &Option<String>, rtf: &Option<String>) 
         return false;
     }
     let id = last.id.clone();
-    let rel = format!("data/{id}.txt");
+    let rel = crate::store::text_rel(&id);
     write_text_entity(&dir, &rel, text);
     last.text_path = Some(rel);
     last.size = text.len() as u64;
@@ -1642,7 +1653,7 @@ fn replace_latest_text(text: &str, html: &Option<String>, rtf: &Option<String>) 
         last.rich_images = imgs;
     }
     if let Some(r) = rtf {
-        let rrel = format!("data/{id}.rtf");
+        let rrel = crate::store::rtf_rel(&id);
         write_text_entity(&dir, &rrel, r);
         last.rtf_path = Some(rrel);
     }
@@ -1685,7 +1696,7 @@ fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
     }
     if last.rtf_path.is_none() {
         if let Some(r) = rtf {
-            let rel = format!("data/{id}.rtf");
+            let rel = crate::store::rtf_rel(&id);
             write_text_entity(&dir, &rel, r);
             last.rtf_path = Some(rel);
             changed = true;
@@ -2941,7 +2952,7 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
             item.preview_truncated = truncated;
             // 无论长短都落盘全文：内存只保留截断后的 preview 摘要，
             // 这样既遵守「内容不走内存」红线，复制回去时也不会被截断。
-            let rel = format!("data/{}.txt", id);
+            let rel = crate::store::text_rel(&id);
             write_text_entity(&dir, &rel, &text);
             item.text_path = Some(rel);
             // 富文本实体单独落盘（一样加密）：纯文本永远是主数据，
@@ -2952,7 +2963,7 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
                 item.rich_images = imgs;
             }
             if let Some(r) = rtf {
-                let rrel = format!("data/{id}.rtf");
+                let rrel = crate::store::rtf_rel(&id);
                 write_text_entity(&dir, &rrel, &r);
                 item.rtf_path = Some(rrel);
             }
@@ -2975,7 +2986,7 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
             }
             // 路径清单落盘（每行一个完整路径）：缓存目录里必须有这条记录的实体，
             // 否则「文件」条目的数据在缓存目录里完全看不到。
-            let rel = format!("files/{}.txt", id);
+            let rel = crate::store::files_rel(&id);
             let body = files.join("\r\n");
             write_text_entity(&dir, &rel, &body);
             item.files_path = Some(rel);
@@ -3032,7 +3043,10 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
     }
 
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
-    hist.insert(0, item.clone());
+    // 按 ts 二分插入，而不是 `insert(0, _)`：后者隐含「新条目 ts 一定最大」，
+    // 系统时钟回拨（NTP 校时 / 用户改时间）时就会把新内容排到中间去，
+    // 而列表「ts 严格降序」是分页切片的前提。正常情况命中下标 0，与老行为一致。
+    crate::store::insert_ordered(&mut hist, item.clone());
     save_index(&dir, &hist);
     // ⚠️ 只记**元数据**，绝不记内容。
     //
@@ -4080,7 +4094,7 @@ fn dpapi(input: &[u8], protect: bool) -> Option<Vec<u8>> {
 ///
 /// 加密失败时**退回明文**而不是报错：宁可少一层保护，也不能因为 DPAPI 异常
 /// 把用户刚复制的内容弄丢 —— 剪贴板历史的首要职责是「记得住」。
-fn encrypt_text(plain: &str) -> Vec<u8> {
+pub(crate) fn encrypt_text(plain: &str) -> Vec<u8> {
     match dpapi(plain.as_bytes(), true) {
         Some(blob) => {
             let mut out = Vec::with_capacity(ENC_MAGIC.len() + blob.len());
@@ -4098,7 +4112,7 @@ fn encrypt_text(plain: &str) -> Vec<u8> {
 }
 
 /// 把落盘字节还原成文本，**同时兼容历史明文文件**（没有魔数前缀的就是老数据）。
-fn decode_text_bytes(raw: &[u8]) -> Option<String> {
+pub(crate) fn decode_text_bytes(raw: &[u8]) -> Option<String> {
     if raw.starts_with(ENC_MAGIC) {
         let plain = dpapi(&raw[ENC_MAGIC.len()..], false)?;
         // 密文解出来一定是当初写进去的 UTF-8；非法字节说明 blob 被破坏
@@ -4149,120 +4163,28 @@ fn encrypt_legacy_entities(dir: &PathBuf) -> usize {
     n
 }
 
-/// 索引读不出来时，把损坏的文件原样留一份再返回空。
+/// 落盘索引：v2 快照（AES-256-GCM），实现在 `store` 里。
 ///
-/// 为什么必须留：`load_index` 返回空之后，用户随手复制一条就会触发 `save_index`，
-/// 把损坏文件**就地覆盖**成一个看起来正常的小索引 —— 事故现场彻底消失，事后
-/// 谁也无法判断是截断、解密失败还是解析失败。用户实测那次就是这样丢的证据。
-fn keep_corrupt(dir: &PathBuf, raw: &[u8], why: &str) {
-    let dst = dir.join("index.json.corrupt");
-    match fs::write(&dst, raw) {
-        Ok(()) => crate::log_err!(
-            "clipboard",
-            "index.json {why}；损坏文件 {} 字节已另存为 index.json.corrupt",
-            raw.len()
-        ),
-        Err(e) => crate::log_err!("clipboard", "index.json {why}，且备份失败：{e}"),
-    }
-}
-
-fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
-    let path = dir.join("index.json");
-    // 按**字节**读，不按字符串：新格式是 DPAPI 密文（带 ENC_MAGIC），不是 UTF-8 JSON。
-    let raw = match fs::read(&path) {
-        Ok(v) => v,
-        Err(e) => {
-            // 曾经这里直接 `return Vec::new()` —— **一行日志都没有**。于是
-            // 「记录全没了」成了唯一线索，连「索引文件到底在不在」都查不出来。
-            // 用户实测那次日志里恰好就是这种真空。
-            if e.kind() == std::io::ErrorKind::NotFound {
-                crate::log_warn!(
-                    "[clipboard] 没有 index.json（首次运行，或索引已被删除/改名）—— 历史列表为空"
-                );
-            } else {
-                crate::log_err!("clipboard", "index.json 读取失败：{e}");
-            }
-            return Vec::new();
-        }
-    };
-    if raw.is_empty() {
-        crate::log_err!(
-            "clipboard",
-            "index.json 是空文件（0 字节）—— 上次写入被中断（强杀/崩溃/断电）的特征，历史列表将为空"
-        );
-        return Vec::new();
-    }
-    // decode_text_bytes 同时兼容老版本的明文 JSON（没有魔数 → 原样返回），
-    // 老用户升级后历史不会因为格式切换而清空。
-    let Some(json) = decode_text_bytes(&raw) else {
-        keep_corrupt(dir, &raw, "解密失败（可能换了 Windows 账户或机器）");
-        return Vec::new();
-    };
-    let mut v: Vec<HistoryItem> = serde_json::from_str(&json).unwrap_or_else(|e| {
-        keep_corrupt(dir, &raw, &format!("解析失败：{e}"));
-        Vec::new()
-    });
-    // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
-    // 历史是默认视图，用户当初置顶的内容在历史里仍然浮顶，行为不变。
-    let mut migrated = 0usize;
-    for i in v.iter_mut() {
-        if i.pinned && !i.pinned_views.iter().any(|x| x == "history") {
-            i.pinned_views.push("history".to_string());
-            migrated += 1;
-        }
-    }
-    if migrated > 0 {
-        crate::log_print!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
-    }
-    // 成功加载也要记一条：否则「索引读到了几条、文件多大」只能靠 init 里那句
-    // 间接推断。事故复盘时最有用的是「改动前后的两条读数」，而不是只剩一条。
-    crate::log_print!(
-        "[clipboard] 索引加载成功：{} 条，{} 字节",
-        v.len(),
-        raw.len()
-    );
-    v
-}
-
-/// 落盘索引：**整份 DPAPI 加密**，落盘的不是明文 JSON。
+/// 为什么这里只剩薄薄一层：`save_index` 有 14 处调用点，分布在复制、置顶、收藏、
+/// 删除、清理、退出……每一处都得「记得写一次」。保留**一个**统一写入口，比把 14 处
+/// 分别改成新函数更安全 —— 漏改一处就是「这次操作没落盘」这类最难发现的 bug
+/// （要等到下次启动少几条才暴露）。这个入口同时保证了没人绕过去写 `index.json`。
 ///
-/// 为什么必须加密：`index.json` 里有 `preview`（正文前 2 行）和 `files`（完整
-/// 路径列表）—— 前者可能直接是密码、密钥、聊天记录，后者暴露目录结构与项目名。
-/// 内容实体（`data/` `files/`）早就加密了，索引却是明文，等于把同一份内容
-/// 抄了个不加密的副本放在旁边，加密就白做了。
+/// 索引为什么必须加密：里面有 `preview`（正文开头两行）与 `files`（完整路径列表），
+/// 前者可能直接是密码、密钥、聊天记录，后者暴露目录结构与项目名。内容实体早就加密了，
+/// 索引若是明文，等于给同一份内容留了个不加密的副本。
 ///
-/// 为什么整份加密而不是逐字段：`save_index` 每次捕获都会跑，逐字段要对上千条
-/// 各调一次 `CryptProtectData`，一次复制能卡上百毫秒；整份只调一次。
-/// 代价是 index.json 不再是人眼可读的 JSON —— 但它本来就是程序独占的索引，
-/// 需要排查时看日志就够了。
-///
-/// 加密失败时 `encrypt_text` 会退回明文（与内容实体同一策略）：
-/// 宁可少一层保护，也不能因为 DPAPI 异常把整份历史弄丢。读出时靠魔数区分。
+/// 落盘失败时**不降级成明文**：宁可这一次不写（内存里的历史还在，下一次成功写入
+/// 会整份补上 —— 快照是整份写的，不会只补一半），也不能在用户不知情的情况下把
+/// 正文写成明文。旧实现里 `encrypt_text` 在 DPAPI 异常时会退回明文，那是「多一层
+/// 保护不如记得住」的取舍；索引不同：它一旦以明文落盘，用户以为的加密就是假的。
 fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
-    let path = dir.join("index.json");
-    // 先写临时文件、再原子替换。
-    //
-    // 直接 `fs::write` 覆盖是**非原子**的：进程若在写入中途被强杀（taskkill、
-    // 崩溃、关机），index.json 会被截断成半截甚至 0 字节，下次启动解析失败
-    // → 历史全没。用户实测过一次：列表只剩 4 条，而 data/ 下 300 多个正文文件
-    // 都在 —— 正是这种损坏形态。rename 在同一分区上是原子的，要么是旧的完整
-    // 索引，要么是新的完整索引，不存在半截状态。
-    let tmp = dir.join("index.json.tmp");
-    match serde_json::to_string_pretty(hist) {
-        Ok(s) => {
-            // 写失败要记：index.json 是重启后恢复历史/置顶/收藏的唯一依据，
-            // 静默失败会表现为「重启后记录全没了」却查无实据。
-            if let Err(e) = fs::write(&tmp, encrypt_text(&s)) {
-                crate::log_err!("clipboard", "index.json 写入失败：{e}");
-                let _ = fs::remove_file(&tmp);
-                return;
-            }
-            if let Err(e) = fs::rename(&tmp, &path) {
-                crate::log_err!("clipboard", "index.json 原子替换失败：{e}");
-                let _ = fs::remove_file(&tmp);
-            }
-        }
-        Err(e) => crate::log_err!("clipboard", "index.json 序列化失败：{e}"),
+    match crate::store::persist(dir, hist) {
+        Ok(()) => {}
+        Err(e) => crate::log_err!(
+            "clipboard",
+            "索引落盘失败（{e}）：本次改动只在内存生效，下一次成功写入会整份补上"
+        ),
     }
 }
 
@@ -4321,14 +4243,14 @@ fn count_entities(dir: &PathBuf) -> usize {
 /// 返回 `(html 相对路径, 图片相对路径列表)`。
 fn store_rich_html(dir: &PathBuf, id: &str, html: &str) -> (String, Vec<String>) {
     let (stripped, imgs) = extract_inline_images(html, dir, id);
-    let rel = format!("data/{id}.html");
+    let rel = crate::store::html_rel(&id);
     write_text_entity(dir, &rel, &stripped);
     (rel, imgs)
 }
 
 /// 列出某个条目已落盘的内联图，按序号排好（重建索引时用）。
-fn list_rich_images(dir: &PathBuf, id: &str) -> Vec<String> {
-    let sub = dir.join(format!("images/rich/{id}"));
+fn list_rich_images(dir: &Path, id: &str) -> Vec<String> {
+    let sub = dir.join(crate::store::rich_dir_rel(id));
     let Ok(rd) = fs::read_dir(&sub) else {
         return Vec::new();
     };
@@ -4344,12 +4266,12 @@ fn list_rich_images(dir: &PathBuf, id: &str) -> Vec<String> {
     });
     names
         .into_iter()
-        .map(|n| format!("images/rich/{id}/{n}"))
+        .map(|n| format!("{}/{n}", crate::store::rich_dir_rel(id)))
         .collect()
 }
 
 /// 实体文件存在则返回它的相对路径（用于重建时恢复可选关联，如富文本实体）。
-fn has_entity(dir: &PathBuf, rel: &str) -> Option<String> {
+fn has_entity(dir: &Path, rel: &str) -> Option<String> {
     if dir.join(rel).is_file() {
         Some(rel.to_string())
     } else {
@@ -4363,7 +4285,7 @@ fn has_entity(dir: &PathBuf, rel: &str) -> Option<String> {
 /// 数据没了 —— 重建能把记录一条不少地找回来（正文预览要解密读原文）。
 ///
 /// 只补不删：索引里已有的 id 一律跳过，所以可以在「索引为空」时无条件调用。
-fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
+pub(crate) fn rebuild_index_from_files(dir: &Path, hist: &mut Vec<HistoryItem>) -> usize {
     let known: std::collections::HashSet<String> =
         hist.iter().map(|i| i.id.clone()).collect();
     let mut found: Vec<HistoryItem> = Vec::new();
@@ -4390,11 +4312,11 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
             preview,
             preview_truncated,
             size: text.len() as u64,
-            text_path: Some(format!("data/{id}.txt")),
+            text_path: Some(crate::store::text_rel(id)),
             // 索引丢了但富文本实体还在：按文件存在与否重建关联，
             // 否则重建出来的条目会「格式凭空消失」。
-            html_path: has_entity(dir, &format!("data/{id}.html")),
-            rtf_path: has_entity(dir, &format!("data/{id}.rtf")),
+            html_path: has_entity(dir, &crate::store::html_rel(id)),
+            rtf_path: has_entity(dir, &crate::store::rtf_rel(id)),
             // 索引丢了但图片还在：按目录内容恢复，否则回贴时图会凭空消失
             rich_images: list_rich_images(dir, id),
             img_path: None,
@@ -4472,7 +4394,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 rtf_path: None,
                 rich_images: Vec::new(),
                 img_path: None,
-                files_path: Some(format!("files/{id}.txt")),
+                files_path: Some(crate::store::files_rel(&id)),
                 files: Some(files),
             });
         }
@@ -4563,7 +4485,7 @@ fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
         if files.is_empty() {
             continue;
         }
-        let rel = format!("files/{}.txt", item.id);
+        let rel = crate::store::files_rel(&item.id);
         // 必须走 write_text_entity（会自动 DPAPI 加密）—— 这里原先是裸 fs::write 明文，
         // 与「内容落盘一律加密」自相矛盾，等于给老条目补了一份明文副本。
         write_text_entity(dir, &rel, &files.join("\r\n"));
@@ -4606,7 +4528,7 @@ fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
         }
     }
     // 富文本拆出来的内联图：整目录删。放在 rels 之外，因为它是目录而不是文件。
-    let rich_dir = dir.join(format!("images/rich/{}", item.id));
+    let rich_dir = dir.join(crate::store::rich_dir_rel(&item.id));
     if rich_dir.exists() {
         if let Err(e) = fs::remove_dir_all(&rich_dir) {
             crate::log_err!("clipboard", "删除富文本图片目录失败（{}）：{e}", rich_dir.display());
@@ -5288,7 +5210,7 @@ fn extract_inline_images(html: &str, dir: &PathBuf, id: &str) -> (String, Vec<St
                 return None;
             }
             let n = paths.len();
-            let rel_path = format!("images/rich/{id}/{n}.{ext}");
+            let rel_path = format!("{}/{n}.{ext}", crate::store::rich_dir_rel(id));
             let full = dir.join(&rel_path);
             if let Some(parent) = full.parent() {
                 let _ = fs::create_dir_all(parent);
@@ -6113,11 +6035,13 @@ mod tests {
         assert_eq!(cf_html_fragment(naked), "<p>x</p>");
     }
 
-    /// 索引必须**整份加密**落盘。
+    /// 索引必须**整份加密**落盘，且能原样读回。
     ///
-    /// 这条是真需求而不是洁癖：`index.json` 里有 `preview`（正文前 2 行）和
-    /// `files`（完整路径）。内容实体已经加密了，索引若还是明文，等于给同一份
-    /// 内容留了个不加密的副本，前面的加密全白做。
+    /// 这条是真需求而不是洁癖：索引里有 `preview`（正文前 2 行）和 `files`（完整路径）。
+    /// 内容实体已经加密了，索引若还是明文，等于给同一份内容留了个不加密的副本。
+    ///
+    /// 落盘位置从 `index.json` 换成了 `index.bin`（v2 容器）：文件名跟着格式走，
+    /// 用户（和我们自己）一眼就能看出这个目录用的是哪一代格式。
     #[test]
     fn index_saved_encrypted_and_roundtrips() {
         let dir = std::env::temp_dir().join(format!("qingtie-idx-enc-{}", std::process::id()));
@@ -6127,23 +6051,31 @@ mod tests {
         let secret = "密码 hunter2 不能出现在索引里";
         save_index(&dir, &vec![sample_item("t1", secret)]);
 
-        let raw = fs::read(dir.join("index.json")).unwrap();
-        assert!(raw.starts_with(ENC_MAGIC), "索引必须带加密魔数");
+        assert!(
+            !dir.join("index.json").exists(),
+            "新格式不该再写 index.json"
+        );
+        let raw = fs::read(dir.join("index.bin")).unwrap();
+        assert!(
+            raw.starts_with(crate::crypto::MAGIC_V2),
+            "索引必须带 v2 加密魔数"
+        );
         let needle = "hunter2".as_bytes();
         assert!(
             !raw.windows(needle.len()).any(|w| w == needle),
-            "index.json 里不能出现明文正文"
+            "index.bin 里不能出现明文正文"
         );
 
         // 解回来必须逐字一致，否则加密就成了丢数据
-        let back = load_index(&dir);
-        assert_eq!(back.len(), 1);
-        assert_eq!(back[0].preview, secret);
+        let back = crate::store::load_index(&dir);
+        assert_eq!(back.status, crate::store::LoadStatus::V2);
+        assert_eq!(back.items.len(), 1);
+        assert_eq!(back.items[0].preview, secret);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 兼容性：老版本 index.json 是明文 JSON，读取时必须照常解析（靠魔数区分），
+    /// 兼容性：老版本索引（明文 JSON / 整份 DPAPI）读取时必须照常解析，
     /// 否则升级后所有人的历史会被当成「解析失败」清空。
     #[test]
     fn index_accepts_legacy_plaintext() {
@@ -6154,9 +6086,10 @@ mod tests {
         let json = serde_json::to_string_pretty(&vec![sample_item("t2", "旧版明文索引")]).unwrap();
         fs::write(dir.join("index.json"), json.as_bytes()).unwrap();
 
-        let back = load_index(&dir);
-        assert_eq!(back.len(), 1);
-        assert_eq!(back[0].preview, "旧版明文索引");
+        let back = crate::store::load_index(&dir);
+        assert_eq!(back.status, crate::store::LoadStatus::MigratedV0);
+        assert_eq!(back.items.len(), 1);
+        assert_eq!(back.items[0].preview, "旧版明文索引");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -6834,10 +6767,24 @@ fn bench_scale() {
         let pretty = serde_json::to_string_pretty(&hist).unwrap();
         let t_pretty = t.elapsed();
 
+        // 旧加密路径（整份 DPAPI）：留作对照，量的是「这次改动到底省了多少」
         let t = Instant::now();
         let _enc = encrypt_text(&pretty);
         let t_enc = t.elapsed();
 
+        // 新加密路径（AES-256-GCM）：同样是加密整份紧凑 JSON
+        let bench_key = crate::crypto::load_or_create_key(&dir).unwrap();
+        let t = Instant::now();
+        let sealed = crate::crypto::seal(
+            &bench_key,
+            crate::crypto::DOMAIN_INDEX,
+            None,
+            compact.as_bytes(),
+            1,
+        );
+        let t_seal = t.elapsed();
+
+        // 真实落盘：序列化 + 加密 + 临时文件 + sync_all + rename
         let t = Instant::now();
         save_index(&dir, &hist);
         let t_save = t.elapsed();
@@ -6851,11 +6798,12 @@ fn bench_scale() {
         }
         let t_save_plain = t.elapsed();
 
+        // 读回：读文件 + 解密 + 解析（密钥在进程内已缓存，与真实启动一致）
         let t = Instant::now();
-        let raw = std::fs::read(dir.join("index.json")).unwrap();
-        let plain = decode_text_bytes(&raw).unwrap();
-        let back: Vec<HistoryItem> = serde_json::from_str(&plain).unwrap();
+        let loaded = crate::store::load_index(&dir);
         let t_load = t.elapsed();
+        assert_eq!(loaded.items.len(), n, "读回条数必须与写入一致");
+        let back = loaded.items;
 
         let t = Instant::now();
         let mut filtered: Vec<&HistoryItem> = back.iter().filter(|i| i.kind != "files").collect();
@@ -6868,18 +6816,21 @@ fn bench_scale() {
 
         println!(
             "{n:>6} 条：紧凑 JSON {:.1} MB / {:.0} ms；pretty {:.1} MB / {:.0} ms；\
-             加密 {:.0} ms；整份保存 {:.0} ms；读回+解密+解析 {:.0} ms；全量排序 {:.0} ms",
+             DPAPI 加密 {:.0} ms；AES-GCM 加密 {:.0} ms（{:.1} MB 容器）；\
+             整份保存 {:.0} ms；读回+解密+解析 {:.0} ms；全量排序 {:.0} ms",
             compact.len() as f64 / 1e6,
             t_compact.as_millis(),
             pretty.len() as f64 / 1e6,
             t_pretty.as_millis(),
             t_enc.as_millis(),
+            t_seal.as_millis(),
+            sealed.len() as f64 / 1e6,
             t_save.as_millis(),
             t_load.as_millis(),
             t_sort.as_millis(),
         );
         println!("        不加密保存（紧凑 JSON 直写）：{} ms", t_save_plain.as_millis());
-        let _ = std::fs::remove_file(dir.join("index.json"));
+        let _ = std::fs::remove_file(dir.join(crate::store::INDEX_BIN));
         let _ = std::fs::remove_file(dir.join("index-plain.json"));
     }
     let _ = std::fs::remove_dir_all(&dir);

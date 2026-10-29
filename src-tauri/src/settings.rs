@@ -263,6 +263,13 @@ pub struct Config {
     /// 与 `subtype_version` 同一套做法：改规则就加一版，启动时按需迁移一次。
     #[serde(default)]
     pub image_layout_ver: u32,
+    /// 历史索引的存储格式版本。0/1 = 旧的 `index.json`（整份 DPAPI），2 = `index.bin`（v2 容器）。
+    ///
+    /// 只用于诊断与日志：**真正的迁移判据是磁盘上的文件**（有 `index.bin` 就是 v2，
+    /// 只有 `index.json` 就是旧格式）。把这个数字当判据会在「用户手工删过文件」
+    /// 或「回滚到旧版本又升回来」时变成谎话，而文件不会。
+    #[serde(default)]
+    pub storage_version: u32,
     /// 主窗口隐藏多久后释放它的 WebView（秒）。0 = 关闭（默认）。
     ///
     /// 释放后只留后端与托盘：常驻占用从 411 MB 降到 40 MB 上下（实测 373 MB
@@ -466,6 +473,7 @@ impl Default for Config {
             shot_format: default_shot_format(),
             images_split_dirs: true,
             image_layout_ver: 0,
+            storage_version: 0,
             release_idle_secs: default_release_idle(),
             pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
             pin_cancel_on_disable: true, // 默认开启：关掉互通即撤销它铺开的置顶

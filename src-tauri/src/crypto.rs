@@ -31,8 +31,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Nonce};
+use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce, Tag};
 
 // ---------------------------------------------------------------------------
 // 密钥文件
@@ -169,6 +169,10 @@ pub fn detect(bytes: &[u8]) -> Format {
 // ---------------------------------------------------------------------------
 
 /// 一把已解封的密钥。只活在内存里，`Debug` 打不出密钥字节。
+///
+/// `Clone` 是给存储层缓存用的：进程内只解一次密钥（DPAPI 调用不进写盘路径），
+/// 每次取出来用的是一份 32 字节的副本，用完随栈销毁。密钥本身不写日志、不进序列化。
+#[derive(Clone)]
 pub struct Key {
     bytes: [u8; KEY_LEN],
     key_id: u64,
@@ -331,22 +335,20 @@ pub fn seal(
     out[NONCE_OFFSET..NONCE_OFFSET + NONCE_LEN].copy_from_slice(&nonce_bytes);
 
     let aad = build_aad(&out[..AAD_HEADER_LEN], domain, rel_path);
+    // 原地加密：明文先拷进容器尾巴，再在那块内存上做 CTR。
+    //
+    // 为什么不用 `encrypt`：它会另开一块与明文等长的缓冲区返回「密文+tag」，
+    // 于是 38 MB 的索引要先零填 38 MB、再分配 38 MB、再拷回来 —— 三次全量内存
+    // 往返，实测比 AES 本身还贵。原地版本只多一次明文拷贝。
+    out[CONTAINER_PREFIX_LEN..].copy_from_slice(plain);
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let sealed = key
+    let tag = key
         .cipher()
-        .encrypt(
-            nonce,
-            Payload {
-                msg: plain,
-                aad: &aad,
-            },
-        )
+        .encrypt_in_place_detached(nonce, &aad, &mut out[CONTAINER_PREFIX_LEN..])
         // GCM 加密对任意长度的明文都不会失败（只有 AEAD 的容量上限会），
         // 走到这里说明内存已经坏到不能继续写盘。
         .expect("AES-256-GCM 加密失败（内存异常）");
-    let (ciphertext, tag) = sealed.split_at(plain.len());
-    out[TAG_OFFSET..TAG_OFFSET + TAG_LEN].copy_from_slice(tag);
-    out[CONTAINER_PREFIX_LEN..].copy_from_slice(ciphertext);
+    out[TAG_OFFSET..TAG_OFFSET + TAG_LEN].copy_from_slice(&tag);
     out
 }
 
@@ -386,20 +388,13 @@ pub fn open(
     }
 
     let aad = build_aad(&bytes[..AAD_HEADER_LEN], domain, rel_path);
-    // `aes-gcm` 的 `decrypt` 要求「密文 + tag」连在一起，容器里是分开存的，这里拼回去。
-    let mut joined = Vec::with_capacity(ciphertext.len() + TAG_LEN);
-    joined.extend_from_slice(ciphertext);
-    joined.extend_from_slice(&bytes[TAG_OFFSET..TAG_OFFSET + TAG_LEN]);
+    // 原地解密：容器里密文与 tag 是分开存的，`decrypt_in_place_detached` 正好吃这种形态，
+    // 不需要像 `decrypt` 那样先拼一块「密文+tag」的 38 MB 临时缓冲。
+    let mut plain = ciphertext.to_vec();
+    let tag = Tag::from_slice(&bytes[TAG_OFFSET..TAG_OFFSET + TAG_LEN]);
     let nonce = Nonce::from_slice(&bytes[NONCE_OFFSET..NONCE_OFFSET + NONCE_LEN]);
-    let plain = key
-        .cipher()
-        .decrypt(
-            nonce,
-            Payload {
-                msg: &joined,
-                aad: &aad,
-            },
-        )
+    key.cipher()
+        .decrypt_in_place_detached(nonce, &aad, &mut plain, tag)
         .map_err(|_| CryptoError::Tampered)?;
     if plain.len() as u64 != plain_len {
         // 理论上不可达（tag 覆盖了 plain_len）。留着是因为「解密成功但长度不对」必须

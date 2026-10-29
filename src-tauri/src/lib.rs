@@ -8,6 +8,11 @@ mod effects;
 mod idle_release;
 #[cfg(windows)]
 mod clipboard;
+// 索引存储层（v2 快照 + 旧格式迁移）。它依赖 clipboard 的 HistoryItem 与 DPAPI 原语，
+// 所以和 clipboard 一样只在 Windows 上编译 —— 本产品只发布 Windows 版，
+// 为「别的平台也能编译」去把这层抽象出来只会多一层壳。
+#[cfg(windows)]
+mod store;
 #[cfg(windows)]
 mod singleton;
 #[cfg(windows)]
