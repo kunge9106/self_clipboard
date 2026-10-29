@@ -2497,7 +2497,7 @@ function settingsGeneralHtml(s) {
       rowCheck(
         "set-hotkey-enabled",
         "唤起面板",
-        "在任何程序里按下组合键，弹出贴光标的小列表；回车直接粘回原窗口",
+        "按下后光标旁列出最近的内容；回车代替 Ctrl+V 粘到唤出前的窗口 —— 那里没有输入焦点就不会有反应",
         s.hotkeyEnabled
       ) +
         rowCtl(
