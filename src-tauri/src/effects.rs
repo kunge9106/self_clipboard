@@ -1408,6 +1408,8 @@ const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_MINIMIZE: usize = 0xF020;
 /// SW_HIDE：隐藏窗口（与「关闭时收进托盘」同路径）
 const SW_HIDE: i32 = 0;
+/// WM_DESTROY：窗口销毁
+const WM_DESTROY: u32 = 0x0002;
 /// WM_SIZE：窗口尺寸变化
 const WM_SIZE: u32 = 0x0005;
 /// SIZE_MINIMIZED：窗口被最小化
@@ -1653,6 +1655,8 @@ unsafe extern "system" fn border_proc(
 
 pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
     let _ = HOOK_APP.set(app.clone());
+    // 注册 Shell Hook：任务栏点击会以窗口消息送到本窗口的窗口过程
+    crate::taskbar::install_shell_hook(hwnd);
 
     unsafe extern "system" {
         fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
@@ -1712,6 +1716,28 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
         //
         // 标题栏的「最小化」按钮要真最小化，它走 ALLOW_MINIMIZE 标记放行 —— 与
         // 2.6.0 的行为保持一致。
+        // Shell Hook：任务栏点击等 Shell 事件。
+        //
+        // `HSHELL_RUDEAPPACTIVATED` = 用户点了任务栏上某个已运行程序的按钮，
+        // lParam 就是那个窗口的句柄 —— lParam 是我们时才收进托盘。
+        //
+        // 这条路是主路：Win11 点当前窗口的任务栏按钮可能只是弹缩略图、根本不
+        // 最小化（不合并任务栏按钮的旧设置下才会最小化），靠系统消息抓不到。
+        // 窗口销毁时注销 Shell Hook：后台释放会销毁并重建窗口，旧 hwnd 上还挂着
+        // 注册的话，Shell 事件会往一个已经不存在的窗口发。
+        if msg == WM_DESTROY {
+            crate::taskbar::remove_shell_hook(hwnd);
+        }
+        if crate::taskbar::is_shellhook(msg) {
+            if wparam == crate::taskbar::HSHELL_RUDEAPPACTIVATED && lparam == hwnd {
+                extern "system" {
+                    fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+                }
+                unsafe { ShowWindow(hwnd, SW_HIDE); }
+                crate::log_print!("[taskbar] 再次点击任务栏图标 → 收进托盘");
+                return 0;
+            }
+        }
         if msg == WM_SIZE && wparam == SIZE_MINIMIZED {
             if ALLOW_MINIMIZE.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 return 0;

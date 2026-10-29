@@ -377,9 +377,6 @@ pub fn run() {
         }
         settings::init(app.handle());
         clipboard::init(app.handle());
-        // 任务栏按钮「再点一次收回」：Windows 在部分版本上对这个点击不发任何消息给
-        // 窗口，只能自己判断（详见 taskbar.rs 的说明）
-        taskbar::spawn_taskbar_click_watcher(app.handle().clone());
         log_startup_banner();
         // 自愈：旧版本把自启值按 UTF-8 写进宽字符 API，注册表里是乱码路径，
         // 开机启动失败。这里每次启动比对一次，内容不符就重写。
