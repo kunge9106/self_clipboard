@@ -29,6 +29,13 @@
 复跑方式：`cargo test --release --lib bench_scale -- --ignored --nocapture`，
 同理 `bench_resident_memory` / `bench_window_latency`。
 
+## 条数上限
+
+默认 1 万条（`max_items`，`0` = 不限），**不在设置页暴露**，只作为兜底闸：达到上限
+时弹一次清理建议（当前条数、将清理多少条、置顶与收藏豁免、不可撤销），用户点
+「暂不清理」则 7 天内不再打扰（时间戳落盘）。需要改上限可以手改 `config.json`
+里的 `max_items` 或调 `set_max_items`。
+
 ## 虚拟列表为什么没启用
 
 实机反馈三处视觉都不对：行距过大、卡片叠在一起、窗口四周露出透明材质
