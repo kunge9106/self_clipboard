@@ -302,6 +302,8 @@ pub fn run() {
             clipboard::history_limit,
             minimize_window,
             clipboard::trim_history_to_limit,
+            clipboard::count_older_than,
+            clipboard::delete_older_than,
             query::get_history_window,
             query::history_count,
             query::count_by_filter,

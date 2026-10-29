@@ -157,8 +157,21 @@
         <div class="modal-title">历史条目超过上限</div>
         <div class="modal-text" id="limit-modal-text"></div>
         <div class="modal-actions">
+          <button class="btn-ghost" id="limit-by-age" hidden>按建议清理</button>
           <button class="btn-ghost" id="limit-snooze">暂不清理（7 天内不再提示）</button>
           <button class="btn-danger" id="limit-confirm">清理最旧的条目</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 按天数清理旧条目：一次性删除 N 天前的条目，不改保留天数设置。 -->
+    <div class="modal-mask" id="age-clean-modal" hidden>
+      <div class="modal">
+        <div class="modal-title">按天数清理旧条目</div>
+        <div class="modal-text" id="age-clean-modal-text"></div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="age-clean-cancel">取消</button>
+          <button class="btn-danger" id="age-clean-confirm">清理</button>
         </div>
       </div>
     </div>

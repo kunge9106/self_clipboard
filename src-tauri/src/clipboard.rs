@@ -4957,6 +4957,54 @@ pub fn prune_retention(days: u32) {
     }
 }
 
+/// 统计早于 `days` 天的条目数（受保护的置顶/收藏按设置豁免）。
+///
+/// 给「建议清理多少天以前的」提供数字：上限提示与清理页都用它，避免前端自己
+/// 猜一套口径。
+#[tauri::command]
+pub fn count_older_than(days: u32) -> u32 {
+    if days == 0 {
+        return 0;
+    }
+    let Some(hist) = HISTORY.get() else { return 0 };
+    let guard = match hist.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let include_pinned = crate::settings::get().prune_include_pinned;
+    let deadline = now_ms().saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
+    guard
+        .iter()
+        .filter(|it| it.ts < deadline && (include_pinned || !is_protected(it)))
+        .count() as u32
+}
+
+/// 清理早于 `days` 天的条目（一次性操作，**不改保留天数设置**），返回删除条数。
+///
+/// 与保留期清理共用 `prune_history`，两处的「谁受保护」口径必须一致 ——
+/// 这里自己数一遍再自己删一遍的话，两条路径迟早会漂。
+#[tauri::command]
+pub fn delete_older_than(days: u32) -> u32 {
+    if days == 0 {
+        return 0;
+    }
+    let Some(dir) = DIR.get().cloned() else { return 0 };
+    let Some(hist) = HISTORY.get() else { return 0 };
+    let include_pinned = crate::settings::get().prune_include_pinned;
+    let mut guard = match hist.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let before = guard.len();
+    *guard = prune_history(guard.clone(), &dir, days, include_pinned);
+    crate::query::bump_epoch();
+    let removed = (before - guard.len()) as u32;
+    if removed > 0 {
+        crate::log_print!("[clipboard] 按天数清理 {removed} 条（{days} 天前）");
+    }
+    removed
+}
+
 /// 这条记录是否受保护（置顶或收藏）。
 ///
 /// 单独抽出来是因为**所有自动清理路径都要用它**：退出清理、保留期清理。

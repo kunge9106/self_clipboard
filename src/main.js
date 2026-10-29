@@ -3077,6 +3077,15 @@ function settingsDataHtml(s) {
           "退出前先确认一次",
           s.cleanConfirmExit,
           true
+        ) +
+        // 一次性按天数清理：与「保留天数」不是一回事 —— 保留天数是常驻策略（每次启动
+        // 按它清），这里只清这一次，不改设置。
+        rowCtl(
+          "按天数清理",
+          "一次性删除 N 天前的旧条目，<b>不改动保留天数设置</b>；置顶与收藏按上方设置豁免",
+          `<input type="number" id="clean-age-days" min="1" value="30" /><button class="btn-ghost" id="btn-clean-by-age">清理</button>`,
+          false,
+          "set-clean-by-age"
         )
     ),
     block(
@@ -4560,11 +4569,106 @@ async function checkHistoryLimit() {
     `当前 ${count} 条，上限 ${max} 条，超出 ${count - max} 条。` +
     `清理会删掉最旧的 ${count - max} 条（置顶与收藏不受影响），此操作不可撤销。`;
   modal.hidden = false;
+  void suggestAgeCleanup(count - max);
 }
 
 // 设置项与弹窗都用事件委托：设置页每次渲染都会重建那一行，委托才能活过重绘。
+/// 上限提示里的「按建议清理」：找一个保留天数档，既能清掉超出量、又不至于
+/// 清得太狠（档位从宽松到严格依次试，取第一个够用的）。
+///
+/// 数字由后端数（`count_older_than`），前端不自己算 —— 两处口径必须一致。
+let suggestedAgeDays = 0;
+
+async function suggestAgeCleanup(overflow) {
+  const btn = document.getElementById("limit-by-age");
+  if (!btn) return;
+  btn.hidden = true;
+  suggestedAgeDays = 0;
+  for (const days of [7, 30, 90, 180, 365]) {
+    let n = 0;
+    try {
+      n = Number(await invoke("count_older_than", { days })) || 0;
+    } catch {
+      return;
+    }
+    if (n >= overflow && n > 0) {
+      suggestedAgeDays = days;
+      btn.textContent = `清理 ${days} 天前的旧条目（${n} 条）`;
+      btn.hidden = false;
+      return;
+    }
+  }
+}
+
 document.addEventListener("click", async (e) => {
   const id = e.target?.id;
+  if (id === "limit-by-age") {
+    const modal = document.getElementById("limit-modal");
+    if (modal) modal.hidden = true;
+    const days = suggestedAgeDays;
+    if (!days) return;
+    let n = 0;
+    try {
+      n = Number(await invoke("delete_older_than", { days })) || 0;
+    } catch (err) {
+      toast("清理失败：" + err);
+      return;
+    }
+    try {
+      items = await invoke("get_history");
+      render();
+    } catch {
+      /* 刷新失败不阻塞提示 */
+    }
+    toast(n > 0 ? `已清理 ${n} 条 ${days} 天前的条目` : "没有可清理的条目");
+    return;
+  }
+  if (id === "btn-clean-by-age") {
+    const days = Math.max(1, Math.floor(Number(document.getElementById("clean-age-days")?.value) || 30));
+    let n = 0;
+    try {
+      n = Number(await invoke("count_older_than", { days })) || 0;
+    } catch {
+      n = -1;
+    }
+    const modal = document.getElementById("age-clean-modal");
+    if (!modal) return;
+    document.getElementById("age-clean-modal-text").textContent =
+      n < 0
+        ? `将删除 ${days} 天前的条目。`
+        : n === 0
+          ? `没有 ${days} 天前的条目。`
+          : `将删除 ${days} 天前的条目 ${n} 条（置顶与收藏按设置豁免），此操作不可撤销。`;
+    modal.dataset.days = String(days);
+    modal.hidden = false;
+    return;
+  }
+  if (id === "age-clean-cancel") {
+    const modal = document.getElementById("age-clean-modal");
+    if (modal) modal.hidden = true;
+    return;
+  }
+  if (id === "age-clean-confirm") {
+    const modal = document.getElementById("age-clean-modal");
+    const days = Number(modal?.dataset.days || 0);
+    if (modal) modal.hidden = true;
+    if (!days) return;
+    let n = 0;
+    try {
+      n = Number(await invoke("delete_older_than", { days })) || 0;
+    } catch (err) {
+      toast("清理失败：" + err);
+      return;
+    }
+    try {
+      items = await invoke("get_history");
+      render();
+    } catch {
+      /* 刷新失败不阻塞提示 */
+    }
+    toast(n > 0 ? `已清理 ${n} 条 ${days} 天前的条目` : "没有可清理的条目");
+    return;
+  }
   if (id !== "limit-confirm" && id !== "limit-snooze") return;
   const modal = document.getElementById("limit-modal");
   if (modal) modal.hidden = true;
