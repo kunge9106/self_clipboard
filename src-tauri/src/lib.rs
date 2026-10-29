@@ -292,6 +292,7 @@ pub fn run() {
             query::get_history_window,
             query::history_count,
             query::count_by_filter,
+            query::filter_stats,
             query::list_ids,
             clipboard::delete_by_filter,
             clipboard::delete_item,

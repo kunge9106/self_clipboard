@@ -102,6 +102,19 @@ pub struct IdPage {
     pub offset: u32,
 }
 
+/// 「清空当前视图」弹窗要的分组统计：置顶优先、收藏次之、其余为普通。
+///
+/// 为什么由后端算：这三组互不重叠的划分依赖 `pinnedViews` 与 `favorite`，
+/// 前端要自己算就得先拿到全量条目 —— 那正是这次要消灭的东西。
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterStats {
+    pub total: u64,
+    pub normal: u64,
+    pub pinned: u64,
+    pub favorites: u64,
+}
+
 /// `delete_by_filter` 的结果。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -487,6 +500,31 @@ pub fn count(items: &[Meta], filter: &HistoryFilter) -> u64 {
         .count() as u64
 }
 
+/// 分组统计：一条一旦置顶就不再计入收藏组（与前端弹窗的三组划分一致）。
+pub fn stats(items: &[Meta], filter: &HistoryFilter) -> FilterStats {
+    let r = Resolved::new(filter);
+    let mut out = FilterStats {
+        total: 0,
+        normal: 0,
+        pinned: 0,
+        favorites: 0,
+    };
+    for item in items {
+        if !(r.passes_view(item) && r.matches_query(item)) {
+            continue;
+        }
+        out.total += 1;
+        if !item.pinned_views.is_empty() {
+            out.pinned += 1;
+        } else if item.favorite {
+            out.favorites += 1;
+        } else {
+            out.normal += 1;
+        }
+    }
+    out
+}
+
 /// 过滤后的 id（按结果顺序）。
 pub fn matching_ids(items: &[Meta], filter: &HistoryFilter) -> Vec<String> {
     let r = Resolved::new(filter);
@@ -546,6 +584,12 @@ pub fn history_count(filter: HistoryFilter) -> Result<u64, String> {
     Ok(crate::clipboard::with_history(|items| {
         count(items, &filter)
     }))
+}
+
+/// 「清空当前视图」的分组统计（弹窗文案与勾选项用）。
+#[tauri::command]
+pub fn filter_stats(filter: HistoryFilter) -> Result<FilterStats, String> {
+    Ok(crate::clipboard::with_history(|items| stats(items, &filter)))
 }
 
 /// 见 [`history_count`]。

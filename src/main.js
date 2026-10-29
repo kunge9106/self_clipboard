@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+// 查询封装与窗口化列表：两者都不依赖 DOM 之外的全局状态，可单独 import 测（见 test/）。
+import { buildFilter, createHistoryApi } from "./history-api.js";
+import { VirtualList } from "./virtual-list.js";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -609,6 +612,11 @@ function bindSelectBar() {
 
 function bindClearView() {
   document.getElementById("btn-clear-view").onclick = () => {
+    // 窗口模式：不在前端算 id，交给后端按同一套筛选自己删
+    if (USE_WINDOW_API) {
+      void clearViewWindow();
+      return;
+    }
     const scope = filtered();
     if (scope.length === 0) {
       toast("没有可清理的条目");
@@ -627,6 +635,70 @@ function bindClearView() {
     }
     openClearViewModal({ normal, pinned, favs });
   };
+}
+
+/**
+ * 窗口模式的「清空当前视图」。
+ *
+ * 与旧实现的差别只在「id 从哪来」：旧的是 `filtered()` 给出全量 id，新的由后端
+ * 按同一个筛选条件自己算 —— 10 万条页面不需要把 10 万个 id 传到前端再传回去。
+ * 分组与口径（默认保留置顶与收藏、两者都没有时直接清不弹窗）完全照旧。
+ */
+async function clearViewWindow() {
+  const filter = currentFilter();
+  let stats;
+  try {
+    stats = await invoke("filter_stats", { filter });
+  } catch (e) {
+    toast("读取失败：" + e);
+    return;
+  }
+  if (!stats || stats.total === 0) {
+    toast("没有可清理的条目");
+    return;
+  }
+  if (stats.pinned === 0 && stats.favorites === 0) {
+    await doClearViewFilter({ includePinned: false, includeFavorites: false });
+    return;
+  }
+  openClearViewModalWindow(filter, stats);
+}
+
+/** 弹窗（复用同一套 DOM，只把内容换成计数）。 */
+function openClearViewModalWindow(filter, stats) {
+  clearViewTargets = { window: true, filter, stats };
+  document.getElementById("clear-view-modal-text").textContent =
+    stats.normal > 0
+      ? `将清除 ${stats.normal} 条${query ? "搜索结果" : "内容"}，默认保留置顶与收藏。`
+      : "范围内没有普通条目（全是置顶或收藏），勾选下方选项可一并清除。";
+  const pinRow = document.getElementById("clear-view-pinned-row");
+  const favRow = document.getElementById("clear-view-fav-row");
+  pinRow.hidden = stats.pinned === 0;
+  favRow.hidden = stats.favorites === 0;
+  document.getElementById("clear-view-pinned-label").textContent =
+    `同时清除置顶（${stats.pinned} 条）`;
+  document.getElementById("clear-view-fav-label").textContent =
+    `同时清除收藏（${stats.favorites} 条）`;
+  document.getElementById("clear-view-pinned").checked = false;
+  document.getElementById("clear-view-fav").checked = false;
+  document.getElementById("clear-view-checks").hidden =
+    stats.pinned === 0 && stats.favorites === 0;
+  document.getElementById("clear-view-modal").hidden = false;
+}
+
+/** 按筛选删除（窗口模式）。返回后整表重取，锚点归零到顶部。 */
+async function doClearViewFilter({ includePinned, includeFavorites }) {
+  try {
+    const res = await api.deleteByFilter(currentFilter(), false, {
+      includePinned,
+      includeFavorites,
+    });
+    render({ keepScroll: false });
+    const n = res?.deleted ?? 0;
+    toast(query ? `已清理 ${n} 条搜索结果` : `已清理 ${n} 条`);
+  } catch (e) {
+    toast("清理失败：" + e);
+  }
 }
 
 async function doClearView(ids) {
@@ -680,6 +752,13 @@ function bindClearViewModal() {
     modal.hidden = true;
     const t = clearViewTargets;
     if (!t) return;
+    if (t.window) {
+      await doClearViewFilter({
+        includePinned: document.getElementById("clear-view-pinned").checked,
+        includeFavorites: document.getElementById("clear-view-fav").checked,
+      });
+      return;
+    }
     const ids = t.normal.map((i) => i.id);
     if (document.getElementById("clear-view-pinned").checked)
       ids.push(...t.pinned.map((i) => i.id));
@@ -716,7 +795,20 @@ function bindSearch() {
   const sync = () => {
     if (clear) clear.hidden = el.value.trim() === "";
   };
+  let searchTimer = null;
   el.addEventListener("input", () => {
+    // 窗口模式：搜索词原样交给后端归一（前端不再 toLowerCase，否则 filterKey
+    // 会因大小写差异反复失效）。120ms 去抖 —— 每按一个键就取一页没有意义。
+    if (USE_WINDOW_API) {
+      sync();
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        searchTimer = null;
+        query = el.value.trim();
+        render({ keepScroll: false });
+      }, 120);
+      return;
+    }
     query = el.value.trim().toLowerCase();
     sync();
     render();
@@ -726,6 +818,10 @@ function bindSearch() {
       el.value = "";
       query = "";
       sync();
+      if (searchTimer) {
+        clearTimeout(searchTimer);
+        searchTimer = null;
+      }
       render(); // 换回完整列表，不回顶部保留位置
       el.focus();
     });
@@ -850,6 +946,266 @@ const SUBTYPE_BADGE = {
  * 为什么需要这个参数：本函数会 `view.innerHTML = ""` 并新建 `.history` 容器，
  * 容器一换，scrollTop 必然归零。所以必须在重建**之前**把位置记下来。
  */
+
+// ---------------------------------------------------------------------------
+// 窗口化列表（USE_WINDOW_API）
+//
+// 旧的「全量 filtered() + 渐进渲染」路径完整保留在下方：把 `USE_WINDOW_API`
+// 改成 `false` 就回到改动前的行为，一个字都不用动。两套路径的入口在 render()。
+//
+// 为什么换：全量路径要把 10 万条一次拿到前端（38 MB IPC）、过滤一遍、排序一遍，
+// 再加入 DOM；窗口化之后每次交互只传一页（约 100 KB），DOM 里只留四十来行。
+// ---------------------------------------------------------------------------
+const USE_WINDOW_API = true;
+
+/** 一页多少条。200 条约 100 KB，与设计文档的 IPC 预算是同一个数量级。 */
+const WINDOW_LIMIT = 200;
+
+const api = createHistoryApi(invoke, { cachePages: 10 });
+
+let wl = null; // VirtualList 实例
+let wlTotal = 0; // 过滤后的总条数（后端给）
+let wlState = null; // 已加载的连续片段 { start, items }
+let wlToken = 0; // 渲染序号：异步回来晚了的旧结果直接丢弃
+let wlBusy = false; // 取页中（同一时刻只允许一个请求，避免重复页）
+
+/** 当前筛选条件。搜索词原样传 —— 后端负责 trim 与折叠大小写。 */
+function currentFilter() {
+  return buildFilter({ view: currentView, query });
+}
+
+/** 造一个「类高度探针」：用真实卡片标记，量到的就是真高度。 */
+function probeRow(c) {
+  const el = document.createElement("div");
+  el.className = "card";
+  const item = {
+    id: `vl-probe-${c}`,
+    kind: "text",
+    subtype: null,
+    ts: 0,
+    preview: "探针内容，用于测量这一行的高度",
+    preview_truncated: false,
+    pinnedViews: [],
+    favorite: false,
+    shot: false,
+    edited: false,
+  };
+  if (c === 1) item.subtype = "code";
+  if (c === 2) item.subtype = "markdown";
+  if (c === 3) {
+    item.kind = "files";
+    item.preview = "a.txt 等 2 个文件";
+  }
+  if (c === 4) {
+    item.kind = "image";
+    item.preview = "[图片]";
+  }
+  fillCard(el, item);
+  if (c === 4) {
+    // 图片行的高度由图片决定，但探针里的 <img> 还没加载（高度 0）。
+    // 按 CSS 允许的上限（max-height:60px）撑起来，量到的才是健康状态下的行高；
+    // 真实行加载完图片后由 ResizeObserver 校正。
+    const img = el.querySelector(".card-image");
+    if (img) {
+      img.style.height = "60px";
+      img.style.width = "80px";
+    }
+  }
+  return el;
+}
+
+/** 建滚动容器 + 虚拟列表（切视图、从设置页回来时都会重建，保证状态干净）。 */
+function ensureWindow(view) {
+  if (wl) {
+    wl.destroy();
+    wl = null;
+  }
+  const scroller = document.createElement("div");
+  scroller.className = "history";
+  view.innerHTML = "";
+  view.appendChild(scroller);
+  wl = new VirtualList({
+    scroller,
+    fillRow: (el, item) => fillCard(el, item),
+    keyOf: (item) => item.id,
+    onNeedRange: () => schedulePrefetch(),
+    onRendered: () => {
+      // 行池复用后有两件事必须重做：图片懒加载的观察（新节点换了 data-img-id）、
+      // 文件失效徽章（新节点没有上一轮留下的 class）。
+      observeImages(scroller);
+      applyMissingMarks();
+    },
+  });
+  wl.measureProbes(probeRow);
+  scroller.addEventListener(
+    "scroll",
+    () => {
+      wl?.scheduleRender();
+      schedulePrefetch();
+    },
+    { passive: true }
+  );
+}
+
+/** 把一页并进已加载片段（只支持相邻拼接；不连续就丢掉旧窗口重建）。 */
+function absorbPage(offset, pageItems) {
+  if (!pageItems || pageItems.length === 0) return;
+  if (!wlState) {
+    wlState = { start: offset, items: pageItems.slice() };
+  } else if (offset === wlState.start + wlState.items.length) {
+    wlState.items.push(...pageItems);
+  } else if (offset + pageItems.length === wlState.start) {
+    wlState.items = pageItems.concat(wlState.items);
+    wlState.start = offset;
+  } else {
+    wlState = { start: offset, items: pageItems.slice() };
+  }
+  items = wlState.items; // 既有 helper（失效检测、批量删除）只看已加载行
+  if (wl) {
+    wl.setTotal(wlTotal);
+    wl.setWindow(wlState.start, wlState.items);
+  }
+}
+
+let prefetchRaf = null;
+function schedulePrefetch() {
+  if (prefetchRaf) return;
+  prefetchRaf = requestAnimationFrame(() => {
+    prefetchRaf = null;
+    void prefetchNow();
+  });
+}
+
+/** 视口缺数据就补一页：往上缺补上一页，往下缺补下一页。 */
+async function prefetchNow() {
+  if (!wl || wlBusy || wlTotal === 0 || !wlState) return;
+  const need = wl.needRange();
+  const start = wlState.start;
+  const end = wlState.start + wlState.items.length;
+  let target = null;
+  if (need.first < start) {
+    target = Math.max(0, Math.floor(need.first / WINDOW_LIMIT) * WINDOW_LIMIT);
+  } else if (need.last >= end && end < wlTotal) {
+    target = end;
+  }
+  if (target == null) return;
+
+  wlBusy = true;
+  const token = wlToken;
+  try {
+    const res = await api.fetchWindow({
+      filter: currentFilter(),
+      offset: target,
+      limit: WINDOW_LIMIT,
+      anchorId: null,
+      wantTotal: false,
+    });
+    if (token !== wlToken) return; // 期间换了视图/搜索词
+    absorbPage(res.offset, res.items);
+    wl.scheduleRender();
+    refreshMissing(wlState.items);
+  } catch (e) {
+    reportFrontend("warn", "list", "取页失败：" + e);
+  } finally {
+    wlBusy = false;
+  }
+}
+
+/** 状态栏：总数由后端给（`wantTotal=true` 的那次返回）。 */
+function refreshStatusCount() {
+  const el = document.getElementById("status-count");
+  if (!el) return;
+  el.textContent = query ? `找到 ${wlTotal} 条结果` : `共 ${wlTotal} 条`;
+}
+
+/**
+ * 窗口化渲染入口。与旧路径共享 render() 的前半段（工具栏/设置页/空态）。
+ *
+ * `keepScroll` 的语义与旧路径一致：保位置。只是实现从「记 scrollTop 数值并做高度
+ * 补偿」换成了「记住视口顶端那条的 id 与像素偏移」，插入/删除都不用再补高度。
+ */
+async function renderWindow({ keepScroll = false } = {}) {
+  const view = document.getElementById("view");
+  const token = ++wlToken;
+  const wasAtTop = !wl || wl.scroller.scrollTop <= 0;
+  const anchor = keepScroll && wl && !wasAtTop ? wl.getAnchor() : null;
+  // 保位置时取「锚点所在的那一页」而不是窗口起点：窗口可能有上千条（一路滚下来
+  // 累积的），只取起点那一页会把视口里的内容整片丢掉。
+  let from = 0;
+  let anchorId = null;
+  if (keepScroll && wl && anchor && anchor.id != null) {
+    const at = wl.idToIndex.get(anchor.id);
+    if (at !== undefined) {
+      from = Math.max(0, Math.floor(at / WINDOW_LIMIT) * WINDOW_LIMIT);
+      anchorId = anchor.id;
+    }
+  }
+
+  // 每次完整重绘都重新问一次后端：置顶 / 收藏 / 删除 / 新内容到达这些操作
+  // 散在十几个处理函数里，与其要求每一处都记得「失效缓存」，不如在这里统一失效。
+  // 代价是一次取页（1–2 ms）；页缓存真正的作用是滚动时的相邻页与回滚，不受影响。
+  api.invalidate();
+  ensureWindow(view);
+  refreshStatusCount();
+  wlBusy = true;
+  let res;
+  try {
+    res = await api.fetchWindow({
+      filter: currentFilter(),
+      offset: from,
+      limit: WINDOW_LIMIT,
+      anchorId,
+      wantTotal: true,
+    });
+  } catch (e) {
+    if (token === wlToken) {
+      view.innerHTML = `<div class="empty"><div class="empty-title">列表读取失败</div>
+        <div class="empty-sub">${String(e)}</div></div>`;
+      if (wl) {
+        wl.destroy();
+        wl = null;
+      }
+    }
+    return;
+  } finally {
+    wlBusy = false;
+  }
+  if (token !== wlToken) return; // 期间又渲染了一次
+
+  wlTotal = res.total;
+  refreshStatusCount();
+
+  if (wlTotal === 0) {
+    view.innerHTML = emptyHtml();
+    if (wl) {
+      wl.destroy();
+      wl = null;
+    }
+    wlState = null;
+    items = [];
+    return;
+  }
+
+  wlState = { start: res.offset, items: res.items.slice() };
+  items = wlState.items;
+  wl.setTotal(wlTotal);
+  wl.setWindow(wlState.start, wlState.items);
+  if (anchor) wl.restoreAnchor(anchor);
+  wl.render();
+  schedulePrefetch();
+  // 文件失效检测只查**已加载**的行 —— 全量查一次 10 万个 id 是旧路径的成本
+  refreshMissing(wlState.items);
+}
+
+/** 列表变了之后保持位置重绘（删除、置顶、收藏、新内容到达都走这里）。 */
+function rerenderNow() {
+  if (!USE_WINDOW_API) {
+    render({ keepScroll: true });
+    return;
+  }
+  void renderWindow({ keepScroll: true });
+}
+
 function render({ keepScroll = false } = {}) {
   hideHoverPreview(); // 重绘后旧卡片已销毁，避免浮层残留
   const prevTop = keepScroll && wrapEl ? wrapEl.scrollTop : 0;
@@ -886,6 +1242,12 @@ function render({ keepScroll = false } = {}) {
       <div class="empty-title">文件复制已关闭</div>
       <div class="empty-sub">可在「设置 → 数据 → 记录」里打开</div>
     </div>`;
+    return;
+  }
+
+  // ★ 分流点：窗口化路径（USE_WINDOW_API=false 时走下面原封不动的旧路径）
+  if (USE_WINDOW_API) {
+    void renderWindow({ keepScroll });
     return;
   }
 
@@ -955,6 +1317,11 @@ function statusCountText(n) {
 function removeCards(ids) {
   const drop = new Set(ids);
   if (drop.size === 0) return;
+  if (USE_WINDOW_API) {
+    // 窗口模式：数据在后端，重取当前窗口并按锚点还原位置（不需要手工扣高度）
+    rerenderNow();
+    return;
+  }
 
   let removedAbove = 0; // 视口上沿之上被删掉的总高度（含间距）
   let removedRendered = 0; // 已渲染卡片里被删掉的数量
@@ -1076,6 +1443,18 @@ function emptyHtml() {
 
 function cardEl(item) {
   const card = document.createElement("div");
+  fillCard(card, item);
+  return card;
+}
+
+/**
+ * 把一条内容填进**已有的**卡片节点（行池复用就是反复调它）。
+ *
+ * 与旧写法的区别只有两处：清空旧内容、事件用属性赋值而不是 addEventListener ——
+ * 后者在复用节点上会越绑越多，滚一遍列表就绑出几十个回调。
+ */
+function fillCard(card, item) {
+  card.innerHTML = "";
   const pinned = isPinnedIn(item, currentView); // 置顶按分类独立，只看当前分类
   card.className =
     "card" +
@@ -1153,19 +1532,18 @@ function cardEl(item) {
   bindHoverPreview(card, item);
 
   // 左键 → 复制回剪贴板；批量选中模式下改为切换选中
-  card.addEventListener("click", () => {
+  card.onclick = () => {
     if (selectMode) {
       toggleSelect(item.id, card);
       return;
     }
     copyBack(item);
-  });
-  card.addEventListener("contextmenu", (e) => {
+  };
+  card.oncontextmenu = (e) => {
     e.preventDefault();
     e.stopPropagation();
     openContextMenu(e.clientX, e.clientY, item);
-  });
-  return card;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1372,6 +1750,9 @@ function placePreview(box, card) {
 
 
 function bindHoverPreview(card, item) {
+  // 复用节点：上一次绑的回调必须清掉，否则鼠标一进会拿到旧条目
+  card.onmouseenter = null;
+  card.onmouseleave = null;
   if (!hasMoreToPreview(item)) return;
   // 悬浮多久才弹浮层。
   //
@@ -1380,11 +1761,11 @@ function bindHoverPreview(card, item) {
   // 1s 是个平衡点：快速扫过列表不会触发，停下来看一眼时也不觉得迟。
   // 图片 / 文本 / 文件统一 1s，同一份列表里弹得快慢不一会显得很随意。
   const HOVER_DELAY_MS = 1000;
-  card.addEventListener("mouseenter", () => {
+  card.onmouseenter = () => {
     if (previewTimer) clearTimeout(previewTimer);
     previewTimer = setTimeout(() => showHoverPreview(card, item), HOVER_DELAY_MS);
-  });
-  card.addEventListener("mouseleave", hideHoverPreview);
+  };
+  card.onmouseleave = hideHoverPreview;
 }
 
 async function showHoverPreview(card, item) {
@@ -4152,6 +4533,13 @@ async function main() {
   await listen("clipboard-update", (e) => {
     const item = e.payload;
     if (items.some((i) => i.id === item.id)) return;
+    if (USE_WINDOW_API) {
+      // 数据在后端：让页缓存失效并重取。用户停在顶部时不做锚点还原，
+      // 新内容立刻可见；停在中间时锚点会把他正在看的那条钉在原地。
+      api.invalidate();
+      if (currentView !== "settings") renderWindow({ keepScroll: true });
+      return;
+    }
     items.unshift(item);
     // 设置页与条目列表无关。重绘只是把整页重建一遍，然后弹回顶部 ——
     // 数据已经进了 items，切回列表自然是最新的。

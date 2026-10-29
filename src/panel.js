@@ -5,6 +5,8 @@
 // 样式与变量复用主界面那一套（panel.css @import styles.css），观感不会割裂。
 
 import { invoke } from "@tauri-apps/api/core";
+// 与主窗口共用同一套查询封装与筛选语义（否则「同一个词在主窗口搜得到、面板搜不到」）
+import { buildFilter, createHistoryApi } from "./history-api.js";
 import { listen } from "@tauri-apps/api/event";
 // 关闭键的匹配规则与设置页录制共用一份，两边各写一套必然对不上
 import { matchesCombo } from "./hotkeys.js";
@@ -28,8 +30,9 @@ const listEl = $("panel-list");
 const searchEl = $("panel-search");
 const statusEl = $("panel-status");
 
-/** 全量历史（已按时间倒序） */
-let all = [];
+const api = createHistoryApi(invoke, { cachePages: 3 });
+/** 过滤后的总条数（后端给）：面板只显示前 MAX_ROWS 条，但状态栏要报真实总数 */
+let total = 0;
 /** 当前过滤后的结果 */
 let rows = [];
 /** 当前选中下标 */
@@ -50,28 +53,47 @@ const HOVER_DELAY_MS = 600;
 
 /** 重载数据。面板是常驻窗口，每次弹出都要重拉 —— 否则看到的是上次的列表。 */
 async function reload() {
-  try {
-    all = await invoke("get_history");
-  } catch (e) {
-    all = [];
-    setStatus("读取失败：" + e);
-  }
   searchEl.value = "";
   sel = 0;
-  applyFilter();
+  hidePreview();
+  await fetchRows("");
 }
 
+/** 搜索去抖 120ms（与主窗口一致）。搜索词原样传，归一由后端做。 */
+let searchTimer = null;
 function applyFilter() {
-  const q = searchEl.value.trim().toLowerCase();
-  const matched = q
-    ? all.filter(
-        (i) =>
-          (i.preview || "").toLowerCase().includes(q) ||
-          (KIND_LABEL[i.kind] || "").includes(q) ||
-          (i.kind || "").includes(q)
-      )
-    : all;
-  rows = matched.slice(0, MAX_ROWS);
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    searchTimer = null;
+    void fetchRows(searchEl.value.trim());
+  }, 120);
+}
+
+/**
+ * 取第一页（面板只列 60 条，不需要翻页）。
+ *
+ * `wantTotal = true` 是为了状态栏能报出真实总数：面板只显示前 60 条，
+ * 「共 3 万条」和「共 60 条」对用户是两件事。
+ */
+async function fetchRows(q) {
+  let res;
+  try {
+    res = await api.fetchWindow({
+      filter: buildFilter({ view: "history", query: q }),
+      offset: 0,
+      limit: MAX_ROWS,
+      anchorId: null,
+      wantTotal: true,
+    });
+  } catch (e) {
+    rows = [];
+    total = 0;
+    render();
+    setStatus("读取失败：" + e);
+    return;
+  }
+  rows = res.items;
+  total = res.total;
   if (sel >= rows.length) sel = Math.max(0, rows.length - 1);
   render();
   setStatus(
@@ -79,7 +101,7 @@ function applyFilter() {
       ? q
         ? "没有匹配的内容"
         : "剪贴板还是空的"
-      : `${matched.length} 条${matched.length > MAX_ROWS ? `（显示前 ${MAX_ROWS} 条）` : ""}`
+      : `${total} 条${total > MAX_ROWS ? `（显示前 ${MAX_ROWS} 条）` : ""}`
   );
 }
 

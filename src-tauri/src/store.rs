@@ -2098,6 +2098,44 @@ mod tests {
         assert!(!again.items.iter().any(|i| i.id == "b-2"));
     }
 
+    /// 真实形态的 v0 索引（明文 JSON）必须能迁移：这是升级用户的必经路径。
+    ///
+    /// 用一条**逐字段写全**的样例（含 pinnedViews / files / shot / subtype / 各种
+    /// 路径组合），宁可与真实数据重复也不要漏字段 —— 老版本写出来的 JSON 就是长这样。
+    #[test]
+    fn migrate_v0_realistic_index() {
+        let dir = TempDir::new("v0-real");
+        let json = r#"[
+          {"id":"18bcfe56fa2-1","kind":"text","ts":1730000000000,"pinnedViews":["history"],
+           "favorite":false,"edited":false,"subtype":"code",
+           "preview":"第 0 条剪贴板内容","preview_truncated":true,"size":120,"shot":false,
+           "text_path":"data/18bcfe56fa2-1.txt","html_path":null,"rtf_path":null,
+           "rich_images":[],"img_path":null,"files_path":null,"files":null},
+          {"id":"18bcfe56fa3-1","kind":"files","ts":1730000001000,"pinnedViews":[],
+           "favorite":true,"edited":false,"preview":"报告.pdf 等 3 个文件",
+           "preview_truncated":true,"size":120,"shot":false,
+           "text_path":null,"img_path":null,"files_path":"files/18bcfe56fa3-1.txt",
+           "files":["C:/a.pdf","C:/b.pdf","C:/c.pdf"]},
+          {"id":"18bcfe56fa4-1","kind":"image","ts":1730000002000,"pinnedViews":[],
+           "favorite":false,"edited":false,"preview":"[图片]","preview_truncated":true,
+           "size":120,"shot":false,"text_path":null,"img_path":null}
+        ]"#;
+        fs::write(dir.path().join(INDEX_LEGACY), json).unwrap();
+
+        let loaded = load_index(dir.path());
+        assert_eq!(loaded.status, LoadStatus::MigratedV0);
+        assert_eq!(loaded.items.len(), 3, "三条都要在");
+        assert_eq!(loaded.items[0].pinned_views, vec!["history"]);
+        assert_eq!(loaded.items[1].files.as_ref().unwrap().len(), 3);
+        assert!(loaded.items[1].favorite);
+        assert_eq!(loaded.items[2].kind, "image");
+
+        // 迁移落盘后再读一次：v2
+        persist(dir.path(), &loaded.items).unwrap();
+        assert_eq!(load_index(dir.path()).status, LoadStatus::V2);
+        assert_eq!(load_index(dir.path()).items.len(), 3);
+    }
+
     /// 密钥不可用（key.bin 坏掉）→ 保存明确报 `NoKey`，绝不写出读不回来的索引。
     #[test]
     fn save_without_key_reports_nokey() {

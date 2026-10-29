@@ -4838,10 +4838,37 @@ fn patch_item<F: FnOnce(&mut crate::store::Meta)>(id: &str, f: F) -> Result<(), 
 pub fn delete_by_filter(
     filter: crate::query::HistoryFilter,
     delete_local_files: Option<bool>,
+    include_pinned: Option<bool>,
+    include_favorites: Option<bool>,
 ) -> Result<crate::query::DeleteReport, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
-    let ids = crate::query::matching_ids(&hist, &filter);
+    let all = crate::query::matching_ids(&hist, &filter);
+    // `include_*` 默认 false = **保留**置顶与收藏，与今天「清空当前视图」的默认口径一致
+    // （那个弹窗的两个勾选项就是这两个开关）。这层保护必须在后端做：让前端先筛一遍
+    // 再传 id，等于又回到「拉全量 id」的老路。
+    let inc_pinned = include_pinned.unwrap_or(false);
+    let inc_favs = include_favorites.unwrap_or(false);
+    let ids: Vec<String> = if all.is_empty() || (inc_pinned && inc_favs) {
+        all
+    } else {
+        // 一次扫描收集「受保护」的 id 与它的保护类型，避免 O(n²) 的 contains
+        let mut protect: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+        for m in hist.iter() {
+            if !m.pinned_views.is_empty() {
+                protect.insert(m.id.as_str(), true); // true = 置顶（分组优先于收藏）
+            } else if m.favorite {
+                protect.insert(m.id.as_str(), false);
+            }
+        }
+        all.into_iter()
+            .filter(|id| match protect.get(id.as_str()) {
+                Some(true) => inc_pinned,
+                Some(false) => inc_favs,
+                None => true, // 普通条目总是删
+            })
+            .collect()
+    };
     if ids.is_empty() {
         return Ok(crate::query::DeleteReport {
             deleted: 0,
