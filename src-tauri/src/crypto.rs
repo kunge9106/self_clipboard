@@ -83,10 +83,17 @@ const TAG_LEN: usize = 16;
 pub const CONTAINER_PREFIX_LEN: usize = AAD_HEADER_LEN + NONCE_LEN + TAG_LEN;
 
 const KEY_ID_OFFSET: usize = 8;
+const ALG_OFFSET: usize = 7;
 const WRITE_SEQ_OFFSET: usize = 16;
 const PLAIN_LEN_OFFSET: usize = 24;
 const NONCE_OFFSET: usize = 32;
 const TAG_OFFSET: usize = 44;
+
+/// 密钥文件里 `key_id` / `created_ms` 的偏移。**与容器的偏移是两套**，
+/// 只是数值上恰好都在 8 / 16 —— 刻意分开命名：容器的头以后要动的话，
+/// 不应该连带把已经落盘的 `key.bin` 读坏。
+const KEY_FILE_KEY_ID_OFFSET: usize = 8;
+const KEY_FILE_CREATED_OFFSET: usize = 16;
 
 /// 域串：索引快照。
 pub const DOMAIN_INDEX: &[u8] = b"index";
@@ -229,8 +236,8 @@ fn decode_key_file(raw: &[u8]) -> io::Result<Key> {
             "密钥文件魔数不匹配，按损坏处理；不会自动重建",
         ));
     }
-    let key_id = read_u64(raw, KEY_ID_OFFSET);
-    let created_ms = read_u64(raw, KEY_ID_OFFSET + 8);
+    let key_id = read_u64(raw, KEY_FILE_KEY_ID_OFFSET);
+    let created_ms = read_u64(raw, KEY_FILE_CREATED_OFFSET);
     let blob = &raw[KEY_HEADER_LEN..];
     let plain = keyring::unprotect(blob, KEY_ENTROPY).ok_or_else(|| {
         io::Error::new(
@@ -267,12 +274,8 @@ fn create_key_file(dir: &Path, path: &Path) -> io::Result<Key> {
     let key_id = u64::from_le_bytes(id_bytes);
     let created_ms = now_ms();
 
-    let blob = keyring::protect(&bytes, KEY_ENTROPY).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "DPAPI 加密密钥失败，密钥未落盘（本次不写任何数据）",
-        )
-    })?;
+    let blob = keyring::protect(&bytes, KEY_ENTROPY)
+        .ok_or_else(|| io::Error::other("DPAPI 加密密钥失败，密钥未落盘（本次不写任何数据）"))?;
 
     let mut out = Vec::with_capacity(KEY_HEADER_LEN + blob.len());
     out.extend_from_slice(KEY_MAGIC);
@@ -320,7 +323,7 @@ pub fn seal(
 
     let mut out = vec![0u8; CONTAINER_PREFIX_LEN + plain.len()];
     out[..MAGIC_V2.len()].copy_from_slice(MAGIC_V2);
-    out[MAGIC_V2.len()] = ALG_AES_256_GCM;
+    out[ALG_OFFSET] = ALG_AES_256_GCM;
     out[KEY_ID_OFFSET..KEY_ID_OFFSET + 8].copy_from_slice(&key.key_id.to_le_bytes());
     out[WRITE_SEQ_OFFSET..WRITE_SEQ_OFFSET + 8].copy_from_slice(&write_seq.to_le_bytes());
     out[PLAIN_LEN_OFFSET..PLAIN_LEN_OFFSET + 8]
@@ -368,7 +371,7 @@ pub fn open(
     if bytes.len() < CONTAINER_PREFIX_LEN {
         return Err(CryptoError::Malformed);
     }
-    if bytes[MAGIC_V2.len()] != ALG_AES_256_GCM {
+    if bytes[ALG_OFFSET] != ALG_AES_256_GCM {
         return Err(CryptoError::Malformed);
     }
     // key_id 先比：用错了密钥时「校验失败」和「密钥不对」是两件完全不同的事，
@@ -445,7 +448,7 @@ fn now_ms() -> u64 {
 }
 
 fn random_bytes(buf: &mut [u8]) -> io::Result<()> {
-    getrandom::getrandom(buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    getrandom::getrandom(buf).map_err(|e| io::Error::other(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -760,7 +763,7 @@ mod tests {
 
         // 未知算法编号也算结构错误
         let mut bad = sealed.clone();
-        bad[MAGIC_V2.len()] = 0x02;
+        bad[ALG_OFFSET] = 0x02;
         assert_eq!(
             open(&key, DOMAIN_INDEX, None, &bad),
             Err(CryptoError::Malformed)
