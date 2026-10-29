@@ -1402,30 +1402,6 @@ pub fn resize_start(app: tauri::AppHandle, edge: u32) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 const WM_NCACTIVATE: u32 = 0x0086;
-/// 系统命令：任务栏点击、最小化、关闭等
-const WM_SYSCOMMAND: u32 = 0x0112;
-/// SC_MINIMIZE：最小化请求（任务栏再点当前窗口时发的就是它）
-const SC_MINIMIZE: usize = 0xF020;
-/// SW_HIDE：隐藏窗口（与「关闭时收进托盘」同路径）
-const SW_HIDE: i32 = 0;
-/// WM_DESTROY：窗口销毁
-const WM_DESTROY: u32 = 0x0002;
-/// WM_SIZE：窗口尺寸变化
-const WM_SIZE: u32 = 0x0005;
-/// SIZE_MINIMIZED：窗口被最小化
-const SIZE_MINIMIZED: usize = 1;
-
-/// 「这次最小化是自己人发起的」标记。
-///
-/// 标题栏的「最小化」按钮要走真最小化（与 2.6.0 一致），任务栏点当前窗口的按钮
-/// 要改成收进托盘。两者在窗口过程里长得一样（都表现为 SIZE_MINIMIZED），只能靠
-/// 这个标记区分：自己人发起的先把标记置上，最小化真正发生时清掉。
-static ALLOW_MINIMIZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// 允许下一次最小化按真最小化处理（标题栏按钮用）。
-pub fn allow_minimize_once() {
-    ALLOW_MINIMIZE.store(true, std::sync::atomic::Ordering::Relaxed);
-}
 /// 鼠标捕获转移：lparam 为接手 capture 的窗口（0 = 没人持有）
 const WM_CAPTURECHANGED: u32 = 0x0215;
 
@@ -1655,8 +1631,6 @@ unsafe extern "system" fn border_proc(
 
 pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
     let _ = HOOK_APP.set(app.clone());
-    // 注册 Shell Hook：任务栏点击会以窗口消息送到本窗口的窗口过程
-    crate::taskbar::install_shell_hook(hwnd);
 
     unsafe extern "system" {
         fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
@@ -1698,86 +1672,6 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
         if msg == WM_NCACTIVATE {
             // lparam = -1 → 禁止重绘非客户区，原生标题栏就永远画不出来
             return unsafe { DefWindowProcW(hwnd, msg, wparam, -1) };
-        }
-        // 任务栏上再点一次当前窗口的按钮 = 收起（与点关闭按钮同路径）。
-        //
-        // Windows 对「点当前前台窗口的任务栏按钮」发的是 WM_SYSCOMMAND/SC_MINIMIZE；
-        // 自己标题栏的「最小化」走 Tauri 的 window.minimize() → ShowWindow，
-        // 不经过这条消息，所以拦它不影响标题栏按钮。
-        //
-        // 只在这条消息上动手，不去判断「是不是任务栏发来的」：其他来源的 SC_MINIMIZE
-        // （程序自己调 ShowWindow(SW_MINIMIZE)）根本不走 WM_SYSCOMMAND，不会命中。
-        // 最小化本身：任务栏点当前窗口的按钮走的是 ShowWindow(SW_MINIMIZE)，
-        // **不经过 WM_SYSCOMMAND**（拦那条消息在实测里根本没被触发），所以这里
-        // 拦最小化的结果而不是命令。
-        //
-        // 一旦发现是最小化，就改成隐藏窗口（与「关闭时收进托盘」同路径）。窗口已经
-        // 进了最小化状态，隐藏前不需要额外处理；重新唤回时 show_main 会 unminimize。
-        //
-        // 标题栏的「最小化」按钮要真最小化，它走 ALLOW_MINIMIZE 标记放行 —— 与
-        // 2.6.0 的行为保持一致。
-        // Shell Hook：任务栏点击等 Shell 事件。
-        //
-        // `HSHELL_RUDEAPPACTIVATED` = 用户点了任务栏上某个已运行程序的按钮，
-        // lParam 就是那个窗口的句柄 —— lParam 是我们时才收进托盘。
-        //
-        // 这条路是主路：Win11 点当前窗口的任务栏按钮可能只是弹缩略图、根本不
-        // 最小化（不合并任务栏按钮的旧设置下才会最小化），靠系统消息抓不到。
-        // 窗口销毁时注销 Shell Hook：后台释放会销毁并重建窗口，旧 hwnd 上还挂着
-        // 注册的话，Shell 事件会往一个已经不存在的窗口发。
-        if msg == WM_DESTROY {
-            crate::taskbar::remove_shell_hook(hwnd);
-        }
-        if crate::taskbar::is_shellhook(msg) {
-            if wparam == crate::taskbar::HSHELL_RUDEAPPACTIVATED && lparam == hwnd {
-                // 启动闸门：应用启动时外壳也会发这条事件，那时窗口正要显示，
-                // 误收就变成「进程在、窗口永远打不开」。
-                if !crate::taskbar::is_ready() {
-                    return 0;
-                }
-                extern "system" {
-                    fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
-                    fn IsWindowVisible(hwnd: isize) -> i32;
-                    fn GetForegroundWindow() -> isize;
-                }
-                let visible = unsafe { IsWindowVisible(hwnd) } != 0;
-                if !visible {
-                    // 收着的时候点图标 = 唤回。走托盘那条路径（含材质补齐、
-                    // unminimize、抢焦点），不要自己 ShowWindow。
-                    if let Some(app) = HOOK_APP.get() {
-                        crate::tray::show_main(app);
-                    }
-                    crate::log_print!("[taskbar] 点任务栏图标 → 唤回窗口");
-                    return 0;
-                }
-                // 窗口可见但不在前台 = 用户想去这个程序，这时点图标是要**唤回**它，
-                // 不是收走它。交给系统正常激活即可。
-                if unsafe { GetForegroundWindow() } != hwnd {
-                    return 0;
-                }
-                unsafe { ShowWindow(hwnd, SW_HIDE); }
-                crate::log_print!("[taskbar] 点任务栏图标 → 收进托盘");
-                return 0;
-            }
-        }
-        if msg == WM_SIZE && wparam == SIZE_MINIMIZED {
-            if ALLOW_MINIMIZE.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                return 0;
-            }
-            extern "system" {
-                fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
-            }
-            unsafe { ShowWindow(hwnd, SW_HIDE); }
-            crate::log_print!("[effects] 窗口被最小化 → 改为收进托盘");
-            return 0;
-        }
-        if msg == WM_SYSCOMMAND && wparam == SC_MINIMIZE {
-            extern "system" {
-                fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
-            }
-            unsafe { ShowWindow(hwnd, SW_HIDE); }
-            crate::log_print!("[effects] 任务栏再次点击 → 收进托盘");
-            return 0;
         }
         // 鼠标捕获被抢走 / 释放（点了窗口外部、失焦、别的窗口 SetCapture）：
         // 此时收不到 WM_LBUTTONUP，必须在这里复位，否则拖动/缩放的「起点」

@@ -1005,7 +1005,6 @@ id 对得上的高度。
 | `DwmSetWindowAttribute` / `DwmGetWindowAttribute` / `DwmFlush` | Vista |
 | `UpdateLayeredWindow` / `SetWindowRgn` / `AddClipboardFormatListener` | Win2000 |
 | `CryptProtectData` / `CryptUnprotectData`（DPAPI） | XP |
-| `RegisterShellHookWindow` / `RegisterWindowMessage` | Win2000 |
 | `GetProcessMemoryInfo` / `QueryFullProcessImageNameW` / `SHFileOperationW` | XP / Vista / Win2000 |
 
 `RtlGetVersion` 读真实 build 号，不用 `GetVersionEx`（后者会受应用清单影响，
