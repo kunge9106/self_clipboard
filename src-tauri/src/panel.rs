@@ -187,22 +187,27 @@ pub(crate) unsafe fn force_foreground(hwnd: isize) -> bool {
     GetForegroundWindow() == hwnd
 }
 
-/// 复制完成后给一条提示的落点。
+/// 提示的落点：面板矩形下沿中点（物理像素）。
 ///
-/// 面板还开着（「点选后保持打开」）就贴在它下沿居中 —— 面板在光标下方展开，
-/// 提示再压在光标下方会盖住列表第一行；面板已经收起就落到光标处，那里的界面刚消失，
-/// 视线还在原处。
-fn toast_anchor(app: &AppHandle) -> (i32, i32) {
-    if let Some(w) = app.get_webview_window(PANEL_LABEL) {
-        if w.is_visible().unwrap_or(false) {
-            if let (Ok(pos), Ok(size)) = (w.outer_position(), w.inner_size()) {
-                return (
-                    pos.x + size.width as i32 / 2,
-                    pos.y + size.height as i32,
-                );
-            }
-        }
-    }
+/// 必须在**收起之前**取。收起之后面板就没了，退化成按光标定位会让提示跑到另一处 ——
+/// 实测两种观感都不对：
+/// - 键盘选中（`Enter`）时鼠标还停在唤起面板时的位置，提示跟用户盯着的地方无关；
+/// - 鼠标点选时提示压在刚粘出去的内容上。
+///
+/// 贴着面板原来的下沿就稳定得多：面板本身就在光标下方展开，提示接在它下方，
+/// 「面板收起/不收起」两种模式的落点一致。
+fn panel_anchor(app: &AppHandle) -> Option<(i32, i32)> {
+    let w = app.get_webview_window(PANEL_LABEL)?;
+    let pos = w.outer_position().ok()?;
+    let size = w.inner_size().ok()?;
+    Some((
+        pos.x + size.width as i32 / 2,
+        pos.y + size.height as i32,
+    ))
+}
+
+/// 光标位置。面板矩形取不到时才退回用它。
+fn cursor_point() -> (i32, i32) {
     let mut pt = Rect {
         left: 0,
         top: 0,
@@ -215,12 +220,22 @@ fn toast_anchor(app: &AppHandle) -> (i32, i32) {
     (200, 200)
 }
 
+/// 出一张复制结果提示。文案与落点都由调用方决定 —— 落点取不到（面板还没建过）
+/// 才退回光标。
+fn toast(anchor: Option<(i32, i32)>, text: &str) {
+    let (x, y) = anchor.unwrap_or_else(cursor_point);
+    crate::shot_native::toast_near_point(text, x, y);
+}
+
 /// 把某条内容复制进剪贴板，再粘回唤出前的窗口。
 ///
 /// 默认粘完就收起面板；「点选后保持打开」开着时留着不动 —— 那时焦点已经还给原窗口，
 /// 面板处于「可见但失焦」的状态，可以接着点下一条（点击本身会把焦点拿回来）。
 /// 该开关只有在「面板失焦不收起」也开着时才允许打开（见 `settings`），否则留不住。
 pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
+    // 必须在收起之前取：收起后窗口就没了，落点会退化成光标位置
+    let anchor = panel_anchor(app);
+
     // 走与右键「复制」完全相同的路径：格式处理（原样 / 纯文本 / 内联图还原）
     // 只有一份实现，两边不会漂移。
     crate::clipboard::copy_back(id.to_string(), Some(false))?;
@@ -237,8 +252,7 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
     if target == 0 {
         // 没有可回的目标：内容已经在剪贴板里，用户自己按 Ctrl+V 即可
         crate::log_print!("[panel] 无目标窗口，已只复制不粘贴");
-        let (x, y) = toast_anchor(app);
-        crate::shot_native::toast_near_point("已复制到剪贴板", x, y);
+        toast(anchor, "已复制到剪贴板");
         return Ok(());
     }
 
@@ -248,8 +262,7 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(80));
         if GetForegroundWindow() != target {
             crate::log_warn!("[panel] 焦点没能切回原窗口，跳过模拟粘贴（内容已在剪贴板）");
-            let (x, y) = toast_anchor(app);
-            crate::shot_native::toast_near_point("已复制到剪贴板", x, y);
+            toast(anchor, "已复制到剪贴板");
             return Ok(());
         }
         // 顺序：Ctrl 按下 → V 按下 → V 抬起 → Ctrl 抬起。
@@ -259,8 +272,9 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
         }
     }
     crate::log_print!("[panel] 已粘贴回原窗口");
-    let (x, y) = toast_anchor(app);
-    crate::shot_native::toast_near_point("已粘贴", x, y);
+    // 文案统一成「已复制到剪贴板」：粘贴是否真的落到目标窗口取决于对方，
+    // 而复制这一步是确定成功的，提示只说确定的事
+    toast(anchor, "已复制到剪贴板");
     Ok(())
 }
 
