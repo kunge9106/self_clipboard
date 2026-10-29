@@ -2825,7 +2825,7 @@ dependencies = [
 
 [[package]]
 name = "self-clipboard"
-version = "2.6.0"
+version = "2.6.5"
 dependencies = [
  "aes-gcm",
  "getrandom 0.2.17",

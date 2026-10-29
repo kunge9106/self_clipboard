@@ -988,6 +988,41 @@ N 天前的条目（`delete_older_than`），不改保留天数设置 —— 保
 下标可能装着另一条内容，偏移表却按旧内容排布 —— 改成同时记 id，重排时只采用
 id 对得上的高度。
 
+## 九·六、系统兼容性
+
+**目标系统**：Windows 10 1809（build 17763）起，含 Windows 11 全部版本。
+
+**运行时依赖**：WebView2 Runtime。Win11 自带；Win10 上若未预装，由安装程序按需
+下载 Evergreen 引导程序（安装包内不含离线包，避免体积翻倍）。不依赖 .NET，
+不依赖任何原生（C）库 —— 加密（`aes-gcm` / `getrandom`）是纯 Rust 实现。
+
+**Win32 API 的版本下限**（代码里用到的全部 API 逐个核过，最晚的几个都在 Win10
+1607 之前，1809 满足）：
+
+| API | 最低版本 |
+|---|---|
+| `GetDpiForSystem` / `GetDpiForWindow` / `GetSystemMetricsForDpi` / `SetThreadDpiAwarenessContext` | Win10 1607 |
+| `DwmSetWindowAttribute` / `DwmGetWindowAttribute` / `DwmFlush` | Vista |
+| `UpdateLayeredWindow` / `SetWindowRgn` / `AddClipboardFormatListener` | Win2000 |
+| `CryptProtectData` / `CryptUnprotectData`（DPAPI） | XP |
+| `RegisterShellHookWindow` / `RegisterWindowMessage` | Win2000 |
+| `GetProcessMemoryInfo` / `QueryFullProcessImageNameW` / `SHFileOperationW` | XP / Vista / Win2000 |
+
+`RtlGetVersion` 读真实 build 号，不用 `GetVersionEx`（后者会受应用清单影响，
+拿到的不是真实版本）。
+
+**材质按 build 号分档**（`effects.rs` 的 `Tier`，每档都打印实际 build 与实际档位）：
+
+| 档位 | 适用 | 表现 |
+|---|---|---|
+| `SystemBackdrop` | Win11 22H2+ | 系统级 acrylic，圆角由系统给 |
+| `Mica` | Win11 21H2 | 壁纸采样，不是真模糊 |
+| `Acrylic` | Win10 1809 – Win11 22H2 | `SetWindowCompositionAttribute` 真模糊，圆角限 10px |
+| `Solid` | 兜底 | 不透明底色，观感不崩 |
+
+**已实测**：Windows 10 build 19045（22H2）、Windows 11（开发期另一台）。
+**未实测**：Windows 10 1809 / 1903 / 1909 与多屏不同缩放。
+
 ## 十、IPC 命令清单（`lib.rs`）
 
 | 命令 | 作用 |

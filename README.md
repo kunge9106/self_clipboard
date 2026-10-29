@@ -196,6 +196,12 @@ Win10 上圆角与系统模糊无法同时满足：acrylic 始终铺满窗口矩
 - 开启圆角模式：关闭系统模糊，窗口四角为真透明，背景壁纸不再模糊。
 - 直角模式为默认：保留系统毛玻璃，窗口为直角，矩形与 acrylic 完全吻合，无残留。
 
+## 系统要求
+
+- Windows 10 1809（build 17763）起，含 Windows 11 全部版本
+- 需要 WebView2 Runtime（Win11 自带；Win10 缺失时安装程序会按需下载）
+- 不需要 .NET，不含原生依赖
+
 ## 数据与存储
 
 默认缓存目录为 `%APPDATA%\com.kunge.selfclipboard\clipboard\`，可在设置中改为任意路径。
