@@ -60,6 +60,21 @@ image = { version = "0.25", default-features = false, features = [
 # Windows 材质与剪贴板一律走手写 FFI，不引入 windows crate：
 # 避免元数据版本漂移，也避免为几个 API 拖入庞大依赖（开发原则 10）。
 
+# 加密内核（src/crypto.rs）。
+#
+# 为什么不继续用 DPAPI 加密整份数据：`CryptProtectData` 的耗时不是线性的，
+# 实测 0.5 MB 要 21 ms、38 MB 要 226 ms，更像有 200 ms 量级的固定开销 ——
+# 十万条历史下每次复制都要重写整份索引，一次三百多毫秒。改成「DPAPI 只包 32 字节密钥
+# （进程启动时解一次）+ 数据用 AES-256-GCM」后，写盘路径上没有系统调用级的加密开销。
+#
+# `aes-gcm` 是纯 Rust 实现（RustCrypto），x86_64 上走 AES-NI，不引 C 依赖。
+# 关掉默认 feature：只要算法本身与 `alloc`，不需要它自带的 `getrandom`（随机源我们
+# 直接用 `getrandom` crate，少一层间接、也少一个 rand_core 依赖）。
+# 坚决不自己实现 AES/GCM —— 那是这类模块唯一无法靠单测兜底的错误来源。
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+# 只用来取 32 字节密钥与每条 12 字节 nonce；Windows 上走 `BCryptGenRandom`。
+getrandom = "0.2"
+
 [profile.release]
 codegen-units = 1
 lto = true

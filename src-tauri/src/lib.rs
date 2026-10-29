@@ -16,6 +16,12 @@ mod settings;
 mod autostart;
 mod tray;
 mod logger;
+// 加密内核与标签字典是「谁都可能要用的地基」，不归属某个窗口或某个功能：
+// 声明成 `pub mod` 而不是 `mod`，一是让它们能脱离本 crate 的私有树被单测与后续
+// 存储/查询层直接引用，二是避免 `pub fn` 因为「crate 内暂时没人调用」被判成死代码
+// （本任务刻意不改任何老路径，新模块只被单测使用）。
+pub mod crypto;
+pub mod labels;
 mod hotkey;
 mod popup;
 mod panel;
