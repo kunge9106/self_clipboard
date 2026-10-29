@@ -101,6 +101,9 @@ pub const DOMAIN_INDEX: &[u8] = b"index";
 pub const DOMAIN_TEXT: &[u8] = b"text";
 /// 域串：`files/<id>.txt` 这类路径清单实体。
 pub const DOMAIN_FILES: &[u8] = b"files";
+/// 域串：追加日志 `index.wal` 的帧。日志帧的头与容器不同（见 `store::wal`），
+/// 所以帧的 AAD 由调用方拼好，这里只提供域串。
+pub const DOMAIN_WAL: &[u8] = b"wal";
 
 // ---------------------------------------------------------------------------
 // 错误
@@ -402,6 +405,60 @@ pub fn open(
         return Err(CryptoError::Malformed);
     }
     Ok(plain)
+}
+
+/// 裸 AEAD 加密：调用方自己拼 AAD、自己决定帧布局，返回 `(nonce, tag, 密文)`。
+///
+/// 之所以在容器之外另开一个入口：追加日志（`index.wal`）的帧头是
+/// 「魔数 + 长度 + nonce + tag」，与快照容器（60 B 前缀、带 key_id）不是一套东西。
+/// 但**密码学实现只能有一份** —— 自己再写一遍 GCM 初始化就是又开一个可能出错的副本。
+/// 这里的 AAD 由调用方拼（帧头 + 域串），与容器同一条纪律：头参与认证，改长度字段
+/// 直接校验失败。
+pub fn seal_detached(key: &Key, aad: &[u8], plain: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    if let Err(e) = random_bytes(&mut nonce_bytes) {
+        panic!("系统随机数不可用（{e}）：拒绝用可预测的 nonce 继续加密");
+    }
+    let mut ciphertext = plain.to_vec();
+    let tag = key
+        .cipher()
+        .encrypt_in_place_detached(Nonce::from_slice(&nonce_bytes), aad, &mut ciphertext)
+        .expect("AES-256-GCM 加密失败（内存异常）");
+    (nonce_bytes.to_vec(), tag.to_vec(), ciphertext)
+}
+
+/// 裸 AEAD 解密，是 [`seal_detached`] 的逆操作。任何校验失败都归到 `Tampered`。
+pub fn open_detached(
+    key: &Key,
+    aad: &[u8],
+    nonce: &[u8],
+    tag: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    if nonce.len() != NONCE_LEN || tag.len() != TAG_LEN {
+        return Err(CryptoError::Malformed);
+    }
+    let mut plain = ciphertext.to_vec();
+    key.cipher()
+        .decrypt_in_place_detached(
+            Nonce::from_slice(nonce),
+            aad,
+            &mut plain,
+            Tag::from_slice(tag),
+        )
+        .map_err(|_| CryptoError::Tampered)?;
+    Ok(plain)
+}
+
+/// 读容器头里的 `write_seq`（快照的「已覆盖到哪个 op 序号」）。
+///
+/// 只做**读**，不做校验；调用方必须先用 [`open`] 成功解过一次再拿它当判据 ——
+/// 它是 AAD 的一部分，被改过的话 `open` 会直接失败。
+pub fn container_write_seq(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() < AAD_HEADER_LEN || !bytes.starts_with(MAGIC_V2) {
+        return None;
+    }
+    Some(read_u64(bytes, WRITE_SEQ_OFFSET))
 }
 
 /// AAD = 容器头前 32 字节 ‖ 域串 ‖ `0x00` ‖ 相对路径（实体才有路径）。

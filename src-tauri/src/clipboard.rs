@@ -375,7 +375,7 @@ pub fn delete_item(id: String, delete_local_files: Option<bool>) -> Result<Optio
             None
         };
         remove_item_files(&dir, &item);
-        save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
+        append_op(&dir, crate::store::Op::Delete { id: id.clone() });
         // 只记 id / kind 等元数据，不含内容。
         crate::log_print!("[clipboard] 删除条目 {id} kind={kind}");
         Ok(note)
@@ -496,7 +496,9 @@ pub fn clear_all() -> Result<(), String> {
         remove_item_files(&dir, item);
     }
     hist.clear();
-    save_index(&dir, &hist);
+    drop(hist);
+    // `clear` 是覆盖式语义（清空就是清空），重放不会「复活」条目。
+    append_op(&dir, crate::store::Op::Clear);
     crate::log_print!("[clipboard] 清空全部历史，共 {n} 条");
     Ok(())
 }
@@ -937,7 +939,17 @@ pub fn delete_items(
         }
     });
     drop(hist);
-    save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
+    // 每条一个 Delete 帧：单帧几十字节；整批一次写完、一次 fsync（逐条 sync 会是
+    // 几百次 fsync = 秒级卡顿）。不用 `clear` 之类的批量 op —— 那会把
+    // 「选中删除」变成「清空」，语义完全不同。
+    let ops: Vec<crate::store::Op> = ids
+        .iter()
+        .map(|id| crate::store::Op::Delete { id: id.clone() })
+        .collect();
+    match crate::store::append_many(&dir, &ops) {
+        Ok(()) => LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed),
+        Err(e) => crate::log_err!("clipboard", "批量删除的日志追加失败（{e}）"),
+    }
     crate::log_print!("[clipboard] 批量删除 {removed} 条");
     Ok(note)
 }
@@ -1129,6 +1141,8 @@ pub fn init(app: &AppHandle) {
     // 这一次启动结束时要不要补写一份 v2 快照：首次运行、刚迁移完、索引需要重建，
     // 三种情况都得写，否则下次启动又走一遍同样的分支。
     let mut need_snapshot = loaded.status.needs_snapshot();
+    // 日志里还有没固化的帧（含「尾帧刚被截断」「中间帧损坏」两种）→ 起后台整理
+    let loaded_needs_compaction = loaded.needs_compaction;
     // 索引条目数明显少于缓存目录里的内容文件 → 索引坏了，按文件补齐。
     //
     // 不只看「索引为空」：用户实测的损坏形态是索引被截断、只剩最后几条
@@ -1217,6 +1231,14 @@ pub fn init(app: &AppHandle) {
     let hist = prune_history(hist, &dir, cfg.retention_days, cfg.prune_include_pinned);
 
     let _ = HISTORY.set(Mutex::new(hist));
+
+    // 启动时日志里还有帧（上次没来得及整理，或尾帧刚被截断）→ 后台固化一次。
+    // 不在这里同步做：10 万条的 compaction 要 150 ms，那是启动路径上的白等。
+    if loaded_needs_compaction {
+        spawn_compact(dir.clone());
+    }
+    // 空闲维护：日志 30 秒没有新变更就固化，避免「关掉再打开时重放一大段日志」。
+    spawn_compaction_ticker(dir.clone());
 
     // 工作线程必须在订阅监听**之前**就位：否则第一批 WM_CLIPBOARDUPDATE
     // 到达时 WORKER 还没初始化，会退化成主线程同步落盘。
@@ -1658,8 +1680,10 @@ fn replace_latest_text(text: &str, html: &Option<String>, rtf: &Option<String>) 
         last.rtf_path = Some(rrel);
     }
     let updated = last.clone();
-    save_index(&dir, &g);
     drop(g);
+    // 编辑保存几乎把整条都换了（正文、预览、子类型、富文本），写整条最直接，
+    // 也仍然是幂等的：同 id upsert。
+    append_op(&dir, crate::store::Op::Insert { item: updated.clone() });
     if let Some(app) = APP.get() {
         let _ = app.emit("clipboard-update", updated);
     }
@@ -1703,7 +1727,17 @@ fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
         }
     }
     if changed {
-        save_index(&dir, &g);
+        // 只变了富文本三项 → 用 patch，帧比整条小一半
+        let set = crate::store::PatchSet {
+            html_path: last.html_path.clone(),
+            rtf_path: last.rtf_path.clone(),
+            rich_images: Some(last.rich_images.clone()),
+            ..Default::default()
+        };
+        drop(g);
+        append_op(&dir, crate::store::Op::Patch { id, set });
+    } else {
+        drop(g);
     }
     changed
 }
@@ -3042,12 +3076,16 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
         RawClip::ImageFile(_) | RawClip::ImageRaw(_) => {}
     }
 
-    let mut hist = HISTORY.get().unwrap().lock().unwrap();
-    // 按 ts 二分插入，而不是 `insert(0, _)`：后者隐含「新条目 ts 一定最大」，
-    // 系统时钟回拨（NTP 校时 / 用户改时间）时就会把新内容排到中间去，
-    // 而列表「ts 严格降序」是分页切片的前提。正常情况命中下标 0，与老行为一致。
-    crate::store::insert_ordered(&mut hist, item.clone());
-    save_index(&dir, &hist);
+    {
+        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        // 按 ts 二分插入，而不是 `insert(0, _)`：后者隐含「新条目 ts 一定最大」，
+        // 系统时钟回拨（NTP 校时 / 用户改时间）时就会把新内容排到中间去，
+        // 而列表「ts 严格降序」是分页切片的前提。正常情况命中下标 0，与老行为一致。
+        crate::store::insert_ordered(&mut hist, item.clone());
+    } // 先放锁：追加日志要 sync_data，别让读的人等它
+    // 复制是最高频的写路径：一条 op 追加进日志（~500 B + sync_data），
+    // 不再整份重写索引。整份快照交给后台整理。
+    append_op(&dir, crate::store::Op::Insert { item: item.clone() });
     // ⚠️ 只记**元数据**，绝不记内容。
     //
     // 改动前这里打的是 `preview={:?}`，而 preview 就是剪贴板正文的开头几行 ——
@@ -4188,6 +4226,84 @@ fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
     }
 }
 
+/// 最近一次追加变更的时间（毫秒），给「空闲 30 秒就整理」用。
+static LAST_APPEND_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 把一条变更追加进日志 —— 高频路径（复制 / 删除 / 置顶 / 收藏 / 清空）走这里。
+///
+/// 与 `save_index` 的分工是硬边界：**任何一条路径只能选一种**。同一次操作既 append
+/// 又整份快照，重放时会把那条 op 再来一遍（insert 幂等还好，但 `clear` 之后再
+/// `insert` 就会凭空多出一条），属于自己给自己造数据错误。
+fn append_op(dir: &Path, op: crate::store::Op) {
+    match crate::store::append(dir, op) {
+        Ok(()) => {
+            LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed);
+            // 帧数 / 字节数到阈值 → 后台整理。判断只看内存里的计数，不进 IO。
+            if crate::store::wal_needs_compact(dir) {
+                spawn_compact(dir.to_path_buf());
+            }
+        }
+        Err(e) => crate::log_err!(
+            "clipboard",
+            "追加日志失败（{e}）：本次改动只在内存生效，下一次成功写入会补上"
+        ),
+    }
+}
+
+/// 单飞的整理线程标记：同一时刻只允许一个 compaction 在跑。
+static COMPACTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 起一个后台线程做一次整理。
+fn spawn_compact(dir: PathBuf) {
+    if COMPACTING.swap(true, Ordering::SeqCst) {
+        return; // 已经有一个在跑，它会把该固化的都固化掉
+    }
+    std::thread::spawn(move || {
+        compact_now(&dir);
+        COMPACTING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// 同步整理：把内存里的全量状态写成新快照，并截掉日志里已被覆盖的部分。
+///
+/// 序列化要的是**当前**状态，所以这里克隆一份 `Vec<HistoryItem>`（10 万条约 38 ms）。
+/// 拿读锁克隆、写盘时不再持锁：整理是后台行为，不该让别人等它。
+/// 注意不能在持有 `HISTORY` 锁的路径上直接调用（会自锁），只能从新线程或退出流程里调。
+fn compact_now(dir: &Path) {
+    let Some(store) = HISTORY.get() else { return };
+    let snapshot = match store.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    };
+    let t = std::time::Instant::now();
+    match crate::store::compact(dir, &snapshot) {
+        Ok(()) => crate::log_print!(
+            "[clipboard] 索引整理完成：{} 条，{} ms",
+            snapshot.len(),
+            t.elapsed().as_millis()
+        ),
+        Err(e) => crate::log_err!("clipboard", "索引整理失败（{e}）"),
+    }
+}
+
+/// 空闲整理：启动后台维护线程，日志超过 30 秒没有新变更就固化一次。
+///
+/// 为什么需要它：帧数/字节数阈值只在「一直在写」时才会触发；用户复制几步就不动了，
+/// 日志会一直躺在磁盘上等下次启动重放。空闲整理把「重放成本」限制在一次会话之内。
+fn spawn_compaction_ticker(dir: PathBuf) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        if crate::store::wal_len(&dir) == 0 {
+            continue;
+        }
+        let idle = now_ms().saturating_sub(LAST_APPEND_MS.load(Ordering::Relaxed));
+        if idle >= 30_000 {
+            spawn_compact(dir.clone());
+        }
+    });
+}
+
 /// 从 id（`{:x}-{counter}`）里取回毫秒时间戳。取不到返回 None。
 fn ts_from_id(id: &str) -> Option<u64> {
     id.split('-')
@@ -4545,14 +4661,23 @@ fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
 
 fn patch_item<F: FnOnce(&mut HistoryItem)>(id: &str, f: F) -> Result<(), String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
-    let mut hist = HISTORY.get().unwrap().lock().unwrap();
-    if let Some(item) = hist.iter_mut().find(|i| i.id == id) {
+    // 先留一份改动前的样子：改完之后拿它跟新值比，才知道该写哪种 op。
+    // 只改了收藏就写一个 `Fav` 帧（约 60 B），不必把整条重新写一遍。
+    let (before, after) = {
+        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        let Some(item) = hist.iter_mut().find(|i| i.id == id) else {
+            return Err("条目不存在".into());
+        };
+        let before = item.clone();
         f(item);
-        save_index(&dir, &hist);
-        Ok(())
-    } else {
-        Err("条目不存在".into())
+        (before, item.clone())
+    };
+    match crate::store::diff_op(&before, &after) {
+        // 什么都没变（例如对已在顶部的条目再点一次置顶）→ 不写盘
+        None => {}
+        Some(op) => append_op(&dir, op),
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5012,6 +5137,14 @@ pub fn on_app_exit() {
     // 落盘已挪到后台线程，退出前得等它跑完，否则「刚复制就退出」会丢记录。
     // 上限 2 秒：大图解码可能较久，但不至于让退出卡住。
     flush_pending(std::time::Duration::from_secs(2));
+
+    // 退出前把日志固化进快照：下次启动直接读快照，不必重放。
+    // 日志本身已经 sync 过，这里失败也不丢数据（最坏下次启动重放一遍）。
+    if let Some(dir) = DIR.get() {
+        if crate::store::wal_len(dir) > 0 {
+            compact_now(dir);
+        }
+    }
 
     if !USER_QUIT.swap(false, Ordering::SeqCst) {
         // 迁移缓存目录 / 装完更新 / 重启应用：程序自己发起的退出，不动数据
@@ -6798,12 +6931,38 @@ fn bench_scale() {
         }
         let t_save_plain = t.elapsed();
 
+        // 单次 append：复制路径的真实成本 = 组帧 + 加密 + write + sync_data。
+        // 用独立的目录，免得这 200 条测试 op 干扰后面的读回测量。
+        let wal_dir = std::env::temp_dir().join(format!("qingtie-bench-wal-{n}"));
+        let _ = std::fs::create_dir_all(&wal_dir);
+        let _ = std::fs::remove_file(wal_dir.join(crate::store::WAL_FILE));
+        let mut samples: Vec<u128> = Vec::with_capacity(200);
+        for k in 0..200 {
+            let mut it = hist[k % hist.len()].clone();
+            it.id = format!("bench-{k}");
+            let t = Instant::now();
+            crate::store::append(&wal_dir, crate::store::Op::Insert { item: it }).unwrap();
+            samples.push(t.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        let append_median = samples[samples.len() / 2];
+        let frame_bytes = crate::store::wal_len(&wal_dir) / 200;
+        let _ = std::fs::remove_dir_all(&wal_dir);
+
         // 读回：读文件 + 解密 + 解析（密钥在进程内已缓存，与真实启动一致）
         let t = Instant::now();
         let loaded = crate::store::load_index(&dir);
         let t_load = t.elapsed();
         assert_eq!(loaded.items.len(), n, "读回条数必须与写入一致");
         let back = loaded.items;
+
+        // compaction：后台整理一次（克隆当前状态 + 整份快照 + 截断日志）
+        let t = Instant::now();
+        let cloned = back.clone();
+        let t_clone = t.elapsed();
+        let t = Instant::now();
+        crate::store::compact(&dir, &cloned).unwrap();
+        let t_compact = t.elapsed();
 
         let t = Instant::now();
         let mut filtered: Vec<&HistoryItem> = back.iter().filter(|i| i.kind != "files").collect();
@@ -6830,6 +6989,15 @@ fn bench_scale() {
             t_sort.as_millis(),
         );
         println!("        不加密保存（紧凑 JSON 直写）：{} ms", t_save_plain.as_millis());
+        println!(
+            "        单次 append 中位数：{:.2} ms（200 次，平均帧 {frame_bytes} B，含 sync_data）"
+            , append_median as f64 / 1000.0
+        );
+        println!(
+            "        compaction：{} ms（其中克隆当前状态 {} ms，写盘不持锁）",
+            t_compact.as_millis(),
+            t_clone.as_millis()
+        );
         let _ = std::fs::remove_file(dir.join(crate::store::INDEX_BIN));
         let _ = std::fs::remove_file(dir.join("index-plain.json"));
     }
