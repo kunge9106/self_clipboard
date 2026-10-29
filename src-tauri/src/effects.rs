@@ -1408,6 +1408,22 @@ const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_MINIMIZE: usize = 0xF020;
 /// SW_HIDE：隐藏窗口（与「关闭时收进托盘」同路径）
 const SW_HIDE: i32 = 0;
+/// WM_SIZE：窗口尺寸变化
+const WM_SIZE: u32 = 0x0005;
+/// SIZE_MINIMIZED：窗口被最小化
+const SIZE_MINIMIZED: usize = 1;
+
+/// 「这次最小化是自己人发起的」标记。
+///
+/// 标题栏的「最小化」按钮要走真最小化（与 2.6.0 一致），任务栏点当前窗口的按钮
+/// 要改成收进托盘。两者在窗口过程里长得一样（都表现为 SIZE_MINIMIZED），只能靠
+/// 这个标记区分：自己人发起的先把标记置上，最小化真正发生时清掉。
+static ALLOW_MINIMIZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 允许下一次最小化按真最小化处理（标题栏按钮用）。
+pub fn allow_minimize_once() {
+    ALLOW_MINIMIZE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 /// 鼠标捕获转移：lparam 为接手 capture 的窗口（0 = 没人持有）
 const WM_CAPTURECHANGED: u32 = 0x0215;
 
@@ -1687,6 +1703,26 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
         //
         // 只在这条消息上动手，不去判断「是不是任务栏发来的」：其他来源的 SC_MINIMIZE
         // （程序自己调 ShowWindow(SW_MINIMIZE)）根本不走 WM_SYSCOMMAND，不会命中。
+        // 最小化本身：任务栏点当前窗口的按钮走的是 ShowWindow(SW_MINIMIZE)，
+        // **不经过 WM_SYSCOMMAND**（拦那条消息在实测里根本没被触发），所以这里
+        // 拦最小化的结果而不是命令。
+        //
+        // 一旦发现是最小化，就改成隐藏窗口（与「关闭时收进托盘」同路径）。窗口已经
+        // 进了最小化状态，隐藏前不需要额外处理；重新唤回时 show_main 会 unminimize。
+        //
+        // 标题栏的「最小化」按钮要真最小化，它走 ALLOW_MINIMIZE 标记放行 —— 与
+        // 2.6.0 的行为保持一致。
+        if msg == WM_SIZE && wparam == SIZE_MINIMIZED {
+            if ALLOW_MINIMIZE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                return 0;
+            }
+            extern "system" {
+                fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+            }
+            unsafe { ShowWindow(hwnd, SW_HIDE); }
+            crate::log_print!("[effects] 窗口被最小化 → 改为收进托盘");
+            return 0;
+        }
         if msg == WM_SYSCOMMAND && wparam == SC_MINIMIZE {
             extern "system" {
                 fn ShowWindow(hwnd: isize, cmd: i32) -> i32;

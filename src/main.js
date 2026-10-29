@@ -263,8 +263,10 @@ function doCloseWindow() {
 function bindWindowControls() {
   const guard = (label, p) =>
     p.catch((err) => toast(label + "失败：" + err));
+  // 走自己的命令而不是 appWindow.minimize()：窗口过程里要把「任务栏点当前窗口的
+  // 按钮」变成收进托盘，自己人发的最小化需要先打标记放行
   document.getElementById("btn-minimize").onclick = () =>
-    guard("最小化", appWindow.minimize());
+    guard("最小化", invoke("minimize_window"));
   document.getElementById("btn-maximize").onclick = () =>
     guard("最大化", appWindow.toggleMaximize());
   document.getElementById("btn-close").onclick = () => {

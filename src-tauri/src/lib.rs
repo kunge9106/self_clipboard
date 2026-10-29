@@ -241,6 +241,17 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     });
 }
 
+/// 标题栏「最小化」按钮：真最小化。
+///
+/// 不用前端直接调 `window.minimize()`：窗口过程里拦最小化是为了把「任务栏点当前
+/// 窗口的按钮」变成收进托盘，自己人发的最小化要先打标记放行，否则标题栏的按钮
+/// 也会变成收进托盘（与 2.6.0 的行为不一致）。
+#[tauri::command]
+fn minimize_window(window: tauri::Window) -> Result<(), String> {
+    crate::effects::allow_minimize_once();
+    window.minimize().map_err(|e| e.to_string())
+}
+
 pub fn run() {
     // panic 钩子最先装上：这样连「单实例检测阶段的崩溃」也能落进日志。
     logger::install_hook();
@@ -289,6 +300,7 @@ pub fn run() {
             clipboard::get_history,
             clipboard::copy_diagnostics,
             clipboard::history_limit,
+            minimize_window,
             clipboard::trim_history_to_limit,
             query::get_history_window,
             query::history_count,
