@@ -220,6 +220,15 @@ fn cursor_point() -> (i32, i32) {
     (200, 200)
 }
 
+/// 一次粘贴走到了哪一步。决定提示说什么 —— 只有真的把 Ctrl+V 送进原窗口才敢说「已粘贴」。
+#[derive(Clone, Copy)]
+enum Pasted {
+    /// 焦点切回原窗口并送出了粘贴按键
+    Yes,
+    /// 没有可回的目标窗口、焦点没抢回来、或按键没送出去：只保证内容在剪贴板里
+    No,
+}
+
 /// 复制结果的提示。落到哪里取决于面板会不会留着：
 ///
 /// - **面板留着**（「点选后保持打开」）：贴面板下沿。此时提示是面板「这一行动作的
@@ -230,15 +239,25 @@ fn cursor_point() -> (i32, i32) {
 ///
 /// 两种落点的共同点是**都不跟着鼠标走**：鼠标停在哪只代表输入位置，不代表用户
 /// 正在看哪里（键盘选中时它可能还停在唤起面板的地方）。
-fn toast_after_copy(panel: Option<(i32, i32)>, keep_open: bool) {
-    const TEXT: &str = "已复制到剪贴板";
+/// 文案按**实际结果**给，不按「通常会发生什么」给：
+/// - 真把 Ctrl+V 送进了原窗口 → 「已粘贴」；
+/// - 只复制成功（无目标窗口 / 焦点没抢回 / 按键被拦）→ 「已复制到剪贴板」。
+///
+/// 后者不能笼统说成「已粘贴」：面板点一下确实通常会粘进输入框，但目标程序拒绝焦点、
+/// 或以管理员身份运行导致 `SendInput` 被 UIPI 拦下时，内容只在剪贴板里。反过来，
+/// 全说成「已复制」又埋掉了「它已经替你粘好了」这个关键信息 —— 用户会再去按一次 Ctrl+V。
+fn toast_after_copy(panel: Option<(i32, i32)>, keep_open: bool, pasted: Pasted) {
+    let text = match pasted {
+        Pasted::Yes => "已粘贴",
+        Pasted::No => "已复制到剪贴板",
+    };
     match panel {
-        Some((x, bottom)) if keep_open => crate::shot_native::toast_near_point(TEXT, x, bottom),
-        Some((x, bottom)) => crate::shot_native::toast_at_work_area_bottom(TEXT, x, bottom),
+        Some((x, bottom)) if keep_open => crate::shot_native::toast_near_point(text, x, bottom),
+        Some((x, bottom)) => crate::shot_native::toast_at_work_area_bottom(text, x, bottom),
         // 面板还没建过（极少见）：用光标判断落在哪块屏
         None => {
             let (x, y) = cursor_point();
-            crate::shot_native::toast_at_work_area_bottom(TEXT, x, y);
+            crate::shot_native::toast_at_work_area_bottom(text, x, y);
         }
     }
 }
@@ -270,7 +289,7 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
     if target == 0 {
         // 没有可回的目标：内容已经在剪贴板里，用户自己按 Ctrl+V 即可
         crate::log_print!("[panel] 无目标窗口，已只复制不粘贴");
-        toast_after_copy(anchor, keep_open);
+        toast_after_copy(anchor, keep_open, Pasted::No);
         return Ok(());
     }
 
@@ -280,19 +299,20 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(80));
         if GetForegroundWindow() != target {
             crate::log_warn!("[panel] 焦点没能切回原窗口，跳过模拟粘贴（内容已在剪贴板）");
-            toast_after_copy(anchor, keep_open);
+            toast_after_copy(anchor, keep_open, Pasted::No);
             return Ok(());
         }
         // 顺序：Ctrl 按下 → V 按下 → V 抬起 → Ctrl 抬起。
         // 注入实现只有 `input` 一份，截图取消发 Esc 走的是同一个函数。
         if !crate::input::send_keys(&[VK_CONTROL, VK_V]) {
+            // 按键被拦（目标程序以管理员身份运行时常见）：内容在剪贴板，但没有粘上
             crate::log_warn!("[panel] SendInput 未能送出全部按键（可能被权限拦截）");
+            toast_after_copy(anchor, keep_open, Pasted::No);
+            return Ok(());
         }
     }
     crate::log_print!("[panel] 已粘贴回原窗口");
-    // 文案只说确定的事：粘贴是否真的落到目标窗口取决于对方程序，
-    // 而复制这一步是确定成功的
-    toast_after_copy(anchor, keep_open);
+    toast_after_copy(anchor, keep_open, Pasted::Yes);
     Ok(())
 }
 
