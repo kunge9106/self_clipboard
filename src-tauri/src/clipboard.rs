@@ -4340,14 +4340,37 @@ static LIMIT_STATE: std::sync::Mutex<(u32, u32, bool)> = std::sync::Mutex::new((
 static NEAR_LIMIT_LOGGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 前端读取上限状态：`{ max, count, nearLimit }`。
+/// 前端读取上限状态：`{ max, count, nearLimit, snoozeUntil }`。
+///
+/// `count` 来自上一次上限检查时记下的读数（每次复制都会刷新），不必为此再扫一遍全表。
 #[tauri::command]
 pub fn history_limit() -> serde_json::Value {
     let (count, max, near) = match LIMIT_STATE.lock() {
         Ok(g) => *g,
         Err(p) => *p.into_inner(),
     };
-    serde_json::json!({ "max": max, "count": count, "nearLimit": near })
+    serde_json::json!({
+        "max": max,
+        "count": count,
+        "nearLimit": near,
+        "snoozeUntil": crate::settings::get().max_items_snooze_until,
+    })
+}
+
+/// 立即按当前设置的上限清理一次（改小上限之后、或用户在弹窗里点了确认）。
+///
+/// 返回删掉的条数，前端据此提示「已清理 N 条」。
+#[tauri::command]
+pub fn trim_history_to_limit() -> u32 {
+    let Some(dir) = DIR.get().cloned() else { return 0 };
+    let Some(hist) = HISTORY.get() else { return 0 };
+    let mut guard = match hist.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let before = guard.len();
+    enforce_history_limit(&dir, &mut guard);
+    (before.saturating_sub(guard.len())) as u32
 }
 
 /// 按 `max_items` 清理超限的最旧条目。

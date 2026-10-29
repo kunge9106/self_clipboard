@@ -3032,6 +3032,15 @@ function settingsDataHtml(s) {
           "不勾选（默认）则置顶与收藏<b>不会</b>因到期被删；勾选后到期一并清理（不可恢复）",
           s.pruneIncludePinned,
           true
+        ) +
+        // 条数上限：与「保留天数」是两件事 —— 保留天数按时间清，上限按条数清。
+        // 调小上限会立即清理超出的部分（置顶与收藏豁免），所以这一行必须写清后果。
+        rowCtl(
+          "条数上限",
+          "超过此数量时提示清理最旧的条目，<b>置顶与收藏不受影响</b>；调小上限会立即清理",
+          `<input type="number" id="set-max-items" min="0" value="${s.maxItems ?? 10000}" /><span class="hint">0 = 不限</span><div class="hint" id="max-items-impact">${maxItemsImpact(s.maxItems ?? 10000)}</div>`,
+          false,
+          "set-max-items"
         )
     ),
     block(
@@ -4520,3 +4529,107 @@ async function main() {
 }
 
 main();
+
+
+// ── 条数上限：影响提示、设置项、超限弹窗 ────────────────────────────────
+//
+// 影响分档的来源是实测，不是估计：`bench_resident_memory` 量到 10 万条常驻
+// 64 MB，即约 612 B/条；进程基线（后端 + 托盘）约 30 MB。下面的数字由这两项算出，
+// 换算方式写在每档后面，改基准时一并改这里。
+function maxItemsImpact(n) {
+  if (!n) {
+    return "不限条数：常驻内存随历史增长，10 万条约 90 MB，启动读回与后台整理明显变慢。";
+  }
+  const mb = 30 + Math.round((n * 612) / 1048576);
+  if (n <= 10000) return `后台释放后常驻约 ${mb} MB，启动与操作无感。`;
+  if (n <= 30000) return "后台释放后常驻约 40–50 MB（30 MB 基线 + 612 B/条）。";
+  if (n <= 100000) return "后台释放后常驻约 55–75 MB，启动读回与后台整理各慢 50–150 ms。";
+  return "后台释放后常驻超过 90 MB，启动读回与后台整理明显变慢。";
+}
+
+/// 已经弹过就不再弹（同一轮运行内）。
+let limitPromptShown = false;
+
+/// 检查是否超过上限，超过则弹清理建议。
+///
+/// 用前端的 `items.length` 作为条数：后端的 `LIMIT_STATE.count` 是上一次上限检查
+/// 时记下的读数（每次复制才刷新），启动时可能还是 0。
+async function checkHistoryLimit() {
+  if (limitPromptShown) return;
+  let st = null;
+  try {
+    st = await invoke("history_limit");
+  } catch {
+    return;
+  }
+  const max = Number(st?.max || 0);
+  const count = items.length || Number(st?.count || 0);
+  if (!max || count <= max) return;
+  // 用户点过「暂不清理」：7 天内不再打扰
+  if (Number(st?.snoozeUntil || 0) > Date.now()) return;
+  const modal = document.getElementById("limit-modal");
+  if (!modal) return;
+  limitPromptShown = true;
+  document.getElementById("limit-modal-text").textContent =
+    `当前 ${count} 条，上限 ${max} 条，超出 ${count - max} 条。` +
+    `清理会删掉最旧的 ${count - max} 条（置顶与收藏不受影响），此操作不可撤销。`;
+  modal.hidden = false;
+}
+
+// 设置项与弹窗都用事件委托：设置页每次渲染都会重建那一行，委托才能活过重绘。
+document.addEventListener("input", (e) => {
+  if (e.target?.id !== "set-max-items") return;
+  const hint = document.getElementById("max-items-impact");
+  if (!hint) return;
+  hint.textContent = maxItemsImpact(Math.max(0, Math.floor(Number(e.target.value) || 0)));
+});
+
+document.addEventListener("change", async (e) => {
+  if (e.target?.id !== "set-max-items") return;
+  const n = Math.max(0, Math.floor(Number(e.target.value) || 0));
+  try {
+    await invoke("set_max_items", { items: n });
+    settings = await invoke("get_settings");
+    toast(n === 0 ? "条数上限已取消" : `条数上限已设为 ${n}`);
+  } catch (err) {
+    toast("保存失败：" + err);
+  }
+});
+
+document.addEventListener("click", async (e) => {
+  const id = e.target?.id;
+  if (id !== "limit-confirm" && id !== "limit-snooze") return;
+  const modal = document.getElementById("limit-modal");
+  if (modal) modal.hidden = true;
+  if (id === "limit-snooze") {
+    try {
+      await invoke("snooze_limit_warning", { days: 7 });
+      toast("7 天内不再提示");
+    } catch (err) {
+      toast("设置失败：" + err);
+    }
+    return;
+  }
+  let n = 0;
+  try {
+    n = await invoke("trim_history_to_limit");
+  } catch (err) {
+    toast("清理失败：" + err);
+    return;
+  }
+  try {
+    items = await invoke("get_history");
+    render();
+  } catch {
+    /* 列表刷新失败不阻塞提示 */
+  }
+  toast(n > 0 ? `已清理 ${n} 条` : "没有可清理的条目");
+});
+
+// 启动后查一次；之后每次复制（clipboard-update）再查
+setTimeout(() => {
+  void checkHistoryLimit();
+}, 1500);
+listen("clipboard-update", () => {
+  void checkHistoryLimit();
+});

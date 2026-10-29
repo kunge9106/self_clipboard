@@ -1402,6 +1402,12 @@ pub fn resize_start(app: tauri::AppHandle, edge: u32) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 const WM_NCACTIVATE: u32 = 0x0086;
+/// 系统命令：任务栏点击、最小化、关闭等
+const WM_SYSCOMMAND: u32 = 0x0112;
+/// SC_MINIMIZE：最小化请求（任务栏再点当前窗口时发的就是它）
+const SC_MINIMIZE: usize = 0xF020;
+/// SW_HIDE：隐藏窗口（与「关闭时收进托盘」同路径）
+const SW_HIDE: i32 = 0;
 /// 鼠标捕获转移：lparam 为接手 capture 的窗口（0 = 没人持有）
 const WM_CAPTURECHANGED: u32 = 0x0215;
 
@@ -1672,6 +1678,22 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
         if msg == WM_NCACTIVATE {
             // lparam = -1 → 禁止重绘非客户区，原生标题栏就永远画不出来
             return unsafe { DefWindowProcW(hwnd, msg, wparam, -1) };
+        }
+        // 任务栏上再点一次当前窗口的按钮 = 收起（与点关闭按钮同路径）。
+        //
+        // Windows 对「点当前前台窗口的任务栏按钮」发的是 WM_SYSCOMMAND/SC_MINIMIZE；
+        // 自己标题栏的「最小化」走 Tauri 的 window.minimize() → ShowWindow，
+        // 不经过这条消息，所以拦它不影响标题栏按钮。
+        //
+        // 只在这条消息上动手，不去判断「是不是任务栏发来的」：其他来源的 SC_MINIMIZE
+        // （程序自己调 ShowWindow(SW_MINIMIZE)）根本不走 WM_SYSCOMMAND，不会命中。
+        if msg == WM_SYSCOMMAND && wparam == SC_MINIMIZE {
+            extern "system" {
+                fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+            }
+            unsafe { ShowWindow(hwnd, SW_HIDE); }
+            crate::log_print!("[effects] 任务栏再次点击 → 收进托盘");
+            return 0;
         }
         // 鼠标捕获被抢走 / 释放（点了窗口外部、失焦、别的窗口 SetCapture）：
         // 此时收不到 WM_LBUTTONUP，必须在这里复位，否则拖动/缩放的「起点」

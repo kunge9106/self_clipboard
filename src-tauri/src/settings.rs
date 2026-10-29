@@ -273,6 +273,12 @@ pub struct Config {
     /// 被自动清理掉等于背弃那个标记。可删的删完仍超限时停手并记 WARN（宁可不删）。
     #[serde(default = "default_max_items")]
     pub max_items: u32,
+    /// 「条数上限」清理提示的下次允许弹出时间（Unix 毫秒）。
+    ///
+    /// 用户点过「暂不清理（不再提示 7 天）」就写一个 7 天后的时间戳。存在配置里而不是
+    /// 内存里，是因为「每次启动都弹」正是要避免的事 —— 内存标记一重启就失效。
+    #[serde(default)]
+    pub max_items_snooze_until: u64,
     /// 历史索引的存储格式版本。0/1 = 旧的 `index.json`（整份 DPAPI），2 = `index.bin`（v2 容器）。
     ///
     /// 只用于诊断与日志：**真正的迁移判据是磁盘上的文件**（有 `index.bin` 就是 v2，
@@ -365,10 +371,14 @@ fn default_theme_mode() -> String {
     "system".into()
 }
 
-/// 默认条数上限。10 万条是本方案的目标容量（再往上要换索引格式），
-/// 而 10 万条的元数据常驻约 33–55 MB —— 这是「能接受」与「失控」之间的分界。
+/// 默认条数上限。
+///
+/// 为什么是 1 万而不是 10 万：常驻内存约 612 B/条（实测，见 `bench_resident_memory`），
+/// 1 万条 ≈ 6 MB 元数据 —— 对绝大多数用户足够用，也不会让「后台释放后常驻」明显变高。
+/// 10 万条光元数据就是 61 MB，属于「需要的人自己往上调」的档位，不该是默认值。
+/// `0` = 不限。
 fn default_max_items() -> u32 {
-    100_000
+    10_000
 }
 
 fn default_true() -> bool {
@@ -490,6 +500,7 @@ impl Default for Config {
             images_split_dirs: true,
             image_layout_ver: 0,
             max_items: default_max_items(),
+            max_items_snooze_until: 0,
             storage_version: 0,
             release_idle_secs: default_release_idle(),
             pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
@@ -1094,6 +1105,35 @@ pub fn set_retention_days(days: u32) -> Result<(), String> {
     update(|c| c.retention_days = days);
     // 立即按新天数清理一次
     crate::clipboard::prune_retention(days);
+    Ok(())
+}
+
+/// 改条数上限。改小之后**立即**按新上限清理一次（用户刚把上限调小，就该看到效果）。
+#[tauri::command]
+pub fn set_max_items(items: u32) -> Result<(), String> {
+    update(|c| c.max_items = items);
+    crate::clipboard::trim_history_to_limit();
+    crate::log_print!(
+        "[settings] 条数上限改为 {}",
+        if items == 0 {
+            "不限".to_string()
+        } else {
+            format!("{items} 条")
+        }
+    );
+    Ok(())
+}
+
+/// 「暂不清理」：7 天内不再弹上限提示。
+#[tauri::command]
+pub fn snooze_limit_warning(days: u32) -> Result<(), String> {
+    let days = days.clamp(1, 30) as u64;
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+        + days * 24 * 60 * 60 * 1000;
+    update(|c| c.max_items_snooze_until = until);
     Ok(())
 }
 
