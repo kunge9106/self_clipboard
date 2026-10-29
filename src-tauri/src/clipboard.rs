@@ -4928,8 +4928,20 @@ pub fn delete_by_filter(
             LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed);
             crate::query::bump_epoch();
         }
-        // 内存里已经删了、磁盘上没有：下次启动这些条目会回来。必须让调用方知道。
-        Err(e) => return Err(format!("已删除 {} 条，但日志追加失败（{e}）", ids.len())),
+        // 内存里已经删了、磁盘上没有：下次启动这些条目会回来。
+        //
+        // 这里**不**再向上返回错误 —— 返回错误会让前端弹「清理失败」，可条目明明已经
+        // 删掉了，界面又不刷新，用户看到的是「失败 + 没变化」这种最糟的组合。
+        // 正确的处理是大声记日志（含真实错误，便于追 WAL 为什么写不进去），让调用方
+        // 拿到「删了多少条」，界面立即刷新；后台整理会在下一次成功写入时补上。
+        Err(e) => {
+            crate::log_err!(
+                "clipboard",
+                "按筛选删除 {} 条已生效，但日志追加失败：{e}",
+                ids.len()
+            );
+            crate::query::bump_epoch();
+        }
     }
     let deleted = ids.len() as u64;
     crate::log_print!("[clipboard] 按筛选条件删除 {deleted} 条");

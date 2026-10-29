@@ -611,6 +611,14 @@ function bindSelectBar() {
 // 「清空当前视图」：按钮 → 分组 → 弹窗或直接清
 
 function bindClearView() {
+  // 直接绑，不走事件委托：图标按钮被点到的是内部那个 <svg>，委托里判断 id
+  // 容易落空（改成 closest 也仍受别的处理器影响）。与「清空」按钮保持一致。
+  document.getElementById("btn-clean-age").onclick = async () => {
+    const modal = document.getElementById("age-clean-modal");
+    if (!modal) return;
+    await refreshAgeCleanPreview(modal);
+    modal.hidden = false;
+  };
   document.getElementById("btn-clear-view").onclick = () => {
     // 窗口模式：不在前端算 id，交给后端按同一套筛选自己删
     if (USE_WINDOW_API) {
