@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+// 查询封装与窗口化列表：两者都不依赖 DOM 之外的全局状态，可单独 import 测（见 test/）。
+import { buildFilter, createHistoryApi } from "./history-api.js";
+import { VirtualList } from "./virtual-list.js";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -10,6 +13,21 @@ import {
   highlightCode,
   sanitizeRichHtml,
 } from "./formats.js";
+// 键名映射与组合串格式化：与面板共用一份（面板要用同一套判断关闭键）
+import {
+  comboLabel,
+  comboFromEvent,
+  checkPanelCloseKey,
+} from "./hotkeys.js";
+// 悬浮预览的内容口径与面板共用（定位各自实现：主界面四个方向试，面板只上下二选一）
+import {
+  createPreviewBox,
+  fillFiles,
+  guardPreviewText,
+  hasMoreToPreview,
+  pickSlot,
+  resetPreviewBox,
+} from "./preview.js";
 
 const appWindow = getCurrentWindow();
 
@@ -593,7 +611,20 @@ function bindSelectBar() {
 // 「清空当前视图」：按钮 → 分组 → 弹窗或直接清
 
 function bindClearView() {
+  // 直接绑，不走事件委托：图标按钮被点到的是内部那个 <svg>，委托里判断 id
+  // 容易落空（改成 closest 也仍受别的处理器影响）。与「清空」按钮保持一致。
+  document.getElementById("btn-clean-age").onclick = async () => {
+    const modal = document.getElementById("age-clean-modal");
+    if (!modal) return;
+    await refreshAgeCleanPreview(modal);
+    modal.hidden = false;
+  };
   document.getElementById("btn-clear-view").onclick = () => {
+    // 窗口模式：不在前端算 id，交给后端按同一套筛选自己删
+    if (USE_WINDOW_API) {
+      void clearViewWindow();
+      return;
+    }
     const scope = filtered();
     if (scope.length === 0) {
       toast("没有可清理的条目");
@@ -612,6 +643,70 @@ function bindClearView() {
     }
     openClearViewModal({ normal, pinned, favs });
   };
+}
+
+/**
+ * 窗口模式的「清空当前视图」。
+ *
+ * 与旧实现的差别只在「id 从哪来」：旧的是 `filtered()` 给出全量 id，新的由后端
+ * 按同一个筛选条件自己算 —— 10 万条页面不需要把 10 万个 id 传到前端再传回去。
+ * 分组与口径（默认保留置顶与收藏、两者都没有时直接清不弹窗）完全照旧。
+ */
+async function clearViewWindow() {
+  const filter = currentFilter();
+  let stats;
+  try {
+    stats = await invoke("filter_stats", { filter });
+  } catch (e) {
+    toast("读取失败：" + e);
+    return;
+  }
+  if (!stats || stats.total === 0) {
+    toast("没有可清理的条目");
+    return;
+  }
+  if (stats.pinned === 0 && stats.favorites === 0) {
+    await doClearViewFilter({ includePinned: false, includeFavorites: false });
+    return;
+  }
+  openClearViewModalWindow(filter, stats);
+}
+
+/** 弹窗（复用同一套 DOM，只把内容换成计数）。 */
+function openClearViewModalWindow(filter, stats) {
+  clearViewTargets = { window: true, filter, stats };
+  document.getElementById("clear-view-modal-text").textContent =
+    stats.normal > 0
+      ? `将清除 ${stats.normal} 条${query ? "搜索结果" : "内容"}，默认保留置顶与收藏。`
+      : "范围内没有普通条目（全是置顶或收藏），勾选下方选项可一并清除。";
+  const pinRow = document.getElementById("clear-view-pinned-row");
+  const favRow = document.getElementById("clear-view-fav-row");
+  pinRow.hidden = stats.pinned === 0;
+  favRow.hidden = stats.favorites === 0;
+  document.getElementById("clear-view-pinned-label").textContent =
+    `同时清除置顶（${stats.pinned} 条）`;
+  document.getElementById("clear-view-fav-label").textContent =
+    `同时清除收藏（${stats.favorites} 条）`;
+  document.getElementById("clear-view-pinned").checked = false;
+  document.getElementById("clear-view-fav").checked = false;
+  document.getElementById("clear-view-checks").hidden =
+    stats.pinned === 0 && stats.favorites === 0;
+  document.getElementById("clear-view-modal").hidden = false;
+}
+
+/** 按筛选删除（窗口模式）。返回后整表重取，锚点归零到顶部。 */
+async function doClearViewFilter({ includePinned, includeFavorites }) {
+  try {
+    const res = await api.deleteByFilter(currentFilter(), false, {
+      includePinned,
+      includeFavorites,
+    });
+    render({ keepScroll: false });
+    const n = res?.deleted ?? 0;
+    toast(query ? `已清理 ${n} 条搜索结果` : `已清理 ${n} 条`);
+  } catch (e) {
+    toast("清理失败：" + e);
+  }
 }
 
 async function doClearView(ids) {
@@ -665,6 +760,13 @@ function bindClearViewModal() {
     modal.hidden = true;
     const t = clearViewTargets;
     if (!t) return;
+    if (t.window) {
+      await doClearViewFilter({
+        includePinned: document.getElementById("clear-view-pinned").checked,
+        includeFavorites: document.getElementById("clear-view-fav").checked,
+      });
+      return;
+    }
     const ids = t.normal.map((i) => i.id);
     if (document.getElementById("clear-view-pinned").checked)
       ids.push(...t.pinned.map((i) => i.id));
@@ -701,7 +803,20 @@ function bindSearch() {
   const sync = () => {
     if (clear) clear.hidden = el.value.trim() === "";
   };
+  let searchTimer = null;
   el.addEventListener("input", () => {
+    // 窗口模式：搜索词原样交给后端归一（前端不再 toLowerCase，否则 filterKey
+    // 会因大小写差异反复失效）。120ms 去抖 —— 每按一个键就取一页没有意义。
+    if (USE_WINDOW_API) {
+      sync();
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        searchTimer = null;
+        query = el.value.trim();
+        render({ keepScroll: false });
+      }, 120);
+      return;
+    }
     query = el.value.trim().toLowerCase();
     sync();
     render();
@@ -711,6 +826,10 @@ function bindSearch() {
       el.value = "";
       query = "";
       sync();
+      if (searchTimer) {
+        clearTimeout(searchTimer);
+        searchTimer = null;
+      }
       render(); // 换回完整列表，不回顶部保留位置
       el.focus();
     });
@@ -835,6 +954,240 @@ const SUBTYPE_BADGE = {
  * 为什么需要这个参数：本函数会 `view.innerHTML = ""` 并新建 `.history` 容器，
  * 容器一换，scrollTop 必然归零。所以必须在重建**之前**把位置记下来。
  */
+
+// ---------------------------------------------------------------------------
+// 窗口化列表（USE_WINDOW_API）
+//
+// 旧的「全量 filtered() + 渐进渲染」路径完整保留在下方：把 `USE_WINDOW_API`
+// 改成 `false` 就回到改动前的行为，一个字都不用动。两套路径的入口在 render()。
+//
+// 为什么换：全量路径要把 10 万条一次拿到前端（38 MB IPC）、过滤一遍、排序一遍，
+// 再加入 DOM；窗口化之后每次交互只传一页（约 100 KB），DOM 里只留四十来行。
+// ---------------------------------------------------------------------------
+const USE_WINDOW_API = true;
+
+/** 一页多少条。200 条约 100 KB，与设计文档的 IPC 预算是同一个数量级。 */
+const WINDOW_LIMIT = 200;
+
+const api = createHistoryApi(invoke, { cachePages: 10 });
+
+let wl = null; // VirtualList 实例
+let wlTotal = 0; // 过滤后的总条数（后端给）
+let wlState = null; // 已加载的连续片段 { start, items }
+let wlToken = 0; // 渲染序号：异步回来晚了的旧结果直接丢弃
+let wlBusy = false; // 取页中（同一时刻只允许一个请求，避免重复页）
+
+/** 当前筛选条件。搜索词原样传 —— 后端负责 trim 与折叠大小写。 */
+function currentFilter() {
+  return buildFilter({ view: currentView, query });
+}
+
+/** 建滚动容器 + 虚拟列表（切视图、从设置页回来时都会重建，保证状态干净）。 */
+function ensureWindow(view) {
+  if (wl) {
+    wl.destroy();
+    wl = null;
+  }
+  const scroller = document.createElement("div");
+  scroller.className = "history";
+  view.innerHTML = "";
+  view.appendChild(scroller);
+  wl = new VirtualList({
+    scroller,
+    // 行是**容器**，卡片是它里面的元素 —— 不能把 vl-row 和 card 用同一个节点。
+    //
+    // fillCard 会重写 className（`card.className = "card …"`），直接把它用在行节点上
+    // 会把 `vl-row` 这个类覆盖掉；而正是 vl-row 提供 `position:absolute`。类一没，
+    // 卡片就回到 .vl-inner 的流式布局里，translateY(偏移量) 又叠在流位置之上 ——
+    // 间距变成偏移值本身（实测约 90px，露出窗口的透明材质），偏移偏小时又互相重叠。
+    fillRow: (el, item) => {
+      let card = el.querySelector(":scope > .card");
+      if (!card) {
+        // 骨架行把 innerHTML 换成过 .vl-skeleton-bar，这里重建卡片
+        card = document.createElement("div");
+        el.innerHTML = "";
+        el.appendChild(card);
+      }
+      fillCard(card, item);
+    },
+    keyOf: (item) => item.id,
+    onNeedRange: () => schedulePrefetch(),
+    onRendered: () => {
+      // 行池复用后有两件事必须重做：图片懒加载的观察（新节点换了 data-img-id）、
+      // 文件失效徽章（新节点没有上一轮留下的 class）。
+      observeImages(scroller);
+      applyMissingMarks();
+    },
+  });
+  scroller.addEventListener(
+    "scroll",
+    () => {
+      wl?.scheduleRender();
+      schedulePrefetch();
+    },
+    { passive: true }
+  );
+}
+
+/** 把一页并进已加载片段（只支持相邻拼接；不连续就丢掉旧窗口重建）。 */
+function absorbPage(offset, pageItems) {
+  if (!pageItems || pageItems.length === 0) return;
+  if (!wlState) {
+    wlState = { start: offset, items: pageItems.slice() };
+  } else if (offset === wlState.start + wlState.items.length) {
+    wlState.items.push(...pageItems);
+  } else if (offset + pageItems.length === wlState.start) {
+    wlState.items = pageItems.concat(wlState.items);
+    wlState.start = offset;
+  } else {
+    wlState = { start: offset, items: pageItems.slice() };
+  }
+  items = wlState.items; // 既有 helper（失效检测、批量删除）只看已加载行
+  if (wl) {
+    wl.setTotal(wlTotal);
+    wl.setWindow(wlState.start, wlState.items);
+  }
+}
+
+let prefetchRaf = null;
+function schedulePrefetch() {
+  if (prefetchRaf) return;
+  prefetchRaf = requestAnimationFrame(() => {
+    prefetchRaf = null;
+    void prefetchNow();
+  });
+}
+
+/** 视口缺数据就补一页：往上缺补上一页，往下缺补下一页。 */
+async function prefetchNow() {
+  if (!wl || wlBusy || wlTotal === 0 || !wlState) return;
+  const need = wl.needRange();
+  const start = wlState.start;
+  const end = wlState.start + wlState.items.length;
+  let target = null;
+  if (need.first < start) {
+    target = Math.max(0, Math.floor(need.first / WINDOW_LIMIT) * WINDOW_LIMIT);
+  } else if (need.last >= end && end < wlTotal) {
+    target = end;
+  }
+  if (target == null) return;
+
+  wlBusy = true;
+  const token = wlToken;
+  try {
+    const res = await api.fetchWindow({
+      filter: currentFilter(),
+      offset: target,
+      limit: WINDOW_LIMIT,
+      anchorId: null,
+      wantTotal: false,
+    });
+    if (token !== wlToken) return; // 期间换了视图/搜索词
+    absorbPage(res.offset, res.items);
+    wl.scheduleRender();
+    refreshMissing(wlState.items);
+  } catch (e) {
+    reportFrontend("warn", "list", "取页失败：" + e);
+  } finally {
+    wlBusy = false;
+  }
+}
+
+/** 状态栏：总数由后端给（`wantTotal=true` 的那次返回）。 */
+function refreshStatusCount() {
+  const el = document.getElementById("status-count");
+  if (!el) return;
+  el.textContent = query ? `找到 ${wlTotal} 条结果` : `共 ${wlTotal} 条`;
+}
+
+/**
+ * 窗口化渲染入口。与旧路径共享 render() 的前半段（工具栏/设置页/空态）。
+ *
+ * `keepScroll` 的语义与旧路径一致：保位置。只是实现从「记 scrollTop 数值并做高度
+ * 补偿」换成了「记住视口顶端那条的 id 与像素偏移」，插入/删除都不用再补高度。
+ */
+async function renderWindow({ keepScroll = false } = {}) {
+  const view = document.getElementById("view");
+  const token = ++wlToken;
+  const wasAtTop = !wl || wl.scroller.scrollTop <= 0;
+  const anchor = keepScroll && wl && !wasAtTop ? wl.getAnchor() : null;
+  // 保位置时取「锚点所在的那一页」而不是窗口起点：窗口可能有上千条（一路滚下来
+  // 累积的），只取起点那一页会把视口里的内容整片丢掉。
+  let from = 0;
+  let anchorId = null;
+  if (keepScroll && wl && anchor && anchor.id != null) {
+    const at = wl.idToIndex.get(anchor.id);
+    if (at !== undefined) {
+      from = Math.max(0, Math.floor(at / WINDOW_LIMIT) * WINDOW_LIMIT);
+      anchorId = anchor.id;
+    }
+  }
+
+  // 每次完整重绘都重新问一次后端：置顶 / 收藏 / 删除 / 新内容到达这些操作
+  // 散在十几个处理函数里，与其要求每一处都记得「失效缓存」，不如在这里统一失效。
+  // 代价是一次取页（1–2 ms）；页缓存真正的作用是滚动时的相邻页与回滚，不受影响。
+  api.invalidate();
+  ensureWindow(view);
+  refreshStatusCount();
+  wlBusy = true;
+  let res;
+  try {
+    res = await api.fetchWindow({
+      filter: currentFilter(),
+      offset: from,
+      limit: WINDOW_LIMIT,
+      anchorId,
+      wantTotal: true,
+    });
+  } catch (e) {
+    if (token === wlToken) {
+      view.innerHTML = `<div class="empty"><div class="empty-title">列表读取失败</div>
+        <div class="empty-sub">${String(e)}</div></div>`;
+      if (wl) {
+        wl.destroy();
+        wl = null;
+      }
+    }
+    return;
+  } finally {
+    wlBusy = false;
+  }
+  if (token !== wlToken) return; // 期间又渲染了一次
+
+  wlTotal = res.total;
+  refreshStatusCount();
+
+  if (wlTotal === 0) {
+    view.innerHTML = emptyHtml();
+    if (wl) {
+      wl.destroy();
+      wl = null;
+    }
+    wlState = null;
+    items = [];
+    return;
+  }
+
+  wlState = { start: res.offset, items: res.items.slice() };
+  items = wlState.items;
+  wl.setTotal(wlTotal);
+  wl.setWindow(wlState.start, wlState.items);
+  if (anchor) wl.restoreAnchor(anchor);
+  wl.render();
+  schedulePrefetch();
+  // 文件失效检测只查**已加载**的行 —— 全量查一次 10 万个 id 是旧路径的成本
+  refreshMissing(wlState.items);
+}
+
+/** 列表变了之后保持位置重绘（删除、置顶、收藏、新内容到达都走这里）。 */
+function rerenderNow() {
+  if (!USE_WINDOW_API) {
+    render({ keepScroll: true });
+    return;
+  }
+  void renderWindow({ keepScroll: true });
+}
+
 function render({ keepScroll = false } = {}) {
   hideHoverPreview(); // 重绘后旧卡片已销毁，避免浮层残留
   const prevTop = keepScroll && wrapEl ? wrapEl.scrollTop : 0;
@@ -871,6 +1224,12 @@ function render({ keepScroll = false } = {}) {
       <div class="empty-title">文件复制已关闭</div>
       <div class="empty-sub">可在「设置 → 数据 → 记录」里打开</div>
     </div>`;
+    return;
+  }
+
+  // ★ 分流点：窗口化路径（USE_WINDOW_API=false 时走下面原封不动的旧路径）
+  if (USE_WINDOW_API) {
+    void renderWindow({ keepScroll });
     return;
   }
 
@@ -940,6 +1299,11 @@ function statusCountText(n) {
 function removeCards(ids) {
   const drop = new Set(ids);
   if (drop.size === 0) return;
+  if (USE_WINDOW_API) {
+    // 窗口模式：数据在后端，重取当前窗口并按锚点还原位置（不需要手工扣高度）
+    rerenderNow();
+    return;
+  }
 
   let removedAbove = 0; // 视口上沿之上被删掉的总高度（含间距）
   let removedRendered = 0; // 已渲染卡片里被删掉的数量
@@ -1061,6 +1425,18 @@ function emptyHtml() {
 
 function cardEl(item) {
   const card = document.createElement("div");
+  fillCard(card, item);
+  return card;
+}
+
+/**
+ * 把一条内容填进**已有的**卡片节点（行池复用就是反复调它）。
+ *
+ * 与旧写法的区别只有两处：清空旧内容、事件用属性赋值而不是 addEventListener ——
+ * 后者在复用节点上会越绑越多，滚一遍列表就绑出几十个回调。
+ */
+function fillCard(card, item) {
+  card.innerHTML = "";
   const pinned = isPinnedIn(item, currentView); // 置顶按分类独立，只看当前分类
   card.className =
     "card" +
@@ -1138,19 +1514,18 @@ function cardEl(item) {
   bindHoverPreview(card, item);
 
   // 左键 → 复制回剪贴板；批量选中模式下改为切换选中
-  card.addEventListener("click", () => {
+  card.onclick = () => {
     if (selectMode) {
       toggleSelect(item.id, card);
       return;
     }
     copyBack(item);
-  });
-  card.addEventListener("contextmenu", (e) => {
+  };
+  card.oncontextmenu = (e) => {
     e.preventDefault();
     e.stopPropagation();
     openContextMenu(e.clientX, e.clientY, item);
-  });
-  return card;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,54 +1667,10 @@ function observeImages(rootEl) {
     .forEach((el) => imgObserver.observe(el));
 }
 
-// 浮层里三个内容槽常驻，按类型显示其中一个（切换时把另外两个清空，
-// 避免上一次的文本 / 清单在 DOM 里留着）。
-//
-// 定位是**预告片**，不是替代「查看」：
-//   文本只给 4 行、文件只给 3 个文件名 —— 够判断「是不是这条」就停，
-//   想读全、想看完整路径就走右键「查看」。浮层把内容全摊开的话，
-//   「查看」这个入口就白做了。
-//
-// 这两个数值只是**载荷护栏**，不是显示行数：正文真正被截到 4 行靠 CSS 的
-// `-webkit-line-clamp`（见 .hp-text），否则一条长行折行后会变成十几行。
-const PREVIEW_TEXT_GUARD_LINES = 40;
-const PREVIEW_TEXT_GUARD_CHARS = 1200;
-const PREVIEW_FILES_MAX = 3;
-
+/** 主界面只维护「有没有建过」这一份状态，骨架与内容槽由 `preview.js` 提供。 */
 function ensurePreviewBox() {
-  if (previewBox) return previewBox;
-  const box = document.createElement("div");
-  box.className = "hover-preview";
-  box.hidden = true;
-  const img = document.createElement("img");
-  img.alt = "预览";
-  const text = document.createElement("div");
-  text.className = "hp-text";
-  const files = document.createElement("ul");
-  files.className = "hp-files";
-  box.append(img, text, files);
-  document.body.appendChild(box);
-  previewBox = box;
-  return box;
-}
-
-/**
- * 只留 kind 对应的内容槽，其余清空。
- *
- * 清空而不是只隐藏：图片槽留着上一次的 src 会一直占着解码后的位图内存，
- * 文本 / 清单留着也无意义。浮层是纯展示层，每次重建内容的成本可以忽略。
- */
-function pickPreviewSlot(box, kind) {
-  const img = box.querySelector("img");
-  const text = box.querySelector(".hp-text");
-  const files = box.querySelector(".hp-files");
-  img.hidden = kind !== "image";
-  text.hidden = kind !== "text";
-  files.hidden = kind !== "files";
-  if (kind !== "image") img.removeAttribute("src");
-  if (kind !== "text") text.textContent = "";
-  if (kind !== "files") files.replaceChildren();
-  return { img, text, files };
+  if (!previewBox) previewBox = createPreviewBox();
+  return previewBox;
 }
 
 function hideHoverPreview() {
@@ -1347,11 +1678,7 @@ function hideHoverPreview() {
     clearTimeout(previewTimer);
     previewTimer = null;
   }
-  if (previewBox && !previewBox.hidden) {
-    previewBox.hidden = true;
-    // 大图的 dataURL 松开引用，别让它在浮层里常驻
-    previewBox.querySelector("img").removeAttribute("src");
-  }
+  if (previewBox && !previewBox.hidden) resetPreviewBox(previewBox);
 }
 
 /** 浮层与卡片之间的间距 / 与窗口边缘的安全距离 */
@@ -1402,22 +1729,12 @@ function placePreview(box, card) {
   box.style.top = `${clamp(pick.y, PREVIEW_EDGE, Math.max(PREVIEW_EDGE, vh - h - PREVIEW_EDGE))}px`;
 }
 
-/**
- * 卡片上已经显示全的内容不给浮层 —— 再弹一次同样的字只是噪音。
- *
- * 「是不是还有更多」一律问后端，前端不照抄一份判断规则：
- *   文本 → `preview_truncated`，就是后端 `text_preview_parts` 在生成卡片摘要时
- *          得出的「有没有丢弃内容」。照抄「2 行 / 140 字」到前端，日后改一边必漂移。
- *   文件 → 只有 1 个时卡片已经写着文件名了，浮层给不出任何新信息。
- *   图片 → 缩略图必然是缩过的，大图永远有增量。
- */
-function hasMoreToPreview(item) {
-  if (item.kind === "text") return !!item.preview_truncated;
-  if (item.kind === "files") return (item.files || []).length > 1;
-  return true;
-}
+
 
 function bindHoverPreview(card, item) {
+  // 复用节点：上一次绑的回调必须清掉，否则鼠标一进会拿到旧条目
+  card.onmouseenter = null;
+  card.onmouseleave = null;
   if (!hasMoreToPreview(item)) return;
   // 悬浮多久才弹浮层。
   //
@@ -1426,60 +1743,11 @@ function bindHoverPreview(card, item) {
   // 1s 是个平衡点：快速扫过列表不会触发，停下来看一眼时也不觉得迟。
   // 图片 / 文本 / 文件统一 1s，同一份列表里弹得快慢不一会显得很随意。
   const HOVER_DELAY_MS = 1000;
-  card.addEventListener("mouseenter", () => {
+  card.onmouseenter = () => {
     if (previewTimer) clearTimeout(previewTimer);
     previewTimer = setTimeout(() => showHoverPreview(card, item), HOVER_DELAY_MS);
-  });
-  card.addEventListener("mouseleave", hideHoverPreview);
-}
-
-/**
- * 文本载荷护栏（**不是**显示截断）。
- *
- * 显示层面的「4 行 + 省略号」交给 CSS 的 `-webkit-line-clamp`：
- * 只有浏览器知道自己把一行折成了几个视觉行，JS 按 `\n` 数行数是数不准的
- * （一行十万字符的日志流会被算成「1 行」，照样撑爆浮层）。
- * 这里只做一件事 —— 别把几万字塞进 DOM 让排版计算变慢。
- */
-function guardPreviewText(text) {
-  let s = text;
-  const lines = s.split("\n");
-  if (lines.length > PREVIEW_TEXT_GUARD_LINES) {
-    s = lines.slice(0, PREVIEW_TEXT_GUARD_LINES).join("\n");
-  }
-  if (s.length > PREVIEW_TEXT_GUARD_CHARS) {
-    s = s.slice(0, PREVIEW_TEXT_GUARD_CHARS);
-  }
-  return s;
-}
-
-/** 取文件名：浮层只给名字，完整路径留给右键「查看」 */
-function baseName(path) {
-  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return i >= 0 ? path.slice(i + 1) : path;
-}
-
-/** 文件清单：前 N 条**文件名**，其余折叠成一行「…另有 N 个」 */
-function fillFilePreview(ul, item) {
-  const all = Array.isArray(item.files) ? item.files : [];
-  const lis = all.slice(0, PREVIEW_FILES_MAX).map((p) => {
-    const li = document.createElement("li");
-    li.textContent = baseName(p);
-    return li;
-  });
-  if (all.length > PREVIEW_FILES_MAX) {
-    const li = document.createElement("li");
-    li.className = "hp-more";
-    li.textContent = `…另有 ${all.length - PREVIEW_FILES_MAX} 个`;
-    lis.push(li);
-  }
-  // 极老的条目可能没有 files 字段 → 退回卡片上那条摘要，至少不是个空浮层
-  if (lis.length === 0) {
-    const li = document.createElement("li");
-    li.textContent = item.preview || "";
-    lis.push(li);
-  }
-  ul.replaceChildren(...lis);
+  };
+  card.onmouseleave = hideHoverPreview;
 }
 
 async function showHoverPreview(card, item) {
@@ -1497,7 +1765,7 @@ async function showHoverPreview(card, item) {
     }
     // 读取期间鼠标可能已移开
     if (!card.isConnected || !card.matches(":hover")) return;
-    const { img } = pickPreviewSlot(box, "image");
+    const { img } = pickSlot(box, "image");
     // 图片尺寸只有加载完才准，加载后重新定位一次
     img.onload = () => {
       if (!box.hidden) placePreview(box, card);
@@ -1509,8 +1777,8 @@ async function showHoverPreview(card, item) {
   }
 
   if (item.kind === "files") {
-    const { files } = pickPreviewSlot(box, "files");
-    fillFilePreview(files, item);
+    const { files } = pickSlot(box, "files");
+    fillFiles(files, item);
     box.hidden = false;
     placePreview(box, card);
     return;
@@ -1525,7 +1793,7 @@ async function showHoverPreview(card, item) {
     return;
   }
   if (!card.isConnected || !card.matches(":hover")) return;
-  const { text } = pickPreviewSlot(box, "text");
+  const { text } = pickSlot(box, "text");
   text.textContent = guardPreviewText(data.text || "");
   box.hidden = false;
   placePreview(box, card);
@@ -2384,36 +2652,6 @@ function block(title, inner, opts = {}) {
   return `<section class="${cls}">${title ? `<h3 class="block-h">${title}</h3>` : ""}${inner}</section>`;
 }
 
-/// 把 `ctrl+alt+v` 显示成 `Ctrl + Alt + V`（值的形式由后端 `hotkey::parse_combo` 定义）。
-function comboLabel(combo) {
-  return String(combo || "")
-    .split("+")
-    .map((p) => {
-      const k = p.trim().toLowerCase();
-      if (k === "ctrl" || k === "control") return "Ctrl";
-      if (k === "alt") return "Alt";
-      if (k === "shift") return "Shift";
-      if (k === "win" || k === "super") return "Win";
-      if (k === "space") return "空格";
-      return k.toUpperCase();
-    })
-    .filter(Boolean)
-    .join(" + ");
-}
-
-/// DOM `KeyboardEvent.key` → 后端能解析的键名；不支持的返回 null。
-function hotkeyKeyName(key) {
-  if (key === " ") return "space";
-  if (key.length === 1) {
-    const c = key.toLowerCase();
-    // 与后端 `vk_of` 的白名单保持一致：字母、数字、反引号、减号
-    if (/[a-z0-9`\-]/.test(c)) return c;
-    return null;
-  }
-  if (/^f([1-9]|1[0-2])$/i.test(key)) return key.toLowerCase();
-  return null;
-}
-
 /// 绑定一组「开关 + 快捷键录制」控件。
 ///
 /// 录制期间必须临时注销全局热键（`hotkey_suspend`）：注册过的组合会被系统**先**
@@ -2485,21 +2723,16 @@ function bindHotkeyRow(view, opts) {
       btn.textContent = pre.length ? pre.join(" + ") + " + …" : "请按下组合键…（Esc 取消）";
       return;
     }
-    const mods = [];
-    if (e.ctrlKey) mods.push("ctrl");
-    if (e.altKey) mods.push("alt");
-    if (e.shiftKey) mods.push("shift");
-    if (e.metaKey) mods.push("win");
-    const main = hotkeyKeyName(e.key);
-    if (!main) {
+    const parsed = comboFromEvent(e);
+    if (!parsed) {
       toast("这个键暂不支持，请用字母、数字、F1–F12、空格或 `");
       return;
     }
-    if (mods.length === 0) {
+    if (parsed.mods.length === 0) {
       toast("至少需要一个修饰键（Ctrl / Alt / Shift / Win）");
       return;
     }
-    const combo = [...mods, main].join("+");
+    const combo = parsed.combo;
     recording = false;
     btn.classList.remove("is-recording");
     btn.textContent = comboLabel(combo);
@@ -2511,6 +2744,77 @@ function bindHotkeyRow(view, opts) {
       // 后端已回滚并重注册旧组合，这里只把界面拉回去
       toast("该组合不可用：" + err);
       btn.textContent = label();
+    }
+  };
+}
+
+/// 面板关闭键的录制。
+///
+/// 与 `bindHotkeyRow` 分开，因为两者差别在两处：那个绑定的是**全局热键**（要注册、
+/// 会因被占用而失败、录制前要暂停注册），这个只存一个字符串，按键由面板页面自己比对；
+/// 录制规则也不同 —— 这里允许裸绑 Esc / F5 / Home，字符键仍要求带修饰键。
+function bindPanelCloseKey(view) {
+  const btn = view.querySelector("#set-panel-close");
+  if (!btn) return;
+
+  let recording = false;
+  const stop = () => {
+    recording = false;
+    btn.classList.remove("is-recording");
+    btn.textContent = comboLabel(settings?.panelCloseKey || "esc");
+  };
+
+  btn.onclick = () => {
+    if (recording) return;
+    recording = true;
+    btn.classList.add("is-recording");
+    btn.textContent = "请按下要用的键…（Esc 取消）";
+    btn.focus();
+  };
+  // 点到别处 = 放弃录制
+  btn.onblur = () => recording && stop();
+
+  btn.onkeydown = async (e) => {
+    if (!recording) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // 录制里 Esc 一律是「取消」：它本来就是默认关闭键，想用它不必重录
+    if (e.key === "Escape") {
+      stop();
+      return;
+    }
+    // 只按住修饰键：先显示出来，等主键落下
+    if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) {
+      const pre = [];
+      if (e.ctrlKey) pre.push("Ctrl");
+      if (e.altKey) pre.push("Alt");
+      if (e.shiftKey) pre.push("Shift");
+      if (e.metaKey) pre.push("Win");
+      btn.textContent = pre.length
+        ? pre.join(" + ") + " + …"
+        : "请按下要用的键…（Esc 取消）";
+      return;
+    }
+    const parsed = comboFromEvent(e, { extended: true });
+    if (!parsed) {
+      toast("这个键不支持，请用 Esc / Tab / F1–F12 / Home 等，或带修饰键的组合");
+      return;
+    }
+    const bad = checkPanelCloseKey(parsed.combo, {
+      callUpHotkey: settings?.hotkey || "",
+    });
+    if (bad) {
+      toast(bad);
+      return;
+    }
+    try {
+      await invoke("set_panel_close_key", { combo: parsed.combo });
+      settings = await invoke("get_settings");
+      stop();
+      toast("关闭键已改为 " + comboLabel(parsed.combo));
+    } catch (err) {
+      toast("保存失败：" + err);
+      stop();
     }
   };
 }
@@ -2555,12 +2859,12 @@ function settingsGeneralHtml(s) {
       // 两个热键共用一套「开关 + 录制」控件，绑定逻辑也只写一份（见 bindHotkeyRow）。
       rowCheck(
         "set-hotkey-enabled",
-        "唤起面板",
-        "在任何程序里按下组合键，弹出贴光标的小列表；回车直接粘回原窗口",
+        "快捷面板",
+        "按下快捷键后列出最近内容面板；在输入状态时点击条目或按回车，直接粘贴到输入框，焦点不在输入框时则复制到剪贴板",
         s.hotkeyEnabled
       ) +
         rowCtl(
-          "唤起面板的快捷键",
+          "快捷键",
           "点击后按下想要的组合（至少含一个修饰键）；按 Esc 取消",
           `<button type="button" class="btn-ghost hotkey-btn" id="set-hotkey"${
             s.hotkeyEnabled ? "" : " disabled"
@@ -2571,10 +2875,28 @@ function settingsGeneralHtml(s) {
         // 从属项：它调的正是上一行那个面板的失焦行为，所以缩进一级
         rowCheck(
           "set-panel-stay",
-          "面板失焦不收起",
-          "默认点别处即收起；打开后可先去别的窗口看一眼再回来选。Esc 或再按一次唤起快捷键收起",
+          "失焦不收起",
+          "默认点别处即收起；打开后可先去别的窗口看一眼再回来选。Esc 或再按一次快捷键收起",
           s.panelStayOnBlur,
           true
+        ) +
+        // 再深一层：选中一条之后的行为。它依赖上面的「失焦不收起」——
+        // 粘贴会把焦点还给原窗口，失焦即收起时面板留不住，开关等于无效。
+        rowCheck(
+          "set-panel-keep",
+          "点选后保持打开",
+          "粘进输入框后不收起，可以接着选下一条；需先打开上面的「失焦不收起」",
+          s.panelKeepAfterCopy,
+          true
+        ) +
+        rowCtl(
+          "关闭键",
+          "面板里按这个键收起。Esc 始终可用；字母、数字需带修饰键",
+          `<button type="button" class="btn-ghost hotkey-btn" id="set-panel-close">${comboLabel(
+            s.panelCloseKey || "esc"
+          )}</button>`,
+          true,
+          "set-panel-close"
         ) +
         rowCheck(
           "set-shot-hotkey-enabled",
@@ -3672,7 +3994,7 @@ function bindSettings(view) {
       }
     });
   }
-  // 两个热键（唤起面板 / 截图）共用同一套绑定 —— 交互细节多（只按修饰键先显示、
+  // 两个热键（快捷面板 / 截图）共用同一套绑定 —— 交互细节多（只按修饰键先显示、
   // Esc 取消、失败回滚、录制期挂起），各写一遍必然漂移。
   bindHotkeyRow(view, {
     enabledId: "set-hotkey-enabled",
@@ -3689,7 +4011,7 @@ function bindSettings(view) {
     get: () => settings.screenshotHotkey,
   });
   // 热键被别的程序占用：注册发生在后端启动那一刻，前端没有回调可拿，
-  // 所以主动问一次，把原因标在「唤起面板」那一行下面。
+  // 所以主动问一次，把原因标在「快捷面板」那一行下面。
   invoke("hotkey_status")
     .then((err) => {
       const row = view.querySelector("#set-hotkey-enabled")?.closest(".row");
@@ -3711,8 +4033,47 @@ function bindSettings(view) {
     })
     .catch(() => {});
 
-  // 面板失焦行为：只存一个布尔，后端失焦处理器现读配置，改完立即生效
-  bindCheck("set-panel-stay", "set_panel_stay_on_blur");
+  // 面板失焦行为：只存一个布尔，后端失焦处理器现读配置，改完立即生效。
+  // 不与 bindCheck 合用是因为它还要联动下面两个从属项：关掉失焦保持时，
+  // 「点选后保持打开」必须一起关掉 —— 否则配置里留着一个永远不生效的 true。
+  const panelStay = view.querySelector("#set-panel-stay");
+  const panelKeep = view.querySelector("#set-panel-keep");
+  const syncPanelKeep = () => {
+    if (!panelKeep) return;
+    const off = !panelStay?.checked;
+    panelKeep.toggleAttribute("data-disabled", off);
+    if (off) panelKeep.checked = false;
+  };
+  if (panelStay) {
+    panelStay.onchange = async () => {
+      try {
+        await invoke("set_panel_stay_on_blur", { value: panelStay.checked });
+        settings = await invoke("get_settings");
+        syncPanelKeep();
+        toast(`面板失焦${panelStay.checked ? "保持打开" : "即收起"}`);
+      } catch (e) {
+        toast("保存失败：" + e);
+        panelStay.checked = !panelStay.checked;
+      }
+    };
+  }
+  if (panelKeep) {
+    panelKeep.onchange = async () => {
+      try {
+        await invoke("set_panel_keep_after_copy", { value: panelKeep.checked });
+        settings = await invoke("get_settings");
+        toast(panelKeep.checked ? "点选后保持打开" : "点选后收起面板");
+      } catch (e) {
+        toast("保存失败：" + e);
+        panelKeep.checked = !panelKeep.checked;
+      }
+    };
+  }
+  syncPanelKeep();
+
+  // 面板关闭键：录制规则与全局热键不同 —— 非字符键可以裸绑（F5、Home），
+  // 字符键必须带修饰键（否则在搜索框打字就把面板关了）。规则在 hotkeys.js 里。
+  bindPanelCloseKey(view);
   // 截图右键取消：同样只存布尔，下次唤起截图时按新值决定装不装钩子
   bindCheck("set-shot-rclick", "set_screenshot_right_click_cancel");
 
@@ -4154,6 +4515,13 @@ async function main() {
   await listen("clipboard-update", (e) => {
     const item = e.payload;
     if (items.some((i) => i.id === item.id)) return;
+    if (USE_WINDOW_API) {
+      // 数据在后端：让页缓存失效并重取。用户停在顶部时不做锚点还原，
+      // 新内容立刻可见；停在中间时锚点会把他正在看的那条钉在原地。
+      api.invalidate();
+      if (currentView !== "settings") renderWindow({ keepScroll: true });
+      return;
+    }
     items.unshift(item);
     // 设置页与条目列表无关。重绘只是把整页重建一遍，然后弹回顶部 ——
     // 数据已经进了 items，切回列表自然是最新的。
@@ -4175,3 +4543,210 @@ async function main() {
 }
 
 main();
+
+
+// ── 条数上限：达到上限时给一次清理建议 ────────────────────────────────────
+//
+// 上限本身不在设置页暴露：它是一个「兜底闸」，正常用户碰不到，也不需要为它做
+// 一次决策。真正需要知道的只有一件事 —— 历史条目多到会影响启动与内存时，弹一次
+// 提示，由用户决定清不清（置顶与收藏豁免，不会被自动删）。
+//
+// 上限值存在配置里（`max_items`，默认 1 万，`0` = 不限），需要改可以手改
+// config.json 或走 `set_max_items` 命令。
+
+/// 已经弹过就不再弹（同一轮运行内）。
+let limitPromptShown = false;
+
+/// 检查是否超过上限，超过则弹清理建议。
+///
+/// 用前端的 `items.length` 作为条数：后端的 `LIMIT_STATE.count` 是上一次上限检查
+/// 时记下的读数（每次复制才刷新），启动时可能还是 0。
+async function checkHistoryLimit() {
+  if (limitPromptShown) return;
+  let st = null;
+  try {
+    st = await invoke("history_limit");
+  } catch {
+    return;
+  }
+  const max = Number(st?.max || 0);
+  const count = items.length || Number(st?.count || 0);
+  if (!max || count <= max) return;
+  // 用户点过「暂不清理」：7 天内不再打扰
+  if (Number(st?.snoozeUntil || 0) > Date.now()) return;
+  const modal = document.getElementById("limit-modal");
+  if (!modal) return;
+  limitPromptShown = true;
+  document.getElementById("limit-modal-text").textContent =
+    `当前 ${count} 条，上限 ${max} 条，超出 ${count - max} 条。` +
+    `清理会删掉最旧的 ${count - max} 条（置顶与收藏不受影响），此操作不可撤销。`;
+  modal.hidden = false;
+  void suggestAgeCleanup(count - max);
+}
+
+// 设置项与弹窗都用事件委托：设置页每次渲染都会重建那一行，委托才能活过重绘。
+/// 上限提示里的「按建议清理」：找一个保留天数档，既能清掉超出量、又不至于
+/// 清得太狠（档位从宽松到严格依次试，取第一个够用的）。
+///
+/// 数字由后端数（`count_older_than`），前端不自己算 —— 两处口径必须一致。
+let suggestedAgeDays = 0;
+
+async function suggestAgeCleanup(overflow) {
+  const btn = document.getElementById("limit-by-age");
+  if (!btn) return;
+  btn.hidden = true;
+  suggestedAgeDays = 0;
+  for (const days of [7, 30, 90, 180, 365]) {
+    let n = 0;
+    try {
+      n = Number(await invoke("count_older_than", { days })) || 0;
+    } catch {
+      return;
+    }
+    if (n >= overflow && n > 0) {
+      suggestedAgeDays = days;
+      btn.textContent = `清理 ${days} 天前的旧条目（${n} 条）`;
+      btn.hidden = false;
+      return;
+    }
+  }
+}
+
+document.addEventListener("click", async (e) => {
+  const id = e.target?.id;
+  if (id === "limit-by-age") {
+    const modal = document.getElementById("limit-modal");
+    if (modal) modal.hidden = true;
+    const days = suggestedAgeDays;
+    if (!days) return;
+    let n = 0;
+    try {
+      n = Number(await invoke("delete_older_than", { days })) || 0;
+    } catch (err) {
+      toast("清理失败：" + err);
+      return;
+    }
+    try {
+      items = await invoke("get_history");
+      // 删完之后所有页都可能变了：不失效缓存的话，列表要切一次视图才刷新
+      api.invalidate();
+      render();
+    } catch {
+      /* 刷新失败不阻塞提示 */
+    }
+    toast(n > 0 ? `已清理 ${n} 条 ${days} 天前的条目` : "没有可清理的条目");
+    return;
+  }
+  if (id === "btn-clean-by-age" || id === "btn-clean-age") {
+    const modal = document.getElementById("age-clean-modal");
+    if (!modal) return;
+    await refreshAgeCleanPreview(modal);
+    modal.hidden = false;
+    return;
+  }
+  // 预设档位：填进输入框后重算预览，弹窗保持打开
+  if (e.target?.classList?.contains("age-preset")) {
+    const input = document.getElementById("clean-age-days");
+    if (input) input.value = String(Number(e.target.dataset.days) || 30);
+    const modal = document.getElementById("age-clean-modal");
+    if (modal && !modal.hidden) await refreshAgeCleanPreview(modal);
+    return;
+  }
+  // 自定义天数：改数字就重算预览
+  if (id === "clean-age-days") {
+    const modal = document.getElementById("age-clean-modal");
+    if (modal && !modal.hidden) await refreshAgeCleanPreview(modal);
+    return;
+  }
+
+  if (id === "age-clean-cancel") {
+    const modal = document.getElementById("age-clean-modal");
+    if (modal) modal.hidden = true;
+    return;
+  }
+  if (id === "age-clean-confirm") {
+    const modal = document.getElementById("age-clean-modal");
+    const days = Number(modal?.dataset.days || 0);
+    if (modal) modal.hidden = true;
+    if (!days) return;
+    let n = 0;
+    try {
+      n = Number(await invoke("delete_older_than", { days })) || 0;
+    } catch (err) {
+      toast("清理失败：" + err);
+      return;
+    }
+    try {
+      items = await invoke("get_history");
+      // 删完之后所有页都可能变了：不失效缓存的话，列表要切一次视图才刷新
+      api.invalidate();
+      render();
+    } catch {
+      /* 刷新失败不阻塞提示 */
+    }
+    toast(n > 0 ? `已清理 ${n} 条 ${days} 天前的条目` : "没有可清理的条目");
+    return;
+  }
+  if (id !== "limit-confirm" && id !== "limit-snooze") return;
+  const modal = document.getElementById("limit-modal");
+  if (modal) modal.hidden = true;
+  if (id === "limit-snooze") {
+    try {
+      await invoke("snooze_limit_warning", { days: 7 });
+      toast("7 天内不再提示");
+    } catch (err) {
+      toast("设置失败：" + err);
+    }
+    return;
+  }
+  let n = 0;
+  try {
+    n = await invoke("trim_history_to_limit");
+  } catch (err) {
+    toast("清理失败：" + err);
+    return;
+  }
+  try {
+    items = await invoke("get_history");
+    render();
+  } catch {
+    /* 列表刷新失败不阻塞提示 */
+  }
+  toast(n > 0 ? `已清理 ${n} 条` : "没有可清理的条目");
+});
+
+// 启动后查一次；之后每次复制（clipboard-update）再查
+setTimeout(() => {
+  void checkHistoryLimit();
+}, 1500);
+listen("clipboard-update", () => {
+  void checkHistoryLimit();
+});
+
+/// 重算「按天数清理」弹窗里的预览条数。
+async function refreshAgeCleanPreview(modal) {
+  const days = Math.max(1, Math.floor(Number(document.getElementById("clean-age-days")?.value) || 30));
+  let n = -1;
+  try {
+    n = Number(await invoke("count_older_than", { days })) || 0;
+  } catch {
+    n = -1;
+  }
+  const text = document.getElementById("age-clean-modal-text");
+  if (text) {
+    text.textContent =
+      n < 0
+        ? `将删除 ${days} 天前的条目。`
+        : n === 0
+          ? `没有 ${days} 天前的条目。`
+          : `将删除 ${days} 天前的条目 ${n} 条（置顶与收藏按设置豁免），此操作不可撤销。`;
+  }
+  modal.dataset.days = String(days);
+}
+
+// 自定义天数：改数字就重算预览（输入是 input 事件，不是 click）
+document.addEventListener("input", (e) => {
+  if (e.target?.id !== "clean-age-days") return;
+  const modal = document.getElementById("age-clean-modal");
+  if (modal && !modal.hidden) void refreshAgeCleanPreview(modal);
+});

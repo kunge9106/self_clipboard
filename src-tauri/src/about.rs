@@ -61,7 +61,7 @@ extern "system" {
     ) -> i32;
 }
 
-fn mem_mb() -> u64 {
+pub(crate) fn mem_mb() -> u64 {
     let mut c = ProcessMemoryCounters {
         cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
         page_fault_count: 0,

@@ -33,7 +33,7 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 /// 存储目录（app_data_dir/clipboard）
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 /// 内存中的轻量索引（只存元数据，不存内容正文）
-static HISTORY: OnceLock<Mutex<Vec<HistoryItem>>> = OnceLock::new();
+static HISTORY: OnceLock<Mutex<Vec<crate::store::Meta>>> = OnceLock::new();
 
 /// 上一次处理过的剪贴板序列号（去重）
 static LAST_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -118,7 +118,7 @@ const LAST_IMG_KEEP: usize = 16;
 static WORKER: OnceLock<std::sync::mpsc::Sender<(u64, RawClip, bool, bool)>> = OnceLock::new();
 /// 缩略图生成线程的投递端。与捕获线程分开：捕获线程只做「落盘 + 通知前端」必须快，
 /// 缩略图解码慢、且不影响条目出现，所以单独排队，避免拖慢快速连续复制。
-static THUMB_TX: OnceLock<std::sync::mpsc::Sender<HistoryItem>> = OnceLock::new();
+static THUMB_TX: OnceLock<std::sync::mpsc::Sender<crate::store::Meta>> = OnceLock::new();
 /// 已投递给工作线程、尚未落盘完成的条数。退出前据此等待，避免「刚复制就退出」丢数据。
 static PENDING: AtomicU32 = AtomicU32::new(0);
 
@@ -151,7 +151,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryItem {
     pub id: String,
     pub kind: String, // "text" | "image" | "files"
@@ -307,10 +307,32 @@ pub fn copy_diagnostics() -> Result<String, String> {
 
 #[tauri::command]
 pub fn get_history() -> Vec<HistoryItem> {
+    // 常驻是 Meta，IPC 仍是完整 HistoryItem（字段名与今天逐个对齐，前端零改动）。
+    // 这次全量投影（含深拷贝）是 T03 要用窗口协议删掉的东西，本次先保行为一致。
     HISTORY
         .get()
-        .map(|m| m.lock().unwrap().clone())
+        .map(|m| {
+            m.lock()
+                .unwrap()
+                .iter()
+                .map(|meta| meta.to_item())
+                .collect()
+        })
         .unwrap_or_default()
+}
+
+/// 只读地看一眼常驻列表（查询层用）。
+///
+/// 为什么给函数而不是把 `HISTORY` 暴露出去：锁的纪律要留在这一个文件里 ——
+/// 谁能拿锁、拿多久，是本地存储的事，不该散到查询层去决定。
+pub(crate) fn with_history<T>(f: impl FnOnce(&[crate::store::Meta]) -> T) -> T {
+    match HISTORY.get() {
+        Some(h) => match h.lock() {
+            Ok(g) => f(&g),
+            Err(poisoned) => f(&poisoned.into_inner()),
+        },
+        None => f(&[]),
+    }
 }
 
 /// 处理条目引用的本地文件（回收站 / 永久删除），返回给前端的提示串。
@@ -322,7 +344,7 @@ pub fn get_history() -> Vec<HistoryItem> {
 /// 所以后端不信任任何一侧，两边都满足才动手。
 ///
 /// 日志只记**数量**，不记路径：路径里带着文件名，属于内容级信息。
-fn purge_local_files(items: &[HistoryItem]) -> Option<String> {
+fn purge_local_files(items: &[crate::store::Meta]) -> Option<String> {
     let cfg = crate::settings::get();
     if !cfg.delete_files_with_item {
         return None;
@@ -375,7 +397,7 @@ pub fn delete_item(id: String, delete_local_files: Option<bool>) -> Result<Optio
             None
         };
         remove_item_files(&dir, &item);
-        save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
+        append_op(&dir, crate::store::Op::Delete { id: id.clone() });
         // 只记 id / kind 等元数据，不含内容。
         crate::log_print!("[clipboard] 删除条目 {id} kind={kind}");
         Ok(note)
@@ -496,7 +518,9 @@ pub fn clear_all() -> Result<(), String> {
         remove_item_files(&dir, item);
     }
     hist.clear();
-    save_index(&dir, &hist);
+    drop(hist);
+    // `clear` 是覆盖式语义（清空就是清空），重放不会「复活」条目。
+    append_op(&dir, crate::store::Op::Clear);
     crate::log_print!("[clipboard] 清空全部历史，共 {n} 条");
     Ok(())
 }
@@ -586,16 +610,16 @@ pub fn get_full_content(id: String) -> Result<FullContent, String> {
     };
 
     // 文本正文优先；其次是文件路径清单。图片没有可查看的长文本。
+    // 路径不再是常驻字段：标准形态由 id 推导（store::Meta），非常规形态原样保留。
     let rel = item
-        .text_path
-        .as_ref()
-        .or(item.files_path.as_ref())
+        .text_rel()
+        .or_else(|| item.files_rel())
         .ok_or("该条目没有可查看的文本内容")?;
-    let raw = read_text_entity(&dir, rel)?;
+    let raw = read_text_entity(&dir, &rel)?;
     let mut full = summarize_content(raw);
     // 富文本只在这条确实带格式时才多读一次（解不开就当没有，不影响纯文本显示）
-    if let Some(hrel) = item.html_path.as_ref() {
-        match read_text_entity(&dir, hrel) {
+    if let Some(hrel) = item.html_rel() {
+        match read_text_entity(&dir, &hrel) {
             Ok(h) => full.html = Some(h),
             Err(e) => crate::log_warn!(
                 "[clipboard] 详情：富文本实体读取失败 {hrel}：{e}（回退纯文本显示）"
@@ -751,15 +775,15 @@ pub fn copy_back(id: String, plain: Option<bool>) -> Result<Option<String>, Stri
     let result: Result<Option<String>, String> = (|| -> Result<Option<String>, String> {
         match kind.as_str() {
             "text" => {
-                let text = match &item.text_path {
-                    Some(rel) => read_text_entity(&dir, rel)?,
+                let text = match item.text_rel() {
+                    Some(rel) => read_text_entity(&dir, &rel)?,
                     None => item.preview.clone(),
                 };
                 // 默认**保留格式**（用户复制的是带格式的内容，粘回去也该带格式）；
                 // 想要纯文本走右键菜单里的「粘贴为纯文本」。
                 if !plain.unwrap_or(false) {
-                    if let Some(rel) = &item.html_path {
-                        if let Ok(cf) = read_text_entity(&dir, rel) {
+                    if let Some(rel) = item.html_rel() {
+                        if let Ok(cf) = read_text_entity(&dir, &rel) {
                             // 没有拆出图片的条目：原样写回那段 CF_HTML 字节，零风险。
                             // 有图片的条目：图片存放时是独立文件，这里必须塞回 base64
                             // 并**重建**头部 —— 旧头里的偏移在还原后全错了，
@@ -776,8 +800,8 @@ pub fn copy_back(id: String, plain: Option<bool>) -> Result<Option<String>, Stri
                             return Ok(Some("已按原格式复制".into()));
                         }
                     }
-                    if let Some(rel) = &item.rtf_path {
-                        if let Ok(rtf) = read_text_entity(&dir, rel) {
+                    if let Some(rel) = item.rtf_rel() {
+                        if let Ok(rtf) = read_text_entity(&dir, &rel) {
                             unsafe { write_rtf_to_clipboard(&rtf, &text)? };
                             return Ok(Some("已按原格式复制（RTF）".into()));
                         }
@@ -788,8 +812,8 @@ pub fn copy_back(id: String, plain: Option<bool>) -> Result<Option<String>, Stri
             "files" => {
                 // 以落盘清单为唯一数据源（与文本条目走 text_path 一致）；
                 // 旧版 index.json 把路径内联在 files 里、没有 files_path，回退到内存中的 files。
-                let files: Vec<String> = match &item.files_path {
-                    Some(rel) => read_text_entity(&dir, rel)?
+                let files: Vec<String> = match item.files_rel() {
+                    Some(rel) => read_text_entity(&dir, &rel)?
                         .lines()
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string())
@@ -891,8 +915,8 @@ pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
         if item.kind != "files" {
             continue;
         }
-        let paths: Vec<String> = match &item.files_path {
-            Some(rel) => read_text_entity(&dir, rel)
+        let paths: Vec<String> = match item.files_rel() {
+            Some(rel) => read_text_entity(&dir, &rel)
                 .unwrap_or_default()
                 .lines()
                 .filter(|s| !s.is_empty())
@@ -916,7 +940,7 @@ pub fn delete_items(
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
     // 先把待处理的目标捞出来：`retain` 里拿不到可变借用之外的东西，
     // 而本地文件必须在条目被移除**之前**按它自己记录的路径处理。
-    let purge_targets: Vec<HistoryItem> = if delete_local_files.unwrap_or(false) {
+    let purge_targets: Vec<crate::store::Meta> = if delete_local_files.unwrap_or(false) {
         hist.iter()
             .filter(|i| ids.iter().any(|id| id == &i.id))
             .cloned()
@@ -937,7 +961,20 @@ pub fn delete_items(
         }
     });
     drop(hist);
-    save_index(&dir, &HISTORY.get().unwrap().lock().unwrap());
+    // 每条一个 Delete 帧：单帧几十字节；整批一次写完、一次 fsync（逐条 sync 会是
+    // 几百次 fsync = 秒级卡顿）。不用 `clear` 之类的批量 op —— 那会把
+    // 「选中删除」变成「清空」，语义完全不同。
+    let ops: Vec<crate::store::Op> = ids
+        .iter()
+        .map(|id| crate::store::Op::Delete { id: id.clone() })
+        .collect();
+    match crate::store::append_many(&dir, &ops) {
+        Ok(()) => {
+            LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed);
+            crate::query::bump_epoch();
+        }
+        Err(e) => crate::log_err!("clipboard", "批量删除的日志追加失败（{e}）"),
+    }
     crate::log_print!("[clipboard] 批量删除 {removed} 条");
     Ok(note)
 }
@@ -1062,7 +1099,7 @@ fn spawn_worker() {
 /// 放在捕获线程里就会成为瓶颈。本线程只负责生成缩略图，慢一点无妨 ——
 /// 前端按需读取时会命中已备好的文件，读不到再走 get_image_thumb 现场生成兜底。
 fn spawn_thumb_worker() {
-    let (tx, rx) = std::sync::mpsc::channel::<HistoryItem>();
+    let (tx, rx) = std::sync::mpsc::channel::<crate::store::Meta>();
     let _ = std::thread::Builder::new()
         .name("clipboard-thumb".into())
         .spawn(move || {
@@ -1122,7 +1159,15 @@ pub fn init(app: &AppHandle) {
     }
     let _ = DIR.set(dir.clone());
 
-    let mut hist = load_index(&dir);
+    // 载入：v2 快照 → 旧格式（一次性迁移）→ 没有。任何一种失败都不 panic，
+    // 也不静默生成新密钥（见 store::load_index）。
+    let loaded = crate::store::load_index(&dir);
+    let mut hist = loaded.items;
+    // 这一次启动结束时要不要补写一份 v2 快照：首次运行、刚迁移完、索引需要重建，
+    // 三种情况都得写，否则下次启动又走一遍同样的分支。
+    let mut need_snapshot = loaded.status.needs_snapshot();
+    // 日志里还有没固化的帧（含「尾帧刚被截断」「中间帧损坏」两种）→ 起后台整理
+    let loaded_needs_compaction = loaded.needs_compaction;
     // 索引条目数明显少于缓存目录里的内容文件 → 索引坏了，按文件补齐。
     //
     // 不只看「索引为空」：用户实测的损坏形态是索引被截断、只剩最后几条
@@ -1136,11 +1181,16 @@ pub fn init(app: &AppHandle) {
         let rebuilt = rebuild_index_from_files(&dir, &mut hist);
         if rebuilt > 0 {
             crate::log_warn!(
-                "[clipboard] 索引只有 {before} 条、缓存目录有 {entity_count} 个内容文件 → 判为索引损坏，已补回 {rebuilt} 条（共 {} 条）；旧索引备份为 index.json.corrupt",
+                "[clipboard] 索引只有 {before} 条、缓存目录有 {entity_count} 个内容文件 → 判为索引损坏，已补回 {rebuilt} 条（共 {} 条）",
                 hist.len()
             );
-            let _ = fs::copy(dir.join("index.json"), dir.join("index.json.corrupt"));
-            save_index(&dir, &hist);
+            // 现场文件：store::load_index 在读不出来时已经留过一份；这里补的是
+            // 「能读但条数不对」的情况，把旧快照也原样留一份方便事后比对。
+            let bin = dir.join(crate::store::INDEX_BIN);
+            if bin.is_file() {
+                let _ = fs::copy(&bin, dir.join(crate::store::INDEX_CORRUPT));
+            }
+            need_snapshot = true;
         }
     }
     // 老版本 index.json 把文件路径内联在 files 里、没有落盘清单 → 补一份，
@@ -1190,7 +1240,7 @@ pub fn init(app: &AppHandle) {
         0
     };
 
-    if backfilled > 0 || refreshed > 0 || subtyped > 0 || img_moved > 0 {
+    if backfilled > 0 || refreshed > 0 || subtyped > 0 || img_moved > 0 || need_snapshot {
         save_index(&dir, &hist);
     }
     if layout_stale {
@@ -1203,9 +1253,20 @@ pub fn init(app: &AppHandle) {
 
     // 保留策略：按配置天数清理过期条目（0 = 永久保留）
     let cfg = crate::settings::get();
-    let hist = prune_history(hist, &dir, cfg.retention_days, cfg.prune_include_pinned);
+    let mut hist = prune_history(hist, &dir, cfg.retention_days, cfg.prune_include_pinned);
+    // 启动时也过一遍上限：用户可能在上次运行期间把上限调小了。
+    // 这里只改内存 + 写 WAL，不额外写快照。
+    enforce_history_limit(&dir, &mut hist);
 
     let _ = HISTORY.set(Mutex::new(hist));
+
+    // 启动时日志里还有帧（上次没来得及整理，或尾帧刚被截断）→ 后台固化一次。
+    // 不在这里同步做：10 万条的 compaction 要 150 ms，那是启动路径上的白等。
+    if loaded_needs_compaction {
+        spawn_compact(dir.clone());
+    }
+    // 空闲维护：日志 30 秒没有新变更就固化，避免「关掉再打开时重放一大段日志」。
+    spawn_compaction_ticker(dir.clone());
 
     // 工作线程必须在订阅监听**之前**就位：否则第一批 WM_CLIPBOARDUPDATE
     // 到达时 WORKER 还没初始化，会退化成主线程同步落盘。
@@ -1536,7 +1597,8 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
     //   2. 交给独立的缩略图线程 —— 不占用捕获线程，快速连续复制时不会因为解码而排队。
     if item.kind == "image" {
         if let Some(tx) = THUMB_TX.get() {
-            let _ = tx.send(item.clone());
+            // 线程之间传常驻形态（只有 id + img_path 有用），不必整条 HistoryItem
+            let _ = tx.send(crate::store::Meta::from_item(&item));
         }
     }
 }
@@ -1571,10 +1633,10 @@ fn is_same_origin_recent(text: &str, ts: u64) -> bool {
     if ts.saturating_sub(last.ts) > TEXT_SAME_ORIGIN_MS {
         return false;
     }
-    let Some(rel) = &last.text_path else {
+    let Some(rel) = last.text_rel() else {
         return false;
     };
-    match read_text_entity(&dir, rel) {
+    match read_text_entity(&dir, &rel) {
         Ok(prev) => same_origin(&prev, text),
         Err(_) => false,
     }
@@ -1627,9 +1689,9 @@ fn replace_latest_text(text: &str, html: &Option<String>, rtf: &Option<String>) 
         return false;
     }
     let id = last.id.clone();
-    let rel = format!("data/{id}.txt");
+    let rel = crate::store::text_rel(&id);
     write_text_entity(&dir, &rel, text);
-    last.text_path = Some(rel);
+    last.set_text_path(Some(rel));
     last.size = text.len() as u64;
     let (preview, truncated) = text_preview_parts(text);
     last.preview = preview;
@@ -1638,19 +1700,26 @@ fn replace_latest_text(text: &str, html: &Option<String>, rtf: &Option<String>) 
     // 富文本一并换掉（第二次往往才带格式）
     if let Some(h) = html {
         let (hrel, imgs) = store_rich_html(&dir, &id, h.as_str());
-        last.html_path = Some(hrel);
+        last.set_html_path(Some(hrel));
         last.rich_images = imgs;
     }
     if let Some(r) = rtf {
-        let rrel = format!("data/{id}.rtf");
+        let rrel = crate::store::rtf_rel(&id);
         write_text_entity(&dir, &rrel, r);
-        last.rtf_path = Some(rrel);
+        last.set_rtf_path(Some(rrel));
     }
     let updated = last.clone();
-    save_index(&dir, &g);
     drop(g);
+    // 编辑保存几乎把整条都换了（正文、预览、子类型、富文本），写整条最直接，
+    // 也仍然是幂等的：同 id upsert。帧里是完整 HistoryItem（投影一次）。
+    append_op(
+        &dir,
+        crate::store::Op::Insert {
+            item: updated.to_item(),
+        },
+    );
     if let Some(app) = APP.get() {
-        let _ = app.emit("clipboard-update", updated);
+        let _ = app.emit("clipboard-update", updated.to_item());
     }
     true
 }
@@ -1675,24 +1744,34 @@ fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
     }
     let id = last.id.clone();
     let mut changed = false;
-    if last.html_path.is_none() {
+    if last.html_rel().is_none() {
         if let Some(h) = html {
             let (rel, imgs) = store_rich_html(&dir, &id, h.as_str());
-            last.html_path = Some(rel);
+            last.set_html_path(Some(rel));
             last.rich_images = imgs;
             changed = true;
         }
     }
-    if last.rtf_path.is_none() {
+    if last.rtf_rel().is_none() {
         if let Some(r) = rtf {
-            let rel = format!("data/{id}.rtf");
+            let rel = crate::store::rtf_rel(&id);
             write_text_entity(&dir, &rel, r);
-            last.rtf_path = Some(rel);
+            last.set_rtf_path(Some(rel));
             changed = true;
         }
     }
     if changed {
-        save_index(&dir, &g);
+        // 只变了富文本三项 → 用 patch，帧比整条小一半
+        let set = crate::store::PatchSet {
+            html_path: last.html_rel(),
+            rtf_path: last.rtf_rel(),
+            rich_images: Some(last.rich_images.clone()),
+            ..Default::default()
+        };
+        drop(g);
+        append_op(&dir, crate::store::Op::Patch { id, set });
+    } else {
+        drop(g);
     }
     changed
 }
@@ -2846,21 +2925,21 @@ fn make_text_preview(text: &str) -> String {
 ///
 /// 幂等：只有值确实变了才计数，所以跑过一次之后就不再写盘。
 /// 返回值给调用方决定是否 `save_index`。
-fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usize {
+fn refresh_text_previews(dir: &std::path::Path, hist: &mut [crate::store::Meta]) -> usize {
     let mut changed = 0usize;
     for item in hist.iter_mut() {
         // 只处理文本条目 —— 文件条目的 preview 是「名字 等 N 个文件」，另一套规则
         if item.kind != "text" {
             continue;
         }
-        let Some(rel) = item.text_path.as_ref() else {
+        let Some(rel) = item.text_rel() else {
             continue;
         };
         // 不再「只读文件头 64KB」：内容已加密（见 ENC_MAGIC），DPAPI 必须先拿到
         // **完整密文**才能解出正文，读到一半的头没有任何意义。文本条目本身都不大，
         // 整份读+解的代价可接受；解不开（换了账户/机器）就跳过，不让它拖垮启动。
         let dir = dir.to_path_buf();
-        let Ok(text) = read_text_entity(&dir, rel) else {
+        let Ok(text) = read_text_entity(&dir, &rel) else {
             continue;
         };
         if text.is_empty() {
@@ -2883,16 +2962,16 @@ fn refresh_text_previews(dir: &std::path::Path, hist: &mut [HistoryItem]) -> usi
 /// 只处理 `subtype.is_none()` 的条目 —— 已判定过的（包括「判过但两类都不是」的空串）
 /// 一律跳过，所以这个函数**天然只跑一次**：升级后首次启动扫一遍，之后每次启动
 /// 都不会再解密几百条正文。这也是用空串而不是 None 表示「无子类型」的原因。
-fn refresh_text_subtypes(dir: &PathBuf, hist: &mut [HistoryItem]) -> usize {
+fn refresh_text_subtypes(dir: &PathBuf, hist: &mut [crate::store::Meta]) -> usize {
     let mut changed = 0usize;
     for item in hist.iter_mut() {
         if item.kind != "text" || item.subtype.is_some() {
             continue;
         }
-        let Some(rel) = item.text_path.as_ref() else {
+        let Some(rel) = item.text_rel() else {
             continue;
         };
-        let Ok(text) = read_text_entity(dir, rel) else {
+        let Ok(text) = read_text_entity(dir, &rel) else {
             continue;
         };
         item.subtype = Some(detect_subtype(&text).unwrap_or("").to_string());
@@ -2941,7 +3020,7 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
             item.preview_truncated = truncated;
             // 无论长短都落盘全文：内存只保留截断后的 preview 摘要，
             // 这样既遵守「内容不走内存」红线，复制回去时也不会被截断。
-            let rel = format!("data/{}.txt", id);
+            let rel = crate::store::text_rel(&id);
             write_text_entity(&dir, &rel, &text);
             item.text_path = Some(rel);
             // 富文本实体单独落盘（一样加密）：纯文本永远是主数据，
@@ -2952,7 +3031,7 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
                 item.rich_images = imgs;
             }
             if let Some(r) = rtf {
-                let rrel = format!("data/{id}.rtf");
+                let rrel = crate::store::rtf_rel(&id);
                 write_text_entity(&dir, &rrel, &r);
                 item.rtf_path = Some(rrel);
             }
@@ -2975,7 +3054,7 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
             }
             // 路径清单落盘（每行一个完整路径）：缓存目录里必须有这条记录的实体，
             // 否则「文件」条目的数据在缓存目录里完全看不到。
-            let rel = format!("files/{}.txt", id);
+            let rel = crate::store::files_rel(&id);
             let body = files.join("\r\n");
             write_text_entity(&dir, &rel, &body);
             item.files_path = Some(rel);
@@ -3031,9 +3110,21 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
         RawClip::ImageFile(_) | RawClip::ImageRaw(_) => {}
     }
 
-    let mut hist = HISTORY.get().unwrap().lock().unwrap();
-    hist.insert(0, item.clone());
-    save_index(&dir, &hist);
+    {
+        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        // 按 ts 二分插入，而不是 `insert(0, _)`：后者隐含「新条目 ts 一定最大」，
+        // 系统时钟回拨（NTP 校时 / 用户改时间）时就会把新内容排到中间去，
+        // 而列表「ts 严格降序」是分页切片的前提。正常情况命中下标 0，与老行为一致。
+        crate::store::insert_ordered(&mut hist, crate::store::Meta::from_item(&item));
+    } // 先放锁：追加日志要 sync_data，别让读的人等它
+    // 复制是最高频的写路径：一条 op 追加进日志（~500 B + sync_data），
+    // 不再整份重写索引。整份快照交给后台整理。
+    append_op(&dir, crate::store::Op::Insert { item: item.clone() });
+    // 上限清理：超了就删最旧的非保护条目（走批量 Delete，不写快照）
+    {
+        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        enforce_history_limit(&dir, &mut hist);
+    }
     // ⚠️ 只记**元数据**，绝不记内容。
     //
     // 改动前这里打的是 `preview={:?}`，而 preview 就是剪贴板正文的开头几行 ——
@@ -3355,7 +3446,11 @@ const IMAGE_LAYOUT_VERSION: u32 = 1;
 /// 兜住：它会扫 `shot/` 与 `copy/`，并从文件名解析时间重建条目。真被强杀也不丢图。
 ///
 /// 返回迁移条数。
-fn migrate_image_layout(dir: &PathBuf, hist: &mut Vec<HistoryItem>, split: bool) -> usize {
+fn migrate_image_layout(
+    dir: &PathBuf,
+    hist: &mut Vec<crate::store::Meta>,
+    split: bool,
+) -> usize {
     // 返回「改动条数」：既包括搬了文件的，也包括只补了 shot 标记的 ——
     // 后者也要写索引，否则下次启动还会重算一遍
     let mut changed = 0usize;
@@ -3565,7 +3660,7 @@ fn placeholder_png(side: u32) -> Vec<u8> {
     cur.into_inner()
 }
 
-fn ensure_thumb(dir: &std::path::Path, item: &HistoryItem) -> Option<Vec<u8>> {
+fn ensure_thumb(dir: &std::path::Path, item: &crate::store::Meta) -> Option<Vec<u8>> {
     let rel = item.img_path.as_ref()?;
     let src = dir.join(rel);
     // 1) 已有缩略图直接读
@@ -4080,7 +4175,7 @@ fn dpapi(input: &[u8], protect: bool) -> Option<Vec<u8>> {
 ///
 /// 加密失败时**退回明文**而不是报错：宁可少一层保护，也不能因为 DPAPI 异常
 /// 把用户刚复制的内容弄丢 —— 剪贴板历史的首要职责是「记得住」。
-fn encrypt_text(plain: &str) -> Vec<u8> {
+pub(crate) fn encrypt_text(plain: &str) -> Vec<u8> {
     match dpapi(plain.as_bytes(), true) {
         Some(blob) => {
             let mut out = Vec::with_capacity(ENC_MAGIC.len() + blob.len());
@@ -4098,7 +4193,7 @@ fn encrypt_text(plain: &str) -> Vec<u8> {
 }
 
 /// 把落盘字节还原成文本，**同时兼容历史明文文件**（没有魔数前缀的就是老数据）。
-fn decode_text_bytes(raw: &[u8]) -> Option<String> {
+pub(crate) fn decode_text_bytes(raw: &[u8]) -> Option<String> {
     if raw.starts_with(ENC_MAGIC) {
         let plain = dpapi(&raw[ENC_MAGIC.len()..], false)?;
         // 密文解出来一定是当初写进去的 UTF-8；非法字节说明 blob 被破坏
@@ -4149,121 +4244,233 @@ fn encrypt_legacy_entities(dir: &PathBuf) -> usize {
     n
 }
 
-/// 索引读不出来时，把损坏的文件原样留一份再返回空。
+/// 落盘索引：v2 快照（AES-256-GCM），实现在 `store` 里。
 ///
-/// 为什么必须留：`load_index` 返回空之后，用户随手复制一条就会触发 `save_index`，
-/// 把损坏文件**就地覆盖**成一个看起来正常的小索引 —— 事故现场彻底消失，事后
-/// 谁也无法判断是截断、解密失败还是解析失败。用户实测那次就是这样丢的证据。
-fn keep_corrupt(dir: &PathBuf, raw: &[u8], why: &str) {
-    let dst = dir.join("index.json.corrupt");
-    match fs::write(&dst, raw) {
-        Ok(()) => crate::log_err!(
+/// 为什么这里只剩薄薄一层：`save_index` 有 14 处调用点，分布在复制、置顶、收藏、
+/// 删除、清理、退出……每一处都得「记得写一次」。保留**一个**统一写入口，比把 14 处
+/// 分别改成新函数更安全 —— 漏改一处就是「这次操作没落盘」这类最难发现的 bug
+/// （要等到下次启动少几条才暴露）。这个入口同时保证了没人绕过去写 `index.json`。
+///
+/// 索引为什么必须加密：里面有 `preview`（正文开头两行）与 `files`（完整路径列表），
+/// 前者可能直接是密码、密钥、聊天记录，后者暴露目录结构与项目名。内容实体早就加密了，
+/// 索引若是明文，等于给同一份内容留了个不加密的副本。
+///
+/// 落盘失败时**不降级成明文**：宁可这一次不写（内存里的历史还在，下一次成功写入
+/// 会整份补上 —— 快照是整份写的，不会只补一半），也不能在用户不知情的情况下把
+/// 正文写成明文。旧实现里 `encrypt_text` 在 DPAPI 异常时会退回明文，那是「多一层
+/// 保护不如记得住」的取舍；索引不同：它一旦以明文落盘，用户以为的加密就是假的。
+fn save_index(dir: &PathBuf, hist: &[crate::store::Meta]) {
+    match crate::store::persist(dir, hist) {
+        Ok(()) => {}
+        Err(e) => crate::log_err!(
             "clipboard",
-            "index.json {why}；损坏文件 {} 字节已另存为 index.json.corrupt",
-            raw.len()
+            "索引落盘失败（{e}）：本次改动只在内存生效，下一次成功写入会整份补上"
         ),
-        Err(e) => crate::log_err!("clipboard", "index.json {why}，且备份失败：{e}"),
     }
 }
 
-fn load_index(dir: &PathBuf) -> Vec<HistoryItem> {
-    let path = dir.join("index.json");
-    // 按**字节**读，不按字符串：新格式是 DPAPI 密文（带 ENC_MAGIC），不是 UTF-8 JSON。
-    let raw = match fs::read(&path) {
-        Ok(v) => v,
-        Err(e) => {
-            // 曾经这里直接 `return Vec::new()` —— **一行日志都没有**。于是
-            // 「记录全没了」成了唯一线索，连「索引文件到底在不在」都查不出来。
-            // 用户实测那次日志里恰好就是这种真空。
-            if e.kind() == std::io::ErrorKind::NotFound {
+/// 最近一次追加变更的时间（毫秒），给「空闲 30 秒就整理」用。
+static LAST_APPEND_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 把一条变更追加进日志 —— 高频路径（复制 / 删除 / 置顶 / 收藏 / 清空）走这里。
+///
+/// 与 `save_index` 的分工是硬边界：**任何一条路径只能选一种**。同一次操作既 append
+/// 又整份快照，重放时会把那条 op 再来一遍（insert 幂等还好，但 `clear` 之后再
+/// `insert` 就会凭空多出一条），属于自己给自己造数据错误。
+fn append_op(dir: &Path, op: crate::store::Op) {
+    match crate::store::append(dir, op) {
+        Ok(()) => {
+            LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed);
+            // 列表内容变了 → 版本号 +1（前端据此让页缓存失效）
+            crate::query::bump_epoch();
+            // 帧数 / 字节数到阈值 → 后台整理。判断只看内存里的计数，不进 IO。
+            if crate::store::wal_needs_compact(dir) {
+                spawn_compact(dir.to_path_buf());
+            }
+        }
+        Err(e) => crate::log_err!(
+            "clipboard",
+            "追加日志失败（{e}）：本次改动只在内存生效，下一次成功写入会补上"
+        ),
+    }
+}
+
+/// 单飞的整理线程标记：同一时刻只允许一个 compaction 在跑。
+static COMPACTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 起一个后台线程做一次整理。
+fn spawn_compact(dir: PathBuf) {
+    if COMPACTING.swap(true, Ordering::SeqCst) {
+        return; // 已经有一个在跑，它会把该固化的都固化掉
+    }
+    std::thread::spawn(move || {
+        compact_now(&dir);
+        COMPACTING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// 同步整理：把内存里的全量状态写成新快照，并截掉日志里已被覆盖的部分。
+///
+/// 序列化要的是**当前**状态，所以这里克隆一份 `Vec<HistoryItem>`（10 万条约 38 ms）。
+/// 拿读锁克隆、写盘时不再持锁：整理是后台行为，不该让别人等它。
+/// 注意不能在持有 `HISTORY` 锁的路径上直接调用（会自锁），只能从新线程或退出流程里调。
+fn compact_now(dir: &Path) {
+    let Some(store) = HISTORY.get() else { return };
+    let snapshot = match store.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    };
+    let t = std::time::Instant::now();
+    match crate::store::compact(dir, &snapshot) {
+        Ok(()) => crate::log_print!(
+            "[clipboard] 索引整理完成：{} 条，{} ms",
+            snapshot.len(),
+            t.elapsed().as_millis()
+        ),
+        Err(e) => crate::log_err!("clipboard", "索引整理失败（{e}）"),
+    }
+}
+
+/// 当前是否已接近/达到条数上限（前端启动时读一次，用来决定要不要提示）。
+///
+/// 本轮只到「标志位 + 日志」，不弹窗：提示的呈现方式属于前端渲染层的活。
+static LIMIT_STATE: std::sync::Mutex<(u32, u32, bool)> = std::sync::Mutex::new((0, 0, false));
+/// 「跨过 80% 的那条 INFO 已经记过」：避免每次复制都往日志里写同一句。
+static NEAR_LIMIT_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 前端读取上限状态：`{ max, count, nearLimit, snoozeUntil }`。
+///
+/// `count` 来自上一次上限检查时记下的读数（每次复制都会刷新），不必为此再扫一遍全表。
+#[tauri::command]
+pub fn history_limit() -> serde_json::Value {
+    let (count, max, near) = match LIMIT_STATE.lock() {
+        Ok(g) => *g,
+        Err(p) => *p.into_inner(),
+    };
+    serde_json::json!({
+        "max": max,
+        "count": count,
+        "nearLimit": near,
+        "snoozeUntil": crate::settings::get().max_items_snooze_until,
+    })
+}
+
+/// 立即按当前设置的上限清理一次（改小上限之后、或用户在弹窗里点了确认）。
+///
+/// 返回删掉的条数，前端据此提示「已清理 N 条」。
+#[tauri::command]
+pub fn trim_history_to_limit() -> u32 {
+    let Some(dir) = DIR.get().cloned() else { return 0 };
+    let Some(hist) = HISTORY.get() else { return 0 };
+    let mut guard = match hist.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let before = guard.len();
+    enforce_history_limit(&dir, &mut guard);
+    (before.saturating_sub(guard.len())) as u32
+}
+
+/// 按 `max_items` 清理超限的最旧条目。
+///
+/// 三条硬约束：
+///   1. 只删**非置顶、非收藏**的；保护条目永不自动删（删完仍超限就停手并记 WARN）。
+///   2. 走 WAL 批量 `Delete`，**不写整份快照** —— 上限清理是高频路径上的动作，
+///      为它重写 38 MB 索引就把 WAL 的收益又还回去了。
+///   3. 删记录连实体一起删（正文/富文本/图片/文件清单），否则缓存目录会留下孤儿文件。
+fn enforce_history_limit(dir: &Path, hist: &mut Vec<crate::store::Meta>) {
+    enforce_limit(dir, hist, crate::settings::get().max_items as usize)
+}
+
+/// [`enforce_history_limit`] 的实现：`max` 作为参数传入。
+///
+/// 抽出来只为一件事：单测能直接验证「超限了删哪些」而不必依赖全局配置
+/// （单测环境里 `settings::update` 是空操作，改不动上限）。
+fn enforce_limit(dir: &Path, hist: &mut Vec<crate::store::Meta>, max: usize) {
+    if max == 0 {
+        return; // 0 = 不限
+    }
+    let near = hist.len() * 5 >= max * 4; // 到达 80%
+    if let Ok(mut g) = LIMIT_STATE.lock() {
+        *g = (hist.len() as u32, max as u32, near);
+    }
+    // 只在「刚跨过 80%」时记一条：这条路径每次复制都会跑，每次都记就是刷日志。
+    if near && !NEAR_LIMIT_LOGGED.swap(true, Ordering::Relaxed) {
+        crate::log_info!(
+            "clipboard",
+            "历史已达上限的 {}%（{} / {} 条）：到顶后将从最旧的非置顶非收藏条目开始清理",
+            hist.len() * 100 / max.max(1),
+            hist.len(),
+            max
+        );
+    } else if !near {
+        // 掉回 80% 以下（用户删了条目或调高了上限）→ 下次再跨过时重新记
+        NEAR_LIMIT_LOGGED.store(false, Ordering::Relaxed);
+    }
+    if hist.len() <= max {
+        return;
+    }
+
+    let overflow = crate::store::select_overflow(hist, max);
+    if overflow.ids.is_empty() {
+        crate::log_warn!(
+            "[clipboard] 历史 {} 条已超过上限 {} 条，但可删的（非置顶非收藏）一条都没有 —— 不清理",
+            hist.len(),
+            max
+        );
+        return;
+    }
+    let ids = overflow.ids;
+    for item in hist.iter().filter(|i| ids.iter().any(|d| d == &i.id)) {
+        remove_item_files(dir, item);
+    }
+    hist.retain(|i| !ids.iter().any(|d| d == &i.id));
+    let ops: Vec<crate::store::Op> = ids
+        .iter()
+        .map(|id| crate::store::Op::Delete { id: id.clone() })
+        .collect();
+    match crate::store::append_many(dir, &ops) {
+        Ok(()) => {
+            LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed);
+            crate::query::bump_epoch();
+            if overflow.shortfall > 0 {
                 crate::log_warn!(
-                    "[clipboard] 没有 index.json（首次运行，或索引已被删除/改名）—— 历史列表为空"
+                    "[clipboard] 上限清理：删掉最旧的 {} 条，仍有 {} 条是置顶/收藏不能删（现 {} / {} 条）",
+                    ops.len(),
+                    overflow.shortfall,
+                    hist.len(),
+                    max
                 );
             } else {
-                crate::log_err!("clipboard", "index.json 读取失败：{e}");
+                crate::log_print!(
+                    "[clipboard] 上限清理：删掉最旧的 {} 条（现 {} / {} 条）",
+                    ops.len(),
+                    hist.len(),
+                    max
+                );
             }
-            return Vec::new();
         }
-    };
-    if raw.is_empty() {
-        crate::log_err!(
-            "clipboard",
-            "index.json 是空文件（0 字节）—— 上次写入被中断（强杀/崩溃/断电）的特征，历史列表将为空"
-        );
-        return Vec::new();
+        Err(e) => crate::log_err!("clipboard", "上限清理的日志追加失败（{e}）"),
     }
-    // decode_text_bytes 同时兼容老版本的明文 JSON（没有魔数 → 原样返回），
-    // 老用户升级后历史不会因为格式切换而清空。
-    let Some(json) = decode_text_bytes(&raw) else {
-        keep_corrupt(dir, &raw, "解密失败（可能换了 Windows 账户或机器）");
-        return Vec::new();
-    };
-    let mut v: Vec<HistoryItem> = serde_json::from_str(&json).unwrap_or_else(|e| {
-        keep_corrupt(dir, &raw, &format!("解析失败：{e}"));
-        Vec::new()
-    });
-    // 旧版是**全局**置顶（pinned: bool）。迁移成「历史」分类的置顶——
-    // 历史是默认视图，用户当初置顶的内容在历史里仍然浮顶，行为不变。
-    let mut migrated = 0usize;
-    for i in v.iter_mut() {
-        if i.pinned && !i.pinned_views.iter().any(|x| x == "history") {
-            i.pinned_views.push("history".to_string());
-            migrated += 1;
-        }
-    }
-    if migrated > 0 {
-        crate::log_print!("[clipboard] 迁移 {migrated} 条旧版全局置顶 → 历史分类置顶");
-    }
-    // 成功加载也要记一条：否则「索引读到了几条、文件多大」只能靠 init 里那句
-    // 间接推断。事故复盘时最有用的是「改动前后的两条读数」，而不是只剩一条。
-    crate::log_print!(
-        "[clipboard] 索引加载成功：{} 条，{} 字节",
-        v.len(),
-        raw.len()
-    );
-    v
 }
 
-/// 落盘索引：**整份 DPAPI 加密**，落盘的不是明文 JSON。
+/// 空闲整理：启动后台维护线程，日志超过 30 秒没有新变更就固化一次。
 ///
-/// 为什么必须加密：`index.json` 里有 `preview`（正文前 2 行）和 `files`（完整
-/// 路径列表）—— 前者可能直接是密码、密钥、聊天记录，后者暴露目录结构与项目名。
-/// 内容实体（`data/` `files/`）早就加密了，索引却是明文，等于把同一份内容
-/// 抄了个不加密的副本放在旁边，加密就白做了。
-///
-/// 为什么整份加密而不是逐字段：`save_index` 每次捕获都会跑，逐字段要对上千条
-/// 各调一次 `CryptProtectData`，一次复制能卡上百毫秒；整份只调一次。
-/// 代价是 index.json 不再是人眼可读的 JSON —— 但它本来就是程序独占的索引，
-/// 需要排查时看日志就够了。
-///
-/// 加密失败时 `encrypt_text` 会退回明文（与内容实体同一策略）：
-/// 宁可少一层保护，也不能因为 DPAPI 异常把整份历史弄丢。读出时靠魔数区分。
-fn save_index(dir: &PathBuf, hist: &Vec<HistoryItem>) {
-    let path = dir.join("index.json");
-    // 先写临时文件、再原子替换。
-    //
-    // 直接 `fs::write` 覆盖是**非原子**的：进程若在写入中途被强杀（taskkill、
-    // 崩溃、关机），index.json 会被截断成半截甚至 0 字节，下次启动解析失败
-    // → 历史全没。用户实测过一次：列表只剩 4 条，而 data/ 下 300 多个正文文件
-    // 都在 —— 正是这种损坏形态。rename 在同一分区上是原子的，要么是旧的完整
-    // 索引，要么是新的完整索引，不存在半截状态。
-    let tmp = dir.join("index.json.tmp");
-    match serde_json::to_string_pretty(hist) {
-        Ok(s) => {
-            // 写失败要记：index.json 是重启后恢复历史/置顶/收藏的唯一依据，
-            // 静默失败会表现为「重启后记录全没了」却查无实据。
-            if let Err(e) = fs::write(&tmp, encrypt_text(&s)) {
-                crate::log_err!("clipboard", "index.json 写入失败：{e}");
-                let _ = fs::remove_file(&tmp);
-                return;
-            }
-            if let Err(e) = fs::rename(&tmp, &path) {
-                crate::log_err!("clipboard", "index.json 原子替换失败：{e}");
-                let _ = fs::remove_file(&tmp);
-            }
+/// 为什么需要它：帧数/字节数阈值只在「一直在写」时才会触发；用户复制几步就不动了，
+/// 日志会一直躺在磁盘上等下次启动重放。空闲整理把「重放成本」限制在一次会话之内。
+fn spawn_compaction_ticker(dir: PathBuf) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        if crate::store::wal_len(&dir) == 0 {
+            continue;
         }
-        Err(e) => crate::log_err!("clipboard", "index.json 序列化失败：{e}"),
-    }
+        let idle = now_ms().saturating_sub(LAST_APPEND_MS.load(Ordering::Relaxed));
+        if idle >= 30_000 {
+            spawn_compact(dir.clone());
+        }
+    });
 }
 
 /// 从 id（`{:x}-{counter}`）里取回毫秒时间戳。取不到返回 None。
@@ -4321,14 +4528,14 @@ fn count_entities(dir: &PathBuf) -> usize {
 /// 返回 `(html 相对路径, 图片相对路径列表)`。
 fn store_rich_html(dir: &PathBuf, id: &str, html: &str) -> (String, Vec<String>) {
     let (stripped, imgs) = extract_inline_images(html, dir, id);
-    let rel = format!("data/{id}.html");
+    let rel = crate::store::html_rel(&id);
     write_text_entity(dir, &rel, &stripped);
     (rel, imgs)
 }
 
 /// 列出某个条目已落盘的内联图，按序号排好（重建索引时用）。
-fn list_rich_images(dir: &PathBuf, id: &str) -> Vec<String> {
-    let sub = dir.join(format!("images/rich/{id}"));
+fn list_rich_images(dir: &Path, id: &str) -> Vec<String> {
+    let sub = dir.join(crate::store::rich_dir_rel(id));
     let Ok(rd) = fs::read_dir(&sub) else {
         return Vec::new();
     };
@@ -4344,12 +4551,12 @@ fn list_rich_images(dir: &PathBuf, id: &str) -> Vec<String> {
     });
     names
         .into_iter()
-        .map(|n| format!("images/rich/{id}/{n}"))
+        .map(|n| format!("{}/{n}", crate::store::rich_dir_rel(id)))
         .collect()
 }
 
 /// 实体文件存在则返回它的相对路径（用于重建时恢复可选关联，如富文本实体）。
-fn has_entity(dir: &PathBuf, rel: &str) -> Option<String> {
+fn has_entity(dir: &Path, rel: &str) -> Option<String> {
     if dir.join(rel).is_file() {
         Some(rel.to_string())
     } else {
@@ -4363,7 +4570,7 @@ fn has_entity(dir: &PathBuf, rel: &str) -> Option<String> {
 /// 数据没了 —— 重建能把记录一条不少地找回来（正文预览要解密读原文）。
 ///
 /// 只补不删：索引里已有的 id 一律跳过，所以可以在「索引为空」时无条件调用。
-fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
+pub(crate) fn rebuild_index_from_files(dir: &Path, hist: &mut Vec<crate::store::Meta>) -> usize {
     let known: std::collections::HashSet<String> =
         hist.iter().map(|i| i.id.clone()).collect();
     let mut found: Vec<HistoryItem> = Vec::new();
@@ -4390,11 +4597,11 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
             preview,
             preview_truncated,
             size: text.len() as u64,
-            text_path: Some(format!("data/{id}.txt")),
+            text_path: Some(crate::store::text_rel(id)),
             // 索引丢了但富文本实体还在：按文件存在与否重建关联，
             // 否则重建出来的条目会「格式凭空消失」。
-            html_path: has_entity(dir, &format!("data/{id}.html")),
-            rtf_path: has_entity(dir, &format!("data/{id}.rtf")),
+            html_path: has_entity(dir, &crate::store::html_rel(id)),
+            rtf_path: has_entity(dir, &crate::store::rtf_rel(id)),
             // 索引丢了但图片还在：按目录内容恢复，否则回贴时图会凭空消失
             rich_images: list_rich_images(dir, id),
             img_path: None,
@@ -4472,7 +4679,7 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
                 rtf_path: None,
                 rich_images: Vec::new(),
                 img_path: None,
-                files_path: Some(format!("files/{id}.txt")),
+                files_path: Some(crate::store::files_rel(&id)),
                 files: Some(files),
             });
         }
@@ -4542,7 +4749,8 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
     }
 
     let n = found.len();
-    hist.extend(found);
+    // 重建出来的是磁盘形态（HistoryItem）；常驻统一走一次投影，不另写一套字段搬运。
+    hist.extend(found.iter().map(crate::store::Meta::from_item));
     // 列表约定：新→旧。重建出来的条目顺序取自 read_dir（不确定），必须重排。
     hist.sort_by(|a, b| b.ts.cmp(&a.ts));
     n
@@ -4551,10 +4759,10 @@ fn rebuild_index_from_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize
 
 /// 为「内联了 files、但缺 files_path」的历史文件条目补写 `files/<id>.txt`，
 /// 返回补写的条数。老版本 index.json 是这么存的，不补的话缓存目录里看不到这些条目。
-fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
+fn backfill_files(dir: &PathBuf, hist: &mut Vec<crate::store::Meta>) -> usize {
     let mut n = 0usize;
     for item in hist.iter_mut() {
-        if item.kind != "files" || item.files_path.is_some() {
+        if item.kind != "files" || item.files_rel().is_some() {
             continue;
         }
         let Some(files) = item.files.as_ref() else {
@@ -4563,11 +4771,11 @@ fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
         if files.is_empty() {
             continue;
         }
-        let rel = format!("files/{}.txt", item.id);
+        let rel = crate::store::files_rel(&item.id);
         // 必须走 write_text_entity（会自动 DPAPI 加密）—— 这里原先是裸 fs::write 明文，
         // 与「内容落盘一律加密」自相矛盾，等于给老条目补了一份明文副本。
         write_text_entity(dir, &rel, &files.join("\r\n"));
-        item.files_path = Some(rel);
+        item.set_files_path(Some(rel));
         n += 1;
     }
     n
@@ -4578,27 +4786,27 @@ fn backfill_files(dir: &PathBuf, hist: &mut Vec<HistoryItem>) -> usize {
 /// 以前全用 `let _ =`：删失败（文件被占用、被设为只读、路径失效）就静默留下——
 /// 用户以为敏感内容已经删掉，磁盘上其实还在。这是**隐私相关**的静默失败，
 /// 必须记 ERROR；`NotFound` 不算失败（重复删除、实体本就不存在）。
-fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
-    let mut rels: Vec<&str> = Vec::new();
-    if let Some(rel) = &item.text_path {
+fn remove_item_files(dir: &Path, item: &crate::store::Meta) {
+    let mut rels: Vec<String> = Vec::new();
+    if let Some(rel) = item.text_rel() {
         rels.push(rel);
     }
     // 富文本实体与纯文本同生命周期：只删记录不删实体，等于把「带格式的正文」
     // 留在磁盘上 —— 用户以为删干净了，其实没有（隐私问题）。
-    if let Some(rel) = &item.html_path {
+    if let Some(rel) = item.html_rel() {
         rels.push(rel);
     }
-    if let Some(rel) = &item.rtf_path {
+    if let Some(rel) = item.rtf_rel() {
         rels.push(rel);
     }
     if let Some(rel) = &item.img_path {
-        rels.push(rel);
+        rels.push(rel.clone());
     }
-    if let Some(rel) = &item.files_path {
+    if let Some(rel) = item.files_rel() {
         rels.push(rel);
     }
     for rel in rels {
-        let p = dir.join(rel);
+        let p = dir.join(&rel);
         if let Err(e) = fs::remove_file(&p) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 crate::log_err!("clipboard", "删除实体失败（{}）：{e}", p.display());
@@ -4606,7 +4814,7 @@ fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
         }
     }
     // 富文本拆出来的内联图：整目录删。放在 rels 之外，因为它是目录而不是文件。
-    let rich_dir = dir.join(format!("images/rich/{}", item.id));
+    let rich_dir = dir.join(crate::store::rich_dir_rel(&item.id));
     if rich_dir.exists() {
         if let Err(e) = fs::remove_dir_all(&rich_dir) {
             crate::log_err!("clipboard", "删除富文本图片目录失败（{}）：{e}", rich_dir.display());
@@ -4621,16 +4829,123 @@ fn remove_item_files(dir: &PathBuf, item: &HistoryItem) {
     }
 }
 
-fn patch_item<F: FnOnce(&mut HistoryItem)>(id: &str, f: F) -> Result<(), String> {
+fn patch_item<F: FnOnce(&mut crate::store::Meta)>(id: &str, f: F) -> Result<(), String> {
+    let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
+    // 先留一份改动前的样子：改完之后拿它跟新值比，才知道该写哪种 op。
+    // 只改了收藏就写一个 `Fav` 帧（约 60 B），不必把整条重新写一遍。
+    let (before, after) = {
+        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        let Some(item) = hist.iter_mut().find(|i| i.id == id) else {
+            return Err("条目不存在".into());
+        };
+        let before = item.clone();
+        f(item);
+        (before, item.clone())
+    };
+    match crate::store::diff_op(&before, &after) {
+        // 什么都没变（例如对已在顶部的条目再点一次置顶）→ 不写盘
+        None => {}
+        Some(op) => append_op(&dir, op),
+    }
+    Ok(())
+}
+
+/// 按筛选条件删除（「清空当前视图」用）。
+///
+/// 为什么不让前端把 id 传上来：10 万条 id 就是几 MB 的 IPC，而且「取全量 id → 再传回来」
+/// 中间隔着一次并发写入就会删错。这里由后端按同一套筛选语义自己算。
+///
+/// 两道闸与 `delete_items` 完全一致：前端必须显式要求（`delete_local_files`），
+/// 且设置里已开启 `delete_files_with_item`。后端不信任任何一侧。
+#[tauri::command]
+pub fn delete_by_filter(
+    filter: crate::query::HistoryFilter,
+    delete_local_files: Option<bool>,
+    include_pinned: Option<bool>,
+    include_favorites: Option<bool>,
+) -> Result<crate::query::DeleteReport, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let mut hist = HISTORY.get().unwrap().lock().unwrap();
-    if let Some(item) = hist.iter_mut().find(|i| i.id == id) {
-        f(item);
-        save_index(&dir, &hist);
-        Ok(())
+    let all = crate::query::matching_ids(&hist, &filter);
+    // `include_*` 默认 false = **保留**置顶与收藏，与今天「清空当前视图」的默认口径一致
+    // （那个弹窗的两个勾选项就是这两个开关）。这层保护必须在后端做：让前端先筛一遍
+    // 再传 id，等于又回到「拉全量 id」的老路。
+    let inc_pinned = include_pinned.unwrap_or(false);
+    let inc_favs = include_favorites.unwrap_or(false);
+    let ids: Vec<String> = if all.is_empty() || (inc_pinned && inc_favs) {
+        all
     } else {
-        Err("条目不存在".into())
+        // 一次扫描收集「受保护」的 id 与它的保护类型，避免 O(n²) 的 contains
+        let mut protect: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+        for m in hist.iter() {
+            if !m.pinned_views.is_empty() {
+                protect.insert(m.id.as_str(), true); // true = 置顶（分组优先于收藏）
+            } else if m.favorite {
+                protect.insert(m.id.as_str(), false);
+            }
+        }
+        all.into_iter()
+            .filter(|id| match protect.get(id.as_str()) {
+                Some(true) => inc_pinned,
+                Some(false) => inc_favs,
+                None => true, // 普通条目总是删
+            })
+            .collect()
+    };
+    if ids.is_empty() {
+        return Ok(crate::query::DeleteReport {
+            deleted: 0,
+            note: None,
+        });
     }
+    // 先把目标整条捞出来：本地文件必须在条目被移除**之前**按它自己记录的路径处理
+    let doomed: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let targets: Vec<crate::store::Meta> = hist
+        .iter()
+        .filter(|m| doomed.contains(m.id.as_str()))
+        .cloned()
+        .collect();
+    // 两道闸都在 `purge_local_files` 里：前端显式要求 + 设置里已开启
+    let note = if delete_local_files.unwrap_or(false) {
+        purge_local_files(&targets)
+    } else {
+        None
+    };
+    for m in &targets {
+        remove_item_files(&dir, m);
+    }
+    hist.retain(|m| !doomed.contains(m.id.as_str()));
+    drop(hist);
+
+    // 每条一个 Delete 帧、整批一次 fsync。清空一个大视图可能一次写出几 MB 日志，
+    // 紧接着的 compaction 会立刻把它固化掉（日志上限 2 MB 就是干这个的）。
+    let ops: Vec<crate::store::Op> = ids
+        .iter()
+        .map(|id| crate::store::Op::Delete { id: id.clone() })
+        .collect();
+    match crate::store::append_many(&dir, &ops) {
+        Ok(()) => {
+            LAST_APPEND_MS.store(now_ms(), Ordering::Relaxed);
+            crate::query::bump_epoch();
+        }
+        // 内存里已经删了、磁盘上没有：下次启动这些条目会回来。
+        //
+        // 这里**不**再向上返回错误 —— 返回错误会让前端弹「清理失败」，可条目明明已经
+        // 删掉了，界面又不刷新，用户看到的是「失败 + 没变化」这种最糟的组合。
+        // 正确的处理是大声记日志（含真实错误，便于追 WAL 为什么写不进去），让调用方
+        // 拿到「删了多少条」，界面立即刷新；后台整理会在下一次成功写入时补上。
+        Err(e) => {
+            crate::log_err!(
+                "clipboard",
+                "按筛选删除 {} 条已生效，但日志追加失败：{e}",
+                ids.len()
+            );
+            crate::query::bump_epoch();
+        }
+    }
+    let deleted = ids.len() as u64;
+    crate::log_print!("[clipboard] 按筛选条件删除 {deleted} 条");
+    Ok(crate::query::DeleteReport { deleted, note })
 }
 
 // ---------------------------------------------------------------------------
@@ -4646,6 +4961,7 @@ pub fn prune_retention(days: u32) {
         let mut hist = HISTORY.get().unwrap().lock().unwrap();
         let before = hist.len();
         *hist = prune_history(hist.clone(), dir, days, include_pinned);
+        crate::query::bump_epoch();
         let removed = before - hist.len();
         if removed > 0 {
             crate::log_print!("[clipboard] 保留策略清理 {removed} 条过期条目");
@@ -4653,12 +4969,60 @@ pub fn prune_retention(days: u32) {
     }
 }
 
+/// 统计早于 `days` 天的条目数（受保护的置顶/收藏按设置豁免）。
+///
+/// 给「建议清理多少天以前的」提供数字：上限提示与清理页都用它，避免前端自己
+/// 猜一套口径。
+#[tauri::command]
+pub fn count_older_than(days: u32) -> u32 {
+    if days == 0 {
+        return 0;
+    }
+    let Some(hist) = HISTORY.get() else { return 0 };
+    let guard = match hist.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let include_pinned = crate::settings::get().prune_include_pinned;
+    let deadline = now_ms().saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
+    guard
+        .iter()
+        .filter(|it| it.ts < deadline && (include_pinned || !is_protected(it)))
+        .count() as u32
+}
+
+/// 清理早于 `days` 天的条目（一次性操作，**不改保留天数设置**），返回删除条数。
+///
+/// 与保留期清理共用 `prune_history`，两处的「谁受保护」口径必须一致 ——
+/// 这里自己数一遍再自己删一遍的话，两条路径迟早会漂。
+#[tauri::command]
+pub fn delete_older_than(days: u32) -> u32 {
+    if days == 0 {
+        return 0;
+    }
+    let Some(dir) = DIR.get().cloned() else { return 0 };
+    let Some(hist) = HISTORY.get() else { return 0 };
+    let include_pinned = crate::settings::get().prune_include_pinned;
+    let mut guard = match hist.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let before = guard.len();
+    *guard = prune_history(guard.clone(), &dir, days, include_pinned);
+    crate::query::bump_epoch();
+    let removed = (before - guard.len()) as u32;
+    if removed > 0 {
+        crate::log_print!("[clipboard] 按天数清理 {removed} 条（{days} 天前）");
+    }
+    removed
+}
+
 /// 这条记录是否受保护（置顶或收藏）。
 ///
 /// 单独抽出来是因为**所有自动清理路径都要用它**：退出清理、保留期清理。
 /// 上一版只有退出清理判断了，保留期清理严格按时间戳过滤 —— 于是「置顶了三年」的
 /// 条目会悄无声息地到期被删，用户以为置顶就是长期保存（实测反馈）。
-fn is_protected(item: &HistoryItem) -> bool {
+fn is_protected(item: &crate::store::Meta) -> bool {
     // 不用再判 `item.pinned`：那个 v2.0 早期的全局置顶字段已废弃，
     // `load_index` 载入时就会迁移进 `pinned_views`，而所有清理都发生在载入之后。
     !item.pinned_views.is_empty() || item.favorite
@@ -4669,11 +5033,11 @@ fn is_protected(item: &HistoryItem) -> bool {
 /// `include_pinned = false`（默认）时，置顶/收藏**不受保留期影响** —— 它们被用户
 /// 主动标记为「要留着」，到期自动删掉等于违背这个意图。
 fn prune_history(
-    hist: Vec<HistoryItem>,
+    hist: Vec<crate::store::Meta>,
     dir: &PathBuf,
     days: u32,
     include_pinned: bool,
-) -> Vec<HistoryItem> {
+) -> Vec<crate::store::Meta> {
     if days == 0 {
         crate::log_print!("[clipboard] 保留策略：永久保存，不清理");
         return hist;
@@ -4681,7 +5045,7 @@ fn prune_history(
     let deadline = now_ms().saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
     let before = hist.len();
     let mut kept_protected = 0usize;
-    let kept: Vec<HistoryItem> = hist
+    let kept: Vec<crate::store::Meta> = hist
         .into_iter()
         .filter(|i| {
             if i.ts >= deadline {
@@ -5091,6 +5455,14 @@ pub fn on_app_exit() {
     // 上限 2 秒：大图解码可能较久，但不至于让退出卡住。
     flush_pending(std::time::Duration::from_secs(2));
 
+    // 退出前把日志固化进快照：下次启动直接读快照，不必重放。
+    // 日志本身已经 sync 过，这里失败也不丢数据（最坏下次启动重放一遍）。
+    if let Some(dir) = DIR.get() {
+        if crate::store::wal_len(dir) > 0 {
+            compact_now(dir);
+        }
+    }
+
     if !USER_QUIT.swap(false, Ordering::SeqCst) {
         // 迁移缓存目录 / 装完更新 / 重启应用：程序自己发起的退出，不动数据
         crate::log_print!("[clipboard] 非用户主动退出（重启 / 升级 / 迁移），保留全部数据");
@@ -5288,7 +5660,7 @@ fn extract_inline_images(html: &str, dir: &PathBuf, id: &str) -> (String, Vec<St
                 return None;
             }
             let n = paths.len();
-            let rel_path = format!("images/rich/{id}/{n}.{ext}");
+            let rel_path = format!("{}/{n}.{ext}", crate::store::rich_dir_rel(id));
             let full = dir.join(&rel_path);
             if let Some(parent) = full.parent() {
                 let _ = fs::create_dir_all(parent);
@@ -5691,12 +6063,13 @@ mod tests {
     }
 
     /// 造一条图片条目，供目录迁移测试用。
-    fn image_item(id: &str, ts: u64, img_path: String) -> HistoryItem {
+    fn image_item(id: &str, ts: u64, img_path: String) -> crate::store::Meta {
         image_item_shot(id, ts, img_path, false)
     }
 
-    fn image_item_shot(id: &str, ts: u64, img_path: String, shot: bool) -> HistoryItem {
-        HistoryItem {
+    /// 构造常驻形态的图片条目：先按磁盘形态拼一次，再走唯一的那次投影。
+    fn image_item_shot(id: &str, ts: u64, img_path: String, shot: bool) -> crate::store::Meta {
+        crate::store::Meta::from_item(&HistoryItem {
             id: id.into(),
             kind: "image".into(),
             ts,
@@ -5716,7 +6089,7 @@ mod tests {
             img_path: Some(img_path),
             files_path: None,
             files: None,
-        }
+        })
     }
 
     /// 迁移必须：改名成日期、挪进 copy/、新文件真的落盘、旧文件留到索引写盘后才删。
@@ -5923,8 +6296,8 @@ mod tests {
     }
 
     /// 造一份最小可用的条目，供索引相关用例复用。
-    fn sample_item(id: &str, preview: &str) -> HistoryItem {
-        HistoryItem {
+    fn sample_item(id: &str, preview: &str) -> crate::store::Meta {
+        crate::store::Meta::from_item(&HistoryItem {
             id: id.to_string(),
             kind: "text".into(),
             ts: 1,
@@ -5944,7 +6317,274 @@ mod tests {
             img_path: None,
             files_path: None,
             files: None,
+        })
+    }
+
+
+    // -----------------------------------------------------------------------
+    // 条数上限（max_items）
+    // -----------------------------------------------------------------------
+
+    /// 造一个临时目录，含 data/ 子目录。
+    fn limit_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("qingtie-limit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        dir
+    }
+
+    /// 造一条带正文实体的条目（用来验证「删记录连实体一起删」）。
+    fn limit_item(dir: &std::path::Path, id: &str, ts: u64) -> crate::store::Meta {
+        let mut h = sample_item(id, "正文预览").to_item();
+        h.ts = ts;
+        h.text_path = Some(crate::store::text_rel(id));
+        std::fs::write(dir.join(crate::store::text_rel(id)), b"body").unwrap();
+        crate::store::Meta::from_item(&h)
+    }
+
+    /// 超限时从最旧的开始删，且**跳过置顶/收藏**：被保护的条目哪怕更旧也不能删。
+    #[test]
+    fn limit_prunes_oldest_and_keeps_protected() {
+        let dir = limit_dir("prune");
+        let mut hist = vec![
+            limit_item(&dir, "e5", 5000),
+            limit_item(&dir, "e4", 4000),
+            limit_item(&dir, "e3", 3000),
+            limit_item(&dir, "e2", 2000),
+            limit_item(&dir, "e1", 1000),
+        ];
+        // 最旧的两条里：e1 普通、e2 置顶
+        hist[3].pinned_views = vec!["history".into()];
+
+        crate::store::persist(&dir, &hist).unwrap();
+        let seq_before =
+            crate::crypto::container_write_seq(&std::fs::read(dir.join(crate::store::INDEX_BIN)).unwrap())
+                .expect("快照应有序号");
+
+        // 上限 3 条 → 要删 2 条：从最旧往后挑，跳过 e2（置顶）
+        enforce_limit(&dir, &mut hist, 3);
+
+        assert_eq!(hist.len(), 3, "应回到上限");
+        let ids: Vec<&str> = hist.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["e5", "e4", "e2"], "删最旧的两条普通条目，置顶的 e2 留下");
+        assert!(!dir.join(crate::store::text_rel("e1")).exists(), "实体也要删");
+        assert!(!dir.join(crate::store::text_rel("e3")).exists(), "实体也要删");
+        assert!(dir.join(crate::store::text_rel("e2")).exists(), "保护条目的实体不能动");
+
+        // 走的是 WAL 批量 Delete，**没有**重写快照
+        assert!(crate::store::wal_len(&dir) > 0, "清理应写日志");
+        let seq_after =
+            crate::crypto::container_write_seq(&std::fs::read(dir.join(crate::store::INDEX_BIN)).unwrap())
+                .expect("快照仍应有序号");
+        assert_eq!(seq_before, seq_after, "上限清理不该重写快照");
+
+        // 重放后状态与内存一致（删掉的就是删掉的）
+        let reloaded = crate::store::load_index(&dir);
+        assert_eq!(reloaded.items.len(), 3);
+        assert!(reloaded.items.iter().any(|m| m.id == "e2"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 保护条目占满时不删任何东西（只记 WARN）。
+    #[test]
+    fn limit_with_only_protected_deletes_nothing() {
+        let dir = limit_dir("all-protected");
+        let mut hist: Vec<crate::store::Meta> = (0..5)
+            .map(|i| limit_item(&dir, &format!("p{i}"), 5000 - i as u64 * 1000))
+            .collect();
+        for m in hist.iter_mut() {
+            m.favorite = true;
         }
+        crate::store::persist(&dir, &hist).unwrap();
+
+        enforce_limit(&dir, &mut hist, 2);
+
+        assert_eq!(hist.len(), 5, "全是保护条目 → 一条都不删");
+        assert_eq!(crate::store::wal_len(&dir), 0, "没删任何东西就不该写日志");
+        for i in 0..5 {
+            assert!(dir.join(crate::store::text_rel(&format!("p{i}"))).exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 上限 0 = 不限。
+    #[test]
+    fn limit_zero_means_unlimited() {
+        let dir = limit_dir("unlimited");
+        let mut hist: Vec<crate::store::Meta> =
+            (0..3).map(|i| limit_item(&dir, &format!("u{i}"), 5000 - i as u64 * 1000)).collect();
+        enforce_limit(&dir, &mut hist, 0);
+        assert_eq!(hist.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 10 万条常驻：顺序严格降序，二分查找命中。
+    #[test]
+    fn hundred_thousand_metas_sorted_and_searchable() {
+        const N: u64 = 100_000;
+        let base = 1_700_000_000_000u64;
+        let mut list: Vec<crate::store::Meta> = Vec::with_capacity(N as usize);
+        for i in 0..N {
+            // 生产里 ts 就是降序到达的（store_raw 二分插入也维持这个不变量）
+            let mut h = HistoryItem {
+                id: format!("{:x}-1", base + (N - i)),
+                kind: "text".into(),
+                ts: base + (N - i),
+                pinned: false,
+                pinned_views: Vec::new(),
+                favorite: false,
+                edited: false,
+                shot: false,
+                subtype: None,
+                preview: "x".repeat(40),
+                preview_truncated: false,
+                size: 40,
+                text_path: Some(crate::store::text_rel(&format!("{:x}-1", base + (N - i)))),
+                html_path: None,
+                rtf_path: None,
+                rich_images: Vec::new(),
+                img_path: None,
+                files_path: None,
+                files: None,
+            };
+            h.pinned = false;
+            list.push(crate::store::Meta::from_item(&h));
+        }
+
+        assert!(list.windows(2).all(|w| w[0].ts > w[1].ts), "必须严格降序");
+        // 二分查找：命中首/中/尾三处
+        for idx in [0usize, 50_000, 99_999] {
+            let target = list[idx].ts;
+            let at = list.partition_point(|m| m.ts > target);
+            assert_eq!(at, idx, "二分定位应命中下标 {idx}");
+            assert_eq!(list[at].ts, target);
+        }
+    }
+
+    /// 10 万条常驻内存实测（手动跑）：`cargo test --lib bench_resident_memory -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_resident_memory() {
+        const N: usize = 100_000;
+        let rss_before = crate::about::mem_mb();
+
+        let mut list: Vec<crate::store::Meta> = Vec::with_capacity(N);
+        for i in 0..N {
+            let id = format!("1a1b{i:06x}-1");
+            let h = HistoryItem {
+                id: id.clone(),
+                kind: "text".into(),
+                ts: 1_730_000_000_000 + i as u64 * 1000,
+                pinned: false,
+                pinned_views: if i % 500 == 0 {
+                    vec!["history".into()]
+                } else {
+                    Vec::new()
+                },
+                favorite: false,
+                edited: false,
+                shot: false,
+                subtype: if i % 7 == 0 { Some("code".into()) } else { None },
+                // 与真实条目同量级：preview 约 120 字
+                preview: "剪贴板内容片段，用于压测的一条正常长度的预览文本".repeat(4),
+                preview_truncated: true,
+                size: 320,
+                text_path: Some(crate::store::text_rel(&id)),
+                html_path: None,
+                rtf_path: None,
+                rich_images: Vec::new(),
+                img_path: None,
+                files_path: None,
+                files: None,
+            };
+            list.push(crate::store::Meta::from_item(&h));
+        }
+
+        let rss_after = crate::about::mem_mb();
+        let struct_bytes = std::mem::size_of::<crate::store::Meta>() * list.capacity();
+        let heap_bytes: usize = list
+            .iter()
+            .map(|m| {
+                m.id.capacity()
+                    + m.preview.capacity()
+                    + m.subtype.as_ref().map_or(0, |s| s.capacity())
+                    + m.img_path.as_ref().map_or(0, |s| s.capacity())
+                    + m.pinned_views.iter().map(|s| s.capacity()).sum::<usize>()
+                    + m.rich_images.iter().map(|s| s.capacity()).sum::<usize>()
+                    + m.files
+                        .as_ref()
+                        .map_or(0, |v| v.iter().map(|s| s.capacity()).sum::<usize>())
+            })
+            .sum();
+        let per_item = (struct_bytes + heap_bytes) / list.len().max(1);
+
+        println!(
+            "{N} 条常驻：Vec 容量 {}，结构体 {} MB + 字符串堆 {:.1} MB ≈ 单条 {} B",
+            list.capacity(),
+            struct_bytes / 1_048_576,
+            heap_bytes as f64 / 1_048_576.0,
+            per_item
+        );
+        println!(
+            "  结构体 {} B/条（含 4 个路径三态 + 3 个可选字段）、字符串堆 {} B/条",
+            std::mem::size_of::<crate::store::Meta>(),
+            heap_bytes / list.len().max(1)
+        );
+        println!(
+            "进程工作集（GetProcessMemoryInfo 读数）：{} MB → {} MB，增量 {} MB",
+            rss_before,
+            rss_after,
+            rss_after.saturating_sub(rss_before)
+        );
+        // 预算口径说明：设计文档写的是「≤500 B/条，含 140 字符预览」。
+        // 这条样本用的是 96 个**中文**字符（288 B）—— 中文 1 字 3 字节，
+        // 140 字符的中文预览光文本就 420 B，500 B 的预算本来就装不下。
+        // 所以这里的上界按「结构体 + 一个真实量级的中文预览」定 700 B。
+        assert!(
+            per_item < 700,
+            "单条常驻（含 96 字中文预览）应 ≤700 B，实际 {per_item} B"
+        );
+        std::hint::black_box(&list);
+    }
+
+    // -----------------------------------------------------------------------
+    // 清理白名单：key.bin 与索引本体永不删
+    // -----------------------------------------------------------------------
+
+    /// `CONTENT_DIRS` 只含内容子目录：密钥与索引都在缓存根目录，
+    /// 任何「按目录清空」都不可能碰到它们。
+    #[test]
+    fn content_dirs_never_cover_key_or_index() {
+        for name in CONTENT_DIRS {
+            assert!(
+                !name.contains("key") && !name.contains("index"),
+                "清理目录里不能出现密钥 / 索引：{name}"
+            );
+        }
+        assert_eq!(CONTENT_DIRS, ["data", "images", "files"]);
+    }
+
+    /// 删条目只删它自己的实体，密钥与索引文件必须原样留着。
+    #[test]
+    fn removing_item_keeps_key_and_index() {
+        let dir = limit_dir("whitelist");
+        std::fs::write(dir.join(crate::crypto::KEY_FILE_NAME), b"key-blob").unwrap();
+        std::fs::write(dir.join(crate::store::INDEX_BIN), b"snapshot").unwrap();
+        let item = limit_item(&dir, "k1", 1000);
+
+        remove_item_files(&dir, &item);
+
+        assert!(!dir.join(crate::store::text_rel("k1")).exists(), "正文要删");
+        assert!(
+            dir.join(crate::crypto::KEY_FILE_NAME).is_file(),
+            "key.bin 不能被清理逻辑带走"
+        );
+        assert!(
+            dir.join(crate::store::INDEX_BIN).is_file(),
+            "索引本体不能被清理逻辑带走"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 保留期清理**默认不碰置顶/收藏**。
@@ -6113,11 +6753,13 @@ mod tests {
         assert_eq!(cf_html_fragment(naked), "<p>x</p>");
     }
 
-    /// 索引必须**整份加密**落盘。
+    /// 索引必须**整份加密**落盘，且能原样读回。
     ///
-    /// 这条是真需求而不是洁癖：`index.json` 里有 `preview`（正文前 2 行）和
-    /// `files`（完整路径）。内容实体已经加密了，索引若还是明文，等于给同一份
-    /// 内容留了个不加密的副本，前面的加密全白做。
+    /// 这条是真需求而不是洁癖：索引里有 `preview`（正文前 2 行）和 `files`（完整路径）。
+    /// 内容实体已经加密了，索引若还是明文，等于给同一份内容留了个不加密的副本。
+    ///
+    /// 落盘位置从 `index.json` 换成了 `index.bin`（v2 容器）：文件名跟着格式走，
+    /// 用户（和我们自己）一眼就能看出这个目录用的是哪一代格式。
     #[test]
     fn index_saved_encrypted_and_roundtrips() {
         let dir = std::env::temp_dir().join(format!("qingtie-idx-enc-{}", std::process::id()));
@@ -6127,23 +6769,31 @@ mod tests {
         let secret = "密码 hunter2 不能出现在索引里";
         save_index(&dir, &vec![sample_item("t1", secret)]);
 
-        let raw = fs::read(dir.join("index.json")).unwrap();
-        assert!(raw.starts_with(ENC_MAGIC), "索引必须带加密魔数");
+        assert!(
+            !dir.join("index.json").exists(),
+            "新格式不该再写 index.json"
+        );
+        let raw = fs::read(dir.join("index.bin")).unwrap();
+        assert!(
+            raw.starts_with(crate::crypto::MAGIC_V2),
+            "索引必须带 v2 加密魔数"
+        );
         let needle = "hunter2".as_bytes();
         assert!(
             !raw.windows(needle.len()).any(|w| w == needle),
-            "index.json 里不能出现明文正文"
+            "index.bin 里不能出现明文正文"
         );
 
         // 解回来必须逐字一致，否则加密就成了丢数据
-        let back = load_index(&dir);
-        assert_eq!(back.len(), 1);
-        assert_eq!(back[0].preview, secret);
+        let back = crate::store::load_index(&dir);
+        assert_eq!(back.status, crate::store::LoadStatus::V2);
+        assert_eq!(back.items.len(), 1);
+        assert_eq!(back.items[0].preview, secret);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 兼容性：老版本 index.json 是明文 JSON，读取时必须照常解析（靠魔数区分），
+    /// 兼容性：老版本索引（明文 JSON / 整份 DPAPI）读取时必须照常解析，
     /// 否则升级后所有人的历史会被当成「解析失败」清空。
     #[test]
     fn index_accepts_legacy_plaintext() {
@@ -6151,12 +6801,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        let json = serde_json::to_string_pretty(&vec![sample_item("t2", "旧版明文索引")]).unwrap();
+        // 旧索引里装的是磁盘形态（HistoryItem），这里照原样写一份
+        let json =
+            serde_json::to_string_pretty(&vec![sample_item("t2", "旧版明文索引").to_item()]).unwrap();
         fs::write(dir.join("index.json"), json.as_bytes()).unwrap();
 
-        let back = load_index(&dir);
-        assert_eq!(back.len(), 1);
-        assert_eq!(back[0].preview, "旧版明文索引");
+        let back = crate::store::load_index(&dir);
+        assert_eq!(back.status, crate::store::LoadStatus::MigratedV0);
+        assert_eq!(back.items.len(), 1);
+        assert_eq!(back.items[0].preview, "旧版明文索引");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -6774,4 +7427,173 @@ mod tests {
         assert!(text_preview_parts(&"x".repeat(500)).1, "超出字符预算");
         assert!(text_preview_parts(&format!("{}\n下一行", "y".repeat(200))).1);
     }
+
+/// 规模基准：默认忽略，需要时手动跑
+///
+/// ```text
+/// cargo test --lib bench_scale -- --ignored --nocapture
+/// ```
+///
+/// 量的是**索引这一层的真实成本**：序列化、DPAPI 加密、写盘原子替换、读回解密解析，
+/// 以及前端现在做的那次「全量排序 + 过滤」。DOM 与滚动的成本量不到，那部分靠
+/// `content-visibility` / 虚拟列表解决，不在这条基准的责任范围内。
+#[test]
+#[ignore]
+fn bench_scale() {
+    use std::time::Instant;
+
+    fn sample(n: usize) -> Vec<HistoryItem> {
+        (0..n)
+            .map(|i| HistoryItem {
+                id: format!("1a1b{i:06x}-1"),
+                kind: "text".into(),
+                ts: 1_730_000_000_000 + i as u64 * 1000,
+                pinned_views: if i % 500 == 0 {
+                    vec!["history".into()]
+                } else {
+                    Vec::new()
+                },
+                pinned: false,
+                favorite: i % 300 == 0,
+                edited: false,
+                subtype: if i % 7 == 0 { Some("code".into()) } else { None },
+                // 与真实条目同量级：preview 截到 120 字，路径 ~40 字节
+                preview: "剪贴板内容片段，用于压测的一条正常长度的预览文本".repeat(2),
+                preview_truncated: true,
+                size: 320,
+                text_path: Some(format!("data/1a1b{i:06x}-1.txt")),
+                html_path: None,
+                rtf_path: None,
+                rich_images: Vec::new(),
+                img_path: None,
+                files_path: None,
+                files: None,
+                shot: false,
+            })
+            .collect()
+    }
+
+    let dir = std::env::temp_dir().join("qingtie-bench");
+    let _ = std::fs::create_dir_all(&dir);
+
+    for n in [1_000usize, 10_000, 100_000] {
+        let hist = sample(n);
+
+        let t = Instant::now();
+        let compact = serde_json::to_string(&hist).unwrap();
+        let t_compact = t.elapsed();
+
+        let t = Instant::now();
+        let pretty = serde_json::to_string_pretty(&hist).unwrap();
+        let t_pretty = t.elapsed();
+
+        // 旧加密路径（整份 DPAPI）：留作对照，量的是「这次改动到底省了多少」
+        let t = Instant::now();
+        let _enc = encrypt_text(&pretty);
+        let t_enc = t.elapsed();
+
+        // 新加密路径（AES-256-GCM）：同样是加密整份紧凑 JSON
+        let bench_key = crate::crypto::load_or_create_key(&dir).unwrap();
+        let t = Instant::now();
+        let sealed = crate::crypto::seal(
+            &bench_key,
+            crate::crypto::DOMAIN_INDEX,
+            None,
+            compact.as_bytes(),
+            1,
+        );
+        let t_seal = t.elapsed();
+
+        // 常驻形态（生产里就是它）：落盘、读回、排序都基于 Meta
+        let hist_meta: Vec<crate::store::Meta> =
+            hist.iter().map(crate::store::Meta::from_item).collect();
+
+        // 真实落盘：投影 + 序列化 + 加密 + 临时文件 + sync_all + rename
+        let t = Instant::now();
+        save_index(&dir, &hist_meta);
+        let t_save = t.elapsed();
+
+        // 对照组：不加密，直接写紧凑 JSON（用来看「加密」到底占多少）
+        let t = Instant::now();
+        {
+            let tmp = dir.join("index-plain.tmp");
+            std::fs::write(&tmp, compact.as_bytes()).unwrap();
+            std::fs::rename(&tmp, dir.join("index-plain.json")).unwrap();
+        }
+        let t_save_plain = t.elapsed();
+
+        // 单次 append：复制路径的真实成本 = 组帧 + 加密 + write + sync_data。
+        // 用独立的目录，免得这 200 条测试 op 干扰后面的读回测量。
+        let wal_dir = std::env::temp_dir().join(format!("qingtie-bench-wal-{n}"));
+        let _ = std::fs::create_dir_all(&wal_dir);
+        let _ = std::fs::remove_file(wal_dir.join(crate::store::WAL_FILE));
+        let mut samples: Vec<u128> = Vec::with_capacity(200);
+        for k in 0..200 {
+            let mut it = hist[k % hist.len()].clone();
+            it.id = format!("bench-{k}");
+            let t = Instant::now();
+            crate::store::append(&wal_dir, crate::store::Op::Insert { item: it }).unwrap();
+            samples.push(t.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        let append_median = samples[samples.len() / 2];
+        let frame_bytes = crate::store::wal_len(&wal_dir) / 200;
+        let _ = std::fs::remove_dir_all(&wal_dir);
+
+        // 读回：读文件 + 解密 + 解析（密钥在进程内已缓存，与真实启动一致）
+        let t = Instant::now();
+        let loaded = crate::store::load_index(&dir);
+        let t_load = t.elapsed();
+        assert_eq!(loaded.items.len(), n, "读回条数必须与写入一致");
+        let back = loaded.items;
+
+        // compaction：后台整理一次（克隆当前状态 + 整份快照 + 截断日志）
+        let t = Instant::now();
+        let cloned = back.clone();
+        let t_clone = t.elapsed();
+        let t = Instant::now();
+        crate::store::compact(&dir, &cloned).unwrap();
+        let t_compaction = t.elapsed();
+
+        let t = Instant::now();
+        let mut filtered: Vec<&crate::store::Meta> =
+            back.iter().filter(|i| i.kind != "files").collect();
+        filtered.sort_by(|a, b| {
+            let ap = !a.pinned_views.is_empty();
+            let bp = !b.pinned_views.is_empty();
+            ap.cmp(&bp).reverse().then(b.ts.cmp(&a.ts))
+        });
+        let t_sort = t.elapsed();
+
+        println!(
+            "{n:>6} 条：紧凑 JSON {:.1} MB / {:.0} ms；pretty {:.1} MB / {:.0} ms；\
+             DPAPI 加密 {:.0} ms；AES-GCM 加密 {:.0} ms（{:.1} MB 容器）；\
+             整份保存 {:.0} ms；读回+解密+解析 {:.0} ms；全量排序 {:.0} ms",
+            compact.len() as f64 / 1e6,
+            t_compact.as_millis(),
+            pretty.len() as f64 / 1e6,
+            t_pretty.as_millis(),
+            t_enc.as_millis(),
+            t_seal.as_millis(),
+            sealed.len() as f64 / 1e6,
+            t_save.as_millis(),
+            t_load.as_millis(),
+            t_sort.as_millis(),
+        );
+        println!("        不加密保存（紧凑 JSON 直写）：{} ms", t_save_plain.as_millis());
+        println!(
+            "        单次 append 中位数：{:.2} ms（200 次，平均帧 {frame_bytes} B，含 sync_data）"
+            , append_median as f64 / 1000.0
+        );
+        println!(
+            "        compaction：{} ms（其中克隆当前状态 {} ms，写盘不持锁）",
+            t_compaction.as_millis(),
+            t_clone.as_millis()
+        );
+        let _ = std::fs::remove_file(dir.join(crate::store::INDEX_BIN));
+        let _ = std::fs::remove_file(dir.join("index-plain.json"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 }

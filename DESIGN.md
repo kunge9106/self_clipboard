@@ -631,6 +631,18 @@ Windows 缩放比例一变界面就错位，是三个独立问题叠在一起，
 
 重建耗时实测 291–332 ms，日志里记「界面就绪，重建耗时 X ms」；释放本身在 800 ms 后复查一次窗口表，确认进程组真的退干净（`destroy()` 是异步的，立刻查会得到假的 `["main"]`）。
 
+**两条实测补丁**（「关掉再打开只剩一条标题栏」）：
+
+- **几何读数要设可信下限**。最小化状态下 `inner_size()` 会返回被压扁的尺寸
+  （约 160×28），照它重建就是一个巴掌大、只剩标题栏的窗口。`save_geometry` 遇到
+  `is_minimized()` 或小于 `640×400` 的读数整条丢弃（宁可回到配置里的默认尺寸），
+  `restore_geometry` 恢复时再夹一次 —— 旧版本可能已经把异常值存进配置。
+  建窗后 `PageLoadEvent::Finished` 还会 `ensure_reasonable_size` 兜一层：
+  实际尺寸仍低于下限就按设计尺寸铺开。
+- **面板或托盘菜单还开着时，这一轮不释放**。WebView2 的进程组整组共享，留着面板
+  就省不下内存；而把它们一起销毁又是当着用户的面抽走正在操作的界面。折中是放弃
+  这一轮，等下次收起主窗口重新计时（日志记「{label} 仍可见，用户在用，本次不释放」）。
+
 ---
 
 ## 八、前端（`src/`）
@@ -883,7 +895,7 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 
 设置页按四个标签分页：常规、外观、数据、关于，避免长列表翻找。
 
-- 常规：启动（开机自启、关闭时收进托盘、后台释放与等待时长）、快捷操作（两个热键、面板失焦、截图方式与截图格式）、置顶、帮助；
+- 常规：启动（开机自启、关闭时收进托盘、后台释放与等待时长）、快捷操作（两个热键、面板失焦与点选后行为、面板关闭键、截图方式与截图格式）、置顶、帮助；
 - 外观：主题三档、材质浓度、圆角模式、显示（不跟随系统缩放）；
 - 数据：记录（文件复制、保留天数、到期是否清理置顶/收藏）、存储位置（缓存目录、迁移、图片分类存放）、清理、删除文件条目、危险操作；
 - 关于：版本、运行环境自检、检查更新与更新日志、项目主页与问题反馈入口，详见 8.6。
@@ -906,6 +918,9 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 | `file_copy` | **false** | 是否记录文件复制（默认关闭） |
 | `pin_global` | false | 置顶是否在全部分类间互通（默认关闭 = 按分类独立） |
 | `pin_cancel_on_disable` | true | 关闭互通时是否连它产生的同步置顶一起取消 |
+| `panel_stay_on_blur` | false | 面板失焦时保持打开（托盘菜单不听这个开关） |
+| `panel_keep_after_copy` | false | 点选一条后不收起面板；**依赖** `panel_stay_on_blur`，父开关关着时后端拒绝打开 |
+| `panel_close_key` | `"esc"` | 面板关闭键（`esc` / `f5` / `ctrl+w`）；Esc 始终兜底可用 |
 | `cache_dir` | null | 自定义缓存目录（null = app_data_dir/clipboard） |
 | `release_idle_secs` | **0** | 后台释放的等待秒数，0 = 关闭（见 7.4）。1 = 收起即释放 |
 | `images_split_dirs` | **true** | 图片是否分 `shot/` 与 `copy/` 目录（见 3.5.1） |
@@ -922,6 +937,90 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 失败兜底：`config.json` 解析失败时打印日志并退回默认配置，不阻断启动。
 
 ---
+
+## 九·五、十万条量级的存储与查询（已实现）
+
+### 存储层
+
+索引从「整份 DPAPI 加密的 `index.json`」换成两层：
+
+- **密钥与数据分离**（`crypto.rs`）：DPAPI 只包一把 32 B 密钥（`key.bin`），数据用
+  AES-256-GCM 自封装容器（头 60 B：魔数 / 算法 / key_id / write_seq / plain_len /
+  nonce / tag）。AAD 绑定「容器头 + 域串 + 相对路径」，密文搬到别的路径就解不开。
+  旧格式（v1 DPAPI、v0 明文）一次性迁移，旧文件改名 `index.v1.json` 保留。
+- **快照 + 追加日志**（`store.rs`）：`index.bin` 是快照，`index.wal` 记增量 op
+  （insert / patch / pins / favorite / delete / clear，全部幂等）。每条 op 带单调序号，
+  快照记录已覆盖到哪个序号，重放只应用更新的帧 —— 快照写完而日志未截断时被强杀，
+  也不会把已进快照的 `clear` 再执行一遍。整理（compaction）在后台线程，
+  只截断检查点之前的前缀，期间新追加的帧原样保留。
+
+### 常驻形态
+
+`HISTORY` 是 `Vec<Meta>`：路径按 id 推导（`RelPath` 三态：Canonical / Absent / Custom），
+只有与存量值**逐字相同**才折叠，不相同的一律保留原值 —— 推导错了最坏是「不吃省内存
+的好处」，不会变成「读不到正文」。实测 612 B/条，十万条约 64 MB。
+
+### 查询层
+
+`query.rs` 提供窗口取数（`get_history_window`，keyset 游标 + 锚点三态 Ok / Drift /
+Missing）、搜索下推（`contains_ci`，零分配）、计数与批量操作（`history_count` /
+`count_by_filter` / `list_ids` / `delete_by_filter` / `filter_stats`）。
+搜索规则与原前端 `filtered()` 用 2000 组随机数据逐条比对过。
+
+### 条数上限
+
+默认 1 万条（`0` = 不限），**不在设置页暴露** —— 它是兜底闸，不是需要用户做决策的
+设置项。达到上限时弹一次清理建议：写清当前条数、将清理多少条、置顶与收藏豁免、
+不可撤销；「暂不清理」把时间戳落盘，7 天内不再打扰。条数用前端的 `items.length`
+（后端 `LIMIT_STATE.count` 是上一次上限检查时的读数，启动时可能还是 0）。
+
+上限提示里另给一个「按建议清理」：档位 7 / 30 / 90 / 180 / 365 天依次试，取第一个
+能清掉超出量的档位，数字由后端 `count_older_than` 统计（与保留期清理共用
+`prune_history`，口径一致）。设置 → 数据 → 清理另有「按天数清理」，一次性删除
+N 天前的条目（`delete_older_than`），不改保留天数设置 —— 保留天数是常驻策略，
+按天数清理是一次性动作，两者不是一回事。
+
+### 虚拟列表（已实现，本版未启用）
+
+`virtual-list.js` + `history-api.js` 已落地，但实机反馈行距、叠行、窗口四周露出
+材质三处不对，**本版不启用**（`src/main.js:959` 的 `USE_WINDOW_API = false`）。
+旧渲染路径一行未改。已修的地基问题：实测行高原本按下标记，行池节点复用后同一
+下标可能装着另一条内容，偏移表却按旧内容排布 —— 改成同时记 id，重排时只采用
+id 对得上的高度。
+
+## 九·六、系统兼容性
+
+**目标系统**：Windows 10 1809（build 17763）起，含 Windows 11 全部版本。
+
+**运行时依赖**：WebView2 Runtime。Win11 自带；Win10 上若未预装，由安装程序按需
+下载 Evergreen 引导程序（安装包内不含离线包，避免体积翻倍）。不依赖 .NET，
+不依赖任何原生（C）库 —— 加密（`aes-gcm` / `getrandom`）是纯 Rust 实现。
+
+**Win32 API 的版本下限**（代码里用到的全部 API 逐个核过，最晚的几个都在 Win10
+1607 之前，1809 满足）：
+
+| API | 最低版本 |
+|---|---|
+| `GetDpiForSystem` / `GetDpiForWindow` / `GetSystemMetricsForDpi` / `SetThreadDpiAwarenessContext` | Win10 1607 |
+| `DwmSetWindowAttribute` / `DwmGetWindowAttribute` / `DwmFlush` | Vista |
+| `UpdateLayeredWindow` / `SetWindowRgn` / `AddClipboardFormatListener` | Win2000 |
+| `CryptProtectData` / `CryptUnprotectData`（DPAPI） | XP |
+| `GetProcessMemoryInfo` / `QueryFullProcessImageNameW` / `SHFileOperationW` | XP / Vista / Win2000 |
+
+`RtlGetVersion` 读真实 build 号，不用 `GetVersionEx`（后者会受应用清单影响，
+拿到的不是真实版本）。
+
+**材质按 build 号分档**（`effects.rs` 的 `Tier`，每档都打印实际 build 与实际档位）：
+
+| 档位 | 适用 | 表现 |
+|---|---|---|
+| `SystemBackdrop` | Win11 22H2+ | 系统级 acrylic，圆角由系统给 |
+| `Mica` | Win11 21H2 | 壁纸采样，不是真模糊 |
+| `Acrylic` | Win10 1809 – Win11 22H2 | `SetWindowCompositionAttribute` 真模糊，圆角限 10px |
+| `Solid` | 兜底 | 不透明底色，观感不崩 |
+
+**已实测**：Windows 10 build 19045（22H2）、Windows 11（开发期另一台）。
+**未实测**：Windows 10 1809 / 1903 / 1909 与多屏不同缩放。
 
 ## 十、IPC 命令清单（`lib.rs`）
 
@@ -944,6 +1043,8 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 | `open_log_dir` | 在资源管理器打开日志目录（含 `Clipboard.log`） |
 | `frontend_log` | 接收前端日志并写入 `Clipboard.log`（带脱敏） |
 | `get_settings` / `set_*` | 读取与修改各项设置 |
+| `set_panel_keep_after_copy` | 点选后是否保持打开（父开关关着时返回错误） |
+| `set_panel_close_key` | 面板关闭键；校验与规范化在 `hotkey::normalize_panel_close_key` |
 | `set_release_idle_secs` | 后台释放的等待秒数（0 = 关闭） |
 | `set_images_split_dirs` | 切换图片分类存放，立刻整理存量并返回搬动条数 |
 | `set_shot_format` | 截图落盘格式 |
@@ -990,7 +1091,9 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 ### 12.1 全局快捷键与快捷面板（已实现）
 
 已在 v2.5.0 落地，不再是计划：`Ctrl+Alt+V` 唤出（组合可录制、可禁用）、快捷面板贴光标弹出、
-`Enter` 走「写剪贴板 → 收起面板 → 抢回原窗口焦点 → 校验前台 → `SendInput` Ctrl+V」全自动粘贴、
+`Enter` 走「写剪贴板 → 收起面板 → 抢回原窗口焦点 → 校验前台 → `SendInput` Ctrl+V」全自动粘贴
+（落字与否取决于目标窗口当时的输入焦点：`Ctrl+V` 是窗口级动作，点在窗口空白处时窗口收到
+按键但没有控件接手；这个结果程序端无从判断，所以提示只说「已复制到剪贴板」）、
 `Alt+Q` 调系统截图。实现细节见 §六。
 
 两处与最初规划的偏差，记录备查：
@@ -998,6 +1101,40 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 - 默认组合定的是 `Ctrl+Alt+V` 而不是 `Ctrl+Shift+V`：后者被大量应用用作「粘贴为纯文本」；
 - 「先半自动、验证需求后再全自动」这一步跳过了。`AttachThreadInput` 抢焦点的方案一次就通，
   没必要退回去让用户自己按 Ctrl+V。
+
+**面板的两个附加开关**：
+
+- `panel_keep_after_copy`（点选后保持打开）必须是 `panel_stay_on_blur` 的子项。原因是粘贴
+  要把焦点还给原窗口，那一刻面板必然失焦 —— 父开关关着，失焦即收起会立刻把它关掉，
+  开关看着是开的却没有效果。后端直接拒绝单独打开，设置页在父关时置灰并回写 false。
+- `panel_close_key`（关闭键，默认 `esc`）只在面板**有焦点**时生效：面板失焦留在屏幕上时
+  收不到键盘事件，那种状态的退出方式是再按一次唤起快捷键。Esc 始终兜底，改成 F2 不会让
+  Esc 失效。校验规则在 `hotkey::normalize_panel_close_key`：非字符键可裸绑（F5、Home…），
+  字母数字必须带修饰键（否则在搜索框打字就关面板），上下键与回车一律不可绑。
+  键名映射与组合串格式化抽到 `src/hotkeys.js`，设置页录制与面板匹配共用一份。
+- 复制成功后的提示复用截图那套自绘分层窗口（`shot_native::toast_near_point`），
+  不另做一套：面板紧接着就可能收起，页面里的 toast 会跟着消失，提示必须活在面板之外。
+  落点按**面板去留**分两种（锚点都在收起之前取）：
+  - 面板留着（「点选后保持打开」）→ 贴面板下沿。提示是这一行的结果，贴容器最自然，
+    也不盖住下方列表；
+  - 面板会收起 → 该屏工作区底部居中。面板一收，原处什么都没有了，提示悬在那里就是
+    「浮在半空」；底部居中是系统级提示的通用位置（Snackbar 语义），也离刚粘出去的内容最远。
+
+  两种落点都不跟鼠标走：鼠标位置只代表输入位置，不代表注意位置（键盘选中时它还停在
+  唤起面板的地方）。
+
+- **悬浮预览与主界面共用内容口径**（`src/preview.js`：`hasMoreToPreview` /
+  `guardPreviewText` / `fillFiles` / 浮层骨架与槽位）。面板行是单行省略号，几乎每条都
+  看不全，所以悬浮 600ms 就弹（主界面是 1s：那边卡片已有两行，停留更久才值得弹）。
+  定位各自实现 —— 主界面四方向试探（卡片常贴列表底部），面板只有 620×460、左右没有
+  富余，只在上/下二选一后夹进窗口。图片在面板侧直接取 `get_image_thumb`：主界面那套
+  缓存与视野外释放是为滚动列表准备的，面板一次只悬浮一个。
+
+  文案统一「已复制到剪贴板」，不做「粘没粘上」的区分。试过按结果分两种说法，
+  结论是**判断不出**：粘贴是窗口级动作，`Ctrl+V` 发给整个窗口、由它决定交给哪个控件，
+  用户点在窗口空白处时窗口收到按键却没人接手；想用 `GetGUIThreadInfo` 的 `hwndFocus`
+  判断，在 Chromium / Electron / WPF / WebView2 这类自绘控件上恒为 0 或顶层窗口，
+  反而全判错。唯一确定成功的是「内容在剪贴板里」，提示只说这一句。
 
 ### 12.2 更多格式（已实现）
 

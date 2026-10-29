@@ -8,6 +8,14 @@ mod effects;
 mod idle_release;
 #[cfg(windows)]
 mod clipboard;
+// 索引存储层（v2 快照 + 旧格式迁移）。它依赖 clipboard 的 HistoryItem 与 DPAPI 原语，
+// 所以和 clipboard 一样只在 Windows 上编译 —— 本产品只发布 Windows 版，
+// 为「别的平台也能编译」去把这层抽象出来只会多一层壳。
+#[cfg(windows)]
+mod store;
+// 查询层（窗口取数 + 搜索下推）。与 store 一样依赖 clipboard 的常驻列表，仅 Windows。
+#[cfg(windows)]
+mod query;
 #[cfg(windows)]
 mod singleton;
 #[cfg(windows)]
@@ -16,6 +24,12 @@ mod settings;
 mod autostart;
 mod tray;
 mod logger;
+// 加密内核与标签字典是「谁都可能要用的地基」，不归属某个窗口或某个功能：
+// 声明成 `pub mod` 而不是 `mod`，一是让它们能脱离本 crate 的私有树被单测与后续
+// 存储/查询层直接引用，二是避免 `pub fn` 因为「crate 内暂时没人调用」被判成死代码
+// （本任务刻意不改任何老路径，新模块只被单测使用）。
+pub mod crypto;
+pub mod labels;
 mod hotkey;
 mod popup;
 mod panel;
@@ -274,6 +288,16 @@ pub fn run() {
             effects::resize_start,
             clipboard::get_history,
             clipboard::copy_diagnostics,
+            clipboard::history_limit,
+            clipboard::trim_history_to_limit,
+            clipboard::count_older_than,
+            clipboard::delete_older_than,
+            query::get_history_window,
+            query::history_count,
+            query::count_by_filter,
+            query::filter_stats,
+            query::list_ids,
+            clipboard::delete_by_filter,
             clipboard::delete_item,
             clipboard::delete_items,
             clipboard::toggle_pin,
@@ -297,6 +321,8 @@ pub fn run() {
             settings::set_images_split_dirs,
             settings::set_shot_format,
             clipboard::confirm_cache_move,
+            settings::set_panel_keep_after_copy,
+            settings::set_panel_close_key,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,
@@ -313,6 +339,8 @@ pub fn run() {
             settings::set_clean_confirm_exit,
             settings::exit_app,
             settings::set_retention_days,
+            settings::set_max_items,
+            settings::snooze_limit_warning,
             settings::set_autostart,
             settings::set_file_copy,
             settings::set_delete_files_with_item,

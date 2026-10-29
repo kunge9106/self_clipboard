@@ -41,10 +41,25 @@ pub struct Config {
     /// 用法 —— 按快捷键弹出面板后，想先回原窗口瞄一眼内容再决定选哪条，一回去面板
     /// 就没了，等于白按一次。两种用法都合理，所以给开关而不是二选一。
     ///
-    /// 打开后收起方式：Esc、再按一次唤起快捷键、选中一条（粘贴后自动收起）。
+    /// 打开后收起方式：关闭键（默认 Esc）、再按一次唤起快捷键、选中一条（未开
+    /// 「点选后保持打开」时粘贴完自动收起）。
     /// 只影响**快捷面板**；托盘菜单失焦必须收起（点别处 = 关掉菜单），不听这个开关。
     #[serde(default)]
     pub panel_stay_on_blur: bool,
+    /// 面板选中一条之后是否保持打开（默认 false = 粘完就收起）。
+    ///
+    /// **依赖 `panel_stay_on_blur`**：粘贴要把焦点还给原窗口，那一刻面板必然失焦，
+    /// 失焦即收起会立刻把它关掉 —— 开关看着是开的，实际没有效果。所以后端拒绝
+    /// 单独打开（见 `set_panel_keep_after_copy`），设置页在父开关关闭时置灰该项。
+    #[serde(default)]
+    pub panel_keep_after_copy: bool,
+    /// 面板的关闭键，形如 `esc` / `f5` / `ctrl+w`（默认 `esc`）。
+    ///
+    /// 只在面板**有焦点**时生效：面板失焦留在屏幕上时收不到键盘事件，那种状态下的
+    /// 退出方式是再按一次唤起快捷键。Esc 始终兜底可用，把它改成 F2 不会让 Esc 失效。
+    /// 校验规则见 `hotkey::normalize_panel_close_key`。
+    #[serde(default = "default_panel_close_key")]
+    pub panel_close_key: String,
     /// 截图由谁来画：`"system"` = 系统的 `ms-screenclip:`（**默认**），
     /// `"builtin"` = 轻贴自带覆盖层。
     ///
@@ -248,6 +263,29 @@ pub struct Config {
     /// 与 `subtype_version` 同一套做法：改规则就加一版，启动时按需迁移一次。
     #[serde(default)]
     pub image_layout_ver: u32,
+    /// 历史条数上限。`0` = 不限；默认 100000。
+    ///
+    /// 为什么需要上限：10 万条之后 Rust 侧的元数据就要几十 MB 常驻，而「搜索覆盖
+    /// 全部历史」意味着这份内存不能被释放。上限是「用多少内存」与「记得多远」之间
+    /// 唯一的旋钮，交给用户而不是写死。
+    ///
+    /// 清理只删**最旧的非置顶、非收藏**条目：置顶与收藏是用户主动标记「要留着」的，
+    /// 被自动清理掉等于背弃那个标记。可删的删完仍超限时停手并记 WARN（宁可不删）。
+    #[serde(default = "default_max_items")]
+    pub max_items: u32,
+    /// 「条数上限」清理提示的下次允许弹出时间（Unix 毫秒）。
+    ///
+    /// 用户点过「暂不清理（不再提示 7 天）」就写一个 7 天后的时间戳。存在配置里而不是
+    /// 内存里，是因为「每次启动都弹」正是要避免的事 —— 内存标记一重启就失效。
+    #[serde(default)]
+    pub max_items_snooze_until: u64,
+    /// 历史索引的存储格式版本。0/1 = 旧的 `index.json`（整份 DPAPI），2 = `index.bin`（v2 容器）。
+    ///
+    /// 只用于诊断与日志：**真正的迁移判据是磁盘上的文件**（有 `index.bin` 就是 v2，
+    /// 只有 `index.json` 就是旧格式）。把这个数字当判据会在「用户手工删过文件」
+    /// 或「回滚到旧版本又升回来」时变成谎话，而文件不会。
+    #[serde(default)]
+    pub storage_version: u32,
     /// 主窗口隐藏多久后释放它的 WebView（秒）。0 = 关闭（默认）。
     ///
     /// 释放后只留后端与托盘：常驻占用从 411 MB 降到 40 MB 上下（实测 373 MB
@@ -319,6 +357,11 @@ fn default_retention() -> u32 {
     3
 }
 
+/// 面板关闭键的默认值：Esc。用户习惯里的第一反应，也是所有弹层的通用约定。
+fn default_panel_close_key() -> String {
+    "esc".into()
+}
+
 /// 截图格式的默认值：沿用 BMP，不改变已发布版本的行为。
 fn default_shot_format() -> String {
     "bmp".into()
@@ -326,6 +369,16 @@ fn default_shot_format() -> String {
 
 fn default_theme_mode() -> String {
     "system".into()
+}
+
+/// 默认条数上限。
+///
+/// 为什么是 1 万而不是 10 万：常驻内存约 612 B/条（实测，见 `bench_resident_memory`），
+/// 1 万条 ≈ 6 MB 元数据 —— 对绝大多数用户足够用，也不会让「后台释放后常驻」明显变高。
+/// 10 万条光元数据就是 61 MB，属于「需要的人自己往上调」的档位，不该是默认值。
+/// `0` = 不限。
+fn default_max_items() -> u32 {
+    10_000
 }
 
 fn default_true() -> bool {
@@ -441,9 +494,14 @@ impl Default for Config {
             delete_files_permanent: false,
             // 0 = 尚未按当前规则算过，首次启动会重算一遍存量
             subtype_version: 0,
+            panel_keep_after_copy: false,
+            panel_close_key: default_panel_close_key(),
             shot_format: default_shot_format(),
             images_split_dirs: true,
             image_layout_ver: 0,
+            max_items: default_max_items(),
+            max_items_snooze_until: 0,
+            storage_version: 0,
             release_idle_secs: default_release_idle(),
             pin_global: false, // 默认关闭：置顶按分类独立（沿用既有行为）
             pin_cancel_on_disable: true, // 默认开启：关掉互通即撤销它铺开的置顶
@@ -638,9 +696,12 @@ pub fn get_settings() -> serde_json::Value {
         "cleanIncludePinned": cfg.clean_include_pinned,
         "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
+        "maxItems": cfg.max_items,
         "hotkeyEnabled": cfg.hotkey_enabled,
         "hotkey": cfg.hotkey,
         "panelStayOnBlur": cfg.panel_stay_on_blur,
+        "panelKeepAfterCopy": cfg.panel_keep_after_copy,
+        "panelCloseKey": cfg.panel_close_key,
         "screenshotHotkeyEnabled": cfg.screenshot_hotkey_enabled,
         "screenshotHotkey": cfg.screenshot_hotkey,
         "screenshotRightClickCancel": cfg.screenshot_right_click_cancel,
@@ -808,7 +869,40 @@ pub fn set_panel_stay_on_blur(value: bool) -> Result<(), String> {
         "[settings] 面板失焦{}",
         if value { "保持打开" } else { "即收起" }
     );
-    update(|c| c.panel_stay_on_blur = value);
+    update(|c| {
+        c.panel_stay_on_blur = value;
+        // 关掉父开关时把从属项一起清掉：留着 true 只会在下次打开父开关时
+        // 自己冒出来生效，用户不记得自己开过
+        if !value {
+            c.panel_keep_after_copy = false;
+        }
+    });
+    Ok(())
+}
+
+/// 面板选中一条之后是否保持打开。
+///
+/// 父开关（`panel_stay_on_blur`）关着时直接拒绝：粘贴把焦点还给原窗口之后面板必然
+/// 失焦，失焦即收起会立刻把它关掉。存下一个「看着开了、实际没用」的配置比报错更糟。
+#[tauri::command]
+pub fn set_panel_keep_after_copy(value: bool) -> Result<(), String> {
+    if value && !get().panel_stay_on_blur {
+        return Err("要先打开「面板失焦不收起」".into());
+    }
+    crate::log_print!(
+        "[settings] 面板点选后{}",
+        if value { "保持打开" } else { "收起" }
+    );
+    update(|c| c.panel_keep_after_copy = value);
+    Ok(())
+}
+
+/// 面板的关闭键。只存值：面板每次弹出时由 `panel-open` 事件带下去，改完下次弹出生效。
+#[tauri::command]
+pub fn set_panel_close_key(combo: String) -> Result<(), String> {
+    let normalized = crate::hotkey::normalize_panel_close_key(&combo)?;
+    crate::log_print!("[settings] 面板关闭键：{normalized}");
+    update(|c| c.panel_close_key = normalized);
     Ok(())
 }
 
@@ -1011,6 +1105,35 @@ pub fn set_retention_days(days: u32) -> Result<(), String> {
     update(|c| c.retention_days = days);
     // 立即按新天数清理一次
     crate::clipboard::prune_retention(days);
+    Ok(())
+}
+
+/// 改条数上限。改小之后**立即**按新上限清理一次（用户刚把上限调小，就该看到效果）。
+#[tauri::command]
+pub fn set_max_items(items: u32) -> Result<(), String> {
+    update(|c| c.max_items = items);
+    crate::clipboard::trim_history_to_limit();
+    crate::log_print!(
+        "[settings] 条数上限改为 {}",
+        if items == 0 {
+            "不限".to_string()
+        } else {
+            format!("{items} 条")
+        }
+    );
+    Ok(())
+}
+
+/// 「暂不清理」：7 天内不再弹上限提示。
+#[tauri::command]
+pub fn snooze_limit_warning(days: u32) -> Result<(), String> {
+    let days = days.clamp(1, 30) as u64;
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+        + days * 24 * 60 * 60 * 1000;
+    update(|c| c.max_items_snooze_until = until);
     Ok(())
 }
 

@@ -125,7 +125,12 @@ fn show_now(app: &AppHandle) {
 
     // 每次弹出都让页面重新拉一次数据：面板是常驻的，不刷新就会看到旧列表，
     // 而「刚复制的那条在最上面」正是用户最先要的。
-    let _ = app.emit_to(PANEL_LABEL, "panel-open", ());
+    // 顺带把面板需要的设置推下去：面板是常驻窗口，改完设置要靠这次推送才生效；
+    // 单独为此发一次 IPC 会让弹出路径多一个来回，不值得。
+    let prefs = serde_json::json!({
+        "closeKey": crate::settings::get().panel_close_key,
+    });
+    let _ = app.emit_to(PANEL_LABEL, "panel-open", prefs);
 }
 
 /// 把窗口强行拉到前台，**返回是否真的抢到了**。
@@ -182,20 +187,102 @@ pub(crate) unsafe fn force_foreground(hwnd: isize) -> bool {
     GetForegroundWindow() == hwnd
 }
 
-/// 把某条内容复制进剪贴板，收起面板，再粘回唤出前的窗口。
+/// 提示的落点：面板矩形下沿中点（物理像素）。
+///
+/// 必须在**收起之前**取。收起之后面板就没了，退化成按光标定位会让提示跑到另一处 ——
+/// 实测两种观感都不对：
+/// - 键盘选中（`Enter`）时鼠标还停在唤起面板时的位置，提示跟用户盯着的地方无关；
+/// - 鼠标点选时提示压在刚粘出去的内容上。
+///
+/// 贴着面板原来的下沿就稳定得多：面板本身就在光标下方展开，提示接在它下方，
+/// 「面板收起/不收起」两种模式的落点一致。
+fn panel_anchor(app: &AppHandle) -> Option<(i32, i32)> {
+    let w = app.get_webview_window(PANEL_LABEL)?;
+    let pos = w.outer_position().ok()?;
+    let size = w.inner_size().ok()?;
+    Some((
+        pos.x + size.width as i32 / 2,
+        pos.y + size.height as i32,
+    ))
+}
+
+/// 光标位置。面板矩形取不到时才退回用它。
+fn cursor_point() -> (i32, i32) {
+    let mut pt = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if unsafe { GetCursorPos(&mut pt) } != 0 {
+        return (pt.left, pt.top);
+    }
+    (200, 200)
+}
+
+/// 复制结果的提示。落到哪里取决于面板会不会留着：
+///
+/// - **面板留着**（「点选后保持打开」）：贴面板下沿。此时提示是面板「这一行动作的
+///   结果」，贴着容器最自然，也不会盖住下面的列表。
+/// - **面板要收起**：落到该屏工作区底部居中。面板一收，原来那块地方什么都没有了，
+///   提示悬在原处就是「浮在半空」；底部居中是系统级提示的通用位置（Snackbar 语义），
+///   也离刚粘出去的内容最远。
+///
+/// 两种落点的共同点是**都不跟着鼠标走**：鼠标停在哪只代表输入位置，不代表用户
+/// 正在看哪里（键盘选中时它可能还停在唤起面板的地方）。
+///
+/// # 文案
+///
+/// 统一「已复制到剪贴板」，不区分「粘没粘上」。
+///
+/// 试过按结果分两种说法（「已粘贴到原窗口」/「已复制到剪贴板」），结论是**判断不出**：
+/// 粘贴是窗口级动作，`Ctrl+V` 发给整个窗口，由它决定交给哪个控件 —— 用户点在窗口空白处
+/// 时窗口收到按键却没人接手，我们无从得知；想靠 `GetGUIThreadInfo` 的 `hwndFocus` 判断，
+/// 在 Chromium / Electron / WPF / WebView2 这类自绘控件上恒为 0 或顶层窗口，反而全判错。
+///
+/// 唯一确定成功的是「内容已经在剪贴板里」—— 提示只说这一句。多一点信息要靠不住的猜测，
+/// 少一点又会在真的没粘上时误导人。
+fn toast_after_copy(panel: Option<(i32, i32)>, keep_open: bool) {
+    const TEXT: &str = "已复制到剪贴板";
+    match panel {
+        Some((x, bottom)) if keep_open => crate::shot_native::toast_near_point(TEXT, x, bottom),
+        Some((x, bottom)) => crate::shot_native::toast_at_work_area_bottom(TEXT, x, bottom),
+        // 面板还没建过（极少见）：用光标判断落在哪块屏
+        None => {
+            let (x, y) = cursor_point();
+            crate::shot_native::toast_at_work_area_bottom(TEXT, x, y);
+        }
+    }
+}
+
+/// 把某条内容复制进剪贴板，再粘回唤出前的窗口。
+///
+/// 默认粘完就收起面板；「点选后保持打开」开着时留着不动 —— 那时焦点已经还给原窗口，
+/// 面板处于「可见但失焦」的状态，可以接着点下一条（点击本身会把焦点拿回来）。
+/// 该开关只有在「面板失焦不收起」也开着时才允许打开（见 `settings`），否则留不住。
 pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
+    // 必须在收起之前取：收起后窗口就没了，落点会退化成光标位置
+    let anchor = panel_anchor(app);
+    // 这一条要不要收起决定了提示落哪：读了就不受后面动作影响
+    let keep_open = crate::settings::get().panel_keep_after_copy;
+
     // 走与右键「复制」完全相同的路径：格式处理（原样 / 纯文本 / 内联图还原）
     // 只有一份实现，两边不会漂移。
     crate::clipboard::copy_back(id.to_string(), Some(false))?;
 
-    if let Some(w) = app.get_webview_window(PANEL_LABEL) {
-        let _ = w.hide();
+    // 先收起再接下面「焦点还给原窗口」那一段：面板还在时抢焦点会被它自己顶回来。
+    // 开了「点选后保持打开」就不收，但焦点照样要还回去，否则 Ctrl+V 会发给面板。
+    if !crate::settings::get().panel_keep_after_copy {
+        if let Some(w) = app.get_webview_window(PANEL_LABEL) {
+            let _ = w.hide();
+        }
     }
 
     let target = PREV_FG.load(Ordering::SeqCst);
     if target == 0 {
         // 没有可回的目标：内容已经在剪贴板里，用户自己按 Ctrl+V 即可
         crate::log_print!("[panel] 无目标窗口，已只复制不粘贴");
+        toast_after_copy(anchor, keep_open);
         return Ok(());
     }
 
@@ -205,15 +292,20 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(80));
         if GetForegroundWindow() != target {
             crate::log_warn!("[panel] 焦点没能切回原窗口，跳过模拟粘贴（内容已在剪贴板）");
+            toast_after_copy(anchor, keep_open);
             return Ok(());
         }
         // 顺序：Ctrl 按下 → V 按下 → V 抬起 → Ctrl 抬起。
         // 注入实现只有 `input` 一份，截图取消发 Esc 走的是同一个函数。
         if !crate::input::send_keys(&[VK_CONTROL, VK_V]) {
+            // 按键被拦（目标程序以管理员身份运行时常见）：内容在剪贴板，但没有粘上
             crate::log_warn!("[panel] SendInput 未能送出全部按键（可能被权限拦截）");
+            toast_after_copy(anchor, keep_open);
+            return Ok(());
         }
     }
     crate::log_print!("[panel] 已粘贴回原窗口");
+    toast_after_copy(anchor, keep_open);
     Ok(())
 }
 

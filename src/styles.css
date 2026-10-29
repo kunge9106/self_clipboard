@@ -1028,6 +1028,43 @@ html:not(.hovers-off) .btn-primary:hover {
 
 /* 渐进渲染的「加载更多」哨兵：不可见，只用于 IntersectionObserver 触发下一批。
    负 margin 抵消 .history 的 8px flex 间距，保证底部留白不变。 */
+/* ---------------------------------------------------------------------------
+   窗口化列表（virtual-list.js）
+
+   结构：.history（滚动容器）→ .vl-inner（高度 = 总高）→ .vl-row（绝对定位）
+   行用 translateY 定位而不是 top：改 transform 不触发 layout，滚动时只重绘。
+
+   一条样式契约：**卡片高度只能由 kind/subtype 决定**。任何让单条高度依赖内容
+   长度的写法（不限行的多行文本、图片自然高度、可变 padding）都会让偏移表失准。
+   真正的兜底是 ResizeObserver（实测差异 >0.5px 就重排），但那是保险丝，不是许可证。
+   --------------------------------------------------------------------------- */
+.vl-inner {
+  position: relative;
+  width: 100%;
+}
+
+.vl-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  /* 卡片自带描边与圆角，行本身不画任何东西 */
+  will-change: transform;
+}
+
+/* 骨架行：数据还没到，先把位置占住，滚动条长度就不会跳 */
+.vl-skeleton {
+  pointer-events: none;
+}
+
+.vl-skeleton-bar {
+  height: 100%;
+  border-radius: var(--radius-sm);
+  background: var(--card-bg);
+  border: 1px solid var(--line);
+  opacity: 0.55;
+}
+
 .history .load-more {
   flex: 0 0 auto;
   height: 1px;
@@ -3101,4 +3138,25 @@ body.round .about-notes code {
   color: var(--text-dim);
   border: 1px dashed var(--stroke);
   border-radius: var(--radius-sm);
+}
+
+/* 「按天数清理」弹窗里的档位选择：预设在前，自定义输入框在后 */
+.age-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.age-pick input[type='number'] {
+  width: 68px;
+}
+
+/* 状态栏右侧的两个动作：装在一个容器里，网格保持 3 列不破版 */
+.statusbar-actions {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
