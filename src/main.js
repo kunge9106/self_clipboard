@@ -3090,15 +3090,6 @@ function settingsDataHtml(s) {
           "退出前先确认一次",
           s.cleanConfirmExit,
           true
-        ) +
-        // 一次性按天数清理：与「保留天数」不是一回事 —— 保留天数是常驻策略（每次启动
-        // 按它清），这里只清这一次，不改设置。
-        rowCtl(
-          "按天数清理",
-          "一次性删除 N 天前的旧条目，<b>不改动保留天数设置</b>；置顶与收藏按上方设置豁免",
-          `<input type="number" id="clean-age-days" min="1" value="30" /><button class="btn-ghost" id="btn-clean-by-age">清理</button>`,
-          false,
-          "set-clean-by-age"
         )
     ),
     block(
@@ -4636,26 +4627,28 @@ document.addEventListener("click", async (e) => {
     toast(n > 0 ? `已清理 ${n} 条 ${days} 天前的条目` : "没有可清理的条目");
     return;
   }
-  if (id === "btn-clean-by-age") {
-    const days = Math.max(1, Math.floor(Number(document.getElementById("clean-age-days")?.value) || 30));
-    let n = 0;
-    try {
-      n = Number(await invoke("count_older_than", { days })) || 0;
-    } catch {
-      n = -1;
-    }
+  if (id === "btn-clean-by-age" || id === "btn-clean-age") {
     const modal = document.getElementById("age-clean-modal");
     if (!modal) return;
-    document.getElementById("age-clean-modal-text").textContent =
-      n < 0
-        ? `将删除 ${days} 天前的条目。`
-        : n === 0
-          ? `没有 ${days} 天前的条目。`
-          : `将删除 ${days} 天前的条目 ${n} 条（置顶与收藏按设置豁免），此操作不可撤销。`;
-    modal.dataset.days = String(days);
+    await refreshAgeCleanPreview(modal);
     modal.hidden = false;
     return;
   }
+  // 预设档位：填进输入框后重算预览，弹窗保持打开
+  if (e.target?.classList?.contains("age-preset")) {
+    const input = document.getElementById("clean-age-days");
+    if (input) input.value = String(Number(e.target.dataset.days) || 30);
+    const modal = document.getElementById("age-clean-modal");
+    if (modal && !modal.hidden) await refreshAgeCleanPreview(modal);
+    return;
+  }
+  // 自定义天数：改数字就重算预览
+  if (id === "clean-age-days") {
+    const modal = document.getElementById("age-clean-modal");
+    if (modal && !modal.hidden) await refreshAgeCleanPreview(modal);
+    return;
+  }
+
   if (id === "age-clean-cancel") {
     const modal = document.getElementById("age-clean-modal");
     if (modal) modal.hidden = true;
@@ -4717,3 +4710,24 @@ setTimeout(() => {
 listen("clipboard-update", () => {
   void checkHistoryLimit();
 });
+
+/// 重算「按天数清理」弹窗里的预览条数。
+async function refreshAgeCleanPreview(modal) {
+  const days = Math.max(1, Math.floor(Number(document.getElementById("clean-age-days")?.value) || 30));
+  let n = -1;
+  try {
+    n = Number(await invoke("count_older_than", { days })) || 0;
+  } catch {
+    n = -1;
+  }
+  const text = document.getElementById("age-clean-modal-text");
+  if (text) {
+    text.textContent =
+      n < 0
+        ? `将删除 ${days} 天前的条目。`
+        : n === 0
+          ? `没有 ${days} 天前的条目。`
+          : `将删除 ${days} 天前的条目 ${n} 条（置顶与收藏按设置豁免），此操作不可撤销。`;
+  }
+  modal.dataset.days = String(days);
+}

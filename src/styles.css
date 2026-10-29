@@ -3139,3 +3139,16 @@ body.round .about-notes code {
   border: 1px dashed var(--stroke);
   border-radius: var(--radius-sm);
 }
+
+/* 「按天数清理」弹窗里的档位选择：预设在前，自定义输入框在后 */
+.age-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.age-pick input[type='number'] {
+  width: 68px;
+}
