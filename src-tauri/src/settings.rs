@@ -41,10 +41,25 @@ pub struct Config {
     /// 用法 —— 按快捷键弹出面板后，想先回原窗口瞄一眼内容再决定选哪条，一回去面板
     /// 就没了，等于白按一次。两种用法都合理，所以给开关而不是二选一。
     ///
-    /// 打开后收起方式：Esc、再按一次唤起快捷键、选中一条（粘贴后自动收起）。
+    /// 打开后收起方式：关闭键（默认 Esc）、再按一次唤起快捷键、选中一条（未开
+    /// 「点选后保持打开」时粘贴完自动收起）。
     /// 只影响**快捷面板**；托盘菜单失焦必须收起（点别处 = 关掉菜单），不听这个开关。
     #[serde(default)]
     pub panel_stay_on_blur: bool,
+    /// 面板选中一条之后是否保持打开（默认 false = 粘完就收起）。
+    ///
+    /// **依赖 `panel_stay_on_blur`**：粘贴要把焦点还给原窗口，那一刻面板必然失焦，
+    /// 失焦即收起会立刻把它关掉 —— 开关看着是开的，实际没有效果。所以后端拒绝
+    /// 单独打开（见 `set_panel_keep_after_copy`），设置页在父开关关闭时置灰该项。
+    #[serde(default)]
+    pub panel_keep_after_copy: bool,
+    /// 面板的关闭键，形如 `esc` / `f5` / `ctrl+w`（默认 `esc`）。
+    ///
+    /// 只在面板**有焦点**时生效：面板失焦留在屏幕上时收不到键盘事件，那种状态下的
+    /// 退出方式是再按一次唤起快捷键。Esc 始终兜底可用，把它改成 F2 不会让 Esc 失效。
+    /// 校验规则见 `hotkey::normalize_panel_close_key`。
+    #[serde(default = "default_panel_close_key")]
+    pub panel_close_key: String,
     /// 截图由谁来画：`"system"` = 系统的 `ms-screenclip:`（**默认**），
     /// `"builtin"` = 轻贴自带覆盖层。
     ///
@@ -319,6 +334,11 @@ fn default_retention() -> u32 {
     3
 }
 
+/// 面板关闭键的默认值：Esc。用户习惯里的第一反应，也是所有弹层的通用约定。
+fn default_panel_close_key() -> String {
+    "esc".into()
+}
+
 /// 截图格式的默认值：沿用 BMP，不改变已发布版本的行为。
 fn default_shot_format() -> String {
     "bmp".into()
@@ -441,6 +461,8 @@ impl Default for Config {
             delete_files_permanent: false,
             // 0 = 尚未按当前规则算过，首次启动会重算一遍存量
             subtype_version: 0,
+            panel_keep_after_copy: false,
+            panel_close_key: default_panel_close_key(),
             shot_format: default_shot_format(),
             images_split_dirs: true,
             image_layout_ver: 0,
@@ -641,6 +663,8 @@ pub fn get_settings() -> serde_json::Value {
         "hotkeyEnabled": cfg.hotkey_enabled,
         "hotkey": cfg.hotkey,
         "panelStayOnBlur": cfg.panel_stay_on_blur,
+        "panelKeepAfterCopy": cfg.panel_keep_after_copy,
+        "panelCloseKey": cfg.panel_close_key,
         "screenshotHotkeyEnabled": cfg.screenshot_hotkey_enabled,
         "screenshotHotkey": cfg.screenshot_hotkey,
         "screenshotRightClickCancel": cfg.screenshot_right_click_cancel,
@@ -808,7 +832,40 @@ pub fn set_panel_stay_on_blur(value: bool) -> Result<(), String> {
         "[settings] 面板失焦{}",
         if value { "保持打开" } else { "即收起" }
     );
-    update(|c| c.panel_stay_on_blur = value);
+    update(|c| {
+        c.panel_stay_on_blur = value;
+        // 关掉父开关时把从属项一起清掉：留着 true 只会在下次打开父开关时
+        // 自己冒出来生效，用户不记得自己开过
+        if !value {
+            c.panel_keep_after_copy = false;
+        }
+    });
+    Ok(())
+}
+
+/// 面板选中一条之后是否保持打开。
+///
+/// 父开关（`panel_stay_on_blur`）关着时直接拒绝：粘贴把焦点还给原窗口之后面板必然
+/// 失焦，失焦即收起会立刻把它关掉。存下一个「看着开了、实际没用」的配置比报错更糟。
+#[tauri::command]
+pub fn set_panel_keep_after_copy(value: bool) -> Result<(), String> {
+    if value && !get().panel_stay_on_blur {
+        return Err("要先打开「面板失焦不收起」".into());
+    }
+    crate::log_print!(
+        "[settings] 面板点选后{}",
+        if value { "保持打开" } else { "收起" }
+    );
+    update(|c| c.panel_keep_after_copy = value);
+    Ok(())
+}
+
+/// 面板的关闭键。只存值：面板每次弹出时由 `panel-open` 事件带下去，改完下次弹出生效。
+#[tauri::command]
+pub fn set_panel_close_key(combo: String) -> Result<(), String> {
+    let normalized = crate::hotkey::normalize_panel_close_key(&combo)?;
+    crate::log_print!("[settings] 面板关闭键：{normalized}");
+    update(|c| c.panel_close_key = normalized);
     Ok(())
 }
 

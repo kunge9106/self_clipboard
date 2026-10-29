@@ -297,6 +297,8 @@ pub fn run() {
             settings::set_images_split_dirs,
             settings::set_shot_format,
             clipboard::confirm_cache_move,
+            settings::set_panel_keep_after_copy,
+            settings::set_panel_close_key,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,

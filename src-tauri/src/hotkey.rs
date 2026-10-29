@@ -261,10 +261,14 @@ pub fn post_msg_w(msg: u32, param: usize) {
 }
 
 
-/// `"ctrl+alt+v"` → (修饰键, 虚拟键码)。
-fn parse_combo(combo: &str) -> Result<(u32, u32), String> {
+/// 组合串 → (修饰键位, 主键名)。**不做键码校验**，由调用方决定要不要。
+///
+/// `allow_bare` 区分两种策略：全局热键不允许裸键（会抢掉正常输入），面板关闭键允许
+/// 裸的非字符键（Esc / F5 这类不产生文字的键）。解析本身只有一份，策略由参数给 ——
+/// 两份解析器迟早会在「控制符写法」「大小写」这些细节上分叉。
+fn parse_combo_with(combo: &str, allow_bare: bool) -> Result<(u32, String), String> {
     let mut mods = 0u32;
-    let mut key: Option<u32> = None;
+    let mut key: Option<String> = None;
     for part in combo.split('+') {
         match part.trim().to_ascii_lowercase().as_str() {
             "" => {}
@@ -272,15 +276,78 @@ fn parse_combo(combo: &str) -> Result<(u32, u32), String> {
             "alt" => mods |= MOD_ALT,
             "shift" => mods |= MOD_SHIFT,
             "win" | "super" => mods |= MOD_WIN,
-            other => key = Some(vk_of(other)?),
+            other => key = Some(other.to_string()),
         }
     }
-    let vk = key.ok_or("缺少主键（例如 V）")?;
-    if mods == 0 {
+    let k = key.ok_or("缺少主键（例如 V）")?;
+    if mods == 0 && !allow_bare {
         // 纯单键会抢掉正常输入，必须带修饰键
         return Err("至少需要一个修饰键（Ctrl / Alt / Shift）".into());
     }
-    Ok((mods, vk))
+    Ok((mods, k))
+}
+
+/// `"ctrl+alt+v"` → (修饰键, 虚拟键码)。
+fn parse_combo(combo: &str) -> Result<(u32, u32), String> {
+    let (mods, key) = parse_combo_with(combo, false)?;
+    Ok((mods, vk_of(&key)?))
+}
+
+/// 面板关闭键允许裸绑的主键：不产生文字，按下去不会打断搜索输入。
+///
+/// 与前端 `hotkeys.js` 的 `BARE_CLOSE_KEYS` 是同一张表 —— 前端负责录制时挡住，
+/// 后端负责兜住（配置是明文 JSON，用户可以直接改）。
+const BARE_CLOSE_KEYS: &[&str] = &[
+    "esc", "tab", "home", "end", "pageup", "pagedown", "insert", "delete", "backspace",
+];
+
+/// 面板自己占用的键：上下选择、回车粘贴。绑成关闭键会让面板没法用。
+const RESERVED_CLOSE_KEYS: &[&str] = &["up", "down", "enter"];
+
+/// 是不是「F1–F12」里的一个。
+fn is_fn_key(name: &str) -> bool {
+    name.strip_prefix('f')
+        .and_then(|n| n.parse::<u32>().ok())
+        .map(|n| (1..=12).contains(&n))
+        .unwrap_or(false)
+}
+
+/// 校验并规范化面板关闭键，返回形如 `ctrl+alt+f2` 的规范串。
+///
+/// 规则（与前端录制一致）：
+/// - 非字符键（Esc / Tab / Home / F1–F12 …）可以裸绑；
+/// - 字母、数字、空格这类会与搜索输入冲突的键必须带修饰键；
+/// - 上下键与回车不可绑（面板拿它们做选择与粘贴）。
+///
+/// 返回规范化串而不是只做校验：修饰键顺序在配置里统一按 ctrl / alt / shift / win，
+/// 面板按字符串解析也比较时不会因为写法不同而认不出。
+pub(crate) fn normalize_panel_close_key(combo: &str) -> Result<String, String> {
+    let (mods, key) = parse_combo_with(combo, true)?;
+    if RESERVED_CLOSE_KEYS.contains(&key.as_str()) {
+        return Err("上下键与回车是面板的选择 / 粘贴键，不能用作关闭键".into());
+    }
+    let bare_ok = BARE_CLOSE_KEYS.contains(&key.as_str()) || is_fn_key(&key);
+    if mods == 0 && !bare_ok {
+        return Err("这个键要带修饰键（Ctrl / Alt / Shift / Win），否则打字时会关掉面板".into());
+    }
+    // 带修饰键时主键也必须在认识的范围内：面板按同一张表匹配，写错了只是永远不触发
+    if !bare_ok {
+        vk_of(&key)?;
+    }
+    let mut out = String::new();
+    for (bit, name) in [
+        (MOD_CONTROL, "ctrl"),
+        (MOD_ALT, "alt"),
+        (MOD_SHIFT, "shift"),
+        (MOD_WIN, "win"),
+    ] {
+        if mods & bit != 0 {
+            out.push_str(name);
+            out.push('+');
+        }
+    }
+    out.push_str(&key);
+    Ok(out)
 }
 
 fn vk_of(name: &str) -> Result<u32, String> {
@@ -331,5 +398,23 @@ mod tests {
         assert!(parse_combo("v").is_err(), "纯单键必须拒绝");
         assert!(parse_combo("ctrl").is_err(), "只有修饰键必须拒绝");
         assert!(parse_combo("ctrl+alt+?").is_err(), "未知按键必须拒绝");
+    }
+
+    /// 面板关闭键：非字符键可裸绑，字符键必须带修饰键，面板自用的键不可绑。
+    #[test]
+    fn panel_close_key_rules() {
+        assert_eq!(normalize_panel_close_key("esc").unwrap(), "esc");
+        assert_eq!(normalize_panel_close_key("F5").unwrap(), "f5");
+        assert_eq!(normalize_panel_close_key("Home").unwrap(), "home");
+        // 修饰键顺序统一，大小写无关
+        assert_eq!(normalize_panel_close_key("shift+ctrl+w").unwrap(), "ctrl+shift+w");
+
+        assert!(normalize_panel_close_key("w").is_err(), "裸字母必须拒绝");
+        assert!(normalize_panel_close_key("1").is_err(), "裸数字必须拒绝");
+        assert!(normalize_panel_close_key("space").is_err(), "裸空格必须拒绝");
+        assert!(normalize_panel_close_key("ctrl").is_err(), "只有修饰键必须拒绝");
+        assert!(normalize_panel_close_key("up").is_err(), "方向键必须拒绝");
+        assert!(normalize_panel_close_key("ctrl+enter").is_err(), "带修饰键的回车也要拒绝");
+        assert!(normalize_panel_close_key("ctrl+?").is_err(), "未知按键必须拒绝");
     }
 }

@@ -10,6 +10,12 @@ import {
   highlightCode,
   sanitizeRichHtml,
 } from "./formats.js";
+// 键名映射与组合串格式化：与面板共用一份（面板要用同一套判断关闭键）
+import {
+  comboLabel,
+  comboFromEvent,
+  checkPanelCloseKey,
+} from "./hotkeys.js";
 
 const appWindow = getCurrentWindow();
 
@@ -2384,36 +2390,6 @@ function block(title, inner, opts = {}) {
   return `<section class="${cls}">${title ? `<h3 class="block-h">${title}</h3>` : ""}${inner}</section>`;
 }
 
-/// 把 `ctrl+alt+v` 显示成 `Ctrl + Alt + V`（值的形式由后端 `hotkey::parse_combo` 定义）。
-function comboLabel(combo) {
-  return String(combo || "")
-    .split("+")
-    .map((p) => {
-      const k = p.trim().toLowerCase();
-      if (k === "ctrl" || k === "control") return "Ctrl";
-      if (k === "alt") return "Alt";
-      if (k === "shift") return "Shift";
-      if (k === "win" || k === "super") return "Win";
-      if (k === "space") return "空格";
-      return k.toUpperCase();
-    })
-    .filter(Boolean)
-    .join(" + ");
-}
-
-/// DOM `KeyboardEvent.key` → 后端能解析的键名；不支持的返回 null。
-function hotkeyKeyName(key) {
-  if (key === " ") return "space";
-  if (key.length === 1) {
-    const c = key.toLowerCase();
-    // 与后端 `vk_of` 的白名单保持一致：字母、数字、反引号、减号
-    if (/[a-z0-9`\-]/.test(c)) return c;
-    return null;
-  }
-  if (/^f([1-9]|1[0-2])$/i.test(key)) return key.toLowerCase();
-  return null;
-}
-
 /// 绑定一组「开关 + 快捷键录制」控件。
 ///
 /// 录制期间必须临时注销全局热键（`hotkey_suspend`）：注册过的组合会被系统**先**
@@ -2485,21 +2461,16 @@ function bindHotkeyRow(view, opts) {
       btn.textContent = pre.length ? pre.join(" + ") + " + …" : "请按下组合键…（Esc 取消）";
       return;
     }
-    const mods = [];
-    if (e.ctrlKey) mods.push("ctrl");
-    if (e.altKey) mods.push("alt");
-    if (e.shiftKey) mods.push("shift");
-    if (e.metaKey) mods.push("win");
-    const main = hotkeyKeyName(e.key);
-    if (!main) {
+    const parsed = comboFromEvent(e);
+    if (!parsed) {
       toast("这个键暂不支持，请用字母、数字、F1–F12、空格或 `");
       return;
     }
-    if (mods.length === 0) {
+    if (parsed.mods.length === 0) {
       toast("至少需要一个修饰键（Ctrl / Alt / Shift / Win）");
       return;
     }
-    const combo = [...mods, main].join("+");
+    const combo = parsed.combo;
     recording = false;
     btn.classList.remove("is-recording");
     btn.textContent = comboLabel(combo);
@@ -2511,6 +2482,77 @@ function bindHotkeyRow(view, opts) {
       // 后端已回滚并重注册旧组合，这里只把界面拉回去
       toast("该组合不可用：" + err);
       btn.textContent = label();
+    }
+  };
+}
+
+/// 面板关闭键的录制。
+///
+/// 与 `bindHotkeyRow` 分开，因为两者差别在两处：那个绑定的是**全局热键**（要注册、
+/// 会因被占用而失败、录制前要暂停注册），这个只存一个字符串，按键由面板页面自己比对；
+/// 录制规则也不同 —— 这里允许裸绑 Esc / F5 / Home，字符键仍要求带修饰键。
+function bindPanelCloseKey(view) {
+  const btn = view.querySelector("#set-panel-close");
+  if (!btn) return;
+
+  let recording = false;
+  const stop = () => {
+    recording = false;
+    btn.classList.remove("is-recording");
+    btn.textContent = comboLabel(settings?.panelCloseKey || "esc");
+  };
+
+  btn.onclick = () => {
+    if (recording) return;
+    recording = true;
+    btn.classList.add("is-recording");
+    btn.textContent = "请按下要用的键…（Esc 取消）";
+    btn.focus();
+  };
+  // 点到别处 = 放弃录制
+  btn.onblur = () => recording && stop();
+
+  btn.onkeydown = async (e) => {
+    if (!recording) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // 录制里 Esc 一律是「取消」：它本来就是默认关闭键，想用它不必重录
+    if (e.key === "Escape") {
+      stop();
+      return;
+    }
+    // 只按住修饰键：先显示出来，等主键落下
+    if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) {
+      const pre = [];
+      if (e.ctrlKey) pre.push("Ctrl");
+      if (e.altKey) pre.push("Alt");
+      if (e.shiftKey) pre.push("Shift");
+      if (e.metaKey) pre.push("Win");
+      btn.textContent = pre.length
+        ? pre.join(" + ") + " + …"
+        : "请按下要用的键…（Esc 取消）";
+      return;
+    }
+    const parsed = comboFromEvent(e, { extended: true });
+    if (!parsed) {
+      toast("这个键不支持，请用 Esc / Tab / F1–F12 / Home 等，或带修饰键的组合");
+      return;
+    }
+    const bad = checkPanelCloseKey(parsed.combo, {
+      callUpHotkey: settings?.hotkey || "",
+    });
+    if (bad) {
+      toast(bad);
+      return;
+    }
+    try {
+      await invoke("set_panel_close_key", { combo: parsed.combo });
+      settings = await invoke("get_settings");
+      stop();
+      toast("关闭键已改为 " + comboLabel(parsed.combo));
+    } catch (err) {
+      toast("保存失败：" + err);
+      stop();
     }
   };
 }
@@ -2575,6 +2617,24 @@ function settingsGeneralHtml(s) {
           "默认点别处即收起；打开后可先去别的窗口看一眼再回来选。Esc 或再按一次唤起快捷键收起",
           s.panelStayOnBlur,
           true
+        ) +
+        // 再深一层：选中一条之后的行为。它依赖上面的「失焦不收起」——
+        // 粘贴会把焦点还给原窗口，失焦即收起时面板留不住，开关等于无效。
+        rowCheck(
+          "set-panel-keep",
+          "点选后保持打开",
+          "粘回原窗口后不收起，可以接着选下一条；需先打开上面的「面板失焦不收起」",
+          s.panelKeepAfterCopy,
+          true
+        ) +
+        rowCtl(
+          "关闭键",
+          "面板里按这个键收起。Esc 始终可用；字母、数字需带修饰键",
+          `<button type="button" class="btn-ghost hotkey-btn" id="set-panel-close">${comboLabel(
+            s.panelCloseKey || "esc"
+          )}</button>`,
+          true,
+          "set-panel-close"
         ) +
         rowCheck(
           "set-shot-hotkey-enabled",
@@ -3711,8 +3771,47 @@ function bindSettings(view) {
     })
     .catch(() => {});
 
-  // 面板失焦行为：只存一个布尔，后端失焦处理器现读配置，改完立即生效
-  bindCheck("set-panel-stay", "set_panel_stay_on_blur");
+  // 面板失焦行为：只存一个布尔，后端失焦处理器现读配置，改完立即生效。
+  // 不与 bindCheck 合用是因为它还要联动下面两个从属项：关掉失焦保持时，
+  // 「点选后保持打开」必须一起关掉 —— 否则配置里留着一个永远不生效的 true。
+  const panelStay = view.querySelector("#set-panel-stay");
+  const panelKeep = view.querySelector("#set-panel-keep");
+  const syncPanelKeep = () => {
+    if (!panelKeep) return;
+    const off = !panelStay?.checked;
+    panelKeep.toggleAttribute("data-disabled", off);
+    if (off) panelKeep.checked = false;
+  };
+  if (panelStay) {
+    panelStay.onchange = async () => {
+      try {
+        await invoke("set_panel_stay_on_blur", { value: panelStay.checked });
+        settings = await invoke("get_settings");
+        syncPanelKeep();
+        toast(`面板失焦${panelStay.checked ? "保持打开" : "即收起"}`);
+      } catch (e) {
+        toast("保存失败：" + e);
+        panelStay.checked = !panelStay.checked;
+      }
+    };
+  }
+  if (panelKeep) {
+    panelKeep.onchange = async () => {
+      try {
+        await invoke("set_panel_keep_after_copy", { value: panelKeep.checked });
+        settings = await invoke("get_settings");
+        toast(panelKeep.checked ? "点选后保持打开" : "点选后收起面板");
+      } catch (e) {
+        toast("保存失败：" + e);
+        panelKeep.checked = !panelKeep.checked;
+      }
+    };
+  }
+  syncPanelKeep();
+
+  // 面板关闭键：录制规则与全局热键不同 —— 非字符键可以裸绑（F5、Home），
+  // 字符键必须带修饰键（否则在搜索框打字就把面板关了）。规则在 hotkeys.js 里。
+  bindPanelCloseKey(view);
   // 截图右键取消：同样只存布尔，下次唤起截图时按新值决定装不装钩子
   bindCheck("set-shot-rclick", "set_screenshot_right_click_cancel");
 

@@ -6,6 +6,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+// 关闭键的匹配规则与设置页录制共用一份，两边各写一套必然对不上
+import { matchesCombo } from "./hotkeys.js";
 
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
 
@@ -23,6 +25,11 @@ let all = [];
 let rows = [];
 /** 当前选中下标 */
 let sel = 0;
+
+/** 后端随每次弹出下发的行为偏好。
+ *  目前只有 `closeKey`（设置页录的关闭键，默认 `esc`，Esc 始终兜底可用）。
+ *  「点选后保持打开」不需要前端参与 —— 收不收面板由后端 `paste()` 按配置决定。 */
+let prefs = { closeKey: "esc" };
 
 /** 重载数据。面板是常驻窗口，每次弹出都要重拉 —— 否则看到的是上次的列表。 */
 async function reload() {
@@ -119,7 +126,11 @@ async function paste(id) {
 
 // ── 键盘 ────────────────────────────────────────────────────────────────
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
+  // 输入法组字期间的按键不算数：组字用 Esc 取消候选是常见操作
+  if (e.isComposing) return;
+  // 关闭键：设置里可以改，Esc 始终兜底。放在最前，否则 Shift+Esc 之类会落到
+  // 下面的方向键分支里（那些分支只比 e.key，不看修饰键）
+  if (e.key === "Escape" || matchesCombo(e, prefs.closeKey)) {
     e.preventDefault();
     invoke("panel_hide");
     return;
@@ -162,7 +173,12 @@ searchEl.addEventListener("keydown", (e) => {
 });
 
 // 每次弹出：重拉数据、清空搜索、选中第一条
-listen("panel-open", () => {
+listen("panel-open", (ev) => {
+  // payload 里带着当前设置：面板是常驻窗口，设置改过之后要靠这次推送才生效，
+  // 而且不必为此多发一次 IPC（弹出路径上每一毫秒都要省）
+  if (ev.payload && typeof ev.payload === "object") {
+    prefs = { ...prefs, ...ev.payload };
+  }
   reload();
   setTimeout(() => searchEl.focus(), 0);
 });

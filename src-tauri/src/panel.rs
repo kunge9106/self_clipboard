@@ -125,7 +125,12 @@ fn show_now(app: &AppHandle) {
 
     // 每次弹出都让页面重新拉一次数据：面板是常驻的，不刷新就会看到旧列表，
     // 而「刚复制的那条在最上面」正是用户最先要的。
-    let _ = app.emit_to(PANEL_LABEL, "panel-open", ());
+    // 顺带把面板需要的设置推下去：面板是常驻窗口，改完设置要靠这次推送才生效；
+    // 单独为此发一次 IPC 会让弹出路径多一个来回，不值得。
+    let prefs = serde_json::json!({
+        "closeKey": crate::settings::get().panel_close_key,
+    });
+    let _ = app.emit_to(PANEL_LABEL, "panel-open", prefs);
 }
 
 /// 把窗口强行拉到前台，**返回是否真的抢到了**。
@@ -182,14 +187,22 @@ pub(crate) unsafe fn force_foreground(hwnd: isize) -> bool {
     GetForegroundWindow() == hwnd
 }
 
-/// 把某条内容复制进剪贴板，收起面板，再粘回唤出前的窗口。
+/// 把某条内容复制进剪贴板，再粘回唤出前的窗口。
+///
+/// 默认粘完就收起面板；「点选后保持打开」开着时留着不动 —— 那时焦点已经还给原窗口，
+/// 面板处于「可见但失焦」的状态，可以接着点下一条（点击本身会把焦点拿回来）。
+/// 该开关只有在「面板失焦不收起」也开着时才允许打开（见 `settings`），否则留不住。
 pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
     // 走与右键「复制」完全相同的路径：格式处理（原样 / 纯文本 / 内联图还原）
     // 只有一份实现，两边不会漂移。
     crate::clipboard::copy_back(id.to_string(), Some(false))?;
 
-    if let Some(w) = app.get_webview_window(PANEL_LABEL) {
-        let _ = w.hide();
+    // 先收起再接下面「焦点还给原窗口」那一段：面板还在时抢焦点会被它自己顶回来。
+    // 开了「点选后保持打开」就不收，但焦点照样要还回去，否则 Ctrl+V 会发给面板。
+    if !crate::settings::get().panel_keep_after_copy {
+        if let Some(w) = app.get_webview_window(PANEL_LABEL) {
+            let _ = w.hide();
+        }
     }
 
     let target = PREV_FG.load(Ordering::SeqCst);

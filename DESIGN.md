@@ -883,7 +883,7 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 
 设置页按四个标签分页：常规、外观、数据、关于，避免长列表翻找。
 
-- 常规：启动（开机自启、关闭时收进托盘、后台释放与等待时长）、快捷操作（两个热键、面板失焦、截图方式与截图格式）、置顶、帮助；
+- 常规：启动（开机自启、关闭时收进托盘、后台释放与等待时长）、快捷操作（两个热键、面板失焦与点选后行为、面板关闭键、截图方式与截图格式）、置顶、帮助；
 - 外观：主题三档、材质浓度、圆角模式、显示（不跟随系统缩放）；
 - 数据：记录（文件复制、保留天数、到期是否清理置顶/收藏）、存储位置（缓存目录、迁移、图片分类存放）、清理、删除文件条目、危险操作；
 - 关于：版本、运行环境自检、检查更新与更新日志、项目主页与问题反馈入口，详见 8.6。
@@ -906,6 +906,9 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 | `file_copy` | **false** | 是否记录文件复制（默认关闭） |
 | `pin_global` | false | 置顶是否在全部分类间互通（默认关闭 = 按分类独立） |
 | `pin_cancel_on_disable` | true | 关闭互通时是否连它产生的同步置顶一起取消 |
+| `panel_stay_on_blur` | false | 面板失焦时保持打开（托盘菜单不听这个开关） |
+| `panel_keep_after_copy` | false | 点选一条后不收起面板；**依赖** `panel_stay_on_blur`，父开关关着时后端拒绝打开 |
+| `panel_close_key` | `"esc"` | 面板关闭键（`esc` / `f5` / `ctrl+w`）；Esc 始终兜底可用 |
 | `cache_dir` | null | 自定义缓存目录（null = app_data_dir/clipboard） |
 | `release_idle_secs` | **0** | 后台释放的等待秒数，0 = 关闭（见 7.4）。1 = 收起即释放 |
 | `images_split_dirs` | **true** | 图片是否分 `shot/` 与 `copy/` 目录（见 3.5.1） |
@@ -944,6 +947,8 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 | `open_log_dir` | 在资源管理器打开日志目录（含 `Clipboard.log`） |
 | `frontend_log` | 接收前端日志并写入 `Clipboard.log`（带脱敏） |
 | `get_settings` / `set_*` | 读取与修改各项设置 |
+| `set_panel_keep_after_copy` | 点选后是否保持打开（父开关关着时返回错误） |
+| `set_panel_close_key` | 面板关闭键；校验与规范化在 `hotkey::normalize_panel_close_key` |
 | `set_release_idle_secs` | 后台释放的等待秒数（0 = 关闭） |
 | `set_images_split_dirs` | 切换图片分类存放，立刻整理存量并返回搬动条数 |
 | `set_shot_format` | 截图落盘格式 |
@@ -998,6 +1003,17 @@ Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作
 - 默认组合定的是 `Ctrl+Alt+V` 而不是 `Ctrl+Shift+V`：后者被大量应用用作「粘贴为纯文本」；
 - 「先半自动、验证需求后再全自动」这一步跳过了。`AttachThreadInput` 抢焦点的方案一次就通，
   没必要退回去让用户自己按 Ctrl+V。
+
+**面板的两个附加开关**：
+
+- `panel_keep_after_copy`（点选后保持打开）必须是 `panel_stay_on_blur` 的子项。原因是粘贴
+  要把焦点还给原窗口，那一刻面板必然失焦 —— 父开关关着，失焦即收起会立刻把它关掉，
+  开关看着是开的却没有效果。后端直接拒绝单独打开，设置页在父关时置灰并回写 false。
+- `panel_close_key`（关闭键，默认 `esc`）只在面板**有焦点**时生效：面板失焦留在屏幕上时
+  收不到键盘事件，那种状态的退出方式是再按一次唤起快捷键。Esc 始终兜底，改成 F2 不会让
+  Esc 失效。校验规则在 `hotkey::normalize_panel_close_key`：非字符键可裸绑（F5、Home…），
+  字母数字必须带修饰键（否则在搜索框打字就关面板），上下键与回车一律不可绑。
+  键名映射与组合串格式化抽到 `src/hotkeys.js`，设置页录制与面板匹配共用一份。
 
 ### 12.2 更多格式（已实现）
 
