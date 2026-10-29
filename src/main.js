@@ -16,6 +16,15 @@ import {
   comboFromEvent,
   checkPanelCloseKey,
 } from "./hotkeys.js";
+// 悬浮预览的内容口径与面板共用（定位各自实现：主界面四个方向试，面板只上下二选一）
+import {
+  createPreviewBox,
+  fillFiles,
+  guardPreviewText,
+  hasMoreToPreview,
+  pickSlot,
+  resetPreviewBox,
+} from "./preview.js";
 
 const appWindow = getCurrentWindow();
 
@@ -1298,54 +1307,10 @@ function observeImages(rootEl) {
     .forEach((el) => imgObserver.observe(el));
 }
 
-// 浮层里三个内容槽常驻，按类型显示其中一个（切换时把另外两个清空，
-// 避免上一次的文本 / 清单在 DOM 里留着）。
-//
-// 定位是**预告片**，不是替代「查看」：
-//   文本只给 4 行、文件只给 3 个文件名 —— 够判断「是不是这条」就停，
-//   想读全、想看完整路径就走右键「查看」。浮层把内容全摊开的话，
-//   「查看」这个入口就白做了。
-//
-// 这两个数值只是**载荷护栏**，不是显示行数：正文真正被截到 4 行靠 CSS 的
-// `-webkit-line-clamp`（见 .hp-text），否则一条长行折行后会变成十几行。
-const PREVIEW_TEXT_GUARD_LINES = 40;
-const PREVIEW_TEXT_GUARD_CHARS = 1200;
-const PREVIEW_FILES_MAX = 3;
-
+/** 主界面只维护「有没有建过」这一份状态，骨架与内容槽由 `preview.js` 提供。 */
 function ensurePreviewBox() {
-  if (previewBox) return previewBox;
-  const box = document.createElement("div");
-  box.className = "hover-preview";
-  box.hidden = true;
-  const img = document.createElement("img");
-  img.alt = "预览";
-  const text = document.createElement("div");
-  text.className = "hp-text";
-  const files = document.createElement("ul");
-  files.className = "hp-files";
-  box.append(img, text, files);
-  document.body.appendChild(box);
-  previewBox = box;
-  return box;
-}
-
-/**
- * 只留 kind 对应的内容槽，其余清空。
- *
- * 清空而不是只隐藏：图片槽留着上一次的 src 会一直占着解码后的位图内存，
- * 文本 / 清单留着也无意义。浮层是纯展示层，每次重建内容的成本可以忽略。
- */
-function pickPreviewSlot(box, kind) {
-  const img = box.querySelector("img");
-  const text = box.querySelector(".hp-text");
-  const files = box.querySelector(".hp-files");
-  img.hidden = kind !== "image";
-  text.hidden = kind !== "text";
-  files.hidden = kind !== "files";
-  if (kind !== "image") img.removeAttribute("src");
-  if (kind !== "text") text.textContent = "";
-  if (kind !== "files") files.replaceChildren();
-  return { img, text, files };
+  if (!previewBox) previewBox = createPreviewBox();
+  return previewBox;
 }
 
 function hideHoverPreview() {
@@ -1353,11 +1318,7 @@ function hideHoverPreview() {
     clearTimeout(previewTimer);
     previewTimer = null;
   }
-  if (previewBox && !previewBox.hidden) {
-    previewBox.hidden = true;
-    // 大图的 dataURL 松开引用，别让它在浮层里常驻
-    previewBox.querySelector("img").removeAttribute("src");
-  }
+  if (previewBox && !previewBox.hidden) resetPreviewBox(previewBox);
 }
 
 /** 浮层与卡片之间的间距 / 与窗口边缘的安全距离 */
@@ -1408,20 +1369,7 @@ function placePreview(box, card) {
   box.style.top = `${clamp(pick.y, PREVIEW_EDGE, Math.max(PREVIEW_EDGE, vh - h - PREVIEW_EDGE))}px`;
 }
 
-/**
- * 卡片上已经显示全的内容不给浮层 —— 再弹一次同样的字只是噪音。
- *
- * 「是不是还有更多」一律问后端，前端不照抄一份判断规则：
- *   文本 → `preview_truncated`，就是后端 `text_preview_parts` 在生成卡片摘要时
- *          得出的「有没有丢弃内容」。照抄「2 行 / 140 字」到前端，日后改一边必漂移。
- *   文件 → 只有 1 个时卡片已经写着文件名了，浮层给不出任何新信息。
- *   图片 → 缩略图必然是缩过的，大图永远有增量。
- */
-function hasMoreToPreview(item) {
-  if (item.kind === "text") return !!item.preview_truncated;
-  if (item.kind === "files") return (item.files || []).length > 1;
-  return true;
-}
+
 
 function bindHoverPreview(card, item) {
   if (!hasMoreToPreview(item)) return;
@@ -1439,55 +1387,6 @@ function bindHoverPreview(card, item) {
   card.addEventListener("mouseleave", hideHoverPreview);
 }
 
-/**
- * 文本载荷护栏（**不是**显示截断）。
- *
- * 显示层面的「4 行 + 省略号」交给 CSS 的 `-webkit-line-clamp`：
- * 只有浏览器知道自己把一行折成了几个视觉行，JS 按 `\n` 数行数是数不准的
- * （一行十万字符的日志流会被算成「1 行」，照样撑爆浮层）。
- * 这里只做一件事 —— 别把几万字塞进 DOM 让排版计算变慢。
- */
-function guardPreviewText(text) {
-  let s = text;
-  const lines = s.split("\n");
-  if (lines.length > PREVIEW_TEXT_GUARD_LINES) {
-    s = lines.slice(0, PREVIEW_TEXT_GUARD_LINES).join("\n");
-  }
-  if (s.length > PREVIEW_TEXT_GUARD_CHARS) {
-    s = s.slice(0, PREVIEW_TEXT_GUARD_CHARS);
-  }
-  return s;
-}
-
-/** 取文件名：浮层只给名字，完整路径留给右键「查看」 */
-function baseName(path) {
-  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return i >= 0 ? path.slice(i + 1) : path;
-}
-
-/** 文件清单：前 N 条**文件名**，其余折叠成一行「…另有 N 个」 */
-function fillFilePreview(ul, item) {
-  const all = Array.isArray(item.files) ? item.files : [];
-  const lis = all.slice(0, PREVIEW_FILES_MAX).map((p) => {
-    const li = document.createElement("li");
-    li.textContent = baseName(p);
-    return li;
-  });
-  if (all.length > PREVIEW_FILES_MAX) {
-    const li = document.createElement("li");
-    li.className = "hp-more";
-    li.textContent = `…另有 ${all.length - PREVIEW_FILES_MAX} 个`;
-    lis.push(li);
-  }
-  // 极老的条目可能没有 files 字段 → 退回卡片上那条摘要，至少不是个空浮层
-  if (lis.length === 0) {
-    const li = document.createElement("li");
-    li.textContent = item.preview || "";
-    lis.push(li);
-  }
-  ul.replaceChildren(...lis);
-}
-
 async function showHoverPreview(card, item) {
   previewTimer = null;
   if (!card.isConnected || !card.matches(":hover")) return;
@@ -1503,7 +1402,7 @@ async function showHoverPreview(card, item) {
     }
     // 读取期间鼠标可能已移开
     if (!card.isConnected || !card.matches(":hover")) return;
-    const { img } = pickPreviewSlot(box, "image");
+    const { img } = pickSlot(box, "image");
     // 图片尺寸只有加载完才准，加载后重新定位一次
     img.onload = () => {
       if (!box.hidden) placePreview(box, card);
@@ -1515,8 +1414,8 @@ async function showHoverPreview(card, item) {
   }
 
   if (item.kind === "files") {
-    const { files } = pickPreviewSlot(box, "files");
-    fillFilePreview(files, item);
+    const { files } = pickSlot(box, "files");
+    fillFiles(files, item);
     box.hidden = false;
     placePreview(box, card);
     return;
@@ -1531,7 +1430,7 @@ async function showHoverPreview(card, item) {
     return;
   }
   if (!card.isConnected || !card.matches(":hover")) return;
-  const { text } = pickPreviewSlot(box, "text");
+  const { text } = pickSlot(box, "text");
   text.textContent = guardPreviewText(data.text || "");
   box.hidden = false;
   placePreview(box, card);

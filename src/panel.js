@@ -8,6 +8,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 // 关闭键的匹配规则与设置页录制共用一份，两边各写一套必然对不上
 import { matchesCombo } from "./hotkeys.js";
+// 悬浮预览的内容口径与主界面共用（定位各自实现：这里窗口只有 620×460，只上下二选一）
+import {
+  createPreviewBox,
+  fillFiles,
+  guardPreviewText,
+  hasMoreToPreview,
+  pickSlot,
+  resetPreviewBox,
+} from "./preview.js";
 
 const KIND_LABEL = { text: "文本", image: "图片", files: "文件" };
 
@@ -30,6 +39,14 @@ let sel = 0;
  *  目前只有 `closeKey`（设置页录的关闭键，默认 `esc`，Esc 始终兜底可用）。
  *  「点选后保持打开」不需要前端参与 —— 收不收面板由后端 `paste()` 按配置决定。 */
 let prefs = { closeKey: "esc" };
+
+/** 悬浮预览。面板是单行列表，长文本一律被省略号截掉，悬浮补一份完整内容。
+ *
+ * 延迟比主界面的 1s 短一些（600ms）：面板一弹出就是要挑东西，扫过两三行确认是哪个
+ * 的时间通常不到 1 秒；面板只有 460 高，弹得太勤反而挡住相邻行，所以也不能更短。 */
+let previewBox = null;
+let hoverTimer = null;
+const HOVER_DELAY_MS = 600;
 
 /** 重载数据。面板是常驻窗口，每次弹出都要重拉 —— 否则看到的是上次的列表。 */
 async function reload() {
@@ -90,6 +107,7 @@ function render() {
         sel = idx;
         paintSelection();
       }
+      schedulePreview(row, item);
     });
     row.addEventListener("click", () => paste(item.id));
     listEl.appendChild(row);
@@ -122,6 +140,108 @@ async function paste(id) {
     // 只有「复制」这一步失败时面板还没收起，这里提示才有意义
     setStatus("粘贴失败：" + e);
   }
+}
+
+// ── 悬浮预览 ────────────────────────────────────────────────────────────
+//
+// 只在「行上确实看不全」时弹（`hasMoreToPreview` 的判断与主界面同一份）：文本按后端
+// 给的 `preview_truncated`，文件只有 1 个时不弹，图片总是弹（缩略图必然被缩过）。
+
+function previewBoxEl() {
+  if (!previewBox) previewBox = createPreviewBox();
+  return previewBox;
+}
+
+function cancelPreview() {
+  if (hoverTimer) {
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
+  }
+}
+
+function hidePreview() {
+  cancelPreview();
+  if (previewBox && !previewBox.hidden) resetPreviewBox(previewBox);
+}
+
+function schedulePreview(row, item) {
+  cancelPreview();
+  if (!hasMoreToPreview(item)) {
+    hidePreview();
+    return;
+  }
+  hoverTimer = setTimeout(() => {
+    hoverTimer = null;
+    showPreview(row, item);
+  }, HOVER_DELAY_MS);
+}
+
+async function showPreview(row, item) {
+  if (!row.isConnected) return;
+  const box = previewBoxEl();
+
+  if (item.kind === "image") {
+    let url;
+    try {
+      // 直接用 Rust 侧的缩略图（长边 ≤512）。主界面那套缓存 + 视野释放是为滚动列表
+      // 准备的，面板一次只悬浮一个，不需要。
+      url = await invoke("get_image_thumb", { id: item.id });
+    } catch {
+      return;
+    }
+    if (!row.isConnected) return;
+    const { img } = pickSlot(box, "image");
+    img.onload = () => {
+      if (!box.hidden) placePreview(box, row);
+    };
+    img.src = url;
+    box.hidden = false;
+    placePreview(box, row);
+    return;
+  }
+
+  if (item.kind === "files") {
+    const { files } = pickSlot(box, "files");
+    fillFiles(files, item);
+    box.hidden = false;
+    placePreview(box, row);
+    return;
+  }
+
+  // 文本：行上只有一行摘要，这里给全文的前几行（显示行数由 CSS 的 line-clamp 卡住）
+  let data;
+  try {
+    data = await invoke("get_full_content", { id: item.id });
+  } catch {
+    return;
+  }
+  if (!row.isConnected) return;
+  const { text } = pickSlot(box, "text");
+  text.textContent = guardPreviewText(data.text || "");
+  box.hidden = false;
+  placePreview(box, row);
+}
+
+/** 浮层位置：优先贴行下方，放不下翻到上方，最后夹进窗口。
+ *
+ * 与主界面的四方向试探不同 —— 面板只有 620×460，左右都没有富余（浮层最宽 460），
+ * 只在上/下之间选；两者都放不下时贴着能放下的那一边，宁可压住相邻行。 */
+function placePreview(box, row) {
+  const r = row.getBoundingClientRect();
+  const w = box.offsetWidth;
+  const h = box.offsetHeight;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const EDGE = 8;
+  const GAP = 8;
+
+  let top = r.bottom + GAP;
+  if (top + h > vh - EDGE) top = r.top - GAP - h;
+  top = Math.max(EDGE, Math.min(top, Math.max(EDGE, vh - h - EDGE)));
+  const left = Math.max(EDGE, Math.min(r.left, Math.max(EDGE, vw - w - EDGE)));
+
+  box.style.left = `${left}px`;
+  box.style.top = `${top}px`;
 }
 
 // ── 键盘 ────────────────────────────────────────────────────────────────
@@ -163,8 +283,12 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+listEl.addEventListener("mouseleave", hidePreview);
+listEl.addEventListener("scroll", hidePreview, { passive: true });
+
 searchEl.addEventListener("input", () => {
   sel = 0;
+  hidePreview();
   applyFilter();
 });
 searchEl.addEventListener("keydown", (e) => {
@@ -179,6 +303,7 @@ listen("panel-open", (ev) => {
   if (ev.payload && typeof ev.payload === "object") {
     prefs = { ...prefs, ...ev.payload };
   }
+  hidePreview();
   reload();
   setTimeout(() => searchEl.focus(), 0);
 });
