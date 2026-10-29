@@ -220,15 +220,6 @@ fn cursor_point() -> (i32, i32) {
     (200, 200)
 }
 
-/// 一次粘贴走到了哪一步。决定提示说什么 —— 只有真的把 Ctrl+V 送进原窗口才敢说「已粘贴」。
-#[derive(Clone, Copy)]
-enum Pasted {
-    /// 焦点切回原窗口并送出了粘贴按键
-    Yes,
-    /// 没有可回的目标窗口、焦点没抢回来、或按键没送出去：只保证内容在剪贴板里
-    No,
-}
-
 /// 复制结果的提示。落到哪里取决于面板会不会留着：
 ///
 /// - **面板留着**（「点选后保持打开」）：贴面板下沿。此时提示是面板「这一行动作的
@@ -239,30 +230,27 @@ enum Pasted {
 ///
 /// 两种落点的共同点是**都不跟着鼠标走**：鼠标停在哪只代表输入位置，不代表用户
 /// 正在看哪里（键盘选中时它可能还停在唤起面板的地方）。
-/// 文案按**实际做到了哪一步**给：
-/// - 把 Ctrl+V 发给了唤出面板前的那个窗口 → 「已粘贴到原窗口」；
-/// - 只复制成功（无目标窗口 / 焦点没抢回 / 按键被 UIPI 拦）→ 「已复制到剪贴板」。
 ///
-/// 「到原窗口」这四个字不能省。粘贴是**窗口级**动作：`Ctrl+V` 发给整个窗口，由它
-/// 决定交给哪个控件。用户把面板点开、鼠标落在窗口空白处（没有输入焦点）时，窗口照样
-/// 收到按键、但没人接手 —— 此时说「已粘贴」就是在替对方程序承诺结果。写清投递范围，
-/// 用户就能自己解释「为什么这次没反应」。
+/// # 文案
 ///
-/// 也没法判断得更细：现代应用（Chromium / Electron / WPF / WebView2）大量使用
-/// 无子 HWND 的自绘控件，`GetGUIThreadInfo` 拿到的 `hwndFocus` 恒为 0 或顶层窗口，
-/// 按它判断「有没有输入框」会把这些应用全判错，比不说更糟。
-fn toast_after_copy(panel: Option<(i32, i32)>, keep_open: bool, pasted: Pasted) {
-    let text = match pasted {
-        Pasted::Yes => "已粘贴到原窗口",
-        Pasted::No => "已复制到剪贴板",
-    };
+/// 统一「已复制到剪贴板」，不区分「粘没粘上」。
+///
+/// 试过按结果分两种说法（「已粘贴到原窗口」/「已复制到剪贴板」），结论是**判断不出**：
+/// 粘贴是窗口级动作，`Ctrl+V` 发给整个窗口，由它决定交给哪个控件 —— 用户点在窗口空白处
+/// 时窗口收到按键却没人接手，我们无从得知；想靠 `GetGUIThreadInfo` 的 `hwndFocus` 判断，
+/// 在 Chromium / Electron / WPF / WebView2 这类自绘控件上恒为 0 或顶层窗口，反而全判错。
+///
+/// 唯一确定成功的是「内容已经在剪贴板里」—— 提示只说这一句。多一点信息要靠不住的猜测，
+/// 少一点又会在真的没粘上时误导人。
+fn toast_after_copy(panel: Option<(i32, i32)>, keep_open: bool) {
+    const TEXT: &str = "已复制到剪贴板";
     match panel {
-        Some((x, bottom)) if keep_open => crate::shot_native::toast_near_point(text, x, bottom),
-        Some((x, bottom)) => crate::shot_native::toast_at_work_area_bottom(text, x, bottom),
+        Some((x, bottom)) if keep_open => crate::shot_native::toast_near_point(TEXT, x, bottom),
+        Some((x, bottom)) => crate::shot_native::toast_at_work_area_bottom(TEXT, x, bottom),
         // 面板还没建过（极少见）：用光标判断落在哪块屏
         None => {
             let (x, y) = cursor_point();
-            crate::shot_native::toast_at_work_area_bottom(text, x, y);
+            crate::shot_native::toast_at_work_area_bottom(TEXT, x, y);
         }
     }
 }
@@ -294,7 +282,7 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
     if target == 0 {
         // 没有可回的目标：内容已经在剪贴板里，用户自己按 Ctrl+V 即可
         crate::log_print!("[panel] 无目标窗口，已只复制不粘贴");
-        toast_after_copy(anchor, keep_open, Pasted::No);
+        toast_after_copy(anchor, keep_open);
         return Ok(());
     }
 
@@ -304,7 +292,7 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(80));
         if GetForegroundWindow() != target {
             crate::log_warn!("[panel] 焦点没能切回原窗口，跳过模拟粘贴（内容已在剪贴板）");
-            toast_after_copy(anchor, keep_open, Pasted::No);
+            toast_after_copy(anchor, keep_open);
             return Ok(());
         }
         // 顺序：Ctrl 按下 → V 按下 → V 抬起 → Ctrl 抬起。
@@ -312,12 +300,12 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
         if !crate::input::send_keys(&[VK_CONTROL, VK_V]) {
             // 按键被拦（目标程序以管理员身份运行时常见）：内容在剪贴板，但没有粘上
             crate::log_warn!("[panel] SendInput 未能送出全部按键（可能被权限拦截）");
-            toast_after_copy(anchor, keep_open, Pasted::No);
+            toast_after_copy(anchor, keep_open);
             return Ok(());
         }
     }
     crate::log_print!("[panel] 已粘贴回原窗口");
-    toast_after_copy(anchor, keep_open, Pasted::Yes);
+    toast_after_copy(anchor, keep_open);
     Ok(())
 }
 
