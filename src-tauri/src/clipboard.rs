@@ -6774,4 +6774,104 @@ mod tests {
         assert!(text_preview_parts(&"x".repeat(500)).1, "超出字符预算");
         assert!(text_preview_parts(&format!("{}\n下一行", "y".repeat(200))).1);
     }
+
+/// 规模基准：默认忽略，需要时手动跑
+///
+/// ```text
+/// cargo test --lib bench_scale -- --ignored --nocapture
+/// ```
+///
+/// 量的是**索引这一层的真实成本**：序列化、DPAPI 加密、写盘原子替换、读回解密解析，
+/// 以及前端现在做的那次「全量排序 + 过滤」。DOM 与滚动的成本量不到，那部分靠
+/// `content-visibility` / 虚拟列表解决，不在这条基准的责任范围内。
+#[test]
+#[ignore]
+fn bench_scale() {
+    use std::time::Instant;
+
+    fn sample(n: usize) -> Vec<HistoryItem> {
+        (0..n)
+            .map(|i| HistoryItem {
+                id: format!("1a1b{i:06x}-1"),
+                kind: "text".into(),
+                ts: 1_730_000_000_000 + i as u64 * 1000,
+                pinned_views: if i % 500 == 0 {
+                    vec!["history".into()]
+                } else {
+                    Vec::new()
+                },
+                pinned: false,
+                favorite: i % 300 == 0,
+                edited: false,
+                subtype: if i % 7 == 0 { Some("code".into()) } else { None },
+                // 与真实条目同量级：preview 截到 120 字，路径 ~40 字节
+                preview: "剪贴板内容片段，用于压测的一条正常长度的预览文本".repeat(2),
+                preview_truncated: true,
+                size: 320,
+                text_path: Some(format!("data/1a1b{i:06x}-1.txt")),
+                html_path: None,
+                rtf_path: None,
+                rich_images: Vec::new(),
+                img_path: None,
+                files_path: None,
+                files: None,
+                shot: false,
+            })
+            .collect()
+    }
+
+    let dir = std::env::temp_dir().join("qingtie-bench");
+    let _ = std::fs::create_dir_all(&dir);
+
+    for n in [1_000usize, 10_000, 100_000] {
+        let hist = sample(n);
+
+        let t = Instant::now();
+        let compact = serde_json::to_string(&hist).unwrap();
+        let t_compact = t.elapsed();
+
+        let t = Instant::now();
+        let pretty = serde_json::to_string_pretty(&hist).unwrap();
+        let t_pretty = t.elapsed();
+
+        let t = Instant::now();
+        let _enc = encrypt_text(&pretty);
+        let t_enc = t.elapsed();
+
+        let t = Instant::now();
+        save_index(&dir, &hist);
+        let t_save = t.elapsed();
+
+        let t = Instant::now();
+        let raw = std::fs::read(dir.join("index.json")).unwrap();
+        let plain = decode_text_bytes(&raw).unwrap();
+        let back: Vec<HistoryItem> = serde_json::from_str(&plain).unwrap();
+        let t_load = t.elapsed();
+
+        let t = Instant::now();
+        let mut filtered: Vec<&HistoryItem> = back.iter().filter(|i| i.kind != "files").collect();
+        filtered.sort_by(|a, b| {
+            let ap = !a.pinned_views.is_empty();
+            let bp = !b.pinned_views.is_empty();
+            ap.cmp(&bp).reverse().then(b.ts.cmp(&a.ts))
+        });
+        let t_sort = t.elapsed();
+
+        println!(
+            "{n:>6} 条：紧凑 JSON {:.1} MB / {:.0} ms；pretty {:.1} MB / {:.0} ms；\
+             加密 {:.0} ms；整份保存 {:.0} ms；读回+解密+解析 {:.0} ms；全量排序 {:.0} ms",
+            compact.len() as f64 / 1e6,
+            t_compact.as_millis(),
+            pretty.len() as f64 / 1e6,
+            t_pretty.as_millis(),
+            t_enc.as_millis(),
+            t_save.as_millis(),
+            t_load.as_millis(),
+            t_sort.as_millis(),
+        );
+        let _ = std::fs::remove_file(dir.join("index.json"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 }
