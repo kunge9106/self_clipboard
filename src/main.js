@@ -956,7 +956,7 @@ const SUBTYPE_BADGE = {
 // 为什么换：全量路径要把 10 万条一次拿到前端（38 MB IPC）、过滤一遍、排序一遍，
 // 再加入 DOM；窗口化之后每次交互只传一页（约 100 KB），DOM 里只留四十来行。
 // ---------------------------------------------------------------------------
-const USE_WINDOW_API = false;
+const USE_WINDOW_API = true;
 
 /** 一页多少条。200 条约 100 KB，与设计文档的 IPC 预算是同一个数量级。 */
 const WINDOW_LIMIT = 200;
@@ -986,7 +986,22 @@ function ensureWindow(view) {
   view.appendChild(scroller);
   wl = new VirtualList({
     scroller,
-    fillRow: (el, item) => fillCard(el, item),
+    // 行是**容器**，卡片是它里面的元素 —— 不能把 vl-row 和 card 用同一个节点。
+    //
+    // fillCard 会重写 className（`card.className = "card …"`），直接把它用在行节点上
+    // 会把 `vl-row` 这个类覆盖掉；而正是 vl-row 提供 `position:absolute`。类一没，
+    // 卡片就回到 .vl-inner 的流式布局里，translateY(偏移量) 又叠在流位置之上 ——
+    // 间距变成偏移值本身（实测约 90px，露出窗口的透明材质），偏移偏小时又互相重叠。
+    fillRow: (el, item) => {
+      let card = el.querySelector(":scope > .card");
+      if (!card) {
+        // 骨架行把 innerHTML 换成过 .vl-skeleton-bar，这里重建卡片
+        card = document.createElement("div");
+        el.innerHTML = "";
+        el.appendChild(card);
+      }
+      fillCard(card, item);
+    },
     keyOf: (item) => item.id,
     onNeedRange: () => schedulePrefetch(),
     onRendered: () => {
