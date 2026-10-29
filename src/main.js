@@ -3032,15 +3032,6 @@ function settingsDataHtml(s) {
           "不勾选（默认）则置顶与收藏<b>不会</b>因到期被删；勾选后到期一并清理（不可恢复）",
           s.pruneIncludePinned,
           true
-        ) +
-        // 条数上限：与「保留天数」是两件事 —— 保留天数按时间清，上限按条数清。
-        // 调小上限会立即清理超出的部分（置顶与收藏豁免），所以这一行必须写清后果。
-        rowCtl(
-          "条数上限",
-          "超过此数量时提示清理最旧的条目，<b>置顶与收藏不受影响</b>；调小上限会立即清理",
-          `<input type="number" id="set-max-items" min="0" value="${s.maxItems ?? 10000}" /><span class="hint">0 = 不限</span><div class="hint" id="max-items-impact">${maxItemsImpact(s.maxItems ?? 10000)}</div>`,
-          false,
-          "set-max-items"
         )
     ),
     block(
@@ -4531,21 +4522,14 @@ async function main() {
 main();
 
 
-// ── 条数上限：影响提示、设置项、超限弹窗 ────────────────────────────────
+// ── 条数上限：达到上限时给一次清理建议 ────────────────────────────────────
 //
-// 影响分档的来源是实测，不是估计：`bench_resident_memory` 量到 10 万条常驻
-// 64 MB，即约 612 B/条；进程基线（后端 + 托盘）约 30 MB。下面的数字由这两项算出，
-// 换算方式写在每档后面，改基准时一并改这里。
-function maxItemsImpact(n) {
-  if (!n) {
-    return "不限条数：常驻内存随历史增长，10 万条约 90 MB，启动读回与后台整理明显变慢。";
-  }
-  const mb = 30 + Math.round((n * 612) / 1048576);
-  if (n <= 10000) return `后台释放后常驻约 ${mb} MB，启动与操作无感。`;
-  if (n <= 30000) return "后台释放后常驻约 40–50 MB（30 MB 基线 + 612 B/条）。";
-  if (n <= 100000) return "后台释放后常驻约 55–75 MB，启动读回与后台整理各慢 50–150 ms。";
-  return "后台释放后常驻超过 90 MB，启动读回与后台整理明显变慢。";
-}
+// 上限本身不在设置页暴露：它是一个「兜底闸」，正常用户碰不到，也不需要为它做
+// 一次决策。真正需要知道的只有一件事 —— 历史条目多到会影响启动与内存时，弹一次
+// 提示，由用户决定清不清（置顶与收藏豁免，不会被自动删）。
+//
+// 上限值存在配置里（`max_items`，默认 1 万，`0` = 不限），需要改可以手改
+// config.json 或走 `set_max_items` 命令。
 
 /// 已经弹过就不再弹（同一轮运行内）。
 let limitPromptShown = false;
@@ -4577,25 +4561,6 @@ async function checkHistoryLimit() {
 }
 
 // 设置项与弹窗都用事件委托：设置页每次渲染都会重建那一行，委托才能活过重绘。
-document.addEventListener("input", (e) => {
-  if (e.target?.id !== "set-max-items") return;
-  const hint = document.getElementById("max-items-impact");
-  if (!hint) return;
-  hint.textContent = maxItemsImpact(Math.max(0, Math.floor(Number(e.target.value) || 0)));
-});
-
-document.addEventListener("change", async (e) => {
-  if (e.target?.id !== "set-max-items") return;
-  const n = Math.max(0, Math.floor(Number(e.target.value) || 0));
-  try {
-    await invoke("set_max_items", { items: n });
-    settings = await invoke("get_settings");
-    toast(n === 0 ? "条数上限已取消" : `条数上限已设为 ${n}`);
-  } catch (err) {
-    toast("保存失败：" + err);
-  }
-});
-
 document.addEventListener("click", async (e) => {
   const id = e.target?.id;
   if (id !== "limit-confirm" && id !== "limit-snooze") return;
