@@ -113,12 +113,6 @@ function makeList({ total, itemsPerPage = 200, viewport = 600, heightFor }) {
     keyOf: (item) => item.id,
     onNeedRange: (first, last) => need.push([first, last]),
   });
-  // 探针：五类各一个固定高度
-  vl.measureProbes((c) => {
-    const el = new El("div");
-    el.h = [78, 74, 80, 78, 100][c];
-    return el;
-  });
   const items = Array.from({ length: total }, (_, i) => ({
     id: `id${i}`,
     kind: i % 10 === 0 ? "image" : "text",
@@ -205,6 +199,25 @@ test("行高类：图片行比文本行高，偏移表跟着变", () => {
   const imgRow = rows.find((el) => el.classList.contains("vl-row") && el.dataset.vlIndex === "0");
   assert.ok(imgRow, "第 0 行应已渲染");
   assert.equal(imgRow.style.transform, "translateY(0px)");
+});
+
+test("按真实行高校准：首帧之后偏移表用实测值，不再用兜底常量", () => {
+  // 兜底常量是 52；真实卡片 50（文本类）——差 2px 也要被纠回来
+  const { vl } = makeList({ total: 100, heightFor: () => 50 });
+  assert.equal(vl.classHeights[0], 50, "类高度应被实测值覆盖");
+  assert.equal(vl.offsets[1], 58, "偏移步长应为 实高 50 + 间距 8");
+  assert.equal(vl.offsets[2], 116);
+});
+
+test("图片行与文本行各自取自己的实测高度", () => {
+  const { vl } = makeList({
+    total: 100,
+    heightFor: (item) => (heightClassOf(item) === 4 ? 120 : 50),
+  });
+  assert.equal(vl.classHeights[0], 50);
+  assert.equal(vl.classHeights[4], 120);
+  // 第 0 行是图片（i%10===0）
+  assert.equal(vl.offsets[1], 128, "图片行之后应多出 120 + 8");
 });
 
 test("空列表不崩", () => {

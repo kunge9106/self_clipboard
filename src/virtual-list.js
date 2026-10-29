@@ -151,9 +151,17 @@ export class VirtualList {
     this.start = 0; // 已加载窗口的起始下标
     this.items = []; // 已加载窗口内的条目（连续）
     this.idToIndex = new Map();
-    this.classHeights = [78, 74, 80, 78, 100]; // 探针测出来之前的兜底（≈ 设计稿）
-    this.known = new Map(); // 下标 → 实测高度
-    this.estimate = 78;
+    // 兜底值只影响「第一帧还没量到真实高度」的那一瞬间，量到之后立刻被实测值替换。
+    // 取 52 量级是因为**实测文本卡约 50px**（设计稿按 1.5×DPI 估的 78 偏大一倍，
+    // 曾导致首页每行按 86px 排布、一屏只看到 4 条）。
+    this.classHeights = [52, 52, 54, 54, 112];
+    // 下标 → 实测高度。**同时记下这条高度是哪一条内容量的**（knownIds）：
+    // 行池节点会被复用，同一个下标在翻页后可能装着另一条内容，那时这条高度就是
+    // 别人的，拿来算偏移会让后面的行叠在一起。
+    this.known = new Map();
+    this.knownIds = new Map(); // 下标 → 当时量到的条目 id
+    this.estimate = 52;
+    this.calibrated = false; // 是否已经从真实行反推过类高度
     this.offsets = computeOffsets({ total: 0, estimate: this.estimate, gap: this.gap });
     this.pool = [];
     this.free = [];
@@ -175,29 +183,44 @@ export class VirtualList {
   }
 
   /**
-   * 用隐藏探针实测 5 个类高度。
+   * 用**真实渲染出来的行**反推 5 个类高度。
    *
-   * 探针用**真实的卡片标记**（同样的 class），所以量到的就是真高度：
-   * 字号、行高、DPI 缩放、边框全算在内。量完即销毁，不留痕迹。
+   * 为什么不再用隐藏探针：探针的宽度取决于它的宿主（绝对定位 + 负偏移时宽度是
+   * shrink-to-fit，与列表不等宽），`visibility:hidden` 与 `display:none` 的差别、
+   * 容器还没进入布局等等，任何一种都会让 `getBoundingClientRect()` 量出一个
+   * 与真实卡片无关的数。实测踩过：探针量出 0 / 量出偏大的值，整列按 86px 排布，
+   * 一屏只放得下 4 条。
+   *
+   * 真实行不会有这个问题 —— 它就是用户看到的那一张卡。所以：首帧渲染完量一次，
+   * 之后每填一批新行就顺手补测，值变了才重排（并保住视口顶端那一条的位置）。
    */
-  measureProbes(makeProbeRow) {
-    const host = document.createElement("div");
-    host.className = "vl-probe";
-    host.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden;pointer-events:none;";
-    this.scroller.appendChild(host);
-    const heights = this.classHeights.slice();
-    for (let c = 0; c < CLASS_COUNT; c++) {
-      const el = makeProbeRow(c);
-      host.appendChild(el);
+  calibrate(indices) {
+    if (!indices.length) return;
+    // 先记住视口顶端的视觉位置：改偏移表会移动内容，得把它还原回去
+    const anchor = this.getAnchor();
+    let changed = false;
+    for (const index of indices) {
+      const el = this.rendered.get(index);
+      const item = this.items[index - this.start];
+      if (!el || !item) continue;
       const h = el.getBoundingClientRect().height;
-      if (h > 0) heights[c] = h;
-      el.remove();
+      if (!(h > 0)) continue; // 窗口隐藏 / 还没布局 → 这一轮量不到，下次再量
+      this.known.set(index, h);
+      this.knownIds.set(index, this.keyOf(item));
+      const c = heightClassOf(item);
+      if (Math.abs(this.classHeights[c] - h) > 0.5) {
+        this.classHeights[c] = h;
+        changed = true;
+      }
     }
-    host.remove();
-    this.classHeights = heights;
-    // 平均值也顺手校准到「文本/文件/图片」三类的加权中位数附近
-    this.estimate = Math.round((heights[0] + heights[3] + heights[4]) / 3);
+    if (!changed && this.calibrated) return;
+    this.calibrated = true;
+    if (!changed) return;
+    // 未加载的行没有类高度可用，用「文本/文件/图片」三类的均值当估值
+    this.estimate = Math.round((this.classHeights[0] + this.classHeights[3] + this.classHeights[4]) / 3);
     this.rebuild();
+    this.inner.style.height = `${Math.round(this.offsets[this.total])}px`;
+    if (anchor) this.restoreAnchor(anchor);
   }
 
   setTotal(total) {
@@ -223,7 +246,10 @@ export class VirtualList {
     }
     // 已加载窗口内的行不再需要「实测覆盖」，让类高度/估算说话（实测值会随渲染补进来）
     for (const idx of [...this.known.keys()]) {
-      if (idx < this.start || idx >= this.start + this.items.length) this.known.delete(idx);
+      if (idx < this.start || idx >= this.start + this.items.length) {
+        this.known.delete(idx);
+        this.knownIds.delete(idx);
+      }
     }
     this.rebuild();
     this.inner.style.height = `${Math.round(this.offsets[Math.max(0, this.total)])}px`;
@@ -231,11 +257,23 @@ export class VirtualList {
   }
 
   rebuild() {
+    // 只采用「量到的就是当前这条内容」的实测高度。
+    //
+    // 翻页后行池节点会被复用：下标 30 上一轮装的是一条图片卡（高 112），这一轮装的是
+    // 一条文本卡（高 50）。若沿用旧值，偏移表会给这行多留 62px（出现大片空隙）；
+    // 反过来则是少留，下面的行直接叠上来。id 对不上的一律丢弃，退回类高度。
+    const knownOk = new Map();
+    for (const [index, h] of this.known) {
+      const item = this.items[index - this.start];
+      if (!item) continue;
+      if (this.knownIds.get(index) !== this.keyOf(item)) continue;
+      knownOk.set(index, h);
+    }
     this.offsets = computeOffsets({
       total: this.total,
       estimate: this.estimate,
       gap: this.gap,
-      known: this.known,
+      known: knownOk,
       classHeights: this.classHeights,
       rowClass: (i) => this.rowClass(i),
     });
@@ -346,6 +384,7 @@ export class VirtualList {
     // 每帧无脑重建所有卡片有两个后果：图片要重新加载（会闪）、鼠标悬停状态被清掉。
     // 用一个 `vlFilled` 标记记住「这一行装的是哪一条」，没变就只更新位置。
     let filled = 0;
+    const fresh = []; // 这一帧新填内容的行：它们的真实高度最可信，用来校准
     for (const index of keep) {
       const el = this.rendered.get(index);
       const item = this.items[index - this.start];
@@ -356,6 +395,7 @@ export class VirtualList {
       el.dataset.vlFilled = want;
       el.dataset.vlIndex = String(index);
       filled++;
+      if (item) fresh.push(index);
       if (item) {
         el.classList.remove("vl-skeleton");
         this.fillRow(el, item, index);
@@ -365,6 +405,9 @@ export class VirtualList {
         el.innerHTML = `<div class="vl-skeleton-bar"></div>`;
       }
     }
+
+    // 用刚填好的真实行校准类高度；值变了会重排并还原视口位置
+    if (fresh.length) this.calibrate(fresh);
 
     // 需要数据就喊一声（first/last 都是闭区间）
     this.onNeedRange(first, last, "render");
@@ -404,6 +447,7 @@ export class VirtualList {
       if (prev === undefined || Math.abs(prev - h) > 0.5) {
         this.known.set(index, h);
         const item = this.items[index - this.start];
+        if (item) this.knownIds.set(index, this.keyOf(item));
         if (item) {
           const c = heightClassOf(item);
           if (Math.abs(this.classHeights[c] - h) > 0.5) {

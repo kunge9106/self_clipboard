@@ -956,7 +956,7 @@ const SUBTYPE_BADGE = {
 // 为什么换：全量路径要把 10 万条一次拿到前端（38 MB IPC）、过滤一遍、排序一遍，
 // 再加入 DOM；窗口化之后每次交互只传一页（约 100 KB），DOM 里只留四十来行。
 // ---------------------------------------------------------------------------
-const USE_WINDOW_API = true;
+const USE_WINDOW_API = false;
 
 /** 一页多少条。200 条约 100 KB，与设计文档的 IPC 预算是同一个数量级。 */
 const WINDOW_LIMIT = 200;
@@ -972,46 +972,6 @@ let wlBusy = false; // 取页中（同一时刻只允许一个请求，避免重
 /** 当前筛选条件。搜索词原样传 —— 后端负责 trim 与折叠大小写。 */
 function currentFilter() {
   return buildFilter({ view: currentView, query });
-}
-
-/** 造一个「类高度探针」：用真实卡片标记，量到的就是真高度。 */
-function probeRow(c) {
-  const el = document.createElement("div");
-  el.className = "card";
-  const item = {
-    id: `vl-probe-${c}`,
-    kind: "text",
-    subtype: null,
-    ts: 0,
-    preview: "探针内容，用于测量这一行的高度",
-    preview_truncated: false,
-    pinnedViews: [],
-    favorite: false,
-    shot: false,
-    edited: false,
-  };
-  if (c === 1) item.subtype = "code";
-  if (c === 2) item.subtype = "markdown";
-  if (c === 3) {
-    item.kind = "files";
-    item.preview = "a.txt 等 2 个文件";
-  }
-  if (c === 4) {
-    item.kind = "image";
-    item.preview = "[图片]";
-  }
-  fillCard(el, item);
-  if (c === 4) {
-    // 图片行的高度由图片决定，但探针里的 <img> 还没加载（高度 0）。
-    // 按 CSS 允许的上限（max-height:60px）撑起来，量到的才是健康状态下的行高；
-    // 真实行加载完图片后由 ResizeObserver 校正。
-    const img = el.querySelector(".card-image");
-    if (img) {
-      img.style.height = "60px";
-      img.style.width = "80px";
-    }
-  }
-  return el;
 }
 
 /** 建滚动容器 + 虚拟列表（切视图、从设置页回来时都会重建，保证状态干净）。 */
@@ -1036,7 +996,6 @@ function ensureWindow(view) {
       applyMissingMarks();
     },
   });
-  wl.measureProbes(probeRow);
   scroller.addEventListener(
     "scroll",
     () => {
