@@ -131,7 +131,7 @@ const LAST_KEEP: usize = 512;
 ///
 /// 再往前的同内容极少被复制，而为它扫描上千个文件不划算（预热是启动路径上的
 /// 后台任务，但没必要为几乎不会命中的条目付 IO）。
-const FP_WARMUP_LIMIT: usize = 200;
+const FP_WARMUP_LIMIT: usize = 1000;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
 /// 元组第三项 = 是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
@@ -1103,20 +1103,22 @@ fn spawn_fp_warmup() {
         return;
     };
     std::thread::spawn(move || {
-        // 先快照 id 与相对路径，再到锁外读文件 —— 读上百个文件不能占着 HISTORY
-        let picked: Vec<(String, String, String)> = {
+        // 先快照 id / 相对路径 / preview，再到锁外读文件 —— 读上百个文件不能占着 HISTORY
+        let picked: Vec<(String, String, Option<String>, String, bool)> = {
             let Ok(g) = hist.lock() else { return };
             g.iter()
                 .take(FP_WARMUP_LIMIT)
                 .filter_map(|m| {
-                    let rel = if m.kind == "text" {
-                        m.text_rel()?
-                    } else if m.kind == "files" {
-                        m.files_rel()?
-                    } else {
+                    if m.kind != "text" && m.kind != "files" {
                         return None;
-                    };
-                    Some((m.id.clone(), m.kind.clone(), rel))
+                    }
+                    Some((
+                        m.id.clone(),
+                        m.kind.clone(),
+                        m.text_rel().or_else(|| m.files_rel()),
+                        m.preview.clone(),
+                        m.preview_truncated,
+                    ))
                 })
                 .collect()
         };
@@ -1128,11 +1130,17 @@ fn spawn_fp_warmup() {
         // 所以倒着放 —— 最后放进去的才是最新那条。
         let (mut text, mut files): (Vec<(u64, u64, String)>, Vec<(u64, u64, String)>) =
             (Vec::new(), Vec::new());
-        for (id, kind, rel) in picked.iter().rev() {
-            let Ok(bytes) = std::fs::read(dir.join(rel)) else {
-                continue;
+        for (id, kind, rel, preview, truncated) in picked.iter().rev() {
+            // 正文文件优先；**文件缺失时退回 preview**。
+            // 为什么会有缺失：早先 WAL 坏掉那段时间入库的条目，正文没写成。
+            // 这类条目读不到正文，但 `preview` 在未截断时就是全文 —— 用它算指纹
+            // 仍能对上，否则它们永远无法跨重启去重（用户实测就是栽在这上面）。
+            // 截断过的不能用：那是前 140 字，哈希必然不同，宁可不预热。
+            let fp = match rel.as_ref().and_then(|r| std::fs::read(dir.join(r)).ok()) {
+                Some(bytes) => content_hash(&bytes),
+                None if !*truncated && !preview.is_empty() => content_hash(preview.as_bytes()),
+                None => continue,
             };
-            let fp = content_hash(&bytes);
             // ts 填 0：只影响 60 秒窗口的判断（`now - 0` 必然超窗），
             // 而预热的意义只在「不限时间」模式下 —— 那里不看 ts。
             if kind == "text" {
