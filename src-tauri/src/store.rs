@@ -1157,7 +1157,11 @@ fn lock_wal() -> std::sync::MutexGuard<'static, WalState> {
 /// 让日志状态指向 `dir`。换目录（配置迁移后重启、单测并行）时重新扫一遍，
 /// 顺便把 `last_seq` 推到「日志里已有的最大序号」，保证新帧的序号严格递增。
 fn ensure_wal_dir(guard: &mut WalState, dir: &Path, key: &Key) -> io::Result<()> {
-    if guard.dir.as_deref() == Some(dir) {
+    // **必须同时看 `file`**：启动时 `replay_wal` 会把 `dir` 设上但把 `file` 留 None
+    // （表示「日志当前为空/已整理」）。只比对 `dir` 就提前返回的话，那之后每一次
+    // 追加都拿不到句柄，报「追加日志句柄不可用」——记录只在内存生效，重启就丢。
+    // 这正是用户反馈「复制不到内容」的成因（日志里从 10-30 起一直在刷这条错误）。
+    if guard.dir.as_deref() == Some(dir) && guard.file.is_some() {
         return Ok(());
     }
     let path = dir.join(WAL_FILE);

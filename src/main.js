@@ -3045,11 +3045,11 @@ function settingsDataHtml(s) {
         rowCtl(
           "相同内容去重",
           "同一内容再次复制时<b>合并到已有条目并置顶</b>，不新增一条。只比较<b>内容完全相同</b>的条目",
-          `<select id="set-dedup-mode">
-            <option value="window"${s.dedupMode === "always" || s.dedupMode === "off" ? "" : " selected"}>60 秒内合并</option>
-            <option value="always"${s.dedupMode === "always" ? " selected" : ""}>不限时间（永久去重）</option>
-            <option value="off"${s.dedupMode === "off" ? " selected" : ""}>关闭（复制几次记几次）</option>
-          </select>`,
+          `<div class="seg" id="set-dedup-mode">
+            <button type="button" data-mode="window" ${(s.dedupMode || "window") === "window" ? 'class="on"' : ""}>60 秒内</button>
+            <button type="button" data-mode="always" ${s.dedupMode === "always" ? 'class="on"' : ""}>不限时间</button>
+            <button type="button" data-mode="off" ${s.dedupMode === "off" ? 'class="on"' : ""}>关闭</button>
+          </div>`,
           false,
           "set-dedup-mode"
         ) +
@@ -4254,21 +4254,27 @@ function bindSettings(view) {
   // 相同内容去重策略：改完立即生效（判重发生在捕获那一刻，无需重启）
   const dedupMode = view.querySelector("#set-dedup-mode");
   if (dedupMode)
-    dedupMode.onchange = async () => {
+    dedupMode.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      const mode = btn.dataset.mode;
       try {
-        await invoke("set_dedup_mode", { value: dedupMode.value });
+        await invoke("set_dedup_mode", { value: mode });
         settings = await invoke("get_settings");
+        dedupMode
+          .querySelectorAll("button[data-mode]")
+          .forEach((b) => b.classList.toggle("on", b === btn));
         toast(
-          dedupMode.value === "off"
+          mode === "off"
             ? "已关闭去重：复制几次记几次"
-            : dedupMode.value === "always"
+            : mode === "always"
               ? "已改为不限时间去重"
               : "已改为 60 秒内去重"
         );
-      } catch (e) {
-        toast("保存失败：" + e);
+      } catch (err) {
+        toast("保存失败：" + err);
       }
-    };
+    });
 
   const material = view.querySelector("#set-material");
   if (material) {

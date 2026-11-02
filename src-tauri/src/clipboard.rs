@@ -1831,12 +1831,12 @@ fn bump_latest(kind: &str, now: u64) {
     }
     g[pos].ts = now;
     let item = g[pos].to_item();
-    // 时间变了就要重排：置顶仍在前，组内按 ts 倒序 —— 目标条目自然浮到它该在的位置
-    g.sort_by(|a, b| {
-        let ap = !a.pinned_views.is_empty();
-        let bp = !b.pinned_views.is_empty();
-        ap.cmp(&bp).reverse().then(b.ts.cmp(&a.ts))
-    });
+    // **只能按 `ts` 降序重排**。常驻列表有一条铁定的不变式：恒按 ts 降序
+    // （`store::insert_ordered` 维护，`query::scan` 里有 `debug_assert` 兜着）。
+    // 「置顶优先」是**查询时**按 `pinned_views` 临时分组算出来的，不属于常驻顺序 ——
+    // 我最早写成「置顶优先 + ts 倒序」重排整个列表，直接踩断言 panic，
+    // 用户实测复制同样内容时崩了两次。
+    g.sort_by(|a, b| b.ts.cmp(&a.ts));
     drop(g);
     append_op(
         &dir,
