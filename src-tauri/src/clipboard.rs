@@ -1149,12 +1149,20 @@ fn spawn_fp_warmup() {
             (Vec::new(), Vec::new());
         for (id, kind, rel, preview, truncated) in picked.iter().rev() {
             // 正文文件优先；**文件缺失时退回 preview**。
-            // 为什么会有缺失：早先 WAL 坏掉那段时间入库的条目，正文没写成。
-            // 这类条目读不到正文，但 `preview` 在未截断时就是全文 —— 用它算指纹
-            // 仍能对上，否则它们永远无法跨重启去重（用户实测就是栽在这上面）。
-            // 截断过的不能用：那是前 140 字，哈希必然不同，宁可不预热。
-            let fp = match rel.as_ref().and_then(|r| std::fs::read(dir.join(r)).ok()) {
-                Some(bytes) => content_hash(&bytes),
+            //
+            // 这里必须用 `read_text_entity`（会解密），**不能直接 `fs::read`** ——
+            // 2.6.5 起正文是 AES-256-GCM 加密存储的，直接读拿到的是密文
+            // （`QTE1` 开头），对密文算出来的哈希与采集时对明文算的完全不同，
+            // 于是预热的每一条都命中不了，等于白做（用户实测就栽在这）。
+            let fp = match rel.as_ref() {
+                Some(r) => match read_text_entity(&dir, r) {
+                    Ok(text) if !text.is_empty() => content_hash(text.as_bytes()),
+                    // 解不开 / 空内容：未截断的 preview 就是全文，可以退一步用它
+                    _ if !*truncated && !preview.is_empty() => {
+                        content_hash(preview.as_bytes())
+                    }
+                    _ => continue,
+                },
                 None if !*truncated && !preview.is_empty() => content_hash(preview.as_bytes()),
                 None => continue,
             };
