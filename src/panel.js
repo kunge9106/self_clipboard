@@ -48,6 +48,9 @@ let total = 0;
 let rows = [];
 /** 当前选中下标 */
 let sel = 0;
+/** 行元素（不含分组标题）。高亮与滚动都按它取 —— 列表里混着 `.p-group`，
+ *  用 `listEl.children` 的下标会对不上，表现为高亮整体上移。 */
+let rowEls = [];
 
 /** 后端随每次弹出下发的行为偏好。
  *  目前只有 `closeKey`（设置页录的关闭键，默认 `esc`，Esc 始终兜底可用）。
@@ -121,12 +124,13 @@ async function fetchRows(q) {
       ? q
         ? "没有匹配的内容"
         : "剪贴板还是空的"
-      : `${total} 条${rows.length < total ? `（显示 ${rows.length} 条）` : ""}`
+      : `${total} 条${total > MAX_ROWS ? `（显示前 ${MAX_ROWS} 条，不含置顶）` : ""}`
   );
 }
 
 function render() {
   listEl.replaceChildren();
+  rowEls = [];
   // 分组标题：列表是「置顶优先、组内按时间倒序」，光靠行上的图钉说不清
   // 「上面这几条为什么不动」。插一条小字标题最直白 —— 微信、Ditto 都是这么分的。
   // 规则：首条是置顶才加「置顶」；从置顶切到普通时才加「最近」；
@@ -173,20 +177,23 @@ function render() {
     });
     row.addEventListener("click", () => paste(item.id));
     listEl.appendChild(row);
+    rowEls.push(row);
   });
   scrollToSel();
 }
 
 /** 只改选中样式，不重建整个列表 —— 键盘连按时重建会有明显卡顿。 */
 function paintSelection() {
-  [...listEl.children].forEach((el, i) => {
+  // **只能用 `.p-row`**：列表里还混着分组标题（`.p-group`），按 `children` 下标取
+  // 会整体偏移 —— 表现就是「高亮的那行比鼠标位置高两行」（正好两个分组标题）。
+  rowEls.forEach((el, i) => {
     el.classList.toggle("is-sel", i === sel);
   });
   scrollToSel();
 }
 
 function scrollToSel() {
-  const el = listEl.children[sel];
+  const el = rowEls[sel];
   if (el) el.scrollIntoView({ block: "nearest" });
 }
 

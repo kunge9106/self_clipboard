@@ -34,8 +34,14 @@ pub fn panel_begin_drag(app: AppHandle) -> Result<(), String> {
         .ok_or_else(|| "面板未打开".to_string())?;
     let h = w.hwnd().map_err(|e| e.to_string())?;
     let hwnd = h.0 as isize;
-    crate::effects::install_popup_hook(hwnd);
-    crate::effects::begin_custom_drag(hwnd);
+    // **必须切回主线程**：`SetCapture` 只对**调用线程**的窗口生效，`SetWindowLongPtrW`
+    // 改别的线程的窗口也不可靠。命令可能跑在 IPC 线程上，直接调会静默失败
+    // （用户实测：换成自定义拖动后完全拖不动）。
+    app.run_on_main_thread(move || {
+        crate::effects::install_popup_hook(hwnd);
+        crate::effects::begin_custom_drag(hwnd);
+    })
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 /// 托盘菜单窗口。与快捷面板一样是懒创建、只隐藏不销毁的独立窗口。
