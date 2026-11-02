@@ -3040,6 +3040,19 @@ function settingsDataHtml(s) {
         "记录资源管理器里复制的文件（默认关闭，关闭时不采集）",
         s.fileCopy
       ) +
+        // 相同内容怎么处理：默认 60 秒内合并并置顶（Windows 剪贴板 / Ditto 的语义）。
+        // 只比较内容完全相同的条目，不同内容不受影响。
+        rowCtl(
+          "相同内容去重",
+          "同一内容再次复制时<b>合并到已有条目并置顶</b>，不新增一条。只比较<b>内容完全相同</b>的条目",
+          `<select id="set-dedup-mode">
+            <option value="window"${s.dedupMode === "always" || s.dedupMode === "off" ? "" : " selected"}>60 秒内合并</option>
+            <option value="always"${s.dedupMode === "always" ? " selected" : ""}>不限时间（永久去重）</option>
+            <option value="off"${s.dedupMode === "off" ? " selected" : ""}>关闭（复制几次记几次）</option>
+          </select>`,
+          false,
+          "set-dedup-mode"
+        ) +
         rowCtl(
           "保留天数",
           "到期自动清理，<b>默认 3 天</b>；填 0 表示永久保存。<b>置顶与收藏默认豁免</b>，见下方选项",
@@ -4222,8 +4235,7 @@ function bindSettings(view) {
       }
     };
 
-  const retention = view.querySelector("#set-retention");
-  if (retention)
+  const retention = view.querySelector("#set-retention");  if (retention)
     retention.onchange = async () => {
       const days = Math.max(0, parseInt(retention.value, 10) || 0);
       retention.value = days;
@@ -4234,6 +4246,25 @@ function bindSettings(view) {
         settings = await invoke("get_settings");
         render();
         toast(days === 0 ? "已改为永久保留" : `仅保留近 ${days} 天`);
+      } catch (e) {
+        toast("保存失败：" + e);
+      }
+    };
+
+  // 相同内容去重策略：改完立即生效（判重发生在捕获那一刻，无需重启）
+  const dedupMode = view.querySelector("#set-dedup-mode");
+  if (dedupMode)
+    dedupMode.onchange = async () => {
+      try {
+        await invoke("set_dedup_mode", { value: dedupMode.value });
+        settings = await invoke("get_settings");
+        toast(
+          dedupMode.value === "off"
+            ? "已关闭去重：复制几次记几次"
+            : dedupMode.value === "always"
+              ? "已改为不限时间去重"
+              : "已改为 60 秒内去重"
+        );
       } catch (e) {
         toast("保存失败：" + e);
       }

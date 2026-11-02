@@ -339,6 +339,7 @@ pub fn run() {
             settings::set_clean_confirm_exit,
             settings::exit_app,
             settings::set_retention_days,
+            settings::set_dedup_mode,
             settings::set_max_items,
             settings::snooze_limit_warning,
             settings::set_autostart,

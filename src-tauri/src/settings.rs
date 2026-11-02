@@ -29,6 +29,16 @@ pub struct Config {
     /// 历史保留天数（0 = 永久保留；v1 硬编码 3）
     #[serde(default = "default_retention")]
     pub retention_days: u32,
+    /// 相同内容的去重策略：
+    /// - `window`（默认）：同一内容在 60 秒内再次复制 → 合并到已有条目并置顶
+    /// - `always`：不限时间，只要历史里还有同内容就不再新增（Windows 剪贴板 / Ditto 的行为）
+    /// - `off`：不去重，复制几次就记几次
+    ///
+    /// 为什么做成配置：这几种用法都合理 —— 多数人希望「复制两次同样的东西，
+    /// 历史里只有一条」，但也有人要靠时间线回忆「我到底复制了几次」。
+    /// 判重只比**内容完全相同**的条目，不同内容不受影响。
+    #[serde(default = "default_dedup_mode")]
+    pub dedup_mode: String,
     /// 全局快捷键是否启用（默认启用：剪贴板工具的核心体验是「不用切窗口」）
     #[serde(default = "default_true")]
     pub hotkey_enabled: bool,
@@ -357,6 +367,15 @@ fn default_retention() -> u32 {
     3
 }
 
+/// 去重策略默认值：60 秒内合并并置顶。
+///
+/// 不默认 `always`：用户可能真的要在时间线里看到「这段我复制过三次」，
+/// 永久去重会让第二次复制"凭空消失"。60 秒既盖住了手滑连按、
+/// 应用同一次复制写两遍，也不会抹掉隔天再复制同样内容这件事。
+fn default_dedup_mode() -> String {
+    "window".to_string()
+}
+
 /// 面板关闭键的默认值：Esc。用户习惯里的第一反应，也是所有弹层的通用约定。
 fn default_panel_close_key() -> String {
     "esc".into()
@@ -466,6 +485,8 @@ impl Default for Config {
             clean_include_pinned: false,
             clean_confirm_exit: false,
             retention_days: default_retention(),
+            // 相同内容 60 秒内合并并置顶（见 default_dedup_mode 的说明）
+            dedup_mode: default_dedup_mode(),
             // 置顶/收藏默认不受保留期影响
             prune_include_pinned: false,
             hotkey_enabled: true,
@@ -696,6 +717,7 @@ pub fn get_settings() -> serde_json::Value {
         "cleanIncludePinned": cfg.clean_include_pinned,
         "cleanConfirmExit": cfg.clean_confirm_exit,
         "retentionDays": cfg.retention_days,
+        "dedupMode": cfg.dedup_mode,
         "maxItems": cfg.max_items,
         "hotkeyEnabled": cfg.hotkey_enabled,
         "hotkey": cfg.hotkey,
@@ -1105,6 +1127,21 @@ pub fn set_retention_days(days: u32) -> Result<(), String> {
     update(|c| c.retention_days = days);
     // 立即按新天数清理一次
     crate::clipboard::prune_retention(days);
+    Ok(())
+}
+
+/// 改「相同内容的去重策略」：`window` / `always` / `off`。
+///
+/// 不需要重启也不需要清理历史：判重发生在**捕获那一刻**，下一次复制就按新策略走。
+/// 已经存在的重复条目不动 —— 用户没要求「回头把历史里的重复也删掉」，
+/// 那种批量删除属于清理功能，不该由切换一个开关偷偷触发。
+#[tauri::command]
+pub fn set_dedup_mode(value: String) -> Result<(), String> {
+    if !matches!(value.as_str(), "window" | "always" | "off") {
+        return Err(format!("未知的去重策略：{value}"));
+    }
+    update(|c| c.dedup_mode = value.clone());
+    crate::log_print!("[settings] 去重策略改为：{value}");
     Ok(())
 }
 

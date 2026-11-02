@@ -1520,7 +1520,7 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
         let fp = content_hash(text.as_bytes());
         let dup = LAST_TEXT
             .lock()
-            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, TEXT_DUP_WINDOW_MS))
+            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, dedup_window(TEXT_DUP_WINDOW_MS)))
             .unwrap_or(false);
         if !dup && is_same_origin_recent(text, captured_ms) {
             if replace_latest_text(text, html, rtf) {
@@ -1541,8 +1541,11 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
             // 关键：第二次往往**才带格式**（延迟渲染）。这里把格式补到已有那条上，
             // 而不是丢掉 —— 否则用户复制一次，格式永远进不来。
             let patched = merge_rich_into_latest(html, rtf);
+            // 合并之后把它顶到最前：否则用户再复制一次同样的文字，列表毫无变化，
+            // 会以为这次没记上（见 `bump_latest` 的说明）。
+            bump_latest("text", captured_ms);
             crate::log_print!(
-                "[clipboard] 重复文本已合并（同一次复制的第二次写入，补格式={patched}）"
+                "[clipboard] 重复文本已合并并置顶（补格式={patched}）"
             );
             return;
         }
@@ -1553,10 +1556,11 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
         let fp = content_hash(paths.join("\n").as_bytes());
         let dup = LAST_FILES
             .lock()
-            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, FILES_DUP_WINDOW_MS))
+            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, dedup_window(FILES_DUP_WINDOW_MS)))
             .unwrap_or(false);
         if dup {
-            crate::log_print!("[clipboard] 重复文件清单已合并（同一次复制的第二次写入）");
+            bump_latest("files", captured_ms);
+            crate::log_print!("[clipboard] 重复文件清单已合并并置顶");
             return;
         }
     }
@@ -1591,8 +1595,10 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
                 crate::logger::write_line(
                     "INFO",
                     "clipboard",
-                    "重复图片已合并（与上一条指纹一致，滑动窗口续期）",
+                    "重复图片已合并并置顶（与上一条指纹一致，滑动窗口续期）",
                 );
+                drop(g);
+                bump_latest("image", captured_ms);
                 return;
             }
         }
@@ -1787,8 +1793,54 @@ fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
     changed
 }
 
+/// 把刚刚合并掉的重复条目**顶到列表最前**。
+///
+/// 历史按 `ts` 倒序排，把最新那条的 `ts` 推到 `now` 就等于「提到顶部」：不新增条目、
+/// 不删文件、id 不变。用户看到的是「它跳到最上面了」—— 这正是 Windows 剪贴板历史
+/// 与 Ditto 的行为；只合并不置顶的话，用户会以为这次复制没被记录。
+///
+/// 为什么可以直接动「最新一条」：判重**只跟最后一条比**（`dedup_merge_with` 的语义），
+/// 所以能命中的重复项必然是刚捕获的那条；中间若插入了别的内容，指纹就对不上了。
+///
+/// `kind` 要匹配，避免「命中的是文本、却把上面的图片顶上去」。
+fn bump_latest(kind: &str, now: u64) {
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return;
+    };
+    let Ok(mut g) = hist.lock() else { return };
+    let Some(top) = g.first_mut() else { return };
+    if top.kind != kind || top.ts == now {
+        return;
+    }
+    top.ts = now;
+    let item = top.to_item();
+    drop(g);
+    append_op(
+        &dir,
+        crate::store::Op::Insert {
+            item: item.clone(),
+        },
+    );
+    if let Some(app) = APP.get() {
+        let _ = app.emit("clipboard-update", item);
+    }
+}
+
+/// 按设置里的策略换算去重窗口（毫秒）。
+///
+/// - `window`（默认）：用各类型自己的窗口（文本/文件/图片都是 60 秒）
+/// - `always`：`u64::MAX`，不限时间
+/// - `off`：0，`now - last < 0` 恒不成立 → 完全不判重
+fn dedup_window(fallback: u64) -> u64 {
+    match crate::settings::get().dedup_mode.as_str() {
+        "always" => u64::MAX,
+        "off" => 0,
+        _ => fallback,
+    }
+}
+
 fn dedup_merge(g: &mut Vec<(u64, u64)>, fp: u64, now: u64) -> bool {
-    dedup_merge_with(g, fp, now, DUP_WINDOW_MS)
+    dedup_merge_with(g, fp, now, dedup_window(DUP_WINDOW_MS))
 }
 
 /// 同 `dedup_merge`，但窗口可指定（文本用更短的窗口，见 `TEXT_DUP_WINDOW_MS`）。
@@ -1801,9 +1853,16 @@ fn dedup_merge_with(g: &mut Vec<(u64, u64)>, fp: u64, now: u64, window: u64) -> 
     }
     g.push((fp, now));
     g.retain(|(_, t)| now.saturating_sub(*t) < window);
+    // 队列上限：`always` 策略要「不限时间」，只有 16 条的话早被挤出队列了，
+    // 所以该策略下放宽到 512 条（一条 16 字节，代价可以忽略）。
+    let keep = if window == u64::MAX {
+        512
+    } else {
+        LAST_IMG_KEEP
+    };
     let len = g.len();
-    if len > LAST_IMG_KEEP {
-        g.drain(0..len - LAST_IMG_KEEP);
+    if len > keep {
+        g.drain(0..len - keep);
     }
     false
 }
@@ -6934,6 +6993,25 @@ mod tests {
         assert!(
             DUP_WINDOW_MS > OBSERVED_MAX_ADJACENT_GAP_MS,
             "窗口 {DUP_WINDOW_MS}ms 必须覆盖实测相邻间隔 {OBSERVED_MAX_ADJACENT_GAP_MS}ms"
+        );
+    }
+
+    /// 设置里的三档策略靠 window 的两个极值实现，语义必须钉住：
+    /// - `off` → 0：永不判重（复制几次记几次）
+    /// - `always` → `u64::MAX`：只要指纹相同就合并，不看时间
+    /// 这两个值一旦被改坏（比如 0 被当成"立刻过期"以外的含义），
+    /// 用户的设置就静默失效，所以单独守一条。
+    #[test]
+    fn dedup_window_extremes_mean_off_and_forever() {
+        let mut g = Vec::new();
+        assert!(!dedup_merge_with(&mut g, 7, 1_000, 0), "0 窗口不应判重");
+        assert!(!dedup_merge_with(&mut g, 7, 1_001, 0), "0 窗口同一指纹也不应判重");
+
+        let mut g = Vec::new();
+        assert!(!dedup_merge_with(&mut g, 7, 1_000, u64::MAX), "首次出现不是重复");
+        assert!(
+            dedup_merge_with(&mut g, 7, 10_000_000, u64::MAX),
+            "永不过期：间隔多久都应判重"
         );
     }
 
