@@ -132,6 +132,11 @@ const LAST_KEEP: usize = 512;
 /// 再往前的同内容极少被复制，而为它扫描上千个文件不划算（预热是启动路径上的
 /// 后台任务，但没必要为几乎不会命中的条目付 IO）。
 const FP_WARMUP_LIMIT: usize = 1000;
+/// 启动预热时最多算多少张**图片**的指纹。
+///
+/// 比文本严格得多：图片要读整个原图（几 MB）再算哈希，20 张 5MB 的图就是 100MB
+/// 的 IO。而「旧图重复制」几乎不会发生 —— 只要最近这几张就够了。
+const FP_WARMUP_IMAGES: usize = 15;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
 /// 元组第三项 = 是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
@@ -1122,7 +1127,19 @@ fn spawn_fp_warmup() {
                 })
                 .collect()
         };
-        if picked.is_empty() {
+        // 图片单独收集：只要最近 [`FP_WARMUP_IMAGES`] 张。
+        // 图片指纹是「原图文件字节的哈希」（微信走的就是这条），读文件算一遍即可；
+        // 但它比文本贵得多（图几 MB），所以限量。从最近一张开始，越新的越可能被
+        // 再复制一次 —— 旧图重复制几乎不会发生。
+        let imgs: Vec<(String, String)> = {
+            let Ok(g) = hist.lock() else { return };
+            g.iter()
+                .filter(|m| m.kind == "image")
+                .filter_map(|m| m.img_path.clone().map(|p| (m.id.clone(), p)))
+                .take(FP_WARMUP_IMAGES)
+                .collect()
+        };
+        if picked.is_empty() && imgs.is_empty() {
             return;
         }
 
@@ -1168,8 +1185,32 @@ fn spawn_fp_warmup() {
                 }
             }
         }
+
+        // 图片：`imgs` 是 ts 降序（最近在前），倒着放 → 队尾才是最近那张
+        let mut images: Vec<(u64, u64, String)> = Vec::new();
+        for (id, path) in imgs.iter().rev() {
+            let p = std::path::Path::new(path);
+            let full = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                dir.join(p)
+            };
+            let Ok(bytes) = std::fs::read(&full) else {
+                continue;
+            };
+            images.push((content_hash(&bytes), 0, id.clone()));
+        }
+        let mut n_img = 0;
+        if !images.is_empty() {
+            if let Ok(mut g) = LAST_IMG.lock() {
+                if g.is_empty() {
+                    n_img = images.len();
+                    *g = images;
+                }
+            }
+        }
         crate::log_print!(
-            "[clipboard] 指纹队列预热 {n} 条（文本/文件，「不限时间」去重跨重启生效）"
+            "[clipboard] 指纹队列预热 {n} 条文本/文件 + {n_img} 张图片（「不限时间」去重跨重启生效）"
         );
     });
 }
