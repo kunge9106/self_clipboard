@@ -72,6 +72,27 @@ body {
   color: #fff;
 }
 
+/* 置顶标识：行左侧一道内阴影竖条，让「置顶组」在视觉上连成一片；
+   图钉本身用强调色。选中态（整行强调色底）时两者都转白，否则会糊在一起。 */
+.p-row.is-pinned {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.p-pin {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+}
+
+.p-row.is-sel.is-pinned {
+  box-shadow: inset 3px 0 0 rgba(255, 255, 255, 0.75);
+}
+
+.p-row.is-sel .p-pin {
+  color: #fff;
+}
+
 .p-kind {
   flex: none;
   padding: 1px 6px;

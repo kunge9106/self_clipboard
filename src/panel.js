@@ -112,6 +112,24 @@ function render() {
     row.className = "p-row" + (idx === sel ? " is-sel" : "");
     row.setAttribute("role", "option");
 
+    // 置顶条目标一下。列表是「置顶优先、组内按时间倒序」排的，但界面上一直没有
+    // 任何提示 —— 用户看到最上面几条总是纹丝不动，会以为是排序坏了。
+    // 这里用「图钉 + 行左侧竖条」两个线索：图钉说明身份，竖条让整组连成一片。
+    // 用内联 SVG 而不是 emoji：emoji 的字形与颜色随系统/字体变，Win10 与 Win11
+    // 上长得不一样，而这个工具要两端表现一致。
+    if (Array.isArray(item.pinnedViews) && item.pinnedViews.length > 0) {
+      row.classList.add("is-pinned");
+      const pin = document.createElement("span");
+      pin.className = "p-pin";
+      pin.title = "置顶";
+      pin.setAttribute("aria-label", "置顶");
+      pin.innerHTML =
+        '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" ' +
+        'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M9 4h6l-1 6 4 4H6l4-4z"/><path d="M12 14v6"/></svg>';
+      row.appendChild(pin);
+    }
+
     const kind = document.createElement("span");
     kind.className = "p-kind";
     kind.textContent = KIND_LABEL[item.kind] || item.kind || "";

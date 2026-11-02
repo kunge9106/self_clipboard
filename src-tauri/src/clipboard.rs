@@ -1605,6 +1605,11 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
     }
 
     let item = store_raw(raw, edited, shot);
+    // 记下最近入库的 id：去重命中时靠它精准定位目标条目（见 `bump_latest`）。
+    // 放在 emit 之前，保证「同一毫秒内连续两次写入」也能对上。
+    if let Ok(mut g) = LAST_NEW_ID.lock() {
+        *g = Some(item.id.clone());
+    }
     if let Some(app) = APP.get() {
         let _ = app.emit("clipboard-update", item.clone());
     }
@@ -1793,27 +1798,43 @@ fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
     changed
 }
 
+/// 最近一次**新入库**条目的 id。
+///
+/// `bump_latest` 要靠它精准定位「刚捕获的那条」。不能按 `history[0]` 取：
+/// 列表里置顶条目永远排在最前，一旦用户置顶过任何东西，`history[0]` 就是那条置顶的
+/// —— 照它改时间戳等于把用户的置顶条目顶到置顶组最前，而真正重复的那条纹丝不动。
+static LAST_NEW_ID: Mutex<Option<String>> = Mutex::new(None);
+
 /// 把刚刚合并掉的重复条目**顶到列表最前**。
 ///
-/// 历史按 `ts` 倒序排，把最新那条的 `ts` 推到 `now` 就等于「提到顶部」：不新增条目、
-/// 不删文件、id 不变。用户看到的是「它跳到最上面了」—— 这正是 Windows 剪贴板历史
-/// 与 Ditto 的行为；只合并不置顶的话，用户会以为这次复制没被记录。
+/// 历史按「置顶优先、组内 ts 倒序」排，把目标条目的 `ts` 推到 `now` 就等于「提到顶部」：
+/// 不新增条目、不删文件、id 不变。用户看到的是「它跳到最上面了」—— 这正是 Windows
+/// 剪贴板历史与 Ditto 的行为；只合并不置顶的话，用户会以为这次复制没被记录。
 ///
-/// 为什么可以直接动「最新一条」：判重**只跟最后一条比**（`dedup_merge_with` 的语义），
-/// 所以能命中的重复项必然是刚捕获的那条；中间若插入了别的内容，指纹就对不上了。
-///
-/// `kind` 要匹配，避免「命中的是文本、却把上面的图片顶上去」。
+/// **必须按 id 定位**（`LAST_NEW_ID`），不能拿 `history[0]`：置顶条目恒在最前，
+/// 有置顶时 index 0 根本不是重复的那条。`kind` 再校一次，避免跨类型误伤。
 fn bump_latest(kind: &str, now: u64) {
+    let Some(id) = LAST_NEW_ID.lock().ok().and_then(|g| g.clone()) else {
+        return;
+    };
     let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
         return;
     };
     let Ok(mut g) = hist.lock() else { return };
-    let Some(top) = g.first_mut() else { return };
-    if top.kind != kind || top.ts == now {
+    let Some(pos) = g.iter().position(|m| m.id == id && m.kind == kind) else {
+        return;
+    };
+    if g[pos].ts == now {
         return;
     }
-    top.ts = now;
-    let item = top.to_item();
+    g[pos].ts = now;
+    let item = g[pos].to_item();
+    // 时间变了就要重排：置顶仍在前，组内按 ts 倒序 —— 目标条目自然浮到它该在的位置
+    g.sort_by(|a, b| {
+        let ap = !a.pinned_views.is_empty();
+        let bp = !b.pinned_views.is_empty();
+        ap.cmp(&bp).reverse().then(b.ts.cmp(&a.ts))
+    });
     drop(g);
     append_op(
         &dir,
