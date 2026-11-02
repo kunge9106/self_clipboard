@@ -976,6 +976,8 @@ let wlTotal = 0; // 过滤后的总条数（后端给）
 let wlState = null; // 已加载的连续片段 { start, items }
 let wlToken = 0; // 渲染序号：异步回来晚了的旧结果直接丢弃
 let wlBusy = false; // 取页中（同一时刻只允许一个请求，避免重复页）
+/** 待执行的重绘句柄：连续到达的 clipboard-update 合并成一次，避免连闪 */
+let pendingWindowRender = null;
 
 /** 当前筛选条件。搜索词原样传 —— 后端负责 trim 与折叠大小写。 */
 function currentFilter() {
@@ -4556,7 +4558,16 @@ async function main() {
       // 数据在后端：让页缓存失效并重取。用户停在顶部时不做锚点还原，
       // 新内容立刻可见；停在中间时锚点会把他正在看的那条钉在原地。
       api.invalidate();
-      if (currentView !== "settings") renderWindow({ keepScroll: true });
+      if (currentView !== "settings") {
+        // **合并重绘**：一次复制可能连着来好几条事件（补格式、置顶、缩略图），
+        // 每条都整页重算会连闪好几次。80ms 内的合并成一次。
+        if (!pendingWindowRender) {
+          pendingWindowRender = setTimeout(() => {
+            pendingWindowRender = null;
+            renderWindow({ keepScroll: true });
+          }, 80);
+        }
+      }
       return;
     }
     items.unshift(item);

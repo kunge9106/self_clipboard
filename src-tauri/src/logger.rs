@@ -12,9 +12,14 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-/// 日志文件上限：到 64MB 时轮转 —— 当前文件 rename 成 `Clipboard.prev.log`，
-/// 新文件继续写。不整份清空：异常前后的上下文分别落在两代文件里，都还在。
-const MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// 日志文件上限：到 8MB 就轮转。
+///
+/// 原先是 64MB —— 那个体积连编辑器都要顿一下才打开，而日志是出问题时第一个要看的
+/// 东西，「打不开」等于没有。8MB 用记事本/VS Code 都是秒开。
+///
+/// 轮转保留**两代**（`Clipboard.prev.log` / `Clipboard.prev2.log`）：阈值降下来后
+/// 轮转会变频繁，只留一代的话，刚出问题又轮转一次就把关键上下文挤掉了。
+const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// 安装 panic 钩子。
 ///
@@ -139,7 +144,10 @@ pub fn write_line(level: &str, tag: &str, msg: &str) {
     if let Ok(md) = std::fs::metadata(&path) {
         if md.len() > MAX_BYTES {
             let prev = path.with_file_name("Clipboard.prev.log");
-            let _ = std::fs::remove_file(&prev);
+            let prev2 = path.with_file_name("Clipboard.prev2.log");
+            // 两代滑动：prev2 退场 → prev 变 prev2 → 当前变 prev
+            let _ = std::fs::remove_file(&prev2);
+            let _ = std::fs::rename(&prev, &prev2);
             if let Err(e) = std::fs::rename(&path, &prev) {
                 // 轮转失败不能让日志断掉：继续往原文件追加即可，但必须留痕
                 eprintln!("[logger] 日志轮转失败：{e}");
