@@ -317,6 +317,30 @@ pub fn panel_hide(app: AppHandle) {
     }
 }
 
+/// 剪贴板有新条目时，**若面板正开着**就通知它刷新。
+///
+/// 为什么只在可见时发：面板收起时下次唤出本来就会重拉（`panel-open` → `reload`），
+/// 这时发通知纯属白跑一次查询。
+///
+/// 可见性用 Win32 的 `IsWindowVisible` 查，不用 `WebviewWindow::is_visible()` ——
+/// 后者在非主线程上是**无超时地等事件循环**，而这里正跑在采集线程上。
+pub fn notify_if_visible(app: &AppHandle) {
+    use tauri::{Emitter, Manager};
+    let Some(w) = app.get_webview_window(PANEL_LABEL) else {
+        return;
+    };
+    let Ok(h) = w.hwnd() else { return };
+    unsafe {
+        extern "system" {
+            fn IsWindowVisible(hwnd: isize) -> i32;
+        }
+        if IsWindowVisible(h.0 as isize) == 0 {
+            return;
+        }
+    }
+    let _ = app.emit_to(PANEL_LABEL, "panel-refresh", ());
+}
+
 /// 面板里回车选中某条：复制并粘回原窗口。
 #[tauri::command]
 pub fn panel_paste(app: AppHandle, id: String) -> Result<(), String> {

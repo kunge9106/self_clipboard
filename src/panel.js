@@ -378,3 +378,26 @@ listen("panel-open", (ev) => {
 });
 
 reload().then(() => searchEl.focus());
+
+// 面板**开着**时剪贴板有新内容：重拉列表（后端只在窗口可见时才发这件事）。
+//
+// 刷新有两个「不能打扰用户」的点：
+//   1. **保留搜索词** —— 用户可能正按关键词找东西，刷新把词清掉等于把人赶出流程；
+//   2. **按 id 找回选中项** —— 新条目插到最前，按旧下标会把高亮指到别的条目上。
+// 300ms 节流：一次复制可能连着触发多条事件（补格式、置顶、缩略图），只刷最后一次。
+let refreshTimer = null;
+listen("panel-refresh", () => {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(async () => {
+    refreshTimer = null;
+    const keepId = rows[sel]?.id;
+    await fetchRows(searchEl.value.trim());
+    if (keepId) {
+      const at = rows.findIndex((r) => r.id === keepId);
+      if (at >= 0) {
+        sel = at;
+        paintSelection();
+      }
+    }
+  }, 300);
+});

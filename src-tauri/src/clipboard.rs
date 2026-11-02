@@ -1612,6 +1612,8 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
     }
     if let Some(app) = APP.get() {
         let _ = app.emit("clipboard-update", item.clone());
+        // 面板开着时同步刷新（收起状态不发，下次唤出本来会重拉）
+        crate::panel::notify_if_visible(app);
     }
     // 缩略图：**所有来源的图片都走这一条通道**（ensure_thumb 读落盘原图 → 解码 → 落缩略图；
     // 解不了一律回退到通用占位图）。两个要点：
@@ -1844,6 +1846,8 @@ fn bump_latest(kind: &str, now: u64) {
     );
     if let Some(app) = APP.get() {
         let _ = app.emit("clipboard-update", item);
+        // 顺序变了（置顶浮到前面），面板开着时要跟上
+        crate::panel::notify_if_visible(app);
     }
 }
 
