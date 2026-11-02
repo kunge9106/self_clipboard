@@ -1108,6 +1108,15 @@ html:not(.hovers-off) .card:hover {
 .card.is-missing .card-preview {
   color: var(--text-dim);
 }
+
+/* 缩略图加载前的占位底色。
+   列表插入新条目后所有行的 index 都会位移，虚拟列表按 index 判断「这行内容变了没」，
+   于是整屏重填；而 `fillCard` 是 `innerHTML = ""` 整卡重建，图片节点被销毁重来 ——
+   没有底色时那一刻会闪一下白。给个与卡片同系的底色，重填就看不出来。 */
+.card-preview:has(img),
+.card-preview img {
+  background: var(--glass);
+}
 /* 代码：等宽字体。字号比正文小一档 —— 等宽字宽更大，
    保持 13px 会让两行只装得下十几个字符。 */
 .card-preview.is-code {

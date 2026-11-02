@@ -519,16 +519,19 @@ fn strip_window_frame(hwnd: isize, force: bool) {
         const GWL_STYLE: i32 = -16;
         const WS_CAPTION: isize = 0x00C0_0000;
         const WS_THICKFRAME: isize = 0x0004_0000;
-        const WS_MINIMIZEBOX: isize = 0x0002_0000;
-        const WS_MAXIMIZEBOX: isize = 0x0001_0000;
-        const WS_SYSMENU: isize = 0x0008_0000;
         const SWP_NOSIZE: u32 = 0x0001;
         const SWP_NOMOVE: u32 = 0x0002;
         const SWP_NOZORDER: u32 = 0x0004;
         const SWP_NOACTIVATE: u32 = 0x0010;
         const SWP_FRAMECHANGED: u32 = 0x0020;
 
-        let mask = WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
+        // **只剥 `WS_CAPTION | WS_THICKFRAME`**。
+        //
+        // DWM 沿窗口矩形画那圈边框，靠的就是这两个位；最小化/最大化/系统菜单
+        // 这三个位与边框无关，但**系统要靠它们判断「这个窗口能不能最小化」** ——
+        // 一起剥掉的话，点击任务栏图标不会最小化（表现为「点了没反应」，
+        // 而 Windows 上所有正常窗口都是「再点一下就收起」）。
+        let mask = WS_CAPTION | WS_THICKFRAME;
         let cur = GetWindowLongPtrW(hwnd, GWL_STYLE);
         if cur == 0 {
             crate::log_warn!("[effects] 读取窗口样式失败");
