@@ -1826,6 +1826,9 @@ fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
 /// 早先写成「置顶优先 + ts 倒序」重排整个列表，直接踩断言 panic，崩过两次。
 fn bump_history_item(id: &str, now: u64) {
     if id.is_empty() {
+        // 指纹队列里的 id 是入库后回填的；真回填失败就置顶不了，
+        // 这种情况必须留痕，否则只表现为「不重复了但没到最前」，极难查。
+        crate::log_warn!("[clipboard] 命中的条目没有记 id，无法置顶（指纹队列回填失败）");
         return;
     }
     let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
@@ -1842,6 +1845,7 @@ fn bump_history_item(id: &str, now: u64) {
     let item = g[pos].to_item();
     g.sort_by(|a, b| b.ts.cmp(&a.ts));
     drop(g);
+    crate::log_print!("[clipboard] 重复内容已置顶 id={id}");
     append_op(
         &dir,
         crate::store::Op::Insert {

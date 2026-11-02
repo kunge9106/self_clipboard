@@ -979,6 +979,16 @@ let wlBusy = false; // 取页中（同一时刻只允许一个请求，避免重
 /** 待执行的重绘句柄：连续到达的 clipboard-update 合并成一次，避免连闪 */
 let pendingWindowRender = null;
 
+/** 请求一次列表重绘，80ms 内合并。设置页与列表无关，不发。 */
+function scheduleWindowRender() {
+  if (currentView === "settings" || pendingWindowRender) return;
+  pendingWindowRender = setTimeout(() => {
+    pendingWindowRender = null;
+    api.invalidate();
+    void renderWindow({ keepScroll: true });
+  }, 80);
+}
+
 /** 当前筛选条件。搜索词原样传 —— 后端负责 trim 与折叠大小写。 */
 function currentFilter() {
   return buildFilter({ view: currentView, query });
@@ -4553,21 +4563,19 @@ async function main() {
   // 增量：复制新内容时 Rust 推事件，直接插到顶部
   await listen("clipboard-update", (e) => {
     const item = e.payload;
-    if (items.some((i) => i.id === item.id)) return;
+    // 条目已存在有两种情况，从 payload 上分不出来：
+    //   1. 一次复制被写两遍（补格式、缩略图更新）—— 列表不用动；
+    //   2. **去重命中并置顶** —— 顺序变了，必须重排，否则用户看不到它跳到最前。
+    // 早先这里直接 return，于是「不会重复出现了，但也没到最前面」。
+    // 统一走一次轻量刷新，80ms 节流，连发也只做一次。
+    if (items.some((i) => i.id === item.id)) {
+      scheduleWindowRender();
+      return;
+    }
     if (USE_WINDOW_API) {
       // 数据在后端：让页缓存失效并重取。用户停在顶部时不做锚点还原，
       // 新内容立刻可见；停在中间时锚点会把他正在看的那条钉在原地。
-      api.invalidate();
-      if (currentView !== "settings") {
-        // **合并重绘**：一次复制可能连着来好几条事件（补格式、置顶、缩略图），
-        // 每条都整页重算会连闪好几次。80ms 内的合并成一次。
-        if (!pendingWindowRender) {
-          pendingWindowRender = setTimeout(() => {
-            pendingWindowRender = null;
-            renderWindow({ keepScroll: true });
-          }, 80);
-        }
-      }
+      scheduleWindowRender();
       return;
     }
     items.unshift(item);
