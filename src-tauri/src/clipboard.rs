@@ -121,8 +121,17 @@ const TEXT_SAME_ORIGIN_MS: u64 = 800;
 /// 同源相似度阈值。实测 Markdown 原文 vs 其渲染文本 ≈ 0.6~0.75（标记被去掉、空白不同），
 /// 而两段无关正文的 bigram 重叠通常 < 0.25 —— 0.5 落在两者中间。
 const TEXT_SAME_ORIGIN_SIM: f32 = 0.5;
-/// 队列上限：只关心「最近这一小段时间」，不用无限增长。
-const LAST_IMG_KEEP: usize = 16;
+/// 指纹队列的实际上限。
+///
+/// 比 `LAST_IMG_KEEP` 大得多：一是启动预热最多灌 200 条历史指纹
+/// （`FP_WARMUP_LIMIT`），16 条的上限会挤掉大半；二是 `always` 策略要
+/// 「不限时间」。一条几十字节，多留几百条的内存代价可以忽略。
+const LAST_KEEP: usize = 512;
+/// 启动时预热指纹队列：只看最近这么多条。
+///
+/// 再往前的同内容极少被复制，而为它扫描上千个文件不划算（预热是启动路径上的
+/// 后台任务，但没必要为几乎不会命中的条目付 IO）。
+const FP_WARMUP_LIMIT: usize = 200;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
 /// 元组第三项 = 是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
@@ -1080,6 +1089,83 @@ fn spawn_clipboard_watchdog() {
         .ok();
 }
 
+/// 启动时把**指纹队列预热**回来（只覆盖文本与文件）。
+///
+/// 为什么需要：三个队列都是内存态，进程一退出就空。而「不限时间」去重的语义是
+/// 「历史里只要还有同内容就不再新增」—— 队列空着的话，重启后第一次复制同样的
+/// 内容照样新增一条，等于这个设置只在本次运行内有效。
+///
+/// 为什么只预热文本与文件：它们的指纹就是内容哈希，读一遍文件即可。图片指纹是
+/// 像素级的，得解码原图（实测约 100ms 一张），启动时做几十张就明显拖慢，所以
+/// 图片维持「本次运行内去重」。
+fn spawn_fp_warmup() {
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        // 先快照 id 与相对路径，再到锁外读文件 —— 读上百个文件不能占着 HISTORY
+        let picked: Vec<(String, String, String)> = {
+            let Ok(g) = hist.lock() else { return };
+            g.iter()
+                .take(FP_WARMUP_LIMIT)
+                .filter_map(|m| {
+                    let rel = if m.kind == "text" {
+                        m.text_rel()?
+                    } else if m.kind == "files" {
+                        m.files_rel()?
+                    } else {
+                        return None;
+                    };
+                    Some((m.id.clone(), m.kind.clone(), rel))
+                })
+                .collect()
+        };
+        if picked.is_empty() {
+            return;
+        }
+
+        // 队列语义：**最后一条是最近的一条**（判重只看 last）。列表是 ts 降序，
+        // 所以倒着放 —— 最后放进去的才是最新那条。
+        let (mut text, mut files): (Vec<(u64, u64, String)>, Vec<(u64, u64, String)>) =
+            (Vec::new(), Vec::new());
+        for (id, kind, rel) in picked.iter().rev() {
+            let Ok(bytes) = std::fs::read(dir.join(rel)) else {
+                continue;
+            };
+            let fp = content_hash(&bytes);
+            // ts 填 0：只影响 60 秒窗口的判断（`now - 0` 必然超窗），
+            // 而预热的意义只在「不限时间」模式下 —— 那里不看 ts。
+            if kind == "text" {
+                text.push((fp, 0, id.clone()));
+            } else {
+                files.push((fp, 0, id.clone()));
+            }
+        }
+
+        let mut n = 0;
+        // 只在队列还空的时候填：预热是补历史，不能盖掉运行期间真实捕获的条目
+        if !text.is_empty() {
+            if let Ok(mut g) = LAST_TEXT.lock() {
+                if g.is_empty() {
+                    n += text.len();
+                    *g = text;
+                }
+            }
+        }
+        if !files.is_empty() {
+            if let Ok(mut g) = LAST_FILES.lock() {
+                if g.is_empty() {
+                    n += files.len();
+                    *g = files;
+                }
+            }
+        }
+        crate::log_print!(
+            "[clipboard] 指纹队列预热 {n} 条（文本/文件，「不限时间」去重跨重启生效）"
+        );
+    });
+}
+
 fn spawn_worker() {
     // app 走全局 APP（OnceLock，在 init 首行写入）；worker 在订阅监听之前
     // 启动，所以取用时必定已就绪。
@@ -1283,6 +1369,7 @@ pub fn init(app: &AppHandle) {
     // 到达时 WORKER 还没初始化，会退化成主线程同步落盘。
     spawn_worker();
     spawn_thumb_worker();
+    spawn_fp_warmup();
 
     // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
     unsafe {
@@ -1916,13 +2003,15 @@ fn dedup_merge_with(
         return Some(g[i].2.clone());
     }
     g.push((fp, now, String::new()));
-    g.retain(|(_, t, _)| now.saturating_sub(*t) < window);
-    // 队列上限：`always` 策略要「不限时间」，只有 16 条的话早被挤出队列了，
-    // 所以该策略下放宽到 512 条（一条几十字节，代价可以忽略）。
-    let keep = if forever { 512 } else { LAST_IMG_KEEP };
+    // `ts == 0` 是**启动预热**留下的历史指纹（只有 id、不知道真实时间），
+    // 不能按窗口清掉 —— 否则切一次 60 秒模式就把它们全删了，「不限时间」跨重启
+    // 去重随之失效。
+    g.retain(|(_, t, _)| *t == 0 || now.saturating_sub(*t) < window);
+    // 上限统一 512：预热最多 200 条，用 16 条的上限会被挤掉大半；
+    // 一条几十字节，多留几百条的内存代价可以忽略。
     let len = g.len();
-    if len > keep {
-        g.drain(0..len - keep);
+    if len > LAST_KEEP {
+        g.drain(0..len - LAST_KEEP);
     }
     None
 }
@@ -7149,7 +7238,7 @@ mod tests {
             let fp = image_fingerprint(&solid_dib(400, 300, [i as u8, 1, 2, 255]));
             test_merge(&mut g, fp, t);
         }
-        assert!(g.len() <= LAST_IMG_KEEP, "队列长度必须受限");
+        assert!(g.len() <= LAST_KEEP, "队列长度必须受限");
     }
 
     /// 缩略图跳采样的方向必须正确。
