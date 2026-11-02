@@ -275,21 +275,28 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     );
 
     // 先清掉 WS_CAPTION | WS_THICKFRAME 等样式位——DWM 正是靠它们才
-    // 沿窗口矩形画 1px 边框（SystemBackdrop 档需要 DWM 提供 backdrop 与圆角，不能动）
-    if tier != Tier::SystemBackdrop {
-        strip_window_frame(hwnd, false);
-        // Tauri 的 4px 缩放边框子窗口会挡在 WebView 之上、抢走边缘鼠标事件，
-        // 每次 apply 都确认一遍（窗口重建后子窗口句柄会变）
-        disable_resize_border(hwnd);
-    }
+    // 沿窗口矩形画 1px 边框
+    //
+    // **所有档位都要剥，包括 SystemBackdrop**。早先这里写的是「SystemBackdrop 档
+    // 需要 DWM 提供 backdrop 与圆角，不能动」，于是该档位保留了这两个样式位，靠
+    // tao「用 WM_NCCALCSIZE 吞掉非客户区」装作无边框。这是个隐含假设：只要 tao 的
+    // NC 处理被打乱（主题切换、后台释放后窗口重建、tao 的 set_window_flags 把
+    // WS_CAPTION 又加回来），原生标题栏与 DWM 那圈 frame 就整条露出来 ——
+    // 用户看到的就是「UI 四周像 Win7 那样的边框」。
+    //
+    // 材质与样式位无关：`DWMWA_SYSTEMBACKDROP_TYPE` 是按**窗口矩形**画的，
+    // 不依赖非客户区。剥掉之后材质照常，只是 DWM 不再替我们画边框 ——
+    // 边框与圆角本来就由我们自己控制。
+    strip_window_frame(hwnd, false);
+    // Tauri 的 4px 缩放边框子窗口会挡在 WebView 之上、抢走边缘鼠标事件，
+    // 每次 apply 都确认一遍（窗口重建后子窗口句柄会变）
+    disable_resize_border(hwnd);
 
     // 标题栏/系统区域跟随深色
     set_immersive_dark(hwnd, dark);
 
-    // 再关掉 DWM 的非客户区渲染（双保险；部分系统上该属性已不再支持）
-    if tier != Tier::SystemBackdrop {
-        disable_nc_rendering(hwnd);
-    }
+    // 关掉 DWM 的非客户区渲染（双保险；部分系统上该属性已不再支持）
+    disable_nc_rendering(hwnd);
 
     let result = match tier {
         Tier::SystemBackdrop => apply_system_backdrop(hwnd),
@@ -1654,6 +1661,8 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
                 lparam: isize,
             ) -> isize;
         }
+        /// 客户区重算。`wparam != 0` 时返回值就是客户区相对窗口的位置与大小。
+        const WM_NCCALCSIZE: u32 = 0x0083;
 
         // 第二个实例请求唤回：**在本进程里**走与托盘唤回完全相同的路径，
         // 而不是让对面跨进程直接操作窗口（那会把窗口尺寸/排版搞坏）。
@@ -1667,6 +1676,16 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
                     let _ = app.emit("singleton-wake", ());
                 });
             }
+            return 0;
+        }
+        // 无边框的**最终保险**：无论样式位怎么变（主题切换、后台释放后窗口重建、
+        // tao 的 `set_window_flags` 把 WS_CAPTION 加回来、DWM 重算非客户区），
+        // 只要这里把非客户区算成 0，原生标题栏与那圈系统边框就永远画不出来。
+        //
+        // 这是 Windows 无边框窗口的标准做法。tao 内部本来也这么做，但它的判断
+        // 会被上面那些路径打乱；接管这一层之后就不再依赖它的状态了。
+        // `wparam == 0` 的那种调用要给系统算默认值（客户区不变），不能一律返回 0。
+        if msg == WM_NCCALCSIZE && wparam != 0 {
             return 0;
         }
         if msg == WM_NCACTIVATE {

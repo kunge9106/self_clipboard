@@ -95,11 +95,22 @@ static LAST_TEXT: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 /// 最近落过的「文件路径清单」指纹。文件条目同样会被写两次（资源管理器在选中多个
 /// 文件时可能连续两次 SetClipboardData），日志里出现过同秒同大小的 files 重复。
 static LAST_FILES: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
-/// 文本判重窗口。比图片的 60s 短得多，因为语义不同：
-/// 图片的 60s 是为了扛住微信「隔几十秒补写同一张图」；
-/// 文本这里只合并「同一次复制被写两遍」，2 秒足够，也不会把用户
-/// 真的连续复制两次同一段文字（通常间隔更久）误合并。
-const TEXT_DUP_WINDOW_MS: u64 = 2_000;
+/// 文本判重窗口。
+///
+/// 早先只给 2 秒，理由是「只合并同一次复制被写两遍，别把用户真的连续复制两次
+/// 同一段文字误合并」。但这与用户预期相反：**同一段文字隔十几秒再复制一次，
+/// 历史里就该只有一条**（Windows 剪贴板、Ditto、CopyQ 的「忽略重复」都是这个语义）。
+/// 用户实测反馈「短时间复制同样的东西会出现两次」，所以统一拉到 60 秒。
+///
+/// 更长的窗口不会误伤：只比较**内容完全相同**的文本，用户真想留两份不同内容
+/// 不受影响；而「同一次复制被写两遍」本来就在几十毫秒内，落在这个窗口里也一样合并。
+const TEXT_DUP_WINDOW_MS: u64 = 60_000;
+/// 文件清单判重窗口。
+///
+/// 原先是 800ms（同 `TEXT_SAME_ORIGIN_MS`），只覆盖「资源管理器连续两次
+/// SetClipboardData」。但实测复制**大文件 / 网络盘上的文件**时，第二次写入可能拖到
+/// 一两秒之后，于是历史里出现两条一模一样的文件记录。跟文本统一到 60 秒。
+const FILES_DUP_WINDOW_MS: u64 = 60_000;
 /// 「同一次复制的两次写入」判定窗口。
 ///
 /// 实测：Markdown 复制时应用先写渲染文本（812 字）、约 20ms 后再写原文（1347 字），
@@ -1542,7 +1553,7 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
         let fp = content_hash(paths.join("\n").as_bytes());
         let dup = LAST_FILES
             .lock()
-            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, TEXT_SAME_ORIGIN_MS))
+            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, FILES_DUP_WINDOW_MS))
             .unwrap_or(false);
         if dup {
             crate::log_print!("[clipboard] 重复文件清单已合并（同一次复制的第二次写入）");
