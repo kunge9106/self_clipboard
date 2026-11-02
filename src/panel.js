@@ -5,6 +5,7 @@
 // 样式与变量复用主界面那一套（panel.css @import styles.css），观感不会割裂。
 
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 // 与主窗口共用同一套查询封装与筛选语义（否则「同一个词在主窗口搜得到、面板搜不到」）
 import { buildFilter, createHistoryApi } from "./history-api.js";
 import { listen } from "@tauri-apps/api/event";
@@ -29,6 +30,17 @@ const $ = (id) => document.getElementById(id);
 const listEl = $("panel-list");
 const searchEl = $("panel-search");
 const statusEl = $("panel-status");
+
+// 顶部把手 → 拖动整个面板。
+//
+// 面板固定在屏幕中央弹出，挡住要看的内容时只能先关掉再挪窗口，等于不能挪。
+// 面板窗口没挂 effects 的那套自定义拖动（那是主窗口专用的，为了绕开 Win10
+// acrylic 下的幽灵窗口），所以这里直接用 Tauri 的系统拖动。
+document.querySelector(".panel-drag")?.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault(); // 别让它变成选中/拖拽文字的起点
+  getCurrentWindow().startDragging().catch(() => {});
+});
 
 const api = createHistoryApi(invoke, { cachePages: 3 });
 /** 过滤后的总条数（后端给）：面板只显示前 MAX_ROWS 条，但状态栏要报真实总数 */
@@ -107,28 +119,30 @@ async function fetchRows(q) {
 
 function render() {
   listEl.replaceChildren();
+  // 分组标题：列表是「置顶优先、组内按时间倒序」，光靠行上的图钉说不清
+  // 「上面这几条为什么不动」。插一条小字标题最直白 —— 微信、Ditto 都是这么分的。
+  // 规则：首条是置顶才加「置顶」；从置顶切到普通时才加「最近」；
+  // 一条置顶都没有时两个标题都不加（整列表都是最近的，标题纯属噪音）。
+  let group = null;
+  const addGroup = (text) => {
+    const h = document.createElement("div");
+    h.className = "p-group";
+    h.textContent = text;
+    listEl.appendChild(h);
+  };
   rows.forEach((item, idx) => {
+    const isPinned = Array.isArray(item.pinnedViews) && item.pinnedViews.length > 0;
+    const want = isPinned ? "pin" : "recent";
+    if (want !== group) {
+      if (want === "pin") addGroup("置顶");
+      else if (group === "pin") addGroup("最近");
+      group = want;
+    }
+
     const row = document.createElement("div");
     row.className = "p-row" + (idx === sel ? " is-sel" : "");
+    if (isPinned) row.classList.add("is-pinned");
     row.setAttribute("role", "option");
-
-    // 置顶条目标一下。列表是「置顶优先、组内按时间倒序」排的，但界面上一直没有
-    // 任何提示 —— 用户看到最上面几条总是纹丝不动，会以为是排序坏了。
-    // 这里用「图钉 + 行左侧竖条」两个线索：图钉说明身份，竖条让整组连成一片。
-    // 用内联 SVG 而不是 emoji：emoji 的字形与颜色随系统/字体变，Win10 与 Win11
-    // 上长得不一样，而这个工具要两端表现一致。
-    if (Array.isArray(item.pinnedViews) && item.pinnedViews.length > 0) {
-      row.classList.add("is-pinned");
-      const pin = document.createElement("span");
-      pin.className = "p-pin";
-      pin.title = "置顶";
-      pin.setAttribute("aria-label", "置顶");
-      pin.innerHTML =
-        '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" ' +
-        'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
-        '<path d="M9 4h6l-1 6 4 4H6l4-4z"/><path d="M12 14v6"/></svg>';
-      row.appendChild(pin);
-    }
 
     const kind = document.createElement("span");
     kind.className = "p-kind";

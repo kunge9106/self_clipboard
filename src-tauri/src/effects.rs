@@ -837,8 +837,25 @@ fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
         // 圆角模式：系统材质已关，只重设区域。这里**不能**开 acrylic ——
         // 矩形材质会把圆角外重新填上
         apply_rounded_corners(hwnd);
-    } else if current_tier() == Tier::Acrylic {
-        let _ = apply_acrylic(hwnd, dark);
+    } else {
+        // 非圆角：按**当前档位**重新应用材质。
+        //
+        // 原来这里只处理 Acrylic 一档，SystemBackdrop / Mica 两档什么都不做 ——
+        // DWM 在主题切换时会重建材质上下文，不重设就退成深灰实心（用户实测：
+        // 「切深浅色后材质没切回来，是小概率」）。重新下发一次是幂等的，
+        // 成本只有几个 DWM 调用。
+        match current_tier() {
+            Tier::SystemBackdrop => {
+                let _ = apply_system_backdrop(hwnd);
+            }
+            Tier::Mica => {
+                let _ = apply_mica(hwnd);
+            }
+            Tier::Acrylic => {
+                let _ = apply_acrylic(hwnd, dark);
+            }
+            Tier::Solid => {}
+        }
     }
     nudge(hwnd);
     crate::log_print!("[effects] 主题视觉重刷完成（第 {pass} 遍，dark={dark}）");

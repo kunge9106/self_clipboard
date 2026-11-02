@@ -27,8 +27,31 @@ body {
   overflow: hidden;
 }
 
+/* 拖拽把手：顶部一道 14px 高的窄条，中间一根小横条做视觉暗示。
+   只占一点点高度（列表是 flex 自适应，少 14px 不影响可用性），
+   但把「面板能挪走」这件事变得可发现 —— 否则用户只能忍着它挡视线。 */
+.panel-drag {
+  height: 14px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+}
+
+.panel-drag:active {
+  cursor: grabbing;
+}
+
+.panel-drag-grip {
+  width: 28px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
 .panel-head {
-  padding: 10px 12px 8px;
+  padding: 8px 12px 8px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -72,26 +95,31 @@ body {
   color: #fff;
 }
 
-/* 置顶标识：行左侧一道内阴影竖条，让「置顶组」在视觉上连成一片；
-   图钉本身用强调色。选中态（整行强调色底）时两者都转白，否则会糊在一起。 */
+/* 置顶标识：行左侧一道内阴影竖条，让「置顶组」在视觉上连成一片。
+   组与组的界限由 `.p-group` 标题说明，这里只做视觉连续。 */
 .p-row.is-pinned {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
-.p-pin {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  color: var(--accent);
+/* 分组标题（置顶 / 最近）。小字、次级色、不参与选中 —— 只做分隔。
+   左侧留出与行一致的 8px，和行文字对齐。 */
+.p-group {
+  padding: 8px 8px 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  letter-spacing: 0.4px;
+  user-select: none;
+}
+
+.p-group:first-child {
+  padding-top: 2px;
 }
 
 .p-row.is-sel.is-pinned {
   box-shadow: inset 3px 0 0 rgba(255, 255, 255, 0.75);
 }
 
-.p-row.is-sel .p-pin {
-  color: #fff;
-}
 
 .p-kind {
   flex: none;
