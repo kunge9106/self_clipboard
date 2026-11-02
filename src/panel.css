@@ -98,17 +98,31 @@ body {
 /* 置顶标识：行左侧一道内阴影竖条，让「置顶组」在视觉上连成一片。
    组与组的界限由 `.p-group` 标题说明，这里只做视觉连续。 */
 .p-row.is-pinned {
-  box-shadow: inset 3px 0 0 var(--accent);
+  position: relative;
 }
 
-/* 分组标题（置顶 / 最近）。小字、次级色、不参与选中 —— 只做分隔。
-   左侧留出与行一致的 8px，和行文字对齐。 */
+/* 只取行高中段的一小截，**不贯穿整行**：通栏竖线看起来像边框画错了，
+   短竖线才像「标签」。 */
+.p-row.is-pinned::before {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: 26%;
+  bottom: 26%;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* 分组标题（置顶 / 最近）。字号比正文小一点，但**用主文字色 + 加粗**——
+   纯次级灰在面板这个尺寸下几乎看不见（用户反馈「不够明显」）。 */
 .p-group {
   padding: 8px 8px 3px;
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 600;
   line-height: 1.4;
-  color: var(--text-dim);
-  letter-spacing: 0.4px;
+  color: var(--text);
+  letter-spacing: 0.3px;
   user-select: none;
 }
 
@@ -116,8 +130,8 @@ body {
   padding-top: 2px;
 }
 
-.p-row.is-sel.is-pinned {
-  box-shadow: inset 3px 0 0 rgba(255, 255, 255, 0.75);
+.p-row.is-sel.is-pinned::before {
+  background: rgba(255, 255, 255, 0.75);
 }
 
 

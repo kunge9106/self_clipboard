@@ -285,6 +285,7 @@ pub fn run() {
             about::install_downloaded,
             about::open_external,
             effects::drag_start,
+            popup::panel_begin_drag,
             effects::resize_start,
             clipboard::get_history,
             clipboard::copy_diagnostics,

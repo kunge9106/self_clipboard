@@ -1755,3 +1755,77 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
     ORIG_WNDPROC.store(orig, std::sync::atomic::Ordering::Relaxed);
     crate::log_print!("[effects] 焦点 hook 已挂载（WM_NCACTIVATE → 不重绘 NC 区）");
 }
+
+// ---------------------------------------------------------------------------
+// 弹出窗口（快捷面板 / 托盘菜单）的拖动
+//
+// 它们不能复用上面那套：`ORIG_WNDPROC` 是**单槽**的，给第二个窗口挂上去会把主窗口
+// 的转发链覆盖掉（主窗口的消息会被转到面板的 WndProc，直接崩）。所以单独一套。
+//
+// 为什么必须自定义拖动而不能用 `startDragging()`：面板是 `transparent` + 带材质的
+// 分层窗口，系统移动循环会让 DWM 逐帧重算模糊，实测拖动时身后拖出一串重影
+// （用户反馈「拖拽重影很严重」）。主窗口早年为同一个问题改用自定义拖动，
+// 这里复用同一套：SetCapture + 按绝对光标位移 SetWindowPos + 16ms 节流。
+// ---------------------------------------------------------------------------
+
+/// 已挂 hook 的弹出窗口句柄（窗口重建后句柄会变，靠它判断要不要重挂）
+static POPUP_HOOKED: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+static POPUP_ORIG_WNDPROC: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+/// `GWL_WNDPROC`：窗口过程的存放槽位（-4）。主窗口那份是写在函数内部的局部常量，
+/// 这里要用在模块作用域，单独定义一份。
+const GWLP_WNDPROC: i32 = -4;
+
+extern "system" fn popup_hook_proc(
+    hwnd: isize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    unsafe extern "system" {
+        fn CallWindowProcW(
+            prev: isize,
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+        ) -> isize;
+    }
+    const WM_NCCALCSIZE: u32 = 0x0083;
+    const WM_NCHITTEST: u32 = 0x0084;
+    const HTCLIENT: isize = 1;
+
+    if msg == WM_NCCALCSIZE && wparam != 0 {
+        return 0;
+    }
+    if msg == WM_NCHITTEST {
+        return HTCLIENT;
+    }
+    if handle_drag_msg(hwnd, msg) {
+        return 0;
+    }
+    let orig = POPUP_ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
+    unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }
+}
+
+/// 给弹出窗口挂上拖动用的 WndProc（幂等：同一个句柄只挂一次）。
+pub fn install_popup_hook(hwnd: isize) {
+    if hwnd == 0 || POPUP_HOOKED.load(std::sync::atomic::Ordering::Relaxed) == hwnd {
+        return;
+    }
+    unsafe {
+        extern "system" {
+            fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+        }
+        let orig =
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, popup_hook_proc as *const () as isize);
+        if orig == 0 {
+            crate::log_warn!("[effects] 弹出窗口 hook 挂载失败");
+            return;
+        }
+        POPUP_ORIG_WNDPROC.store(orig, std::sync::atomic::Ordering::Relaxed);
+        POPUP_HOOKED.store(hwnd, std::sync::atomic::Ordering::Relaxed);
+    }
+    crate::log_print!("[effects] 弹出窗口拖动 hook 已挂载");
+}

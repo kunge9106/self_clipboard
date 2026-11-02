@@ -5,7 +5,6 @@
 // 样式与变量复用主界面那一套（panel.css @import styles.css），观感不会割裂。
 
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 // 与主窗口共用同一套查询封装与筛选语义（否则「同一个词在主窗口搜得到、面板搜不到」）
 import { buildFilter, createHistoryApi } from "./history-api.js";
 import { listen } from "@tauri-apps/api/event";
@@ -33,13 +32,13 @@ const statusEl = $("panel-status");
 
 // 顶部把手 → 拖动整个面板。
 //
-// 面板固定在屏幕中央弹出，挡住要看的内容时只能先关掉再挪窗口，等于不能挪。
-// 面板窗口没挂 effects 的那套自定义拖动（那是主窗口专用的，为了绕开 Win10
-// acrylic 下的幽灵窗口），所以这里直接用 Tauri 的系统拖动。
+// **不能用 `startDragging()`**：面板是 transparent + 带材质的分层窗口，系统移动
+// 循环会让 DWM 逐帧重算背景模糊，实测拖动时拖出一串重影。改走主窗口同款的自定义
+// 拖动（后端 SetCapture + 按光标位移 SetWindowPos + 16ms 节流），材质全程不变。
 document.querySelector(".panel-drag")?.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return;
   e.preventDefault(); // 别让它变成选中/拖拽文字的起点
-  getCurrentWindow().startDragging().catch(() => {});
+  invoke("panel_begin_drag").catch(() => {});
 });
 
 const api = createHistoryApi(invoke, { cachePages: 3 });
@@ -88,15 +87,24 @@ function applyFilter() {
  * 「共 3 万条」和「共 60 条」对用户是两件事。
  */
 async function fetchRows(q) {
-  let res;
-  try {
-    res = await api.fetchWindow({
+  const ask = (limit) =>
+    api.fetchWindow({
       filter: buildFilter({ view: "history", query: q }),
       offset: 0,
-      limit: MAX_ROWS,
+      limit,
       anchorId: null,
       wantTotal: true,
     });
+  let res;
+  try {
+    res = await ask(MAX_ROWS);
+    // **置顶不占「最近 N 条」的名额**：后端按「置顶在前、其余在后」拼成一条序列
+    // 再切 window，只取 60 条时置顶会把本该出现的最近条目挤掉（用户实测：
+    // 置顶几条，最近就少几条）。发现有置顶且总数超上限，按「置顶数 + 60」重取，
+    // 两组各自满额。只在有置顶的账号上多这一次查询。
+    if (res.pinnedCount > 0 && res.total > MAX_ROWS) {
+      res = await ask(MAX_ROWS + res.pinnedCount);
+    }
   } catch (e) {
     rows = [];
     total = 0;
@@ -113,7 +121,7 @@ async function fetchRows(q) {
       ? q
         ? "没有匹配的内容"
         : "剪贴板还是空的"
-      : `${total} 条${total > MAX_ROWS ? `（显示前 ${MAX_ROWS} 条）` : ""}`
+      : `${total} 条${rows.length < total ? `（显示 ${rows.length} 条）` : ""}`
   );
 }
 
