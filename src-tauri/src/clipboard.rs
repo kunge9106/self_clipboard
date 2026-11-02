@@ -2051,6 +2051,15 @@ fn dedup_merge_with(
         g[i].1 = now; // 滑动窗口续期
         return Some(g[i].2.clone());
     }
+    if forever {
+        // 诊断：只在「永久去重」下打，且只在未命中时打（命中时不刷日志）。
+        // 队列长度是最关键的线索 —— 为 0 说明预热没跑到/被清空了，
+        // 有几百条说明是指纹不同（内容其实不完全一样，比如行尾/空白差异）。
+        crate::log_print!(
+            "[clipboard] 永久去重未命中：fp={fp:016X} 队列={} 条",
+            g.len()
+        );
+    }
     g.push((fp, now, String::new()));
     // `ts == 0` 是**启动预热**留下的历史指纹（只有 id、不知道真实时间），
     // 不能按窗口清掉 —— 否则切一次 60 秒模式就把它们全删了，「不限时间」跨重启
@@ -3408,11 +3417,14 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
         (None, None) => "none",
     };
     crate::log_print!(
-        "[clipboard] 新增 {} 条目 kind={} size={} rich={}",
+        "[clipboard] 新增 {} 条目 kind={} size={} rich={}（去重模式={}）",
         id,
         item.kind,
         item.size,
-        rich
+        rich,
+        // 把当前策略带上：日志里能一眼确认「设置真的读到了」，
+        // 而不是怀疑「是不是又退回 60 秒了」
+        crate::settings::get().dedup_mode
     );
     item
 }
