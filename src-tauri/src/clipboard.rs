@@ -1695,14 +1695,19 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
             }
         }
         if let Some(id) = hit {
-            // 关键：第二次往往**才带格式**（延迟渲染）。这里把格式补到已有那条上，
-            // 而不是丢掉 —— 否则用户复制一次，格式永远进不来。
-            let patched = merge_rich_into_latest(html, rtf);
-            // 合并之后把它顶到最前：否则用户再复制一次同样的文字，列表毫无变化，
-            // 会以为这次没记上（见 `bump_history_item` 的说明）。
-            bump_history_item(&id, captured_ms);
-            crate::log_print!("[clipboard] 重复文本已合并并置顶（补格式={patched}）");
-            return;
+            // 先确认这条还活着：用户可能已经把它删了。删掉的条目要当成墓碑清掉，
+            // 否则每次复制同样的内容都会命中它，既不新增也置顶不了。
+            if bump_history_item(&id, captured_ms) {
+                // 关键：第二次往往**才带格式**（延迟渲染）。这里把格式补到已有那条上，
+                // 而不是丢掉 —— 否则用户复制一次，格式永远进不来。
+                let patched = merge_rich_into_latest(html, rtf);
+                crate::log_print!("[clipboard] 重复文本已合并并置顶（补格式={patched}）");
+                return;
+            }
+            forget_fp(&LAST_TEXT, fp);
+            crate::log_warn!(
+                "[clipboard] 命中的条目已被删除，清掉墓碑并按新内容入库（fp={fp:016X}）"
+            );
         }
         remember = 1;
     }
@@ -1715,9 +1720,14 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
             .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, dedup_window(FILES_DUP_WINDOW_MS)))
             .unwrap_or(None);
         if let Some(id) = hit {
-            bump_history_item(&id, captured_ms);
-            crate::log_print!("[clipboard] 重复文件清单已合并并置顶");
-            return;
+            if bump_history_item(&id, captured_ms) {
+                crate::log_print!("[clipboard] 重复文件清单已合并并置顶");
+                return;
+            }
+            forget_fp(&LAST_FILES, fp);
+            crate::log_warn!(
+                "[clipboard] 命中的文件清单已被删除，清掉墓碑并按新内容入库（fp={fp:016X}）"
+            );
         }
         remember = 2;
     }
@@ -1752,13 +1762,18 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
             .map(|mut g| dedup_merge(&mut g, fp, captured_ms))
             .unwrap_or(None);
         if let Some(id) = hit {
-            crate::logger::write_line(
-                "INFO",
-                "clipboard",
-                "重复图片已合并并置顶（与已有指纹一致，滑动窗口续期）",
+            if bump_history_item(&id, captured_ms) {
+                crate::logger::write_line(
+                    "INFO",
+                    "clipboard",
+                    "重复图片已合并并置顶（与已有指纹一致，滑动窗口续期）",
+                );
+                return;
+            }
+            forget_fp(&LAST_IMG, fp);
+            crate::log_warn!(
+                "[clipboard] 命中的图片已被删除，清掉墓碑并按新内容入库（fp={fp:016X}）"
             );
-            bump_history_item(&id, captured_ms);
-            return;
         }
         remember = 3;
     }
@@ -1970,29 +1985,23 @@ fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
 /// 剪贴板历史与 Ditto 的行为；只合并不置顶的话，用户会以为这次复制没被记录。
 /// 把命中的重复条目**顶到列表最前**（不新增、不删文件、id 不变）。
 ///
-/// `id` 由判重函数直接给出（指纹队列里存着每条对应的条目 id），所以不需要再猜
-/// 「哪条是刚入库的」—— 尤其 `always` 策略下命中的可能是很久以前那条。
-///
-/// **只能按 `ts` 降序重排**。常驻列表有一条铁定的不变式：恒按 ts 降序
-/// （`store::insert_ordered` 维护，`query::scan` 里有 `debug_assert` 兜着）。
-/// 「置顶优先」是**查询时**按 `pinned_views` 临时分组算出来的，不属于常驻顺序 ——
-/// 早先写成「置顶优先 + ts 倒序」重排整个列表，直接踩断言 panic，崩过两次。
-fn bump_history_item(id: &str, now: u64) {
+/// 返回 `false` 表示**命中了一个已经不在的条目**（用户删掉了它）—— 调用方据此
+/// 把这条墓碑从指纹队列里清掉、按新内容入库。不清的话每次复制同样的内容都会
+/// 命中同一个墓碑，既不新增也置顶不了，表现就是「复制不进软件」。
+fn bump_history_item(id: &str, now: u64) -> bool {
     if id.is_empty() {
-        // 指纹队列里的 id 是入库后回填的；真回填失败就置顶不了，
-        // 这种情况必须留痕，否则只表现为「不重复了但没到最前」，极难查。
         crate::log_warn!("[clipboard] 命中的条目没有记 id，无法置顶（指纹队列回填失败）");
-        return;
+        return false;
     }
     let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
-        return;
+        return false;
     };
-    let Ok(mut g) = hist.lock() else { return };
+    let Ok(mut g) = hist.lock() else { return false };
     let Some(pos) = g.iter().position(|m| m.id == id) else {
-        return;
+        return false;
     };
     if g[pos].ts == now {
-        return;
+        return true;
     }
     g[pos].ts = now;
     let item = g[pos].to_item();
@@ -2009,6 +2018,14 @@ fn bump_history_item(id: &str, now: u64) {
         let _ = app.emit("clipboard-update", item);
         // 顺序变了（那条浮到前面），面板开着时要跟上
         crate::panel::notify_if_visible(app);
+    }
+    true
+}
+
+/// 从指纹队列里删掉某个指纹的所有记录（条目被删后的墓碑清理）。
+fn forget_fp(q: &Mutex<Vec<(u64, u64, String)>>, fp: u64) {
+    if let Ok(mut g) = q.lock() {
+        g.retain(|(f, _, _)| *f != fp);
     }
 }
 
