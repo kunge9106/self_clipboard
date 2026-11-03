@@ -1317,6 +1317,20 @@ pub fn init(app: &AppHandle) {
     // 也不静默生成新密钥（见 store::load_index）。
     let loaded = crate::store::load_index(&dir);
     let mut hist = loaded.items;
+    // **加载后校正一次顺序**：`query::scan` 依赖「常驻列表恒按 ts 降序」这条不变式，
+    // 而顺序是持久化下来的 —— 快照与 WAL 重放都不保证它正确。一旦某次写入把顺序
+    // 弄乱，下次启动的第一次查询就会踩 `debug_assert` → panic → `panic in a
+    // function that cannot unwind` → abort，表现为「启动即崩、连崩几次」。
+    //
+    // 先 O(n) 检查、不对才排（O(n log n)，680 条几十微秒）。宁可花这点时间，
+    // 也不能让一份顺序有问题的索引把程序卡死在启动阶段。
+    if !hist.windows(2).all(|w| w[0].ts >= w[1].ts) {
+        crate::log_warn!(
+            "[clipboard] 索引顺序异常（不是 ts 降序），已强制重排 {} 条",
+            hist.len()
+        );
+        hist.sort_by(|a, b| b.ts.cmp(&a.ts));
+    }
     // 这一次启动结束时要不要补写一份 v2 快照：首次运行、刚迁移完、索引需要重建，
     // 三种情况都得写，否则下次启动又走一遍同样的分支。
     let mut need_snapshot = loaded.status.needs_snapshot();

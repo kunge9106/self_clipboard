@@ -395,7 +395,20 @@ impl From<io::Error> for SaveError {
 /// `Meta → HistoryItem` 投影。T02b 把常驻列表换成 `Vec<Meta>` 之后走这条。
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn save_snapshot(dir: &Path, metas: &[Meta], key: &Key, write_seq: u64) -> io::Result<()> {
-    let items: Vec<HistoryItem> = metas.iter().map(Meta::to_item).collect();
+    // 出口把关：索引唯一的消费者（`query::scan`）要求**恒按 ts 降序**。
+    // 内存里万一被某条路径弄乱，这里排一次就能保证「落盘的一定是对的」。
+    // 加载端也做了同样的兜底，但出口把关更省 —— 入口兜底要每次启动都判，
+    // 而这里只在真正写快照时判（快照本身就不频繁）。
+    let ordered = metas.windows(2).all(|w| w[0].ts >= w[1].ts);
+    let sorted: Vec<&Meta> = if ordered {
+        metas.iter().collect()
+    } else {
+        crate::log_warn!("[store] 保存快照前发现顺序异常（非 ts 降序），已重排");
+        let mut v: Vec<&Meta> = metas.iter().collect();
+        v.sort_by(|a, b| b.ts.cmp(&a.ts));
+        v
+    };
+    let items: Vec<HistoryItem> = sorted.iter().map(|m| m.to_item()).collect();
     write_snapshot(dir, &items, key, write_seq)
 }
 
