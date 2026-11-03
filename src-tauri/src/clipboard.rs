@@ -782,8 +782,19 @@ const PASTE_MAX_SIDE: u32 = 8192;
 ///
 /// 返回 Ok(Some(提示)) 时前端用该提示替代默认的「已复制到剪贴板」——
 /// 目前只有文件条目会用到（部分原文件已失效、已跳过）。
+///
+/// **必须是 async**：大图回贴要把原图解码到 8192px 长边 DIB，代码注释自己写了
+/// 「4096×3072 ≈ 2s」。同步 command 跑在**主线程**，点一下「粘贴」整个窗口就冻住
+/// （代码审查 P0-3）。丢到 `spawn_blocking` 后 UI 立刻能响应，解码在工作线程做。
 #[tauri::command]
-pub fn copy_back(id: String, plain: Option<bool>) -> Result<Option<String>, String> {
+pub async fn copy_back(id: String, plain: Option<bool>) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || copy_back_sync(id, plain))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 真正的回贴实现（在 blocking 线程上跑，不在主线程）。
+pub(crate) fn copy_back_sync(id: String, plain: Option<bool>) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let hist = HISTORY.get().unwrap().lock().unwrap();
     let item = hist

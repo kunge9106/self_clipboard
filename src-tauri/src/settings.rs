@@ -350,6 +350,9 @@ pub struct UpdateCache {
     /// 安装包字节数（0 = 未知）
     #[serde(default)]
     pub asset_size: u64,
+    /// 安装包 SHA-256（GitHub `assets[].digest`，形如 `sha256:...`）；空 = 无校验信息
+    #[serde(default)]
+    pub asset_digest: String,
     /// 检查时间（epoch 秒）
     #[serde(default)]
     pub checked_at: u64,

@@ -1154,7 +1154,7 @@ async function renderWindow({ keepScroll = false } = {}) {
   } catch (e) {
     if (token === wlToken) {
       view.innerHTML = `<div class="empty"><div class="empty-title">列表读取失败</div>
-        <div class="empty-sub">${String(e)}</div></div>`;
+        <div class="empty-sub">${escFmt(String(e))}</div></div>`;
       if (wl) {
         wl.destroy();
         wl = null;
@@ -1412,8 +1412,8 @@ function emptyHtml() {
   const trunc = (s, n = 12) =>
     s.length > n ? s.slice(0, n) + "..." : s;
   if (query) {
-    return `<div class="empty"><div class="empty-title">暂无 ${trunc(
-      query
+    return `<div class="empty"><div class="empty-title">暂无 ${escFmt(
+      trunc(query)
     )} 相关内容</div></div>`;
   }
   const titles = {
@@ -1468,10 +1468,12 @@ function fillCard(card, item) {
   const hideKind =
     currentView === "text" || currentView === "images" || currentView === "files";
   const hideFav = currentView === "favorites";
+  // kind 同时进 class 与文案，必须白名单：外部字符串不能原样拼进 innerHTML
+  const kind = KIND_LABEL[item.kind] ? item.kind : "text";
   meta.innerHTML =
     (hideKind
       ? ""
-      : `<span class="tag tag-kind tag-kind-${item.kind}">${KIND_LABEL[item.kind] || item.kind}</span>`) +
+      : `<span class="tag tag-kind tag-kind-${escFmt(kind)}">${KIND_LABEL[kind]}</span>`) +
     // 子类型徽章：任何视图都显示（它不是分类，而是「这条内容是什么」的提示，
     // 在「文本」视图里尤其有用 —— 那里所有条目都叫文本，靠它才分得出代码和链接）
     (SUBTYPE_BADGE[item.subtype]

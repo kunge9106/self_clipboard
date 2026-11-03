@@ -480,6 +480,8 @@ struct Release {
     asset_url: String,
     asset_name: String,
     asset_size: u64,
+    /// GitHub 的 asset digest，形如 sha256:...；空表示发布方没给
+    asset_digest: String,
 }
 
 /// 当前构建是不是预发布版（`2.1.9-beta`）——决定查 `latest` 还是列表接口。
@@ -568,6 +570,10 @@ fn release_from_json(v: &serde_json::Value) -> Release {
         asset_size: pick
             .and_then(|a| a.get("size").and_then(|x| x.as_u64()))
             .unwrap_or(0),
+        asset_digest: pick
+            .and_then(|a| a.get("digest").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .to_string(),
     }
 }
 
@@ -747,6 +753,7 @@ fn save_cache(rel: &Release) {
         asset_url: rel.asset_url.clone(),
         asset_name: rel.asset_name.clone(),
         asset_size: rel.asset_size,
+        asset_digest: rel.asset_digest.clone(),
         checked_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -760,6 +767,7 @@ fn save_cache(rel: &Release) {
                 && c.notes == next.notes
                 && c.asset_url == next.asset_url
                 && c.asset_size == next.asset_size
+                && c.asset_digest == next.asset_digest
         });
     if same {
         return;
@@ -814,6 +822,7 @@ pub fn update_state() -> serde_json::Value {
             asset_url: c.asset_url,
             asset_name: c.asset_name,
             asset_size: c.asset_size,
+            asset_digest: c.asset_digest,
         }),
         None => payload(&Release::default()),
     }
@@ -937,6 +946,23 @@ pub async fn open_external(url: String) -> Result<(), String> {
 // 下载安装包并运行
 // ---------------------------------------------------------------------------
 
+/// 流式计算文件 SHA-256（十六进制小写），不把整个安装包读进内存。
+fn sha256_hex(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut h = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// 同一时间只允许一个下载任务（重复点按钮不该开出两条 curl）。
 static DL_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -987,6 +1013,7 @@ fn download_inner(app: &tauri::AppHandle) -> Result<String, String> {
                 asset_url: cached.asset_url,
                 asset_name: cached.asset_name,
                 asset_size: cached.asset_size,
+                asset_digest: cached.asset_digest,
             }
         }
     };
@@ -1079,6 +1106,28 @@ fn download_inner(app: &tauri::AppHandle) -> Result<String, String> {
         // 知道总大小时必须一分不差；不知道时只要求非空
         let size_ok = if total > 0 { got == total } else { got > 0 };
         if exit_ok && size_ok {
+            // 完整性校验（代码审查 P0-5）：只比大小挡不住「资产被替换」。
+            // GitHub 的 asset digest 是发布方给的 SHA-256，不符就删掉 .part，
+            // 绝不交给 install_downloaded 以用户权限执行。
+            if let Some(expected) = cache.asset_digest.strip_prefix("sha256:") {
+                match sha256_hex(&part) {
+                    Ok(got) if got.eq_ignore_ascii_case(expected) => {}
+                    Ok(got) => {
+                        let _ = std::fs::remove_file(&part);
+                        last_err = format!(
+                            "安装包校验失败（SHA-256 不符：期望 {expected}，实际 {got}），已删除"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&part);
+                        last_err = format!("安装包校验失败（无法读取：{e}），已删除");
+                        continue;
+                    }
+                }
+            } else if !cache.asset_digest.is_empty() {
+                crate::log_print!("[update] 发布信息里的 digest 格式未知，本次仍按大小校验");
+            }
             if std::fs::rename(&part, &final_path).is_err() {
                 last_err = "下载完成但重命名失败".into();
                 continue;
@@ -1135,6 +1184,18 @@ pub fn install_downloaded(app: tauri::AppHandle, path: String) -> Result<(), Str
     }
     if !p.is_file() {
         return Err("安装包不存在，可能已被删除".into());
+    }
+    // 二次完整性校验（代码审查 P0-5）：下载完成时验过一次，但这里 `path`
+    // 是前端传来的，且文件可能在下载后被改动。真正拉起安装器之前再算一遍
+    // SHA-256，才算把「只验大小就能执行任意程序」这条链彻底断掉。
+    // 旧缓存没有 digest 时降级为只验路径（向后兼容）。
+    if let Some(c) = crate::settings::get().update_cache {
+        if let Some(expected) = c.asset_digest.strip_prefix("sha256:") {
+            let got = sha256_hex(&p).map_err(|e| format!("安装包校验失败：{e}"))?;
+            if !got.eq_ignore_ascii_case(expected) {
+                return Err("安装包校验失败（SHA-256 不符），已拒绝执行".into());
+            }
+        }
     }
 
     let w = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };

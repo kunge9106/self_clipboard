@@ -268,7 +268,7 @@ pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
 
     // 走与右键「复制」完全相同的路径：格式处理（原样 / 纯文本 / 内联图还原）
     // 只有一份实现，两边不会漂移。
-    crate::clipboard::copy_back(id.to_string(), Some(false))?;
+    crate::clipboard::copy_back_sync(id.to_string(), Some(false))?;
 
     // 先收起再接下面「焦点还给原窗口」那一段：面板还在时抢焦点会被它自己顶回来。
     // 开了「点选后保持打开」就不收，但焦点照样要还回去，否则 Ctrl+V 会发给面板。
