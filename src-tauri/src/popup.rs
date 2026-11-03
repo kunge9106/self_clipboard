@@ -18,6 +18,32 @@ use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, Web
 /// 放在这一层而不是各自 `const` 一份：失焦策略要按 label 区分（见 `closes_on_blur`），
 /// 两边各写一个 `"panel"` 字面量，哪天改名字就会出现「策略认不出这是面板」的静默失效。
 pub const PANEL_LABEL: &str = "panel";
+
+/// 前端在面板顶部把手按下时调用：给面板挂上拖动用的 WndProc，并开始自定义拖动。
+///
+/// **不能用 `WebviewWindow::start_dragging()`**：面板是 `transparent` + 带材质的
+/// 分层窗口，系统移动循环会让 DWM 逐帧重算背景模糊，实测拖动时身后拖出一串重影
+/// （用户反馈「拖拽重影很严重」）。这里走主窗口同款的自定义拖动：
+/// `SetCapture` + 按绝对光标位移 `SetWindowPos` + 16ms 节流，全程材质不变、无残影。
+///
+/// 钩子幂等（同一句柄只挂一次）；面板被后台释放后重建，句柄会变，下次拖动自动重挂。
+#[tauri::command]
+pub fn panel_begin_drag(app: AppHandle) -> Result<(), String> {
+    let w = app
+        .get_webview_window(PANEL_LABEL)
+        .ok_or_else(|| "面板未打开".to_string())?;
+    let h = w.hwnd().map_err(|e| e.to_string())?;
+    let hwnd = h.0 as isize;
+    // **必须切回主线程**：`SetCapture` 只对**调用线程**的窗口生效，`SetWindowLongPtrW`
+    // 改别的线程的窗口也不可靠。命令可能跑在 IPC 线程上，直接调会静默失败
+    // （用户实测：换成自定义拖动后完全拖不动）。
+    app.run_on_main_thread(move || {
+        crate::effects::install_popup_hook(hwnd);
+        crate::effects::begin_custom_drag(hwnd);
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
 /// 托盘菜单窗口。与快捷面板一样是懒创建、只隐藏不销毁的独立窗口。
 pub const MENU_LABEL: &str = "tray-menu";
 

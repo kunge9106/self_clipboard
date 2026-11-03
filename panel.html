@@ -9,6 +9,10 @@
     <!-- 快捷面板：独立最小页面，理由同 tray.html —— 从无到有显示时不会带出主界面残影。
          样式复用主界面的变量与基类，观感一致。 -->
     <div class="panel">
+      <!-- 拖拽把手：面板固定在屏幕中央弹出，有时会挡住要看的内容。
+           顶部这条细把手就是给「把它挪开」用的 —— 中间一道小横条，
+           不用文字说明也能看出可以拖。 -->
+      <div class="panel-drag" title="拖动面板"><span class="panel-drag-grip"></span></div>
       <div class="panel-head">
         <input
           id="panel-search"

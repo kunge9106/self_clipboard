@@ -30,6 +30,17 @@ const listEl = $("panel-list");
 const searchEl = $("panel-search");
 const statusEl = $("panel-status");
 
+// 顶部把手 → 拖动整个面板。
+//
+// **不能用 `startDragging()`**：面板是 transparent + 带材质的分层窗口，系统移动
+// 循环会让 DWM 逐帧重算背景模糊，实测拖动时拖出一串重影。改走主窗口同款的自定义
+// 拖动（后端 SetCapture + 按光标位移 SetWindowPos + 16ms 节流），材质全程不变。
+document.querySelector(".panel-drag")?.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault(); // 别让它变成选中/拖拽文字的起点
+  invoke("panel_begin_drag").catch(() => {});
+});
+
 const api = createHistoryApi(invoke, { cachePages: 3 });
 /** 过滤后的总条数（后端给）：面板只显示前 MAX_ROWS 条，但状态栏要报真实总数 */
 let total = 0;
@@ -37,6 +48,9 @@ let total = 0;
 let rows = [];
 /** 当前选中下标 */
 let sel = 0;
+/** 行元素（不含分组标题）。高亮与滚动都按它取 —— 列表里混着 `.p-group`，
+ *  用 `listEl.children` 的下标会对不上，表现为高亮整体上移。 */
+let rowEls = [];
 
 /** 后端随每次弹出下发的行为偏好。
  *  目前只有 `closeKey`（设置页录的关闭键，默认 `esc`，Esc 始终兜底可用）。
@@ -76,15 +90,24 @@ function applyFilter() {
  * 「共 3 万条」和「共 60 条」对用户是两件事。
  */
 async function fetchRows(q) {
-  let res;
-  try {
-    res = await api.fetchWindow({
+  const ask = (limit) =>
+    api.fetchWindow({
       filter: buildFilter({ view: "history", query: q }),
       offset: 0,
-      limit: MAX_ROWS,
+      limit,
       anchorId: null,
       wantTotal: true,
     });
+  let res;
+  try {
+    res = await ask(MAX_ROWS);
+    // **置顶不占「最近 N 条」的名额**：后端按「置顶在前、其余在后」拼成一条序列
+    // 再切 window，只取 60 条时置顶会把本该出现的最近条目挤掉（用户实测：
+    // 置顶几条，最近就少几条）。发现有置顶且总数超上限，按「置顶数 + 60」重取，
+    // 两组各自满额。只在有置顶的账号上多这一次查询。
+    if (res.pinnedCount > 0 && res.total > MAX_ROWS) {
+      res = await ask(MAX_ROWS + res.pinnedCount);
+    }
   } catch (e) {
     rows = [];
     total = 0;
@@ -101,15 +124,36 @@ async function fetchRows(q) {
       ? q
         ? "没有匹配的内容"
         : "剪贴板还是空的"
-      : `${total} 条${total > MAX_ROWS ? `（显示前 ${MAX_ROWS} 条）` : ""}`
+      : `${total} 条${total > MAX_ROWS ? `（显示前 ${MAX_ROWS} 条，不含置顶）` : ""}`
   );
 }
 
 function render() {
   listEl.replaceChildren();
+  rowEls = [];
+  // 分组标题：列表是「置顶优先、组内按时间倒序」，光靠行上的图钉说不清
+  // 「上面这几条为什么不动」。插一条小字标题最直白 —— 微信、Ditto 都是这么分的。
+  // 规则：首条是置顶才加「置顶」；从置顶切到普通时才加「最近」；
+  // 一条置顶都没有时两个标题都不加（整列表都是最近的，标题纯属噪音）。
+  let group = null;
+  const addGroup = (text) => {
+    const h = document.createElement("div");
+    h.className = "p-group";
+    h.textContent = text;
+    listEl.appendChild(h);
+  };
   rows.forEach((item, idx) => {
+    const isPinned = Array.isArray(item.pinnedViews) && item.pinnedViews.length > 0;
+    const want = isPinned ? "pin" : "recent";
+    if (want !== group) {
+      if (want === "pin") addGroup("置顶");
+      else if (group === "pin") addGroup("最近");
+      group = want;
+    }
+
     const row = document.createElement("div");
     row.className = "p-row" + (idx === sel ? " is-sel" : "");
+    if (isPinned) row.classList.add("is-pinned");
     row.setAttribute("role", "option");
 
     const kind = document.createElement("span");
@@ -133,20 +177,23 @@ function render() {
     });
     row.addEventListener("click", () => paste(item.id));
     listEl.appendChild(row);
+    rowEls.push(row);
   });
   scrollToSel();
 }
 
 /** 只改选中样式，不重建整个列表 —— 键盘连按时重建会有明显卡顿。 */
 function paintSelection() {
-  [...listEl.children].forEach((el, i) => {
+  // **只能用 `.p-row`**：列表里还混着分组标题（`.p-group`），按 `children` 下标取
+  // 会整体偏移 —— 表现就是「高亮的那行比鼠标位置高两行」（正好两个分组标题）。
+  rowEls.forEach((el, i) => {
     el.classList.toggle("is-sel", i === sel);
   });
   scrollToSel();
 }
 
 function scrollToSel() {
-  const el = listEl.children[sel];
+  const el = rowEls[sel];
   if (el) el.scrollIntoView({ block: "nearest" });
 }
 
@@ -331,3 +378,26 @@ listen("panel-open", (ev) => {
 });
 
 reload().then(() => searchEl.focus());
+
+// 面板**开着**时剪贴板有新内容：重拉列表（后端只在窗口可见时才发这件事）。
+//
+// 刷新有两个「不能打扰用户」的点：
+//   1. **保留搜索词** —— 用户可能正按关键词找东西，刷新把词清掉等于把人赶出流程；
+//   2. **按 id 找回选中项** —— 新条目插到最前，按旧下标会把高亮指到别的条目上。
+// 300ms 节流：一次复制可能连着触发多条事件（补格式、置顶、缩略图），只刷最后一次。
+let refreshTimer = null;
+listen("panel-refresh", () => {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(async () => {
+    refreshTimer = null;
+    const keepId = rows[sel]?.id;
+    await fetchRows(searchEl.value.trim());
+    if (keepId) {
+      const at = rows.findIndex((r) => r.id === keepId);
+      if (at >= 0) {
+        sel = at;
+        paintSelection();
+      }
+    }
+  }, 300);
+});

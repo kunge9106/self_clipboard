@@ -367,22 +367,66 @@ impl Hits {
 
 /// 扫一遍常驻列表，收集命中项（按过滤后的顺序分组）与锚点位置。
 ///
-/// **前提**：`items` 恒按 `ts` 降序（`store::insert_ordered` 维护这条不变量）。
-/// 有它才能用「一次稳定分组」代替「一次全量排序」：两组内部本来就是 ts 降序，
-/// 把置顶组整体提到前面就得到了目标顺序。传进来的列表若没排过序，结果顺序会错 ——
-/// 所以 debug 下直接断言，别让这种错悄悄流到界面上。
+/// **不再假设输入有序，也绝不 panic。**
+///
+/// 这里原本是 `debug_assert!(常驻列表必须保持 ts 降序)`，理由是对的：有它才能用
+/// 「一次稳定分组」代替「一次全量排序」。但这条件描述的是**持久化数据**的属性 ——
+/// 历史 bug、外部工具改动、磁盘损坏都可能让它失效，而本工程 `panic = "abort"`，
+/// 一条断言就等于整个程序崩掉、没有任何恢复机会（用户实测「启动即崩、连崩三次」）。
+///
+/// 业界做法：断言只抓「自己的 bug」，不用来处理数据异常 —— 数据有问题就降级并留痕。
+/// 所以这里分两条路：有序走快路径（只多一次 O(n) 比较，纳秒级），无序则临时整理
+/// 一次顺序，结果与有序时完全一致。
 fn scan(items: &[Meta], r: &Resolved<'_>, anchor_id: Option<&str>) -> Hits {
-    debug_assert!(
-        items.windows(2).all(|w| w[0].ts >= w[1].ts),
-        "常驻列表必须保持 ts 降序"
+    if items.windows(2).all(|w| w[0].ts >= w[1].ts) {
+        return collect_hits(0..items.len() as u32, items, r, anchor_id);
+    }
+    warn_unsorted(items.len());
+    let mut idx: Vec<u32> = (0..items.len() as u32).collect();
+    // 与 `insert_ordered` 同序：ts 降序；ts 相同时按原下标（保持稳定）
+    idx.sort_by(|&a, &b| {
+        let (ia, ib) = (&items[a as usize], &items[b as usize]);
+        ib.ts.cmp(&ia.ts).then(a.cmp(&b))
+    });
+    collect_hits(idx.into_iter(), items, r, anchor_id)
+}
+
+/// 「顺序异常」日志限流：查询在滚动时会高频调用，不能每条都写盘。
+static UNSORTED_WARN_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn warn_unsorted(len: usize) {
+    use std::sync::atomic::Ordering;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = UNSORTED_WARN_AT.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 60_000 {
+        return;
+    }
+    UNSORTED_WARN_AT.store(now, Ordering::Relaxed);
+    crate::log_warn!(
+        "[query] 常驻列表顺序异常（非 ts 降序），本次按 ts 降序临时整理 {len} 条；\
+         结果正确，但说明有写入路径在破坏顺序"
     );
+}
+
+/// 按给定下标顺序做一次分组扫描。快路径传 `0..len`（零分配），
+/// 慢路径传排好序的下标。
+fn collect_hits(
+    order: impl Iterator<Item = u32>,
+    items: &[Meta],
+    r: &Resolved<'_>,
+    anchor_id: Option<&str>,
+) -> Hits {
     let mut hits = Hits {
         pinned: Vec::new(),
         other: Vec::new(),
         anchor: None,
     };
     let wants_anchor = anchor_id.is_some();
-    for (idx, item) in items.iter().enumerate() {
+    for idx in order {
+        let item = &items[idx as usize];
         let pinned = is_pinned_in(item, r.view);
         // 锚点只要在**结果集**里就要记下来，与它是否命中搜索无关 —— 它本来就应该
         // 从结果里消失（前端会收到 Missing）。
@@ -394,12 +438,12 @@ fn scan(items: &[Meta], r: &Resolved<'_>, anchor_id: Option<&str>) -> Hits {
             if is_anchor {
                 hits.anchor = Some((true, hits.pinned.len() as u32));
             }
-            hits.pinned.push(idx as u32);
+            hits.pinned.push(idx);
         } else {
             if is_anchor {
                 hits.anchor = Some((false, hits.other.len() as u32));
             }
-            hits.other.push(idx as u32);
+            hits.other.push(idx);
         }
     }
     hits
@@ -618,8 +662,7 @@ mod tests {
     use super::*;
 
     /// 造一条常驻条目。`files` / `pinned_views` 由调用方按需补。
-    fn meta(id: &str, kind: &str, ts: u64, preview: &str) -> Meta {
-        let mut h = HistoryItem {
+    fn meta(id: &str, kind: &str, ts: u64, preview: &str) -> Meta {        let mut h = HistoryItem {
             id: id.to_string(),
             kind: kind.to_string(),
             ts,
@@ -856,6 +899,26 @@ mod tests {
                 m
             })
             .collect()
+    }
+
+    /// 输入顺序乱了也必须给出**正确结果**，而且不能崩。
+    ///
+    /// 这条守的是用户实测过的事故：索引里的顺序被写坏 → 旧实现里的
+    /// `debug_assert` 直接 abort（`panic = "abort"`），程序启动即崩、连崩三次。
+    /// 现在 `scan` 会临时整理顺序，结果与有序时一致。
+    #[test]
+    fn unsorted_input_yields_same_order_and_never_panics() {
+        // 故意打乱：ts 高低交错，模拟被写坏的索引
+        let items = vec![
+            meta("a", "text", 500, "a"),
+            meta("b", "text", 900, "b"),
+            meta("c", "text", 100, "c"),
+            meta("d", "text", 700, "d"),
+        ];
+        let f = HistoryFilter::default();
+        let out = window(&items, &f, 0, 10, None, true);
+        let got: Vec<&str> = out.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(got, vec!["b", "d", "a", "c"], "必须按 ts 降序给出");
     }
 
     /// 10 万条按 limit=200 翻到底：每个 id 恰好出现一次，顺序 == 全量排序。

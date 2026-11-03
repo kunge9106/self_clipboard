@@ -976,6 +976,18 @@ let wlTotal = 0; // 过滤后的总条数（后端给）
 let wlState = null; // 已加载的连续片段 { start, items }
 let wlToken = 0; // 渲染序号：异步回来晚了的旧结果直接丢弃
 let wlBusy = false; // 取页中（同一时刻只允许一个请求，避免重复页）
+/** 待执行的重绘句柄：连续到达的 clipboard-update 合并成一次，避免连闪 */
+let pendingWindowRender = null;
+
+/** 请求一次列表重绘，80ms 内合并。设置页与列表无关，不发。 */
+function scheduleWindowRender() {
+  if (currentView === "settings" || pendingWindowRender) return;
+  pendingWindowRender = setTimeout(() => {
+    pendingWindowRender = null;
+    api.invalidate();
+    void renderWindow({ keepScroll: true });
+  }, 80);
+}
 
 /** 当前筛选条件。搜索词原样传 —— 后端负责 trim 与折叠大小写。 */
 function currentFilter() {
@@ -3040,6 +3052,19 @@ function settingsDataHtml(s) {
         "记录资源管理器里复制的文件（默认关闭，关闭时不采集）",
         s.fileCopy
       ) +
+        // 相同内容怎么处理：默认 60 秒内合并并置顶（Windows 剪贴板 / Ditto 的语义）。
+        // 只比较内容完全相同的条目，不同内容不受影响。
+        rowCtl(
+          "相同内容去重",
+          "同一内容再次复制时<b>合并到已有条目并置顶</b>，不新增一条。只比较<b>内容完全相同</b>的条目",
+          `<div class="seg" id="set-dedup-mode">
+            <button type="button" data-mode="window" ${(s.dedupMode || "window") === "window" ? 'class="on"' : ""}>60 秒内</button>
+            <button type="button" data-mode="always" ${s.dedupMode === "always" ? 'class="on"' : ""}>不限时间</button>
+            <button type="button" data-mode="off" ${s.dedupMode === "off" ? 'class="on"' : ""}>关闭</button>
+          </div>`,
+          false,
+          "set-dedup-mode"
+        ) +
         rowCtl(
           "保留天数",
           "到期自动清理，<b>默认 3 天</b>；填 0 表示永久保存。<b>置顶与收藏默认豁免</b>，见下方选项",
@@ -4222,8 +4247,7 @@ function bindSettings(view) {
       }
     };
 
-  const retention = view.querySelector("#set-retention");
-  if (retention)
+  const retention = view.querySelector("#set-retention");  if (retention)
     retention.onchange = async () => {
       const days = Math.max(0, parseInt(retention.value, 10) || 0);
       retention.value = days;
@@ -4238,6 +4262,31 @@ function bindSettings(view) {
         toast("保存失败：" + e);
       }
     };
+
+  // 相同内容去重策略：改完立即生效（判重发生在捕获那一刻，无需重启）
+  const dedupMode = view.querySelector("#set-dedup-mode");
+  if (dedupMode)
+    dedupMode.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      const mode = btn.dataset.mode;
+      try {
+        await invoke("set_dedup_mode", { value: mode });
+        settings = await invoke("get_settings");
+        dedupMode
+          .querySelectorAll("button[data-mode]")
+          .forEach((b) => b.classList.toggle("on", b === btn));
+        toast(
+          mode === "off"
+            ? "已关闭去重：复制几次记几次"
+            : mode === "always"
+              ? "已改为不限时间去重"
+              : "已改为 60 秒内去重"
+        );
+      } catch (err) {
+        toast("保存失败：" + err);
+      }
+    });
 
   const material = view.querySelector("#set-material");
   if (material) {
@@ -4514,12 +4563,19 @@ async function main() {
   // 增量：复制新内容时 Rust 推事件，直接插到顶部
   await listen("clipboard-update", (e) => {
     const item = e.payload;
-    if (items.some((i) => i.id === item.id)) return;
+    // 条目已存在有两种情况，从 payload 上分不出来：
+    //   1. 一次复制被写两遍（补格式、缩略图更新）—— 列表不用动；
+    //   2. **去重命中并置顶** —— 顺序变了，必须重排，否则用户看不到它跳到最前。
+    // 早先这里直接 return，于是「不会重复出现了，但也没到最前面」。
+    // 统一走一次轻量刷新，80ms 节流，连发也只做一次。
+    if (items.some((i) => i.id === item.id)) {
+      scheduleWindowRender();
+      return;
+    }
     if (USE_WINDOW_API) {
       // 数据在后端：让页缓存失效并重取。用户停在顶部时不做锚点还原，
       // 新内容立刻可见；停在中间时锚点会把他正在看的那条钉在原地。
-      api.invalidate();
-      if (currentView !== "settings") renderWindow({ keepScroll: true });
+      scheduleWindowRender();
       return;
     }
     items.unshift(item);

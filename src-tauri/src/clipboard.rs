@@ -85,21 +85,32 @@ static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// 窗口就全放行，历史里会冒出 6 条一模一样的 50MB 记录 —— 既是「复制大图出现
 /// 两张（实际是好几张）」的成因，也意味着要重复做 6 次秒级的解码+写盘，卡顿被
 /// 放大数倍。保留一个小队列，窗口内的重复一律合并。
-static LAST_IMG: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+static LAST_IMG: Mutex<Vec<(u64, u64, String)>> = Mutex::new(Vec::new());
 /// 最近落过的文本指纹（内容哈希）与时刻。
 ///
 /// 为什么文本也需要：一次复制可能被应用**写两次**剪贴板（先纯文本、后补富文本），
 /// 于是两条通道各收一次，历史里出现两条一模一样的记录 —— 用户实测反馈过。
 /// 图片早就有这套指纹去重（`LAST_IMG`），文本一直没有。
-static LAST_TEXT: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+static LAST_TEXT: Mutex<Vec<(u64, u64, String)>> = Mutex::new(Vec::new());
 /// 最近落过的「文件路径清单」指纹。文件条目同样会被写两次（资源管理器在选中多个
 /// 文件时可能连续两次 SetClipboardData），日志里出现过同秒同大小的 files 重复。
-static LAST_FILES: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
-/// 文本判重窗口。比图片的 60s 短得多，因为语义不同：
-/// 图片的 60s 是为了扛住微信「隔几十秒补写同一张图」；
-/// 文本这里只合并「同一次复制被写两遍」，2 秒足够，也不会把用户
-/// 真的连续复制两次同一段文字（通常间隔更久）误合并。
-const TEXT_DUP_WINDOW_MS: u64 = 2_000;
+static LAST_FILES: Mutex<Vec<(u64, u64, String)>> = Mutex::new(Vec::new());
+/// 文本判重窗口。
+///
+/// 早先只给 2 秒，理由是「只合并同一次复制被写两遍，别把用户真的连续复制两次
+/// 同一段文字误合并」。但这与用户预期相反：**同一段文字隔十几秒再复制一次，
+/// 历史里就该只有一条**（Windows 剪贴板、Ditto、CopyQ 的「忽略重复」都是这个语义）。
+/// 用户实测反馈「短时间复制同样的东西会出现两次」，所以统一拉到 60 秒。
+///
+/// 更长的窗口不会误伤：只比较**内容完全相同**的文本，用户真想留两份不同内容
+/// 不受影响；而「同一次复制被写两遍」本来就在几十毫秒内，落在这个窗口里也一样合并。
+const TEXT_DUP_WINDOW_MS: u64 = 60_000;
+/// 文件清单判重窗口。
+///
+/// 原先是 800ms（同 `TEXT_SAME_ORIGIN_MS`），只覆盖「资源管理器连续两次
+/// SetClipboardData」。但实测复制**大文件 / 网络盘上的文件**时，第二次写入可能拖到
+/// 一两秒之后，于是历史里出现两条一模一样的文件记录。跟文本统一到 60 秒。
+const FILES_DUP_WINDOW_MS: u64 = 60_000;
 /// 「同一次复制的两次写入」判定窗口。
 ///
 /// 实测：Markdown 复制时应用先写渲染文本（812 字）、约 20ms 后再写原文（1347 字），
@@ -110,8 +121,22 @@ const TEXT_SAME_ORIGIN_MS: u64 = 800;
 /// 同源相似度阈值。实测 Markdown 原文 vs 其渲染文本 ≈ 0.6~0.75（标记被去掉、空白不同），
 /// 而两段无关正文的 bigram 重叠通常 < 0.25 —— 0.5 落在两者中间。
 const TEXT_SAME_ORIGIN_SIM: f32 = 0.5;
-/// 队列上限：只关心「最近这一小段时间」，不用无限增长。
-const LAST_IMG_KEEP: usize = 16;
+/// 指纹队列的实际上限。
+///
+/// 比 `LAST_IMG_KEEP` 大得多：一是启动预热最多灌 200 条历史指纹
+/// （`FP_WARMUP_LIMIT`），16 条的上限会挤掉大半；二是 `always` 策略要
+/// 「不限时间」。一条几十字节，多留几百条的内存代价可以忽略。
+const LAST_KEEP: usize = 512;
+/// 启动时预热指纹队列：只看最近这么多条。
+///
+/// 再往前的同内容极少被复制，而为它扫描上千个文件不划算（预热是启动路径上的
+/// 后台任务，但没必要为几乎不会命中的条目付 IO）。
+const FP_WARMUP_LIMIT: usize = 1000;
+/// 启动预热时最多算多少张**图片**的指纹。
+///
+/// 比文本严格得多：图片要读整个原图（几 MB）再算哈希，20 张 5MB 的图就是 100MB
+/// 的 IO。而「旧图重复制」几乎不会发生 —— 只要最近这几张就够了。
+const FP_WARMUP_IMAGES: usize = 15;
 /// 剪贴板落盘工作线程的投递端。解码 / 写盘 / 生成缩略图都在那边做，
 /// 主线程只负责把剪贴板里的字节拷出来就返回，见 spawn_worker。
 /// 元组第三项 = 是否由「编辑保存」产生（决定条目上是否显示「已编辑」徽章）。
@@ -1069,6 +1094,135 @@ fn spawn_clipboard_watchdog() {
         .ok();
 }
 
+/// 启动时把**指纹队列预热**回来（只覆盖文本与文件）。
+///
+/// 为什么需要：三个队列都是内存态，进程一退出就空。而「不限时间」去重的语义是
+/// 「历史里只要还有同内容就不再新增」—— 队列空着的话，重启后第一次复制同样的
+/// 内容照样新增一条，等于这个设置只在本次运行内有效。
+///
+/// 为什么只预热文本与文件：它们的指纹就是内容哈希，读一遍文件即可。图片指纹是
+/// 像素级的，得解码原图（实测约 100ms 一张），启动时做几十张就明显拖慢，所以
+/// 图片维持「本次运行内去重」。
+fn spawn_fp_warmup() {
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        // 先快照 id / 相对路径 / preview，再到锁外读文件 —— 读上百个文件不能占着 HISTORY
+        let picked: Vec<(String, String, Option<String>, String, bool)> = {
+            let Ok(g) = hist.lock() else { return };
+            g.iter()
+                .take(FP_WARMUP_LIMIT)
+                .filter_map(|m| {
+                    if m.kind != "text" && m.kind != "files" {
+                        return None;
+                    }
+                    Some((
+                        m.id.clone(),
+                        m.kind.clone(),
+                        m.text_rel().or_else(|| m.files_rel()),
+                        m.preview.clone(),
+                        m.preview_truncated,
+                    ))
+                })
+                .collect()
+        };
+        // 图片单独收集：只要最近 [`FP_WARMUP_IMAGES`] 张。
+        // 图片指纹是「原图文件字节的哈希」（微信走的就是这条），读文件算一遍即可；
+        // 但它比文本贵得多（图几 MB），所以限量。从最近一张开始，越新的越可能被
+        // 再复制一次 —— 旧图重复制几乎不会发生。
+        let imgs: Vec<(String, String)> = {
+            let Ok(g) = hist.lock() else { return };
+            g.iter()
+                .filter(|m| m.kind == "image")
+                .filter_map(|m| m.img_path.clone().map(|p| (m.id.clone(), p)))
+                .take(FP_WARMUP_IMAGES)
+                .collect()
+        };
+        if picked.is_empty() && imgs.is_empty() {
+            return;
+        }
+
+        // 队列语义：**最后一条是最近的一条**（判重只看 last）。列表是 ts 降序，
+        // 所以倒着放 —— 最后放进去的才是最新那条。
+        let (mut text, mut files): (Vec<(u64, u64, String)>, Vec<(u64, u64, String)>) =
+            (Vec::new(), Vec::new());
+        for (id, kind, rel, preview, truncated) in picked.iter().rev() {
+            // 正文文件优先；**文件缺失时退回 preview**。
+            //
+            // 这里必须用 `read_text_entity`（会解密），**不能直接 `fs::read`** ——
+            // 2.6.5 起正文是 AES-256-GCM 加密存储的，直接读拿到的是密文
+            // （`QTE1` 开头），对密文算出来的哈希与采集时对明文算的完全不同，
+            // 于是预热的每一条都命中不了，等于白做（用户实测就栽在这）。
+            let fp = match rel.as_ref() {
+                Some(r) => match read_text_entity(&dir, r) {
+                    Ok(text) if !text.is_empty() => content_hash(text.as_bytes()),
+                    // 解不开 / 空内容：未截断的 preview 就是全文，可以退一步用它
+                    _ if !*truncated && !preview.is_empty() => {
+                        content_hash(preview.as_bytes())
+                    }
+                    _ => continue,
+                },
+                None if !*truncated && !preview.is_empty() => content_hash(preview.as_bytes()),
+                None => continue,
+            };
+            // ts 填 0：只影响 60 秒窗口的判断（`now - 0` 必然超窗），
+            // 而预热的意义只在「不限时间」模式下 —— 那里不看 ts。
+            if kind == "text" {
+                text.push((fp, 0, id.clone()));
+            } else {
+                files.push((fp, 0, id.clone()));
+            }
+        }
+
+        let mut n = 0;
+        // 只在队列还空的时候填：预热是补历史，不能盖掉运行期间真实捕获的条目
+        if !text.is_empty() {
+            if let Ok(mut g) = LAST_TEXT.lock() {
+                if g.is_empty() {
+                    n += text.len();
+                    *g = text;
+                }
+            }
+        }
+        if !files.is_empty() {
+            if let Ok(mut g) = LAST_FILES.lock() {
+                if g.is_empty() {
+                    n += files.len();
+                    *g = files;
+                }
+            }
+        }
+
+        // 图片：`imgs` 是 ts 降序（最近在前），倒着放 → 队尾才是最近那张
+        let mut images: Vec<(u64, u64, String)> = Vec::new();
+        for (id, path) in imgs.iter().rev() {
+            let p = std::path::Path::new(path);
+            let full = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                dir.join(p)
+            };
+            let Ok(bytes) = std::fs::read(&full) else {
+                continue;
+            };
+            images.push((content_hash(&bytes), 0, id.clone()));
+        }
+        let mut n_img = 0;
+        if !images.is_empty() {
+            if let Ok(mut g) = LAST_IMG.lock() {
+                if g.is_empty() {
+                    n_img = images.len();
+                    *g = images;
+                }
+            }
+        }
+        crate::log_print!(
+            "[clipboard] 指纹队列预热 {n} 条文本/文件 + {n_img} 张图片（「不限时间」去重跨重启生效）"
+        );
+    });
+}
+
 fn spawn_worker() {
     // app 走全局 APP（OnceLock，在 init 首行写入）；worker 在订阅监听之前
     // 启动，所以取用时必定已就绪。
@@ -1163,6 +1317,20 @@ pub fn init(app: &AppHandle) {
     // 也不静默生成新密钥（见 store::load_index）。
     let loaded = crate::store::load_index(&dir);
     let mut hist = loaded.items;
+    // **加载后校正一次顺序**：`query::scan` 依赖「常驻列表恒按 ts 降序」这条不变式，
+    // 而顺序是持久化下来的 —— 快照与 WAL 重放都不保证它正确。一旦某次写入把顺序
+    // 弄乱，下次启动的第一次查询就会踩 `debug_assert` → panic → `panic in a
+    // function that cannot unwind` → abort，表现为「启动即崩、连崩几次」。
+    //
+    // 先 O(n) 检查、不对才排（O(n log n)，680 条几十微秒）。宁可花这点时间，
+    // 也不能让一份顺序有问题的索引把程序卡死在启动阶段。
+    if !hist.windows(2).all(|w| w[0].ts >= w[1].ts) {
+        crate::log_warn!(
+            "[clipboard] 索引顺序异常（不是 ts 降序），已强制重排 {} 条",
+            hist.len()
+        );
+        hist.sort_by(|a, b| b.ts.cmp(&a.ts));
+    }
     // 这一次启动结束时要不要补写一份 v2 快照：首次运行、刚迁移完、索引需要重建，
     // 三种情况都得写，否则下次启动又走一遍同样的分支。
     let mut need_snapshot = loaded.status.needs_snapshot();
@@ -1272,6 +1440,7 @@ pub fn init(app: &AppHandle) {
     // 到达时 WORKER 还没初始化，会退化成主线程同步落盘。
     spawn_worker();
     spawn_thumb_worker();
+    spawn_fp_warmup();
 
     // 订阅剪贴板格式监听：此后系统剪贴板变化会向我们窗口发 WM_CLIPBOARDUPDATE
     unsafe {
@@ -1336,9 +1505,13 @@ pub fn init(app: &AppHandle) {
 ///   - 窗口隐藏/最小化导致消息没投递：轮询本身就是兜底。
 pub fn on_clipboard_update() {
     let seq = unsafe { GetClipboardSequenceNumber() };
-    if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
+    let last = LAST_SEQ.load(Ordering::Relaxed);
+    if seq == 0 || seq == last {
         return;
     }
+    // 诊断：能区分「消息没到」与「到了但被跳过」—— 用户报过「删除之后复制不进来」，
+    // 没有这行就完全看不出是哪一种。
+    crate::log_print!("[clipboard] 收到更新 seq={seq}（上次={last}）");
     // 这次内容是不是**我们自己**写回剪贴板的（回贴 / 编辑保存 / 截图）。
     // 回贴的图不能被当成截图 —— 它只是历史里某张图的副本。
     let mut own_write = false;
@@ -1351,6 +1524,10 @@ pub fn on_clipboard_update() {
         let me = CLIP_HWND.get().copied().unwrap_or(0);
         if me != 0 && GetClipboardOwner() == me {
             if !RECORD_OWN_WRITE.swap(false, Ordering::SeqCst) {
+                // 留痕：这里是**静默跳过**，一旦误判（比如句柄被系统复用），
+                // 用户复制什么都不会入库，而且因为 LAST_SEQ 被推进，那条内容
+                // 就此永久跳过 —— 表现正是「复制不进软件了」。
+                crate::log_print!("[clipboard] 跳过：剪贴板 owner 是本进程窗口 seq={seq}");
                 LAST_SEQ.store(seq, Ordering::Relaxed);
                 return;
             }
@@ -1358,6 +1535,7 @@ pub fn on_clipboard_update() {
             own_write = true;
         }
         if seq == SKIP_SEQ.load(Ordering::Relaxed) {
+            crate::log_print!("[clipboard] 跳过：命中 SKIP_SEQ 标记 seq={seq}");
             SKIP_SEQ.store(0, Ordering::Relaxed);
             LAST_SEQ.store(seq, Ordering::Relaxed);
             return;
@@ -1505,13 +1683,17 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
     //   二、内容**不同但同源**（先写渲染文本、再写 Markdown 原文）→ 用后者替换前者。
     // 第二层是用户实测出来的：复制 Markdown 会落下两条，一条是去掉标记的纯文本、
     // 一条是原文，长度和内容都不一样，光靠哈希根本拦不住。
+    // 本次新增要把 id 回填到哪条指纹队列（判重时条目还没入库，拿不到 id）
+    // 1 = 文本 / 2 = 文件 / 3 = 图片
+    let mut remember: u8 = 0;
+
     if let RawClip::Text { text, html, rtf } = &raw {
         let fp = content_hash(text.as_bytes());
-        let dup = LAST_TEXT
+        let hit = LAST_TEXT
             .lock()
-            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, TEXT_DUP_WINDOW_MS))
-            .unwrap_or(false);
-        if !dup && is_same_origin_recent(text, captured_ms) {
+            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, dedup_window(TEXT_DUP_WINDOW_MS)))
+            .unwrap_or(None);
+        if hit.is_none() && is_same_origin_recent(text, captured_ms) {
             if replace_latest_text(text, html, rtf) {
                 // 指纹换成新内容，否则紧接着的第三次写入又会被当成新条目
                 if let Ok(mut g) = LAST_TEXT.lock() {
@@ -1526,28 +1708,42 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
                 return;
             }
         }
-        if dup {
-            // 关键：第二次往往**才带格式**（延迟渲染）。这里把格式补到已有那条上，
-            // 而不是丢掉 —— 否则用户复制一次，格式永远进不来。
-            let patched = merge_rich_into_latest(html, rtf);
-            crate::log_print!(
-                "[clipboard] 重复文本已合并（同一次复制的第二次写入，补格式={patched}）"
+        if let Some(id) = hit {
+            // 先确认这条还活着：用户可能已经把它删了。删掉的条目要当成墓碑清掉，
+            // 否则每次复制同样的内容都会命中它，既不新增也置顶不了。
+            if bump_history_item(&id, captured_ms) {
+                // 关键：第二次往往**才带格式**（延迟渲染）。这里把格式补到已有那条上，
+                // 而不是丢掉 —— 否则用户复制一次，格式永远进不来。
+                let patched = merge_rich_into_latest(html, rtf);
+                crate::log_print!("[clipboard] 重复文本已合并并置顶（补格式={patched}）");
+                return;
+            }
+            forget_fp(&LAST_TEXT, fp);
+            crate::log_warn!(
+                "[clipboard] 命中的条目已被删除，清掉墓碑并按新内容入库（fp={fp:016X}）"
             );
-            return;
         }
+        remember = 1;
     }
 
     // 文件清单判重：同一批路径在极短时间内被写两次，只留一条。
     if let RawClip::Files(paths) = &raw {
         let fp = content_hash(paths.join("\n").as_bytes());
-        let dup = LAST_FILES
+        let hit = LAST_FILES
             .lock()
-            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, TEXT_SAME_ORIGIN_MS))
-            .unwrap_or(false);
-        if dup {
-            crate::log_print!("[clipboard] 重复文件清单已合并（同一次复制的第二次写入）");
-            return;
+            .map(|mut g| dedup_merge_with(&mut g, fp, captured_ms, dedup_window(FILES_DUP_WINDOW_MS)))
+            .unwrap_or(None);
+        if let Some(id) = hit {
+            if bump_history_item(&id, captured_ms) {
+                crate::log_print!("[clipboard] 重复文件清单已合并并置顶");
+                return;
+            }
+            forget_fp(&LAST_FILES, fp);
+            crate::log_warn!(
+                "[clipboard] 命中的文件清单已被删除，清掉墓碑并按新内容入库（fp={fp:016X}）"
+            );
         }
+        remember = 2;
     }
 
     // 图片：同一次复制可能先给 DIB、再给原文件。两条路径算出来的指纹**体系不同**
@@ -1575,21 +1771,40 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
         _ => None,
     };
     if let Some(fp) = fp {
-        if let Ok(mut g) = LAST_IMG.lock() {
-            if dedup_merge(&mut g, fp, captured_ms) {
+        let hit = LAST_IMG
+            .lock()
+            .map(|mut g| dedup_merge(&mut g, fp, captured_ms))
+            .unwrap_or(None);
+        if let Some(id) = hit {
+            if bump_history_item(&id, captured_ms) {
                 crate::logger::write_line(
                     "INFO",
                     "clipboard",
-                    "重复图片已合并（与上一条指纹一致，滑动窗口续期）",
+                    "重复图片已合并并置顶（与已有指纹一致，滑动窗口续期）",
                 );
                 return;
             }
+            forget_fp(&LAST_IMG, fp);
+            crate::log_warn!(
+                "[clipboard] 命中的图片已被删除，清掉墓碑并按新内容入库（fp={fp:016X}）"
+            );
         }
+        remember = 3;
     }
 
     let item = store_raw(raw, edited, shot);
+    // 判重时条目还没入库、拿不到 id；现在把它回填到对应指纹队列，
+    // 下次命中时才能精准定位到这一条（见 `bump_history_item`）。
+    match remember {
+        1 => remember_id(&LAST_TEXT, &item.id),
+        2 => remember_id(&LAST_FILES, &item.id),
+        3 => remember_id(&LAST_IMG, &item.id),
+        _ => {}
+    }
     if let Some(app) = APP.get() {
         let _ = app.emit("clipboard-update", item.clone());
+        // 面板开着时同步刷新（收起状态不发，下次唤出本来会重拉）
+        crate::panel::notify_if_visible(app);
     }
     // 缩略图：**所有来源的图片都走这一条通道**（ensure_thumb 读落盘原图 → 解码 → 落缩略图；
     // 解不了一律回退到通用占位图）。两个要点：
@@ -1776,25 +1991,139 @@ fn merge_rich_into_latest(html: &Option<String>, rtf: &Option<String>) -> bool {
     changed
 }
 
-fn dedup_merge(g: &mut Vec<(u64, u64)>, fp: u64, now: u64) -> bool {
-    dedup_merge_with(g, fp, now, DUP_WINDOW_MS)
+
+/// 把刚刚合并掉的重复条目**顶到列表最前**。
+///
+/// 历史按「置顶优先、组内 ts 倒序」排，把目标条目的 `ts` 推到 `now` 就等于「提到顶部」：
+/// 不新增条目、不删文件、id 不变。用户看到的是「它跳到最上面了」—— 这正是 Windows
+/// 剪贴板历史与 Ditto 的行为；只合并不置顶的话，用户会以为这次复制没被记录。
+/// 把命中的重复条目**顶到列表最前**（不新增、不删文件、id 不变）。
+///
+/// 返回 `false` 表示**命中了一个已经不在的条目**（用户删掉了它）—— 调用方据此
+/// 把这条墓碑从指纹队列里清掉、按新内容入库。不清的话每次复制同样的内容都会
+/// 命中同一个墓碑，既不新增也置顶不了，表现就是「复制不进软件」。
+fn bump_history_item(id: &str, now: u64) -> bool {
+    if id.is_empty() {
+        crate::log_warn!("[clipboard] 命中的条目没有记 id，无法置顶（指纹队列回填失败）");
+        return false;
+    }
+    let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
+        return false;
+    };
+    let Ok(mut g) = hist.lock() else { return false };
+    let Some(pos) = g.iter().position(|m| m.id == id) else {
+        return false;
+    };
+    if g[pos].ts == now {
+        return true;
+    }
+    // 取出 → 改时间 → 按序插回。比「改完再 sort_by」更省：插入是 O(n) 的搬移，
+    // 全量排序是 O(n log n) 的比较；而且 `insert_ordered` 走的正是维护「ts 降序」
+    // 那条不变式的同一个函数，不可能把顺序弄坏。
+    let mut moved = g.remove(pos);
+    moved.ts = now;
+    let item = moved.to_item();
+    crate::store::insert_ordered(&mut g, moved);
+    drop(g);
+    crate::log_print!("[clipboard] 重复内容已置顶 id={id}");
+    append_op(
+        &dir,
+        crate::store::Op::Insert {
+            item: item.clone(),
+        },
+    );
+    if let Some(app) = APP.get() {
+        let _ = app.emit("clipboard-update", item);
+        // 顺序变了（那条浮到前面），面板开着时要跟上
+        crate::panel::notify_if_visible(app);
+    }
+    true
 }
 
-/// 同 `dedup_merge`，但窗口可指定（文本用更短的窗口，见 `TEXT_DUP_WINDOW_MS`）。
-fn dedup_merge_with(g: &mut Vec<(u64, u64)>, fp: u64, now: u64, window: u64) -> bool {
-    if let Some(last) = g.last_mut() {
-        if last.0 == fp && now.saturating_sub(last.1) < window {
-            last.1 = now; // 滑动窗口：续上这一簇
-            return true;
+/// 从指纹队列里删掉某个指纹的所有记录（条目被删后的墓碑清理）。
+fn forget_fp(q: &Mutex<Vec<(u64, u64, String)>>, fp: u64) {
+    if let Ok(mut g) = q.lock() {
+        g.retain(|(f, _, _)| *f != fp);
+    }
+}
+
+/// 把 `id` 回填到某条指纹队列的末尾（判重发生在入库之前，那时还没有 id）。
+fn remember_id(q: &Mutex<Vec<(u64, u64, String)>>, id: &str) {
+    if let Ok(mut g) = q.lock() {
+        if let Some(last) = g.last_mut() {
+            last.2 = id.to_string();
         }
     }
-    g.push((fp, now));
-    g.retain(|(_, t)| now.saturating_sub(*t) < window);
-    let len = g.len();
-    if len > LAST_IMG_KEEP {
-        g.drain(0..len - LAST_IMG_KEEP);
+}
+
+/// 按设置里的策略换算去重窗口（毫秒）。
+///
+/// - `window`（默认）：用各类型自己的窗口（文本/文件/图片都是 60 秒）
+/// - `always`：`u64::MAX`，不限时间
+/// - `off`：0，`now - last < 0` 恒不成立 → 完全不判重
+fn dedup_window(fallback: u64) -> u64 {
+    match crate::settings::get().dedup_mode.as_str() {
+        "always" => u64::MAX,
+        "off" => 0,
+        _ => fallback,
     }
-    false
+}
+
+fn dedup_merge(g: &mut Vec<(u64, u64, String)>, fp: u64, now: u64) -> Option<String> {
+    dedup_merge_with(g, fp, now, dedup_window(DUP_WINDOW_MS))
+}
+
+/// 判重并记账。**返回命中的条目 id**（`None` = 这是新内容，已入队）。
+///
+/// 两种模式的区别只在「跟谁比」：
+/// - `window`（默认 60 秒）：只跟**最后一条**比。语义是「到复制不同样的内容为止」——
+///   复制 A、B、再复制 A，第二个 A 是新的（中间隔了 B）。
+/// - `always`（`u64::MAX`）：**整队查找**。语义是「历史里只要还有同内容就不再新增」，
+///   与 Windows 剪贴板 / Ditto 一致。用户实测就栽在这里：设了「不限时间」，
+///   复制 A、复制 B、再复制 A 又新增了一条 —— 因为原来只放开了时间窗，
+///   「必须紧邻」这个条件还在。
+///
+/// 入队时 id 先留空，由调用方在拿到新条目 id 后回填（判重发生在入库之前）。
+fn dedup_merge_with(
+    g: &mut Vec<(u64, u64, String)>,
+    fp: u64,
+    now: u64,
+    window: u64,
+) -> Option<String> {
+    let forever = window == u64::MAX;
+    let hit = if forever {
+        g.iter().position(|(f, _, _)| *f == fp)
+    } else {
+        match g.last() {
+            Some((f, t, _)) if *f == fp && now.saturating_sub(*t) < window => Some(g.len() - 1),
+            _ => None,
+        }
+    };
+    if let Some(i) = hit {
+        g[i].1 = now; // 滑动窗口续期
+        return Some(g[i].2.clone());
+    }
+    if forever {
+        // 诊断：只在「永久去重」下打，且只在未命中时打（命中时不刷日志）。
+        // 队列长度是最关键的线索 —— 为 0 说明预热没跑到/被清空了，
+        // 有几百条说明是指纹不同（内容其实不完全一样，比如行尾/空白差异）。
+        crate::log_print!(
+            "[clipboard] 永久去重未命中：fp={fp:016X} 队列={} 条",
+            g.len()
+        );
+    }
+    g.push((fp, now, String::new()));
+    // `ts == 0` 是**启动预热**留下的历史指纹（只有 id、不知道真实时间），
+    // 不能按窗口清掉 —— 否则切一次 60 秒模式就把它们全删了，「不限时间」跨重启
+    // 去重随之失效。
+    g.retain(|(_, t, _)| *t == 0 || now.saturating_sub(*t) < window);
+    // 上限统一 512：预热最多 200 条，用 16 条的上限会被挤掉大半；
+    // 一条几十字节，多留几百条的内存代价可以忽略。
+    let len = g.len();
+    if len > LAST_KEEP {
+        g.drain(0..len - LAST_KEEP);
+    }
+    None
 }
 
 /// 把「待处理」的剪贴板内容整理成可存储形态。
@@ -3140,11 +3469,14 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
         (None, None) => "none",
     };
     crate::log_print!(
-        "[clipboard] 新增 {} 条目 kind={} size={} rich={}",
+        "[clipboard] 新增 {} 条目 kind={} size={} rich={}（去重模式={}）",
         id,
         item.kind,
         item.size,
-        rich
+        rich,
+        // 把当前策略带上：日志里能一眼确认「设置真的读到了」，
+        // 而不是怀疑「是不是又退回 60 秒了」
+        crate::settings::get().dedup_mode
     );
     item
 }
@@ -5924,6 +6256,45 @@ extern "system" {
 mod tests {
     use super::*;
 
+    /// 单测只关心「有没有合并」，把返回的 `Option<String>`（命中的条目 id）
+    /// 压成 bool。生产代码要用 id 去置顶，所以返回值不能是 bool。
+    fn test_merge(g: &mut Vec<(u64, u64, String)>, fp: u64, now: u64) -> bool {
+        dedup_merge(g, fp, now).is_some()
+    }
+    fn test_merge_with(
+        g: &mut Vec<(u64, u64, String)>,
+        fp: u64,
+        now: u64,
+        window: u64,
+    ) -> bool {
+        dedup_merge_with(g, fp, now, window).is_some()
+    }
+
+    /// 「永久去重」必须**整队查找**：A → B → A 的第二个 A 要命中更早那条。
+    ///
+    /// 用户实测的 bug：设成「不限时间」后，复制 A、复制 B、再复制 A，还是新增了
+    /// 一条 —— 因为原来只放开了时间窗（`u64::MAX`），「只跟最后一条比」这个条件
+    /// 还在，中间隔着 B 就再也命中不了。
+    /// 同时锁住窗口模式的原有语义：60 秒下同样的序列**不该**命中（那是正常操作）。
+    #[test]
+    fn forever_mode_finds_earlier_match_but_window_mode_does_not() {
+        let mut g: Vec<(u64, u64, String)> = Vec::new();
+        assert!(!test_merge_with(&mut g, 1, 1_000, u64::MAX), "A 首次");
+        assert!(!test_merge_with(&mut g, 2, 2_000, u64::MAX), "B 首次");
+        assert!(
+            test_merge_with(&mut g, 1, 3_000, u64::MAX),
+            "永久去重：A 应命中 1_000 那条，不该新增"
+        );
+
+        let mut g: Vec<(u64, u64, String)> = Vec::new();
+        assert!(!test_merge_with(&mut g, 1, 1_000, 60_000));
+        assert!(!test_merge_with(&mut g, 2, 2_000, 60_000));
+        assert!(
+            !test_merge_with(&mut g, 1, 3_000, 60_000),
+            "窗口模式只比最后一条：A→B→A 的第二个 A 应放行"
+        );
+    }
+
     /// 日期 → 天数的换算必须与已知锚点一致，否则索引重建时算出的时间会整体偏移。
     #[test]
     fn days_from_civil_matches_known_dates() {
@@ -6876,7 +7247,7 @@ mod tests {
     /// 后者只能验证「我理解对了」，前者才能验证「代码写对了」。
     #[test]
     fn repeated_writes_collapse_to_one_entry() {
-        let mut g: Vec<(u64, u64)> = Vec::new();
+        let mut g: Vec<(u64, u64, String)> = Vec::new();
         let fp = image_fingerprint(&solid_dib(400, 300, [10, 20, 30, 255]));
         let gaps = [0u64, 4_000, 8_000, 4_000, 11_000, 4_000, 46_000, 4_000];
 
@@ -6884,7 +7255,7 @@ mod tests {
         let mut t = 1_000_000u64;
         for gap in gaps {
             t += gap;
-            if dedup_merge(&mut g, fp, t) {
+            if test_merge(&mut g, fp, t) {
                 merged_count += 1;
             }
         }
@@ -6899,7 +7270,7 @@ mod tests {
     /// 只要相邻间隔在窗口内，就始终是一条。
     #[test]
     fn continuous_repeat_never_creates_second_entry() {
-        let mut g: Vec<(u64, u64)> = Vec::new();
+        let mut g: Vec<(u64, u64, String)> = Vec::new();
         let fp = image_fingerprint(&solid_dib(400, 300, [9, 9, 9, 255]));
         let mut t = 1_000_000u64;
         // 每 20s 来一次，共 30 次 → 总跨度 600s，远超窗口 60s。
@@ -6907,7 +7278,7 @@ mod tests {
         // 「连续复制」场景下用户预期始终只有一条。
         for i in 0..30 {
             t += 20_000;
-            let merged = dedup_merge(&mut g, fp, t);
+            let merged = test_merge(&mut g, fp, t);
             if i == 0 {
                 assert!(!merged, "首次应记录");
             } else {
@@ -6926,11 +7297,30 @@ mod tests {
         );
     }
 
+    /// 设置里的三档策略靠 window 的两个极值实现，语义必须钉住：
+    /// - `off` → 0：永不判重（复制几次记几次）
+    /// - `always` → `u64::MAX`：只要指纹相同就合并，不看时间
+    /// 这两个值一旦被改坏（比如 0 被当成"立刻过期"以外的含义），
+    /// 用户的设置就静默失效，所以单独守一条。
+    #[test]
+    fn dedup_window_extremes_mean_off_and_forever() {
+        let mut g = Vec::new();
+        assert!(!test_merge_with(&mut g, 7, 1_000, 0), "0 窗口不应判重");
+        assert!(!test_merge_with(&mut g, 7, 1_001, 0), "0 窗口同一指纹也不应判重");
+
+        let mut g = Vec::new();
+        assert!(!test_merge_with(&mut g, 7, 1_000, u64::MAX), "首次出现不是重复");
+        assert!(
+            test_merge_with(&mut g, 7, 10_000_000, u64::MAX),
+            "永不过期：间隔多久都应判重"
+        );
+    }
+
     /// A → B → A：用户确实复制了两次 A（中间夹了别的图），必须**放行**。
     /// 这正是「只与最后一条比对」的设计意图 —— 与整个队列比对会误合并第二个 A。
     #[test]
     fn interleaved_distinct_image_resets_cluster() {
-        let mut g: Vec<(u64, u64)> = Vec::new();
+        let mut g: Vec<(u64, u64, String)> = Vec::new();
         // ⚠️ 颜色要选**量化后仍不同**的值：指纹采样前会 >>3，
         // 所以 [1,1,1] 与 [2,2,2] 都会变成 0、判为同一张 —— 这不是 bug，
         // 而是量化在容忍「两条写入路径的重采样差异」（见 image_fingerprint）。
@@ -6940,12 +7330,12 @@ mod tests {
         assert_ne!(a, b, "两图指纹必须不同，否则本测试无意义");
         let mut t = 1_000_000u64;
 
-        assert!(!dedup_merge(&mut g, a, t), "首次 A 应记录");
+        assert!(!test_merge(&mut g, a, t), "首次 A 应记录");
         t += 1_000;
-        assert!(!dedup_merge(&mut g, b, t), "B 与 A 不同，应记录");
+        assert!(!test_merge(&mut g, b, t), "B 与 A 不同，应记录");
         t += 1_000;
         assert!(
-            !dedup_merge(&mut g, a, t),
+            !test_merge(&mut g, a, t),
             "中间的 B 打断了簇，第二个 A 应作为新条目记录"
         );
         assert_eq!(g.len(), 3);
@@ -6954,14 +7344,14 @@ mod tests {
     /// 队列不能无限增长。
     #[test]
     fn queue_is_bounded() {
-        let mut g: Vec<(u64, u64)> = Vec::new();
+        let mut g: Vec<(u64, u64, String)> = Vec::new();
         let mut t = 1_000_000u64;
         for i in 0..40u64 {
             t += 100;
             let fp = image_fingerprint(&solid_dib(400, 300, [i as u8, 1, 2, 255]));
-            dedup_merge(&mut g, fp, t);
+            test_merge(&mut g, fp, t);
         }
-        assert!(g.len() <= LAST_IMG_KEEP, "队列长度必须受限");
+        assert!(g.len() <= LAST_KEEP, "队列长度必须受限");
     }
 
     /// 缩略图跳采样的方向必须正确。
@@ -7046,19 +7436,19 @@ mod tests {
     /// 两条一起才说明窗口阈值真正起到了分界作用，而不是「一律合并」或「一律放行」。
     #[test]
     fn gap_beyond_window_creates_new_entry() {
-        let mut g: Vec<(u64, u64)> = Vec::new();
+        let mut g: Vec<(u64, u64, String)> = Vec::new();
         let fp = image_fingerprint(&solid_dib(400, 300, [7, 7, 7, 255]));
         let t0 = 1_000_000u64;
 
-        assert!(!dedup_merge(&mut g, fp, t0), "首次应记录");
+        assert!(!test_merge(&mut g, fp, t0), "首次应记录");
         // 正好在窗口边缘之内 → 合并
         assert!(
-            dedup_merge(&mut g, fp, t0 + DUP_WINDOW_MS - 1),
+            test_merge(&mut g, fp, t0 + DUP_WINDOW_MS - 1),
             "窗口内应合并"
         );
         // 超过窗口 → 放行（此时上一条已被边缘那次刷新到 t0+WINDOW-1）
         assert!(
-            !dedup_merge(&mut g, fp, t0 + DUP_WINDOW_MS - 1 + DUP_WINDOW_MS + 1),
+            !test_merge(&mut g, fp, t0 + DUP_WINDOW_MS - 1 + DUP_WINDOW_MS + 1),
             "超出窗口的间隔应放行"
         );
     }

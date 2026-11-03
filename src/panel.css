@@ -27,8 +27,31 @@ body {
   overflow: hidden;
 }
 
+/* 拖拽把手：顶部一道 14px 高的窄条，中间一根小横条做视觉暗示。
+   只占一点点高度（列表是 flex 自适应，少 14px 不影响可用性），
+   但把「面板能挪走」这件事变得可发现 —— 否则用户只能忍着它挡视线。 */
+.panel-drag {
+  height: 14px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+}
+
+.panel-drag:active {
+  cursor: grabbing;
+}
+
+.panel-drag-grip {
+  width: 28px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
 .panel-head {
-  padding: 10px 12px 8px;
+  padding: 8px 12px 8px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -71,6 +94,46 @@ body {
   background: var(--accent);
   color: #fff;
 }
+
+/* 置顶标识：行左侧一道内阴影竖条，让「置顶组」在视觉上连成一片。
+   组与组的界限由 `.p-group` 标题说明，这里只做视觉连续。 */
+.p-row.is-pinned {
+  position: relative;
+}
+
+/* 只取行高中段的一小截，**不贯穿整行**：通栏竖线看起来像边框画错了，
+   短竖线才像「标签」。 */
+.p-row.is-pinned::before {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: 26%;
+  bottom: 26%;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* 分组标题（置顶 / 最近）。字号比正文小一点，但**用主文字色 + 加粗**——
+   纯次级灰在面板这个尺寸下几乎看不见（用户反馈「不够明显」）。 */
+.p-group {
+  padding: 8px 8px 3px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text);
+  letter-spacing: 0.3px;
+  user-select: none;
+}
+
+.p-group:first-child {
+  padding-top: 2px;
+}
+
+.p-row.is-sel.is-pinned::before {
+  background: rgba(255, 255, 255, 0.75);
+}
+
 
 .p-kind {
   flex: none;

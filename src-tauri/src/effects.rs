@@ -275,21 +275,28 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     );
 
     // 先清掉 WS_CAPTION | WS_THICKFRAME 等样式位——DWM 正是靠它们才
-    // 沿窗口矩形画 1px 边框（SystemBackdrop 档需要 DWM 提供 backdrop 与圆角，不能动）
-    if tier != Tier::SystemBackdrop {
-        strip_window_frame(hwnd, false);
-        // Tauri 的 4px 缩放边框子窗口会挡在 WebView 之上、抢走边缘鼠标事件，
-        // 每次 apply 都确认一遍（窗口重建后子窗口句柄会变）
-        disable_resize_border(hwnd);
-    }
+    // 沿窗口矩形画 1px 边框
+    //
+    // **所有档位都要剥，包括 SystemBackdrop**。早先这里写的是「SystemBackdrop 档
+    // 需要 DWM 提供 backdrop 与圆角，不能动」，于是该档位保留了这两个样式位，靠
+    // tao「用 WM_NCCALCSIZE 吞掉非客户区」装作无边框。这是个隐含假设：只要 tao 的
+    // NC 处理被打乱（主题切换、后台释放后窗口重建、tao 的 set_window_flags 把
+    // WS_CAPTION 又加回来），原生标题栏与 DWM 那圈 frame 就整条露出来 ——
+    // 用户看到的就是「UI 四周像 Win7 那样的边框」。
+    //
+    // 材质与样式位无关：`DWMWA_SYSTEMBACKDROP_TYPE` 是按**窗口矩形**画的，
+    // 不依赖非客户区。剥掉之后材质照常，只是 DWM 不再替我们画边框 ——
+    // 边框与圆角本来就由我们自己控制。
+    strip_window_frame(hwnd, false);
+    // Tauri 的 4px 缩放边框子窗口会挡在 WebView 之上、抢走边缘鼠标事件，
+    // 每次 apply 都确认一遍（窗口重建后子窗口句柄会变）
+    disable_resize_border(hwnd);
 
     // 标题栏/系统区域跟随深色
     set_immersive_dark(hwnd, dark);
 
-    // 再关掉 DWM 的非客户区渲染（双保险；部分系统上该属性已不再支持）
-    if tier != Tier::SystemBackdrop {
-        disable_nc_rendering(hwnd);
-    }
+    // 关掉 DWM 的非客户区渲染（双保险；部分系统上该属性已不再支持）
+    disable_nc_rendering(hwnd);
 
     let result = match tier {
         Tier::SystemBackdrop => apply_system_backdrop(hwnd),
@@ -512,16 +519,19 @@ fn strip_window_frame(hwnd: isize, force: bool) {
         const GWL_STYLE: i32 = -16;
         const WS_CAPTION: isize = 0x00C0_0000;
         const WS_THICKFRAME: isize = 0x0004_0000;
-        const WS_MINIMIZEBOX: isize = 0x0002_0000;
-        const WS_MAXIMIZEBOX: isize = 0x0001_0000;
-        const WS_SYSMENU: isize = 0x0008_0000;
         const SWP_NOSIZE: u32 = 0x0001;
         const SWP_NOMOVE: u32 = 0x0002;
         const SWP_NOZORDER: u32 = 0x0004;
         const SWP_NOACTIVATE: u32 = 0x0010;
         const SWP_FRAMECHANGED: u32 = 0x0020;
 
-        let mask = WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
+        // **只剥 `WS_CAPTION | WS_THICKFRAME`**。
+        //
+        // DWM 沿窗口矩形画那圈边框，靠的就是这两个位；最小化/最大化/系统菜单
+        // 这三个位与边框无关，但**系统要靠它们判断「这个窗口能不能最小化」** ——
+        // 一起剥掉的话，点击任务栏图标不会最小化（表现为「点了没反应」，
+        // 而 Windows 上所有正常窗口都是「再点一下就收起」）。
+        let mask = WS_CAPTION | WS_THICKFRAME;
         let cur = GetWindowLongPtrW(hwnd, GWL_STYLE);
         if cur == 0 {
             crate::log_warn!("[effects] 读取窗口样式失败");
@@ -830,8 +840,25 @@ fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
         // 圆角模式：系统材质已关，只重设区域。这里**不能**开 acrylic ——
         // 矩形材质会把圆角外重新填上
         apply_rounded_corners(hwnd);
-    } else if current_tier() == Tier::Acrylic {
-        let _ = apply_acrylic(hwnd, dark);
+    } else {
+        // 非圆角：按**当前档位**重新应用材质。
+        //
+        // 原来这里只处理 Acrylic 一档，SystemBackdrop / Mica 两档什么都不做 ——
+        // DWM 在主题切换时会重建材质上下文，不重设就退成深灰实心（用户实测：
+        // 「切深浅色后材质没切回来，是小概率」）。重新下发一次是幂等的，
+        // 成本只有几个 DWM 调用。
+        match current_tier() {
+            Tier::SystemBackdrop => {
+                let _ = apply_system_backdrop(hwnd);
+            }
+            Tier::Mica => {
+                let _ = apply_mica(hwnd);
+            }
+            Tier::Acrylic => {
+                let _ = apply_acrylic(hwnd, dark);
+            }
+            Tier::Solid => {}
+        }
     }
     nudge(hwnd);
     crate::log_print!("[effects] 主题视觉重刷完成（第 {pass} 遍，dark={dark}）");
@@ -1654,6 +1681,8 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
                 lparam: isize,
             ) -> isize;
         }
+        /// 客户区重算。`wparam != 0` 时返回值就是客户区相对窗口的位置与大小。
+        const WM_NCCALCSIZE: u32 = 0x0083;
 
         // 第二个实例请求唤回：**在本进程里**走与托盘唤回完全相同的路径，
         // 而不是让对面跨进程直接操作窗口（那会把窗口尺寸/排版搞坏）。
@@ -1667,6 +1696,16 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
                     let _ = app.emit("singleton-wake", ());
                 });
             }
+            return 0;
+        }
+        // 无边框的**最终保险**：无论样式位怎么变（主题切换、后台释放后窗口重建、
+        // tao 的 `set_window_flags` 把 WS_CAPTION 加回来、DWM 重算非客户区），
+        // 只要这里把非客户区算成 0，原生标题栏与那圈系统边框就永远画不出来。
+        //
+        // 这是 Windows 无边框窗口的标准做法。tao 内部本来也这么做，但它的判断
+        // 会被上面那些路径打乱；接管这一层之后就不再依赖它的状态了。
+        // `wparam == 0` 的那种调用要给系统算默认值（客户区不变），不能一律返回 0。
+        if msg == WM_NCCALCSIZE && wparam != 0 {
             return 0;
         }
         if msg == WM_NCACTIVATE {
@@ -1718,4 +1757,78 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
     }
     ORIG_WNDPROC.store(orig, std::sync::atomic::Ordering::Relaxed);
     crate::log_print!("[effects] 焦点 hook 已挂载（WM_NCACTIVATE → 不重绘 NC 区）");
+}
+
+// ---------------------------------------------------------------------------
+// 弹出窗口（快捷面板 / 托盘菜单）的拖动
+//
+// 它们不能复用上面那套：`ORIG_WNDPROC` 是**单槽**的，给第二个窗口挂上去会把主窗口
+// 的转发链覆盖掉（主窗口的消息会被转到面板的 WndProc，直接崩）。所以单独一套。
+//
+// 为什么必须自定义拖动而不能用 `startDragging()`：面板是 `transparent` + 带材质的
+// 分层窗口，系统移动循环会让 DWM 逐帧重算模糊，实测拖动时身后拖出一串重影
+// （用户反馈「拖拽重影很严重」）。主窗口早年为同一个问题改用自定义拖动，
+// 这里复用同一套：SetCapture + 按绝对光标位移 SetWindowPos + 16ms 节流。
+// ---------------------------------------------------------------------------
+
+/// 已挂 hook 的弹出窗口句柄（窗口重建后句柄会变，靠它判断要不要重挂）
+static POPUP_HOOKED: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+static POPUP_ORIG_WNDPROC: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+/// `GWL_WNDPROC`：窗口过程的存放槽位（-4）。主窗口那份是写在函数内部的局部常量，
+/// 这里要用在模块作用域，单独定义一份。
+const GWLP_WNDPROC: i32 = -4;
+
+extern "system" fn popup_hook_proc(
+    hwnd: isize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    unsafe extern "system" {
+        fn CallWindowProcW(
+            prev: isize,
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+        ) -> isize;
+    }
+    const WM_NCCALCSIZE: u32 = 0x0083;
+    const WM_NCHITTEST: u32 = 0x0084;
+    const HTCLIENT: isize = 1;
+
+    if msg == WM_NCCALCSIZE && wparam != 0 {
+        return 0;
+    }
+    if msg == WM_NCHITTEST {
+        return HTCLIENT;
+    }
+    if handle_drag_msg(hwnd, msg) {
+        return 0;
+    }
+    let orig = POPUP_ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
+    unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }
+}
+
+/// 给弹出窗口挂上拖动用的 WndProc（幂等：同一个句柄只挂一次）。
+pub fn install_popup_hook(hwnd: isize) {
+    if hwnd == 0 || POPUP_HOOKED.load(std::sync::atomic::Ordering::Relaxed) == hwnd {
+        return;
+    }
+    unsafe {
+        extern "system" {
+            fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+        }
+        let orig =
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, popup_hook_proc as *const () as isize);
+        if orig == 0 {
+            crate::log_warn!("[effects] 弹出窗口 hook 挂载失败");
+            return;
+        }
+        POPUP_ORIG_WNDPROC.store(orig, std::sync::atomic::Ordering::Relaxed);
+        POPUP_HOOKED.store(hwnd, std::sync::atomic::Ordering::Relaxed);
+    }
+    crate::log_print!("[effects] 弹出窗口拖动 hook 已挂载");
 }
