@@ -1684,8 +1684,9 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
     // 第二层是用户实测出来的：复制 Markdown 会落下两条，一条是去掉标记的纯文本、
     // 一条是原文，长度和内容都不一样，光靠哈希根本拦不住。
     // 本次新增要把 id 回填到哪条指纹队列（判重时条目还没入库，拿不到 id）
-    // 1 = 文本 / 2 = 文件 / 3 = 图片
+    // 1 = 文本 / 2 = 文件 / 3 = 图片；同时记下指纹，回填时要校验
     let mut remember: u8 = 0;
+    let mut remember_fp: u64 = 0;
 
     if let RawClip::Text { text, html, rtf } = &raw {
         let fp = content_hash(text.as_bytes());
@@ -1724,6 +1725,7 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
             );
         }
         remember = 1;
+        remember_fp = fp;
     }
 
     // 文件清单判重：同一批路径在极短时间内被写两次，只留一条。
@@ -1744,6 +1746,7 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
             );
         }
         remember = 2;
+        remember_fp = fp;
     }
 
     // 图片：同一次复制可能先给 DIB、再给原文件。两条路径算出来的指纹**体系不同**
@@ -1790,15 +1793,16 @@ fn handle_clip(captured_ms: u64, raw: RawClip, edited: bool, shot: bool) {
             );
         }
         remember = 3;
+        remember_fp = fp;
     }
 
     let item = store_raw(raw, edited, shot);
     // 判重时条目还没入库、拿不到 id；现在把它回填到对应指纹队列，
     // 下次命中时才能精准定位到这一条（见 `bump_history_item`）。
     match remember {
-        1 => remember_id(&LAST_TEXT, &item.id),
-        2 => remember_id(&LAST_FILES, &item.id),
-        3 => remember_id(&LAST_IMG, &item.id),
+        1 => remember_id(&LAST_TEXT, remember_fp, captured_ms, &item.id),
+        2 => remember_id(&LAST_FILES, remember_fp, captured_ms, &item.id),
+        3 => remember_id(&LAST_IMG, remember_fp, captured_ms, &item.id),
         _ => {}
     }
     if let Some(app) = APP.get() {
@@ -2048,11 +2052,21 @@ fn forget_fp(q: &Mutex<Vec<(u64, u64, String)>>, fp: u64) {
 }
 
 /// 把 `id` 回填到某条指纹队列的末尾（判重发生在入库之前，那时还没有 id）。
-fn remember_id(q: &Mutex<Vec<(u64, u64, String)>>, id: &str) {
+/// 把 `id` 回填到指纹队列（判重发生在入库之前，那时还没有 id）。
+///
+/// **必须按指纹匹配，不能盲写最后一条**：命中墓碑时 `forget_fp` 会把那条记录删掉，
+/// 队列末尾这时对应的是**另一次复制**的内容 —— 盲写就会把它们的 id 改成本条的，
+/// 之后复制那段内容会撞到错误条目（代码审查 P1-3）。
+fn remember_id(q: &Mutex<Vec<(u64, u64, String)>>, fp: u64, now: u64, id: &str) {
     if let Ok(mut g) = q.lock() {
         if let Some(last) = g.last_mut() {
-            last.2 = id.to_string();
+            if last.0 == fp {
+                last.2 = id.to_string();
+                return;
+            }
         }
+        // 队列里没有这次内容的指纹（墓碑被清掉了 / 被上限挤掉了）→ 补一条
+        g.push((fp, now, id.to_string()));
     }
 }
 
@@ -4649,12 +4663,29 @@ fn spawn_compact(dir: PathBuf) {
 /// 注意不能在持有 `HISTORY` 锁的路径上直接调用（会自锁），只能从新线程或退出流程里调。
 fn compact_now(dir: &Path) {
     let Some(store) = HISTORY.get() else { return };
+    // **先定住 WAL 位置，再克隆内存态**（顺序不能反）。
+    //
+    // 反过来的话：克隆之后、checkpoint 之前用户复制了一条 → 该条进了 WAL、
+    // 拿到 seq=501；checkpoint 把它算进 `cp.seq`；而快照写的是克隆时的旧状态
+    // （没有这条）；紧接着 `truncate_wal_prefix` 把 `0..wal_len` 截掉 —— 这条帧
+    // 连同它的记录一起消失，重启后再也找不回来。
+    //
+    // 整理跑在后台线程，用户随时可能在复制，这个窗口是真实存在的（代码审查 P0-1）。
+    let cp = match crate::store::checkpoint(dir) {
+        Ok(cp) => cp,
+        Err(e) => {
+            crate::log_err!("clipboard", "索引整理失败（checkpoint：{e}）");
+            return;
+        }
+    };
     let snapshot = match store.lock() {
         Ok(g) => g.clone(),
         Err(p) => p.into_inner().clone(),
     };
     let t = std::time::Instant::now();
-    match crate::store::compact(dir, &snapshot) {
+    // `persist_at` 用**刚才那个** checkpoint：这之后新追加的帧（seq > cp.seq）
+    // 会原样留在 WAL 里，下次启动重放补进来，不会丢。
+    match crate::store::persist_at(dir, &snapshot, cp) {
         Ok(()) => crate::log_print!(
             "[clipboard] 索引整理完成：{} 条，{} ms",
             snapshot.len(),
@@ -6268,6 +6299,19 @@ mod tests {
         window: u64,
     ) -> bool {
         dedup_merge_with(g, fp, now, window).is_some()
+    }
+
+    /// 命中墓碑被 `forget_fp` 清掉后，队列末尾可能是**另一次复制**的内容。
+    /// `remember_id` 必须按指纹匹配，不能盲写最后一条（审查 P1-3）。
+    #[test]
+    fn remember_id_never_rewrites_another_fingerprint() {
+        let q: Mutex<Vec<(u64, u64, String)>> = Mutex::new(vec![(111, 1, "other".into())]);
+        remember_id(&q, 222, 1000, "mine");
+        let g = q.lock().unwrap();
+        assert_eq!(g[0].2, "other", "别的内容的 id 不能被改掉");
+        assert_eq!(g.len(), 2, "应补一条属于本次内容的记录");
+        assert_eq!(g[1].0, 222);
+        assert_eq!(g[1].2, "mine");
     }
 
     /// 「永久去重」必须**整队查找**：A → B → A 的第二个 A 要命中更早那条。

@@ -485,12 +485,20 @@ struct Session {
 impl Drop for Session {
     fn drop(&mut self) {
         unsafe {
-            DeleteObject(self.dim_bmp);
-            DeleteObject(self.frame_bmp);
-            DeleteObject(self.mem_bmp);
+            // **必须先 DeleteDC，再 DeleteObject**。
+            //
+            // Win32 规则：位图仍被选入某个 DC 时，`DeleteObject` 会**失败**
+            // （返回 0），句柄直接泄漏。这三张位图在 `SelectObject` 之后从未还原
+            // 旧对象，所以原顺序（先删位图、后删 DC）等于每次会话都漏掉三张 DIB ——
+            // 4K 屏一次约 100MB，截几次图内存就吃满（代码审查 P0-6）。
+            //
+            // 先删 DC：DC 一消失，位图自然脱离，随后 `DeleteObject` 才能成功。
             DeleteDC(self.dim_dc);
             DeleteDC(self.frame_dc);
             DeleteDC(self.mem_dc);
+            DeleteObject(self.dim_bmp);
+            DeleteObject(self.frame_bmp);
+            DeleteObject(self.mem_bmp);
         }
     }
 }

@@ -452,8 +452,18 @@ fn write_snapshot(dir: &Path, items: &[HistoryItem], key: &Key, write_seq: u64) 
 /// 第③步用「重写尾部 + rename」而不是原地截断：整理期间新追加的帧在 `0..` 之后，
 /// 原样留着。
 pub fn persist(dir: &Path, metas: &[Meta]) -> Result<(), SaveError> {
-    let key = key_for(dir).ok_or(SaveError::NoKey)?;
     let cp = checkpoint(dir)?;
+    persist_at(dir, metas, cp)
+}
+
+/// 用**调用方给定的** checkpoint 落盘。
+///
+/// 调用方必须**先** `checkpoint()`、**后**取内存快照。顺序反过来的话，
+/// checkpoint 会把「克隆之后新追加的帧」也算进 `cp.seq`，而快照里没有它们，
+/// 紧接着的 `truncate_wal_prefix` 就把这些帧截掉 —— 那条记录永久丢失。
+/// 后台整理（`compact_now`）正是这个场景：它在另一个线程跑，用户随时可能在复制。
+pub fn persist_at(dir: &Path, metas: &[Meta], cp: Checkpoint) -> Result<(), SaveError> {
+    let key = key_for(dir).ok_or(SaveError::NoKey)?;
     // 常驻是 Meta，磁盘形态仍是完整 HistoryItem：投影在这里发生一次。
     save_snapshot(dir, metas, &key, cp.seq)?;
     truncate_wal_prefix(dir, cp.wal_len)?;
@@ -1195,12 +1205,24 @@ fn ensure_wal_dir(guard: &mut WalState, dir: &Path, key: &Key) -> io::Result<()>
         .create(true)
         .append(true)
         .open(&path)?;
+    // **序号只能往前走**。WAL 刚被整理过 / 文件为空时 `max_seq` 是 0，但内存里
+    // 明明知道「已经写到 500」（来自快照头或此前的追加）。若照 0 覆盖，
+    // 下一次追加会拿到 seq=1，而重启重放只应用 `seq > snapshot_seq(500)` 的帧
+    // —— 这条新记录被当成"旧帧"跳过，静默丢失。
+    //
+    // 同一目录才继承进度；**换了目录必须从文件重新开始**（测试、缓存目录迁移都走这条），
+    // 否则会把上一个目录的序号带过来，序号虚高、重放判断全部错位。
+    let prev_last_seq = if guard.dir.as_deref() == Some(dir) {
+        guard.last_seq
+    } else {
+        0
+    };
     *guard = WalState {
         dir: Some(dir.to_path_buf()),
         file: Some(file),
         len,
         frames,
-        last_seq: max_seq,
+        last_seq: max_seq.max(prev_last_seq),
     };
     Ok(())
 }
@@ -1845,6 +1867,87 @@ mod tests {
         let mut it = item(id, text);
         it.ts = ts;
         Op::Insert { item: it }
+    }
+
+    /// 重开一个**空的** WAL 时，序号必须继承而不是从 0 重来。
+    ///
+    /// 反例（审查 P0-2）：整理之后 WAL 空了，再追加拿到 seq=1；而快照头记着
+    /// `write_seq=500`，重启重放只应用 `seq > 500` 的帧 → 这条记录被当成旧帧跳过。
+    #[test]
+    fn reopening_empty_wal_keeps_sequence_monotonic() {
+        let dir = TempDir::new("wal-seq");
+        for i in 0..3u64 {
+            let mut it = item(&format!("s-{i}"), "x");
+            it.ts = 1000 + i;
+            append(
+                dir.path(),
+                Op::Insert {
+                    item: it.clone(),
+                },
+            )
+            .unwrap();
+        }
+        let before = lock_wal().last_seq;
+        assert!(before >= 3, "三次追加后序号应 >= 3，实际 {before}");
+
+        // 模拟「整理完成、句柄被释放」：dir 仍在，file 为 None
+        {
+            let mut g = lock_wal();
+            g.file = None;
+        }
+
+        let mut it = item("s-9", "y");
+        it.ts = 9999;
+        append(
+            dir.path(),
+            Op::Insert {
+                item: it.clone(),
+            },
+        )
+        .unwrap();
+        let after = lock_wal().last_seq;
+        assert!(
+            after > before,
+            "重开空 WAL 后序号必须继承（before={before}, after={after}），否则重启会丢记录"
+        );
+    }
+
+    /// 用「更早的 checkpoint」落盘时，checkpoint 之后追加的帧必须原样留在 WAL 里。
+    ///
+    /// 这直接复现审查 P0-1：`compact_now` 先克隆快照、后取 checkpoint，两者之间的
+    /// 新帧会被 `truncate_wal_prefix` 截掉。改成「先 checkpoint 再克隆」后，这里
+    /// 断言 B 能通过 WAL 重放补回来。
+    #[test]
+    fn persist_at_keeps_frames_appended_after_checkpoint() {
+        let dir = TempDir::new("persist-at");
+        let mut a = item("a-1", "A");
+        a.ts = 1000;
+        persist(dir.path(), &metas(&[a.clone()])).unwrap();
+
+        // ① 先定住 WAL 位置（此时快照里只有 A）
+        let cp = checkpoint(dir.path()).unwrap();
+
+        // ② 期间用户又复制了一条
+        let mut b = item("b-2", "B");
+        b.ts = 2000;
+        append(
+            dir.path(),
+            Op::Insert {
+                item: b.clone(),
+            },
+        )
+        .unwrap();
+
+        // ③ 用旧 checkpoint + 旧快照落盘
+        persist_at(dir.path(), &metas(&[a.clone()]), cp).unwrap();
+
+        // ④ 重新加载：B 必须还在（由 WAL 重放补回）
+        let loaded = load_index(dir.path());
+        let ids: Vec<&str> = loaded.items.iter().map(|m| m.id.as_str()).collect();
+        assert!(
+            ids.contains(&"b-2"),
+            "checkpoint 之后追加的帧被截掉了，实际：{ids:?}"
+        );
     }
 
     /// 追加 → 加载：状态与「直接对内存做同样的 op」逐条一致。
