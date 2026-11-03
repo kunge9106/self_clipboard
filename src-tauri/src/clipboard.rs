@@ -2003,9 +2003,13 @@ fn bump_history_item(id: &str, now: u64) -> bool {
     if g[pos].ts == now {
         return true;
     }
-    g[pos].ts = now;
-    let item = g[pos].to_item();
-    g.sort_by(|a, b| b.ts.cmp(&a.ts));
+    // 取出 → 改时间 → 按序插回。比「改完再 sort_by」更省：插入是 O(n) 的搬移，
+    // 全量排序是 O(n log n) 的比较；而且 `insert_ordered` 走的正是维护「ts 降序」
+    // 那条不变式的同一个函数，不可能把顺序弄坏。
+    let mut moved = g.remove(pos);
+    moved.ts = now;
+    let item = moved.to_item();
+    crate::store::insert_ordered(&mut g, moved);
     drop(g);
     crate::log_print!("[clipboard] 重复内容已置顶 id={id}");
     append_op(
