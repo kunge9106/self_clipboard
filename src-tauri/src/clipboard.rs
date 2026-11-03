@@ -1491,9 +1491,13 @@ pub fn init(app: &AppHandle) {
 ///   - 窗口隐藏/最小化导致消息没投递：轮询本身就是兜底。
 pub fn on_clipboard_update() {
     let seq = unsafe { GetClipboardSequenceNumber() };
-    if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
+    let last = LAST_SEQ.load(Ordering::Relaxed);
+    if seq == 0 || seq == last {
         return;
     }
+    // 诊断：能区分「消息没到」与「到了但被跳过」—— 用户报过「删除之后复制不进来」，
+    // 没有这行就完全看不出是哪一种。
+    crate::log_print!("[clipboard] 收到更新 seq={seq}（上次={last}）");
     // 这次内容是不是**我们自己**写回剪贴板的（回贴 / 编辑保存 / 截图）。
     // 回贴的图不能被当成截图 —— 它只是历史里某张图的副本。
     let mut own_write = false;
@@ -1506,6 +1510,10 @@ pub fn on_clipboard_update() {
         let me = CLIP_HWND.get().copied().unwrap_or(0);
         if me != 0 && GetClipboardOwner() == me {
             if !RECORD_OWN_WRITE.swap(false, Ordering::SeqCst) {
+                // 留痕：这里是**静默跳过**，一旦误判（比如句柄被系统复用），
+                // 用户复制什么都不会入库，而且因为 LAST_SEQ 被推进，那条内容
+                // 就此永久跳过 —— 表现正是「复制不进软件了」。
+                crate::log_print!("[clipboard] 跳过：剪贴板 owner 是本进程窗口 seq={seq}");
                 LAST_SEQ.store(seq, Ordering::Relaxed);
                 return;
             }
@@ -1513,6 +1521,7 @@ pub fn on_clipboard_update() {
             own_write = true;
         }
         if seq == SKIP_SEQ.load(Ordering::Relaxed) {
+            crate::log_print!("[clipboard] 跳过：命中 SKIP_SEQ 标记 seq={seq}");
             SKIP_SEQ.store(0, Ordering::Relaxed);
             LAST_SEQ.store(seq, Ordering::Relaxed);
             return;
