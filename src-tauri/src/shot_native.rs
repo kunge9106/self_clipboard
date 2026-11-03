@@ -746,6 +746,10 @@ unsafe fn build_session(
     }
 
     // 三张位图：原始帧、压暗版、双缓冲目标。任何一步失败都要把已建的一并清掉。
+    //
+    // **清理顺序：先 DeleteDC，再 DeleteObject**。`make_bitmap` 成功时必然已把位图
+    // `SelectObject` 进 DC，此时直接 `DeleteObject` 会失败（句柄泄漏）。这与
+    // `Session::Drop` 是同一条规则，创建失败路径也照做，P0-6 才算闭环。
     let made = (|| -> Option<(isize, isize, isize, isize, isize, isize)> {
         let (frame_bmp, frame_dc) = make_bitmap(screen, &pixels, w, h)?;
         let dimmed = dim_copy(&pixels);
@@ -753,8 +757,8 @@ unsafe fn build_session(
         let (dim_bmp, dim_dc) = match make_bitmap(screen, &dimmed, w, h) {
             Some(v) => v,
             None => {
-                DeleteObject(frame_bmp);
                 DeleteDC(frame_dc);
+                DeleteObject(frame_bmp);
                 return None;
             }
         };
@@ -763,18 +767,19 @@ unsafe fn build_session(
         // 会显示成黑边。DDB 没有 alpha 通道，混合结果只剩 RGB，正是我们要的。
         let mem_bmp = CreateCompatibleBitmap(screen, w, h);
         if mem_bmp == 0 {
-            DeleteObject(frame_bmp);
             DeleteDC(frame_dc);
-            DeleteObject(dim_bmp);
             DeleteDC(dim_dc);
+            DeleteObject(frame_bmp);
+            DeleteObject(dim_bmp);
             return None;
         }
         let mem_dc = CreateCompatibleDC(screen);
         if mem_dc == 0 {
-            DeleteObject(frame_bmp);
             DeleteDC(frame_dc);
-            DeleteObject(dim_bmp);
             DeleteDC(dim_dc);
+            DeleteObject(frame_bmp);
+            DeleteObject(dim_bmp);
+            // mem_bmp 还没选进任何 DC，可以直接删
             DeleteObject(mem_bmp);
             return None;
         }
