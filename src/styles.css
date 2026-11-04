@@ -856,11 +856,10 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 /* 一行「怎么用」：进入批量模式后界面上只剩几个按钮，不说明的话
    用户不知道自己已经在选择模式里（实测反馈）。 */
 .selectbar-hint {
-  /* 紧跟「已选 N 项」靠左，让它和计数连成一段实内容。
-     任何形式的居中（flex 居中 / 绝对居中）都会在中间留出空白，
-     而那层背景是 160deg 渐变 —— 空白处直接露出来就是一片灰（实测多轮反馈）。
-     不居中，是这一条唯一稳定的形态。 */
-  margin-left: 10px;
+  /* 居中：`flex: 1` 撑满剩余宽度，文字在其中居中。
+     不用绝对定位 —— 那会让元素脱离流、把中间整块留空。 */
+  flex: 1;
+  text-align: center;
   color: var(--text-dim);
   font-size: 12px;
   white-space: nowrap;
@@ -886,11 +885,10 @@ html:not(.hovers-off) .seg button:not(.on):hover {
    · 取消：全局 .btn-ghost 用 --text-dim，在灰底上偏淡 → 这里提到正文色
    · 删除禁用态：45% 透明糊成一团 → 0.62，仍明显是禁用，但字读得清 */
 .selectbar-actions .btn-ghost {
+  /* 只提文字色；**底不要动** —— `var(--glass)`（半透明白）在深色主题下是
+     按钮唯一的实体感来源，改成 transparent 之后只剩一圈淡描边，
+     看着「灰蒙蒙、没实体」（实测反馈）。 */
   color: var(--text);
-  /* 全局 .btn-ghost 是半透明白底（var(--glass)），压在灰背景上就是一块
-     「白蒙蒙」的雾 → 操作条里改成透明底 + 描边，只留形状和文字。 */
-  background: transparent;
-  border-color: color-mix(in srgb, var(--text) 22%, transparent);
 }
 
 .selectbar-actions .btn-danger:disabled {
