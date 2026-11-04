@@ -138,7 +138,7 @@ async function fetchRows(q) {
       ? q
         ? "没有匹配的内容"
         : "剪贴板还是空的"
-      : `${total} 条${total > MAX_ROWS ? `（显示前 ${MAX_ROWS} 条，不含置顶）` : ""}`
+      : `${total} 条${total > MAX_ROWS ? ` · 显示前 ${MAX_ROWS} 条` : ""}`
   );
 }
 

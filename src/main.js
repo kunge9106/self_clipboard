@@ -474,7 +474,7 @@ async function openClearMissingModal() {
   }
   clearMissingIds = dead;
   document.getElementById("clear-missing-modal-text").textContent =
-    `共 ${dead.length} 条文件条目的原文件已不存在（被移动、改名或删除），无法再粘贴。此操作不可撤销。`;
+    `共 ${dead.length} 条记录的原文件已不存在，无法再粘贴。此操作不可撤销。`;
   document.getElementById("clear-missing-modal").hidden = false;
 }
 
@@ -519,8 +519,7 @@ async function askPurgeFiles(targets) {
   const tail = perm ? "（不可恢复）" : "（之后可从回收站还原）";
 
   document.getElementById("purge-modal-text").textContent =
-    `将${how} ${alive.length} 个文件条目关联的本地文件${tail}。\n\n` +
-    `具体文件以记录中的路径为准。`;
+    `将处理 ${alive.length} 条文件记录对应的本地文件${tail}。\n\n此操作不可撤销。`;
   document.getElementById("purge-confirm").textContent = perm ? "永久删除" : "移入回收站";
   document.getElementById("purge-modal").hidden = false;
   return new Promise((resolve) => {
@@ -2616,7 +2615,7 @@ function settingsGeneralHtml(s) {
         rowCheck(
           "set-release-idle",
           "后台释放",
-          "收起后关掉界面进程，常驻内存约 400 MB 降到 40 MB；唤回时要重建，慢约 0.3 秒",
+          "收起后释放界面内存；再次唤出时稍慢一点（约 0.3 秒）",
           (s.releaseIdleSecs || 0) > 0
         ) +
         rowCtl(
@@ -2698,7 +2697,7 @@ function settingsGeneralHtml(s) {
         ) +
         rowCtl(
           "截图方式",
-          "系统（默认）：调用 Windows 截图工具，自带箭头与马赛克；内置：轻贴自己画覆盖层，取消不碰剪贴板、截完直接进历史",
+          "系统：使用 Windows 自带截图；内置：使用轻贴截图",
           `<div class="seg" id="set-shot-mode">
             <button type="button" data-mode="builtin" ${
               s.screenshotMode === "builtin" ? 'class="on"' : ""
@@ -2712,7 +2711,7 @@ function settingsGeneralHtml(s) {
         ) +
         rowCtl(
           "截图格式",
-          "BMP：无损、最快；PNG：无损，体积约为 BMP 的 1/5；JPG：有损、最小。只影响截图，复制来的图片保持原样",
+          "仅影响截图；PNG 体积与速度更均衡",
           `<div class="seg" id="set-shot-format">
             <button type="button" data-fmt="bmp" ${
               (s.shotFormat || "bmp") === "bmp" ? 'class="on"' : ""
@@ -2820,14 +2819,14 @@ function settingsDataHtml(s) {
       rowCheck(
         "set-file-copy",
         "文件复制",
-        "记录资源管理器里复制的文件（默认关闭，关闭时不采集）",
+        "记录在资源管理器中复制的文件",
         s.fileCopy
       ) +
         // 相同内容怎么处理：默认 60 秒内合并并置顶（Windows 剪贴板 / Ditto 的语义）。
         // 只比较内容完全相同的条目，不同内容不受影响。
         rowCtl(
           "相同内容去重",
-          "同一内容再次复制时<b>合并到已有条目并置顶</b>，不新增一条。只比较<b>内容完全相同</b>的条目",
+          "相同内容再次复制时，合并到原条目并置顶",
           `<div class="seg" id="set-dedup-mode">
             <button type="button" data-mode="window" ${(s.dedupMode || "window") === "window" ? 'class="on"' : ""}>60 秒内</button>
             <button type="button" data-mode="always" ${s.dedupMode === "always" ? 'class="on"' : ""}>不限时间</button>
@@ -2864,12 +2863,12 @@ function settingsDataHtml(s) {
           <button class="btn-ghost" id="btn-open-dir">打开目录</button>
           <button class="btn-ghost" id="btn-open-log">日志目录</button>
         </div>
-        <div class="cache-log-hint"><b>缓存与日志相互独立</b>：清空、保留天数、退出清理都不会影响日志，日志仅能手动删除。</div>
+        <div class="cache-log-hint">日志不会被自动清理，只能手动删除。</div>
       </div>` +
         rowCheck(
           "set-images-split",
           "图片分类存放",
-          "微信 / QQ / 系统截图放 <b>shot/</b>，其它图片放 <b>copy/</b>；文件名一律按日期时间。关闭则全部平铺在 images/ 下",
+          "截图与其它图片分文件夹存放",
           s.imagesSplitDirs
         )
     ),
@@ -2901,7 +2900,7 @@ function settingsDataHtml(s) {
       rowCheck(
         "set-delete-files",
         "同时处理本地文件",
-        "文件条目只是<b>路径引用</b>。关闭（默认）时删条目只删记录，磁盘上的文件不动；开启后删除会先把本地文件移入回收站，<b>每次都先弹窗确认</b>",
+        "开启后删除记录时，一并把本地文件移入回收站（每次都会确认）",
         s.deleteFilesWithItem
       ) +
         rowCtl(
@@ -2917,7 +2916,7 @@ function settingsDataHtml(s) {
     block(
       "危险操作",
       `<div class="row"><div class="row-text"><span class="row-title">删除条目</span>
-         <div class="row-desc">这两个操作无法撤销。开了「同时处理本地文件」时，清空已失效不会碰文件（它们本来就不存在）</div></div>
+         <div class="row-desc">无法撤销</div></div>
          <div class="row-ctrl">
            <button class="btn-ghost" id="clear-missing">清空已失效</button>
            <button class="btn-danger" id="clear-all">清空全部历史</button>
@@ -3846,7 +3845,7 @@ function bindSettings(view) {
         await invoke("set_panel_stay_on_blur", { value: panelStay.checked });
         settings = await invoke("get_settings");
         syncPanelKeep();
-        toast(`面板失焦${panelStay.checked ? "保持打开" : "即收起"}`);
+        toast(panelStay.checked ? "失焦后保持打开" : "失焦即收起");
       } catch (e) {
         toast("未保存，请重试");
         panelStay.checked = !panelStay.checked;
@@ -3858,7 +3857,7 @@ function bindSettings(view) {
       try {
         await invoke("set_panel_keep_after_copy", { value: panelKeep.checked });
         settings = await invoke("get_settings");
-        toast(panelKeep.checked ? "点选后保持打开" : "点选后收起面板");
+        toast(panelKeep.checked ? "点选后保持打开" : "点选后自动收起");
       } catch (e) {
         toast("未保存，请重试");
         panelKeep.checked = !panelKeep.checked;
@@ -3964,7 +3963,7 @@ function bindSettings(view) {
         shotFmt
           .querySelectorAll("button[data-fmt]")
           .forEach((b) => b.classList.toggle("on", b === btn));
-        toast(`截图格式：${fmt.toUpperCase()}`);
+        toast(`截图格式已改为 ${fmt.toUpperCase()}`);
       } catch (err) {
         toast("未保存，请重试");
       }
@@ -4011,7 +4010,7 @@ function bindSettings(view) {
         await invoke("set_pin_global", { value: pinGlobal.checked });
         settings = await invoke("get_settings");
         items = await invoke("list_item_ids");
-        toast(pinGlobal.checked ? "置顶已改为全分类互通" : "置顶已改为按分类独立");
+        toast(pinGlobal.checked ? "置顶已互通" : "置顶已按分类独立");
       } catch (e) {
         toast("未保存，请重试");
         pinGlobal.checked = !pinGlobal.checked;
@@ -4028,7 +4027,7 @@ function bindSettings(view) {
         items = await invoke("list_item_ids");
         settings = await invoke("get_settings");
         render();
-        toast(days === 0 ? "已改为永久保留" : `仅保留近 ${days} 天`);
+        toast(days === 0 ? "已永久保留" : `仅保留近 ${days} 天`);
       } catch (e) {
         toast("未保存，请重试");
       }
@@ -4049,10 +4048,10 @@ function bindSettings(view) {
           .forEach((b) => b.classList.toggle("on", b === btn));
         toast(
           mode === "off"
-            ? "已关闭去重：复制几次记几次"
+            ? "已关闭去重"
             : mode === "always"
-              ? "已改为不限时间去重"
-              : "已改为 60 秒内去重"
+              ? "已不限时间去重"
+              : "已按 60 秒去重"
         );
       } catch (err) {
         toast("未保存，请重试");
@@ -4385,8 +4384,8 @@ async function checkHistoryLimit() {
   if (!modal) return;
   limitPromptShown = true;
   document.getElementById("limit-modal-text").textContent =
-    `当前 ${count} 条，上限 ${max} 条，超出 ${count - max} 条。` +
-    `清理会删掉最旧的 ${count - max} 条（置顶与收藏不受影响），此操作不可撤销。`;
+    `已达上限：${count} / ${max} 条。` +
+    `将删除最旧的 ${count - max} 条，置顶与收藏保留。此操作不可撤销。`;
   modal.hidden = false;
   void suggestAgeCleanup(count - max);
 }
@@ -4546,7 +4545,7 @@ async function refreshAgeCleanPreview(modal) {
         ? `将删除 ${days} 天前的条目。`
         : n === 0
           ? `没有 ${days} 天前的条目。`
-          : `将删除 ${days} 天前的条目 ${n} 条（置顶与收藏按设置豁免），此操作不可撤销。`;
+          : `将删除 ${days} 天前的 ${n} 条，置顶与收藏按设置保留。此操作不可撤销。`;
   }
   modal.dataset.days = String(days);
 }
