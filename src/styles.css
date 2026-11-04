@@ -843,9 +843,12 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 
 .toolbar.is-selecting .selectbar {
   display: flex;
-  /* 只做布局，不加任何底色/内边距：加了 padding 会在工具栏里圈出一块
-     与周围不同的区域，看起来像盖了层遮罩（实测两次反馈）。 */
-
+  /* 三元素  会在两侧各留一大块空白，而这层背景是
+      从左上到右下的渐变 —— 空白处直接露出渐变，右侧就显得发灰，
+     看着像盖了块遮罩（实测反馈）。
+     改成「文字与说明靠左连成一段、按钮推到最右」，中间只剩一处空白，
+     视觉上就是一条正常的工具栏。 */
+  justify-content: flex-start;
 }
 
 .selectbar-count {
@@ -867,6 +870,8 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 按钮永远贴右缘（与搜索框右缘对齐），与上面的 flex-start 配合 */
+  margin-left: auto;
 }
 
 /* 操作条里的按钮收一档高度，与 32px 的搜索栏对齐 */
