@@ -1120,7 +1120,10 @@ async function renderWindow({ keepScroll = false } = {}) {
       wl = null;
     }
     wlState = null;
-    items = [];
+    // **不要在这里清 items**：它是全量轻量索引，与「当前视图/搜索是否有结果」
+    // 无关。清掉之后搜 0 条再清搜索，索引就空了 → 批量勾选文件条目删除时
+    // askPurgeFiles 筛不到目标 → 确认框被跳过 → 开了「同时删本地文件」也不删
+    // （复核 P1-终审-1，与 e70a802 同一类静默失效）。
     return;
   }
 

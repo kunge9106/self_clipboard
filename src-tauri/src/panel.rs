@@ -343,6 +343,11 @@ pub fn notify_if_visible(app: &AppHandle) {
 
 /// 面板里回车选中某条：复制并粘回原窗口。
 #[tauri::command]
-pub fn panel_paste(app: AppHandle, id: String) -> Result<(), String> {
-    paste(&app, &id)
+pub async fn panel_paste(app: AppHandle, id: String) -> Result<(), String> {
+    // 与主窗 `copy_back` 对齐：面板粘贴大图（8192px 解码约 2s）同样在同步
+    // command 里跑，会把界面冻住（复核 P1-终审-2）。实现仍复用 `paste` →
+    // `copy_back_sync`，不重复逻辑，只是把执行挪到 blocking 线程。
+    tauri::async_runtime::spawn_blocking(move || paste(&app, &id))
+        .await
+        .map_err(|e| e.to_string())?
 }

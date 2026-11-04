@@ -1674,6 +1674,13 @@ pub fn on_clipboard_update() {
             } else {
                 classify_shot(&origin)
             };
+            // **二次检查**（TOCTOU）：从入口到这里之间，迁移可能已经开始 ——
+            // 那样这一条会写进旧目录。窗口极窄（毫秒级、只在换缓存目录时），
+            // 但属真实的写旧目录竞态（复核 P1-终审-3）。宁可丢这一次复制：
+            // 迁移完就重启，用户会重试；写进旧目录则是静默丢数据。
+            if MIGRATING.load(Ordering::Relaxed) {
+                return;
+            }
             dispatch_raw(raw, false, shot);
         }
         None => {
@@ -4829,11 +4836,16 @@ fn spawn_compact(dir: PathBuf) {
     // 迁移期间不发起新整理：`flush_pending` 等到 0 的那一刻，最后一笔 `handle_clip`
     // 可能刚 spawn 出一轮整理，而「等 COMPACTING」发生在那之前 —— 那一轮会在搬运
     // 期间把索引写回旧目录（复核补充）。这里一票拦死。
-    if MIGRATING.load(Ordering::Relaxed) {
-        return;
-    }
+    // **先抢位，再确认闸门**：顺序反过来的话，检查通过之后、swap 之前，
+    // 迁移方可能已经「等完 COMPACTING 并开始搬目录」，而这一轮整理随后才启动，
+    // 正好写进搬了一半的目录（TOCTOU，复核 P1-终审-3）。
     if COMPACTING.swap(true, Ordering::SeqCst) {
         return; // 已经有一个在跑，它会把该固化的都固化掉
+    }
+    if MIGRATING.load(Ordering::Relaxed) {
+        // 迁移中：把位让回去，否则迁移方永远等不到 COMPACTING 清零
+        COMPACTING.store(false, Ordering::SeqCst);
+        return;
     }
     std::thread::spawn(move || {
         compact_now(&dir);
