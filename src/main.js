@@ -627,8 +627,10 @@ async function deleteSelected() {
   }
   selectMode = false;
   selectedIds.clear();
-  // 退出选择模式：卡片由虚拟列表自己重建，不需要手工摘 is-selected
-  // （旧实现靠 `wrapEl` 遍历 DOM，但那个变量随旧渲染路径一起删掉了）
+  // **必须显式同步**：这之后的 `removeCards` 走 `renderWindow`，不经过 `render()`，
+  // 而 `syncSelectBar` 原来只在 `render()` 里调 —— 于是 `body.is-selecting` 残留，
+  // 侧栏与状态栏被永久禁用，用户只能再点一次「取消」才恢复（实测反馈）。
+  syncSelectBar();
   document.querySelector(".toolbar")?.classList.remove("is-selecting");
   // 保留滚动位置：删几条不该把人踹回列表顶部（与单条删除同一口径）
   removeCards(ids);
@@ -1036,6 +1038,8 @@ function refreshStatusCount() {
  * 补偿」换成了「记住视口顶端那条的 id 与像素偏移」，插入/删除都不用再补高度。
  */
 async function renderWindow({ keepScroll = false } = {}) {
+  // 与 `render()` 对齐：任何渲染入口都刷新一次选择条，避免 body 类与状态脱节
+  syncSelectBar();
   const view = document.getElementById("view");
   const token = ++wlToken;
   const wasAtTop = !wl || wl.scroller.scrollTop <= 0;

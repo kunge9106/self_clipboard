@@ -60,7 +60,9 @@ pub fn purge(paths: &[String], permanent: bool) -> (usize, Vec<String>) {
                 // 而用户复制文件夹到剪贴板时，多半并不想「删掉整个文件夹」。
                 // 这两类要分开报，否则用户看到「未能处理」根本不知道为什么。
                 if path.is_dir() {
-                    failed.push(format!("{raw}（是文件夹，未处理）"));
+                    // 目录**只允许进回收站**：可还原是底线。
+                    // 递归永久删除不可逆，一次判断错就是整棵树没了。
+                    failed.push(format!("{raw}（是文件夹：仅支持移入回收站）"));
                 } else {
                     failed.push(format!("{raw}（已不存在）"));
                 }
@@ -91,15 +93,14 @@ pub fn move_to_recycle(paths: &[String]) -> (usize, Vec<String>) {
             failed.push(format!("{raw}（不是绝对路径，已跳过）"));
             continue;
         }
-        if !path.is_file() {
-            // 目录**绝不**处理（防整棵树被带走）；与「已不存在」分开报
-            if path.is_dir() {
-                failed.push(format!("{raw}（是文件夹，未处理）"));
-            } else {
-                failed.push(format!("{raw}（已不存在）"));
-            }
+        if !path.exists() {
+            failed.push(format!("{raw}（已不存在）"));
             continue;
         }
+        // 目录也放行：`SHFileOperationW` + `FOF_ALLOWUNDO` 会把整棵目录树
+        // 移进回收站，用户随时可以还原 —— 这比「删不掉」和「永久递归删除」
+        // 都更合适。永久删除那条分支仍然拒绝目录（在 `purge` 里）。
+
 
         // pFrom 必须以「两个 \0」结尾：一个结束路径，一个结束列表
         let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -154,21 +155,30 @@ mod tests {
         assert!(!p.exists(), "文件应已离开原位置（进了回收站）");
     }
 
-    /// 目录绝不能被处理：某条记录的 `files` 里一旦混进目录，
-    /// 放行它就等于把整棵树带走。
+    /// 目录**永久删除必须拒绝**：递归不可逆，一次判断错就是整棵树没了。
+    ///
+    /// 回收站那条路径现在放行目录（可还原），这里不测 —— 测试真的会把临时目录
+    /// 移进用户的回收站。
     #[test]
-    fn directory_is_skipped() {
+    fn directory_is_refused_for_permanent_delete() {
         let dir = std::env::temp_dir().join("qingtie-purge-dir");
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join("keep.txt");
         std::fs::write(&f, b"keep").unwrap();
 
         let arg = vec![dir.to_string_lossy().to_string()];
-        let (ok, failed) = purge(&arg, false);
-        assert_eq!(ok, 0, "目录不应被处理");
+        let (ok, failed) = purge(&arg, true);
+        assert_eq!(ok, 0, "目录不能被永久删除");
         assert_eq!(failed.len(), 1);
+        assert!(
+            failed[0].contains("仅支持移入回收站"),
+            "失败原因要说清是策略拒绝，实际：{}",
+            failed[0]
+        );
         assert!(dir.is_dir(), "目录必须还在");
         assert!(f.is_file(), "目录里的文件也必须还在");
+
+        let _ = std::fs::remove_dir_all(&dir);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
