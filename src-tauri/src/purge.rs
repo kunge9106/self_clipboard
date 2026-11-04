@@ -44,39 +44,43 @@ extern "system" {
 /// 处理本地文件的统一入口，返回（成功数，失败说明）。
 ///
 /// 两种方式的差别只在最后一步；前置校验（绝对路径、`is_file`、不碰目录）共用 ——
-/// 它们在**永久删除**时更不能省，所以刻意写成同一段，避免两条路各写一遍而漏掉校验。
-pub fn purge(paths: &[String], permanent: bool) -> (usize, Vec<String>) {
-    if permanent {
-        let mut ok = 0usize;
-        let mut failed: Vec<String> = Vec::new();
-        for raw in paths {
-            let path = std::path::Path::new(raw);
-            if !path.is_absolute() {
-                failed.push(format!("{raw}（不是绝对路径，已跳过）"));
-                continue;
-            }
-            if !path.is_file() {
-                // 目录**绝不**递归删除：一个 `remove_dir_all` 写错就是整棵树没了，
-                // 而用户复制文件夹到剪贴板时，多半并不想「删掉整个文件夹」。
-                // 这两类要分开报，否则用户看到「未能处理」根本不知道为什么。
-                if path.is_dir() {
-                    // 目录**只允许进回收站**：可还原是底线。
-                    // 递归永久删除不可逆，一次判断错就是整棵树没了。
-                    failed.push(format!("{raw}（是文件夹：仅支持移入回收站）"));
-                } else {
-                    failed.push(format!("{raw}（已不存在）"));
-                }
-                continue;
-            }
-            match std::fs::remove_file(path) {
-                Ok(()) => ok += 1,
-                Err(e) => failed.push(format!("{raw}（{e}）")),
-            }
-        }
-        (ok, failed)
-    } else {
-        move_to_recycle(paths)
+/// 处理一批本地路径。返回（永久删除数，移入回收站数，失败说明）。
+///
+/// **目录始终走回收站**，与 `permanent` 无关 —— 递归永久删除不可逆，一次判断错
+/// 就是整棵树没了；回收站随时能还原。这条只对**本次调用**生效，不改用户的
+/// 「删除方式」设置（实测反馈：不能让用户为删一个文件夹去改全局设置）。
+pub fn purge(paths: &[String], permanent: bool) -> (usize, usize, Vec<String>) {
+    if !permanent {
+        let (ok, failed) = move_to_recycle(paths);
+        return (0, ok, failed);
     }
+
+    let mut deleted = 0usize;
+    let mut recycled = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for raw in paths {
+        let path = std::path::Path::new(raw);
+        if !path.is_absolute() {
+            failed.push(format!("{raw}（不是绝对路径，已跳过）"));
+            continue;
+        }
+        if !path.exists() {
+            failed.push(format!("{raw}（已不存在）"));
+            continue;
+        }
+        if path.is_dir() {
+            // 本次单独按回收站处理，不碰全局设置
+            let (o, f) = move_to_recycle(std::slice::from_ref(raw));
+            recycled += o;
+            failed.extend(f);
+            continue;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => deleted += 1,
+            Err(e) => failed.push(format!("{raw}（{e}）")),
+        }
+    }
+    (deleted, recycled, failed)
 }
 
 /// 逐条移入回收站，返回（成功数，失败说明）。
@@ -155,32 +159,24 @@ mod tests {
         assert!(!p.exists(), "文件应已离开原位置（进了回收站）");
     }
 
-    /// 目录**永久删除必须拒绝**：递归不可逆，一次判断错就是整棵树没了。
+    /// 目录在「永久删除」模式下**改走回收站**，且只影响本次调用。
     ///
-    /// 回收站那条路径现在放行目录（可还原），这里不测 —— 测试真的会把临时目录
-    /// 移进用户的回收站。
+    /// `#[ignore]`：它会真的把临时目录移进用户的回收站，日常测试不该有这种副作用。
+    /// 需要验证时手动跑 `cargo test -- --ignored`。
     #[test]
-    fn directory_is_refused_for_permanent_delete() {
-        let dir = std::env::temp_dir().join("qingtie-purge-dir");
+    #[ignore = "会往用户回收站里塞一个临时目录"]
+    fn directory_goes_to_recycle_even_in_permanent_mode() {
+        let dir = std::env::temp_dir().join("qingtie-purge-dir-recycle");
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join("keep.txt");
         std::fs::write(&f, b"keep").unwrap();
 
         let arg = vec![dir.to_string_lossy().to_string()];
-        let (ok, failed) = purge(&arg, true);
-        assert_eq!(ok, 0, "目录不能被永久删除");
-        assert_eq!(failed.len(), 1);
-        assert!(
-            failed[0].contains("仅支持移入回收站"),
-            "失败原因要说清是策略拒绝，实际：{}",
-            failed[0]
-        );
-        assert!(dir.is_dir(), "目录必须还在");
-        assert!(f.is_file(), "目录里的文件也必须还在");
-
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let (deleted, recycled, failed) = purge(&arg, true);
+        assert_eq!(deleted, 0, "目录不能被永久删除");
+        assert_eq!(recycled, 1, "目录应改走回收站");
+        assert!(failed.is_empty(), "不应报失败：{:?}", failed);
+        assert!(!dir.exists(), "目录应已移入回收站");
     }
 
     /// 不存在的路径要报失败，而不是静默算成功。
@@ -189,7 +185,7 @@ mod tests {
         let p = std::env::temp_dir().join("qingtie-purge-not-exist-xyz.txt");
         let _ = std::fs::remove_file(&p);
         let arg = vec![p.to_string_lossy().to_string()];
-        let (ok, failed) = purge(&arg, false);
+        let (ok, _recycled, failed) = purge(&arg, false);
         assert_eq!(ok, 0);
         assert_eq!(failed.len(), 1);
     }
@@ -199,7 +195,7 @@ mod tests {
     fn permanent_delete_removes_file() {
         let p = tmp("qingtie-purge-permanent.txt");
         let arg = vec![p.to_string_lossy().to_string()];
-        let (ok, failed) = purge(&arg, true);
+        let (ok, _recycled, failed) = purge(&arg, true);
         assert_eq!(ok, 1, "failed={failed:?}");
         assert!(!p.exists());
     }

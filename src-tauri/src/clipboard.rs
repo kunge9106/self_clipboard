@@ -452,46 +452,43 @@ fn purge_local_files(items: &[crate::store::Meta]) -> Option<String> {
             path.is_file()
         );
     }
-    let (ok, failed) = crate::purge::purge(&paths, cfg.delete_files_permanent);
-    let how = if cfg.delete_files_permanent {
-        "永久删除"
-    } else {
-        "移入回收站"
-    };
-    if failed.is_empty() {
-        crate::log_print!("[clipboard] 已{how} {ok} 个本地文件");
-        Some(format!("已{how} {ok} 个本地文件"))
-    } else if failed.iter().all(|f| f.contains("是文件夹")) {
-        crate::log_print!(
-            "[clipboard] {how}本地文件：{ok} 个已处理，{} 个是文件夹未处理",
-            failed.len()
-        );
-        Some(format!(
-            "已{how} {ok} 个；{} 个是文件夹，未处理（不会递归删除整个文件夹）",
-            failed.len()
-        ))
-    } else if failed.iter().all(|f| f.contains("已不存在")) {
-        // 全部「已不存在」：不是失败，是事实 —— 文件早就不在了，记录已清理。
-        // 原来统一说成「未能处理（可能被占用）」，用户会去查权限，方向就错了。
-        crate::log_print!(
-            "[clipboard] {how}本地文件：{ok} 个已处理，{} 个原本已不存在",
-            failed.len()
-        );
-        Some(format!(
-            "已{how} {ok} 个；{} 个原本已不存在（记录已清理）",
-            failed.len()
-        ))
-    } else {
-        crate::log_warn!(
-            "[clipboard] {how}本地文件：成功 {ok}/{total}，失败 {} 个（详见界面提示）",
-            failed.len()
-        );
-        Some(format!(
-            "已{how} {ok} 个，{} 个未能处理（可能被占用或已不存在）",
-            failed.len()
-        ))
+    let (deleted, recycled, failed) = crate::purge::purge(&paths, cfg.delete_files_permanent);
+
+    // 结果分四类说清楚：永久删除 / 移入回收站 / 原本已不存在 / 真失败。
+    // 「文件夹走回收站」与用户的「永久删除」设置无关，必须单独说明，
+    // 否则用户会以为设置被偷偷改了。
+    let mut parts: Vec<String> = Vec::new();
+    if deleted > 0 {
+        parts.push(format!("已永久删除 {deleted} 个"));
     }
+    if recycled > 0 {
+        parts.push(format!("{recycled} 个文件夹已移入回收站（可还原）"));
+    }
+    let gone = failed.iter().filter(|f| f.contains("已不存在")).count();
+    let real = failed.len() - gone;
+    if gone > 0 {
+        parts.push(format!("{gone} 个原本已不存在（记录已清理）"));
+    }
+    if real > 0 {
+        parts.push(format!("{real} 个未能处理（可能被占用）"));
+        crate::log_warn!(
+            "[clipboard] 本地文件处理失败 {real} 个：{}",
+            failed
+                .iter()
+                .filter(|f| !f.contains("已不存在"))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("；")
+        );
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let msg = parts.join("；");
+    crate::log_print!("[clipboard] 本地文件处理（共 {total} 条）：{msg}");
+    Some(msg)
 }
+
 
 #[tauri::command]
 pub fn delete_item(id: String, delete_local_files: Option<bool>) -> Result<Option<String>, String> {

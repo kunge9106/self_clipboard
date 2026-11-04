@@ -843,10 +843,16 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 
 .toolbar.is-selecting .selectbar {
   display: flex;
+  /* 不加主色底：整条蓝底抢视线，而且和旁边按钮的视觉层级打架（实测反馈）。
+     靠「文字加深 + 加粗 + 一行用法说明」来区分就够了。 */
+  margin: 0 4px;
+  padding: 3px 6px;
 }
 
 .selectbar-count {
-  color: var(--text-dim);
+  /* 原来用 --text-dim，在浅灰工具栏上几乎看不清 */
+  color: var(--text);
+  font-weight: 600;
 }
 
 /* 一行「怎么用」：进入批量模式后界面上只剩几个按钮，不说明的话
@@ -855,7 +861,7 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   margin-left: 10px;
   color: var(--text-dim);
   font-size: 12px;
-  opacity: 0.7;
+  opacity: 0.9;
   white-space: nowrap;
 }
 
