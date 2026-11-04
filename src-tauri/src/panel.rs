@@ -260,15 +260,16 @@ fn toast_after_copy(panel: Option<(i32, i32)>, keep_open: bool) {
 /// 默认粘完就收起面板；「点选后保持打开」开着时留着不动 —— 那时焦点已经还给原窗口，
 /// 面板处于「可见但失焦」的状态，可以接着点下一条（点击本身会把焦点拿回来）。
 /// 该开关只有在「面板失焦不收起」也开着时才允许打开（见 `settings`），否则留不住。
-pub fn paste(app: &AppHandle, id: &str) -> Result<(), String> {
+/// 复制**之后**的所有动作：收起面板、抢回焦点、注入粘贴、提示。
+///
+/// **必须在主线程**：`w.hide()` 是 Tauri 的窗口操作，`SetForegroundWindow` /
+/// `SendInput` 也对调用线程有要求。所以这个函数**不能**放进 `spawn_blocking` ——
+/// 上游只把「解码 + 写剪贴板」那一半（`copy_back_sync`）挪到阻塞线程。
+pub fn paste_after_copy(app: &AppHandle, id: &str) -> Result<(), String> {
     // 必须在收起之前取：收起后窗口就没了，落点会退化成光标位置
     let anchor = panel_anchor(app);
     // 这一条要不要收起决定了提示落哪：读了就不受后面动作影响
     let keep_open = crate::settings::get().panel_keep_after_copy;
-
-    // 走与右键「复制」完全相同的路径：格式处理（原样 / 纯文本 / 内联图还原）
-    // 只有一份实现，两边不会漂移。
-    crate::clipboard::copy_back_sync(id.to_string(), Some(false))?;
 
     // 先收起再接下面「焦点还给原窗口」那一段：面板还在时抢焦点会被它自己顶回来。
     // 开了「点选后保持打开」就不收，但焦点照样要还回去，否则 Ctrl+V 会发给面板。
@@ -344,10 +345,19 @@ pub fn notify_if_visible(app: &AppHandle) {
 /// 面板里回车选中某条：复制并粘回原窗口。
 #[tauri::command]
 pub async fn panel_paste(app: AppHandle, id: String) -> Result<(), String> {
-    // 与主窗 `copy_back` 对齐：面板粘贴大图（8192px 解码约 2s）同样在同步
-    // command 里跑，会把界面冻住（复核 P1-终审-2）。实现仍复用 `paste` →
-    // `copy_back_sync`，不重复逻辑，只是把执行挪到 blocking 线程。
-    tauri::async_runtime::spawn_blocking(move || paste(&app, &id))
-        .await
-        .map_err(|e| e.to_string())?
+    // **只把耗时的半边挪走**（复核 P1-终审-2）。
+    //
+    // 上半段 `copy_back_sync`：解码原图（8192px 约 2s）+ 写系统剪贴板，纯 CPU/IO，
+    // 放主线程会冻界面 → `spawn_blocking`。
+    // 下半段 `paste_after_copy`：收起面板（Tauri 窗口 API）、抢焦点、`SendInput`，
+    // **必须在主线程**，跨线程调用不保证安全 —— 所以不能把整个流程一起塞进
+    // `spawn_blocking`（上一版就是那样，属于错误改法）。
+    let id_for_copy = id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::clipboard::copy_back_sync(id_for_copy, Some(false))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    paste_after_copy(&app, &id)
 }
