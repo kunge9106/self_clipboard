@@ -5699,8 +5699,31 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
         sub
     };
 
+    // ── 迁移前先「静场」（代码审查 P1-4）──
+    //
+    // 迁移是把整个目录搬走，而采集线程、落盘 worker、后台整理都还在跑：
+    //   · 快照之后复制的内容，实体会写进旧目录 → 搬不完，留下的就是丢数据
+    //   · 后台整理可能把新索引写回旧路径 → 搬完之后旧目录里又冒出文件
+    // 顺序：先停监听（不再产生新内容）→ 等已捕获的落盘完成 → 再搬。
+    // 搬完进程会重启（`DIR` 是 `OnceLock`），所以成功后不必恢复监听。
+    let clip_hwnd = unsafe { CLIP_HWND.get().copied() }.unwrap_or(0);
+    if clip_hwnd != 0 {
+        unsafe {
+            RemoveClipboardFormatListener(clip_hwnd);
+        }
+    }
+    flush_pending(std::time::Duration::from_secs(3));
+
     // ── 防线③在 move_dir_contents 内部（结构性杜绝无限递归）──
-    move_dir_contents(&old, &target_root, &app).map_err(|e| format!("迁移缓存文件失败：{e}"))?;
+    if let Err(e) = move_dir_contents(&old, &target_root, &app) {
+        // 迁移失败必须把监听装回去，否则程序会变成「界面能开、但不再记录任何内容」
+        if clip_hwnd != 0 {
+            unsafe {
+                AddClipboardFormatListener(clip_hwnd);
+            }
+        }
+        return Err(format!("迁移缓存文件失败：{e}"));
+    }
 
     let new_dir_str = strip_ext_prefix(&target_root.to_string_lossy());
     crate::settings::update(|c| c.cache_dir = Some(new_dir_str.clone()));
@@ -6317,6 +6340,7 @@ fn create_clip_window() -> isize {
 extern "system" {
     fn OpenClipboard(hwnd: isize) -> i32;
     fn AddClipboardFormatListener(hwnd: isize) -> i32;
+    fn RemoveClipboardFormatListener(hwnd: isize) -> i32;
     fn GetLastError() -> u32;
     fn CloseClipboard() -> i32;
     fn EmptyClipboard() -> i32;
