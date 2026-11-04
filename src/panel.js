@@ -124,7 +124,7 @@ async function fetchRows(q) {
     rows = [];
     total = 0;
     render();
-    setStatus("读取失败：" + e);
+    setStatus("读取失败，请重试");
     return;
   }
   // 两次 await 之间可能又有新请求发出，统一在这里丢弃过期结果
@@ -138,7 +138,7 @@ async function fetchRows(q) {
       ? q
         ? "没有匹配的内容"
         : "剪贴板还是空的"
-      : `${total} 条${total > MAX_ROWS ? `（显示前 ${MAX_ROWS} 条，不含置顶）` : ""}`
+      : `${total} 条${total > MAX_ROWS ? ` · 显示前 ${MAX_ROWS} 条` : ""}`
   );
 }
 
@@ -221,7 +221,7 @@ async function paste(id) {
     await invoke("panel_paste", { id });
   } catch (e) {
     // 只有「复制」这一步失败时面板还没收起，这里提示才有意义
-    setStatus("粘贴失败：" + e);
+    setStatus("粘贴失败，已复制到剪贴板");
   }
 }
 

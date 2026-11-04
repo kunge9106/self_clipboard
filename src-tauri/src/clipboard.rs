@@ -818,7 +818,7 @@ pub fn set_clipboard_text(text: String, changed: bool) -> Result<(), String> {
     // 可能落盘到正在被搬走的旧目录（复核指出的缺口）。迁移几秒后就会重启，
     // 直接让用户重试即可。
     if MIGRATING.load(Ordering::Relaxed) {
-        return Err("正在整理存储，请稍后重试".into());
+        return Err("正在整理数据，请稍后重试".into());
     }
     match unsafe { write_text_to_clipboard(&text) } {
         Ok(()) => {
@@ -5901,7 +5901,7 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
                     AddClipboardFormatListener(clip_hwnd);
                 }
             }
-            return Err("正在整理索引，请稍后重试".into());
+            return Err("正在整理数据，请稍后重试".into());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -5915,7 +5915,7 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
                 AddClipboardFormatListener(clip_hwnd);
             }
         }
-        return Err("仍有内容正在保存，请稍后重试".into());
+        return Err("仍有内容在保存，请稍后重试".into());
     }
 
     // ── 防线③在 move_dir_contents 内部（结构性杜绝无限递归）──
