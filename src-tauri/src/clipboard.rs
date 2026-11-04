@@ -415,11 +415,26 @@ fn purge_local_files(items: &[crate::store::Meta]) -> Option<String> {
     if !cfg.delete_files_with_item {
         return None;
     }
+    // 路径有两个来源，缺一不可：
+    //   · `files` 只是**常驻的前 N 条**（`FILES_RESIDENT_MAX`，为省内存）；
+    //   · 完整清单在实体文件 `files/<id>.txt` 里（`files_rel()`）。
+    // 原来只读 `files`，实体形态的条目一条都取不到 → 用户看到确认框弹了、
+    // 选了「移入回收站 / 永久删除」，但本地文件纹丝不动。
+    let Some(dir) = DIR.get() else {
+        return None;
+    };
     let paths: Vec<String> = items
         .iter()
         .filter(|i| i.kind == "files")
-        .filter_map(|i| i.files.clone())
-        .flatten()
+        .flat_map(|i| match i.files_rel() {
+            Some(rel) => read_text_entity(dir, &rel)
+                .unwrap_or_default()
+                .lines()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            None => i.files.clone().unwrap_or_default(),
+        })
         .collect();
     if paths.is_empty() {
         return None;
