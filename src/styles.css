@@ -843,11 +843,10 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 
 .toolbar.is-selecting .selectbar {
   display: flex;
-  /* 三元素  会在两侧各留一大块空白，而这层背景是
-      从左上到右下的渐变 —— 空白处直接露出渐变，右侧就显得发灰，
-     看着像盖了块遮罩（实测反馈）。
-     改成「文字与说明靠左连成一段、按钮推到最右」，中间只剩一处空白，
-     视觉上就是一条正常的工具栏。 */
+  /* 布局：已选数目靠左、提示语在整条上居中、按钮贴右。
+     提示语用绝对居中（相对这条工具栏），而不是 flex 居中 ——
+     否则它会随两侧内容宽度变化而左右漂移，看着不稳。 */
+  position: relative;
   justify-content: flex-start;
 }
 
@@ -860,10 +859,13 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 /* 一行「怎么用」：进入批量模式后界面上只剩几个按钮，不说明的话
    用户不知道自己已经在选择模式里（实测反馈）。 */
 .selectbar-hint {
-  margin-left: 10px;
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   color: var(--text-dim);
   font-size: 12px;
   white-space: nowrap;
+  pointer-events: none; /* 纯说明文字，不挡点击 */
 }
 
 .selectbar-actions {
