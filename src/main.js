@@ -625,28 +625,8 @@ function bindClearView() {
     modal.hidden = false;
   };
   document.getElementById("btn-clear-view").onclick = () => {
-    // 窗口模式：不在前端算 id，交给后端按同一套筛选自己删
-    if (USE_WINDOW_API) {
-      void clearViewWindow();
-      return;
-    }
-    const scope = filtered();
-    if (scope.length === 0) {
-      toast("没有可清理的条目");
-      return;
-    }
-    // 一条可能既置顶又收藏，所以分组按「置顶优先」划分、三组互不重叠；
-    // 真正删除时再按 id 去重兜底。
-    const pinned = scope.filter((i) => isPinnedAnywhere(i));
-    const favs = scope.filter((i) => i.favorite && !isPinnedAnywhere(i));
-    const normal = scope.filter((i) => !isPinnedAnywhere(i) && !i.favorite);
-
-    // 范围内一件置顶/收藏都没有 → 直接清，不弹窗打扰（保持原来的顺手程度）
-    if (pinned.length === 0 && favs.length === 0) {
-      doClearView(normal.map((i) => i.id));
-      return;
-    }
-    openClearViewModal({ normal, pinned, favs });
+    // 不在前端算 id：交给后端按同一套筛选自己删（10 万条也不必把 id 传一圈）
+    void clearViewWindow();
   };
 }
 
@@ -812,19 +792,13 @@ function bindSearch() {
   el.addEventListener("input", () => {
     // 窗口模式：搜索词原样交给后端归一（前端不再 toLowerCase，否则 filterKey
     // 会因大小写差异反复失效）。120ms 去抖 —— 每按一个键就取一页没有意义。
-    if (USE_WINDOW_API) {
-      sync();
-      if (searchTimer) clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => {
-        searchTimer = null;
-        query = el.value.trim();
-        render({ keepScroll: false });
-      }, 120);
-      return;
-    }
-    query = el.value.trim().toLowerCase();
     sync();
-    render();
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      searchTimer = null;
+      query = el.value.trim();
+      render({ keepScroll: false });
+    }, 120);
   });
   if (clear)
     clear.addEventListener("click", () => {
@@ -864,42 +838,6 @@ function isPinnedAnywhere(item) {
   return Array.isArray(item.pinnedViews) && item.pinnedViews.length > 0;
 }
 
-function filtered() {
-  let list = items;
-  if (currentView === "favorites") list = list.filter((i) => i.favorite);
-  else if (currentView === "text") list = list.filter((i) => i.kind === "text");
-  else if (currentView === "images") list = list.filter((i) => i.kind === "image");
-  else if (currentView === "files") list = list.filter((i) => i.kind === "files");
-
-  // 文件复制开关关闭（默认）→ 文件条目一律不展示。旧条目只是隐藏，数据仍在磁盘上，
-  // 重新打开开关就回来了。
-  if (!fileCopyOn()) list = list.filter((i) => i.kind !== "files");
-
-  if (query) {
-    list = list.filter(
-      (i) =>
-        (i.preview && i.preview.toLowerCase().includes(query)) ||
-        (i.files && i.files.some((f) => f.toLowerCase().includes(query))) ||
-        // 类型名也参与匹配。图片条目的 preview 固定是「[图片]」，所以搜「图片」一直
-        // 能命中；但搜英文「image」命中不了 —— kind 原本不在匹配范围内，img_path
-        // 也不在 i.files 里。把中文标签（图片/文本/文件）与英文 kind（image/text/files）
-        // 都纳入后，「图片」和「image」就都能搜出图片条目。
-        (KIND_LABEL[i.kind] || "").toLowerCase().includes(query) ||
-        (i.kind || "").toLowerCase().includes(query) ||
-        // 子类型也参与匹配：搜「代码」/「code」、「链接」/「link」都应命中
-        (SUBTYPE_LABEL[i.subtype] || "").toLowerCase().includes(query) ||
-        (i.subtype || "").toLowerCase().includes(query)
-    );
-  }
-  // 置顶优先，其余按时间倒序。置顶是**按分类独立**的：只在当前这个分类里置顶过的
-  // 才浮到最上面，「文本」里置顶不会影响它在「历史」里的位置。
-  return [...list].sort((a, b) => {
-    const ap = isPinnedIn(a, currentView);
-    const bp = isPinnedIn(b, currentView);
-    if (ap !== bp) return ap ? -1 : 1;
-    return b.ts - a.ts;
-  });
-}
 
 function timeStr(ts) {
   const now = Date.now();
@@ -959,17 +897,6 @@ const SUBTYPE_BADGE = {
  * 为什么需要这个参数：本函数会 `view.innerHTML = ""` 并新建 `.history` 容器，
  * 容器一换，scrollTop 必然归零。所以必须在重建**之前**把位置记下来。
  */
-
-// ---------------------------------------------------------------------------
-// 窗口化列表（USE_WINDOW_API）
-//
-// 旧的「全量 filtered() + 渐进渲染」路径完整保留在下方：把 `USE_WINDOW_API`
-// 改成 `false` 就回到改动前的行为，一个字都不用动。两套路径的入口在 render()。
-//
-// 为什么换：全量路径要把 10 万条一次拿到前端（38 MB IPC）、过滤一遍、排序一遍，
-// 再加入 DOM；窗口化之后每次交互只传一页（约 100 KB），DOM 里只留四十来行。
-// ---------------------------------------------------------------------------
-const USE_WINDOW_API = true;
 
 /** 一页多少条。200 条约 100 KB，与设计文档的 IPC 预算是同一个数量级。 */
 const WINDOW_LIMIT = 200;
@@ -1198,10 +1125,6 @@ async function renderWindow({ keepScroll = false } = {}) {
 
 /** 列表变了之后保持位置重绘（删除、置顶、收藏、新内容到达都走这里）。 */
 function rerenderNow() {
-  if (!USE_WINDOW_API) {
-    render({ keepScroll: true });
-    return;
-  }
   void renderWindow({ keepScroll: true });
 }
 
@@ -1244,35 +1167,8 @@ function render({ keepScroll = false } = {}) {
     return;
   }
 
-  // ★ 分流点：窗口化路径（USE_WINDOW_API=false 时走下面原封不动的旧路径）
-  if (USE_WINDOW_API) {
-    void renderWindow({ keepScroll });
-    return;
-  }
-
-  const list = filtered();
-  // 状态栏：搜索中显示「找到 X 条结果」，否则显示总数
-  const countEl = document.getElementById("status-count");
-  if (countEl) countEl.textContent = statusCountText(list.length);
-
-  if (list.length === 0) {
-    view.innerHTML = emptyHtml();
-    return;
-  }
-
-  // 渐进渲染：只先渲染第一批，滚到接近底部时再追加下一批（见 appendBatch）。
-  // 这样 DOM 规模有上界，渲染进程内存不再随历史条数增长；而列表的排序、滚动、
-  // 搜索、右键菜单、悬浮预览等行为与全量渲染完全一致。
-  renderList = list;
-  renderedUpTo = 0;
-  wrapEl = document.createElement("div");
-  wrapEl.className = "history";
-  view.innerHTML = "";
-  view.appendChild(wrapEl);
-  setupMoreObserver(); // root 必须绑定到这个新的滚动容器
-  appendBatch();
-  restoreScroll(prevTop);
-  refreshMissing(list); // 文件条目的原路径可能已被移动/删除 → 打「已失效」标记
+  // 列表真相在后端：重绘统一交给窗口路径（旧的全量 filtered 渲染已移除）
+  void renderWindow({ keepScroll });
 }
 
 /**
@@ -1316,12 +1212,9 @@ function statusCountText(n) {
 function removeCards(ids) {
   const drop = new Set(ids);
   if (drop.size === 0) return;
-  if (USE_WINDOW_API) {
-    // 窗口模式：数据在后端，重取当前窗口并按锚点还原位置（不需要手工扣高度）
-    rerenderNow();
-    return;
-  }
-
+  // 数据在后端：重取当前窗口并按锚点还原位置（不需要手工扣高度）
+  rerenderNow();
+  return;
   let removedAbove = 0; // 视口上沿之上被删掉的总高度（含间距）
   let removedRendered = 0; // 已渲染卡片里被删掉的数量
   if (wrapEl) {
@@ -4579,29 +4472,9 @@ async function main() {
       scheduleWindowRender();
       return;
     }
-    if (USE_WINDOW_API) {
-      // 数据在后端：让页缓存失效并重取。用户停在顶部时不做锚点还原，
-      // 新内容立刻可见；停在中间时锚点会把他正在看的那条钉在原地。
-      scheduleWindowRender();
-      return;
-    }
-    items.unshift(item);
-    // 设置页与条目列表无关。重绘只是把整页重建一遍，然后弹回顶部 ——
-    // 数据已经进了 items，切回列表自然是最新的。
-    if (currentView === "settings") return;
-    // 新内容插在**顶部**：内容整体下移一条。只恢复相同的 scrollTop，等于把
-    // 用户正在看的那一条往下推了「一条高度 + 间距」，观感就是页面自己滚了一下。
-    // 把这一段补回去，那一条才会停在原地。本来就在顶部时不补 —— 那种情况下
-    // 他应该立刻看到新内容。
-    const before = wrapEl ? wrapEl.scrollTop : 0;
-    render({ keepScroll: true });
-    // 只有新条目真的落在列表首位时才补。搜索中、或当前分类不显示这类内容时，
-    // 列表内容没变，补了反而把用户推到别处。
-    if (before > 0 && wrapEl && renderList[0]?.id === item.id) {
-      const first = wrapEl.firstElementChild;
-      const gap = parseFloat(getComputedStyle(wrapEl).rowGap) || 0;
-      if (first) wrapEl.scrollTop = before + first.offsetHeight + gap;
-    }
+    // 数据在后端：让页缓存失效并重取。用户停在顶部时不做锚点还原，
+    // 新内容立刻可见；停在中间时锚点会把他正在看的那条钉在原地。
+    scheduleWindowRender();
   });
 }
 
