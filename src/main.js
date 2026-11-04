@@ -476,20 +476,20 @@ let purgeResolve = null;
 /// 返回 false 的两条路径（设置没开 / 没有文件条目）都不弹窗，直接按旧行为删记录。
 function askPurgeFiles(targets) {
   if (!settings?.deleteFilesWithItem) return Promise.resolve(false);
-  const files = targets
-    .filter((i) => i.kind === "files")
-    .flatMap((i) => i.files || []);
-  if (files.length === 0) return Promise.resolve(false);
+  // `items` 已收窄为 `{id, kind}`（P2-1），拿不到 `files` 路径清单了。
+  // 旧写法 `.flatMap((i) => i.files || [])` 在这里恒为空 → 确认框被直接跳过 →
+  // 「删除时同时删本地文件」静默失效。改按**文件条目数**说明：
+  // 具体删哪些文件由后端 `delete_items` 从索引里读，弹窗只需要让用户确认范围。
+  const fileItems = targets.filter((i) => i.kind === "files");
+  if (fileItems.length === 0) return Promise.resolve(false);
 
   const perm = !!settings.deleteFilesPermanent;
   const how = perm ? "永久删除" : "移入回收站";
   const tail = perm ? "（不可恢复）" : "（之后可从回收站还原）";
-  const names = files.map((p) => p.split(/[\\/]/).pop() || p);
-  const head = names.slice(0, 4).map((n) => `· ${n}`).join("\n");
-  const more = names.length > 4 ? `\n…另有 ${names.length - 4} 个` : "";
 
   document.getElementById("purge-modal-text").textContent =
-    `将${how} ${files.length} 个本地文件${tail}：\n\n${head}${more}`;
+    `将${how} ${fileItems.length} 个文件条目关联的本地文件${tail}。\n\n` +
+    `具体文件以记录中的路径为准。`;
   document.getElementById("purge-confirm").textContent = perm ? "永久删除" : "移入回收站";
   document.getElementById("purge-modal").hidden = false;
   return new Promise((resolve) => {
