@@ -4001,7 +4001,9 @@ fn image_dir(split: bool, from_shot: bool) -> &'static str {
 /// 界面上只是一张占位图，日志里才有一行 ERROR。`images/` 根目录一直存在，
 /// 所以分成子目录之前从没撞上过。
 fn write_image(dir: &Path, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
-    let path = dir.join(rel);
+    let path = safe_join(dir, rel).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("非法路径：{rel}"))
+    })?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -4622,15 +4624,43 @@ pub(crate) fn decode_text_bytes(raw: &[u8]) -> Option<String> {
     }
 }
 
+/// 把索引里的相对路径安全地拼到缓存根下。
+///
+/// 索引字段是加密存储的，正常情况下不会越界；但迁移、损坏、未来的 bug 都可能写出
+/// 上跳（parent-dir）或指向根外的绝对路径 —— 那等于开了一条「按内容读写缓存目录
+/// 之外」的通道（代码审查 P1-8）。所有实体读写都从这里过。
+fn safe_join(dir: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
+    if rel.is_empty() {
+        return None;
+    }
+    let p = std::path::Path::new(rel);
+    // 拒绝任何上跳： 会跑出缓存根
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    if p.is_absolute() {
+        // 老索引里的 Custom 形态可能是绝对路径：只接受落在缓存根内的
+        return p.starts_with(dir).then(|| p.to_path_buf());
+    }
+    Some(dir.join(p))
+}
+
 /// 读一个「文本类」实体（`data/*.txt`、`files/*.txt`），自动解密。
 fn read_text_entity(dir: &PathBuf, rel: &str) -> Result<String, String> {
-    let bytes = fs::read(dir.join(rel)).map_err(|e| e.to_string())?;
+    let path = safe_join(dir, rel).ok_or_else(|| format!("非法路径：{rel}"))?;
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
     decode_text_bytes(&bytes).ok_or_else(|| "内容解密失败（可能换了 Windows 账户或机器）".to_string())
 }
 
 /// 写一个「文本类」实体，自动加密。
 fn write_text_entity(dir: &PathBuf, rel: &str, text: &str) {
-    if let Err(e) = fs::write(dir.join(rel), encrypt_text(text)) {
+    let Some(path) = safe_join(dir, rel) else {
+        crate::log_err!("clipboard", "拒绝写入非法路径 {rel}");
+        return;
+    };
+    if let Err(e) = fs::write(&path, encrypt_text(text)) {
         crate::log_err!("clipboard", "文本实体落盘失败 {rel}：{e}");
     }
 }
