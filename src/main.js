@@ -392,7 +392,14 @@ function bindExitModal() {
 // 后端的 clear_all() 是 hist.clear()，没有任何豁免 —— 置顶与收藏也会一并删掉，
 // 且磁盘上的内容文件同时被删除，无法恢复。原先这个按钮点了就直接清空、连提示都没有，
 // 一次误触就是整库没了，所以这里补上二次确认，并把条数与影响范围如实写明。
-function openClearAllModal() {
+async function openClearAllModal() {
+  // 长时间会话里索引可能落后（新内容靠事件补、删除靠本地 filter）；清空是
+  // 不可恢复操作，打开前拉一次全量索引，条数才说得准。
+  try {
+    items = await invoke("list_item_ids");
+  } catch {
+    /* 拉取失败就用现有索引，总比不弹窗好 */
+  }
   const n = items.length;
   if (n === 0) {
     toast("没有可清空的内容");
@@ -442,6 +449,12 @@ function bindClearAllModal() {
 let clearMissingIds = [];
 
 async function openClearMissingModal() {
+  // 同上：靠现有索引可能漏掉新复制的条目，先拉一次再筛
+  try {
+    items = await invoke("list_item_ids");
+  } catch {
+    /* 失败就按现有索引来 */
+  }
   const ids = items.filter((i) => i.kind === "files").map((i) => i.id);
   if (ids.length === 0) {
     toast("没有文件条目");
@@ -4460,15 +4473,16 @@ async function main() {
 
   // 增量：复制新内容时 Rust 推事件，直接插到顶部
   await listen("clipboard-update", (e) => {
-    const item = e.payload;
-    // 条目已存在有两种情况，从 payload 上分不出来：
-    //   1. 一次复制被写两遍（补格式、缩略图更新）—— 列表不用动；
-    //   2. **去重命中并置顶** —— 顺序变了，必须重排，否则用户看不到它跳到最前。
-    // 早先这里直接 return，于是「不会重复出现了，但也没到最前面」。
-    // 统一走一次轻量刷新，80ms 节流，连发也只做一次。
-    // 数据在后端：让页缓存失效并重取。用户停在顶部时不做锚点还原，
-    // 新内容立刻可见；停在中间时锚点会把他正在看的那条钉在原地。
-    // （去重命中也要重排到最前，所以「是不是已存在」不再影响处理方式。）
+    // **新内容必须同步进索引**。`items` 现在只由 `list_item_ids` 与本地删除维护，
+    // 这里不补的话，刚复制的条目在全量索引里不存在 → 批量删除时 `askPurgeFiles`
+    // 筛不到它 → 即使开了「同时删本地文件」也不会删、且没有提示
+    // （与 e70a802 修的是同一类静默失效，只是从「字段没了」变成「索引没更新」）。
+    const p = e.payload || {};
+    if (p.id && !items.some((i) => i.id === p.id)) {
+      items.unshift({ id: p.id, kind: p.kind || "text" });
+    }
+    // 列表本身仍交给窗口路径重取：去重命中时要重排到最前，用户停在中间时
+    // 锚点会把正在看的那条钉在原地。80ms 节流，连发也只做一次。
     scheduleWindowRender();
   });
 }
@@ -4503,7 +4517,7 @@ async function checkHistoryLimit() {
   const max = Number(st?.max || 0);
   // 优先用后端计数：`items` 只是轻量索引，而且渲染后可能只剩「已加载页」——
   // 用它算会偏小，导致超上限却不弹提示（复核指出）。
-  const count = Number(st?.count || 0) || items.length;
+  const count = st?.count != null ? Number(st.count) : items.length;
   if (!max || count <= max) return;
   // 用户点过「暂不清理」：7 天内不再打扰
   if (Number(st?.snoozeUntil || 0) > Date.now()) return;
