@@ -1964,33 +1964,52 @@ fn replace_latest_text(text: &str, html: &Option<String>, rtf: &Option<String>) 
     let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
         return false;
     };
-    let Ok(mut g) = hist.lock() else { return false };
-    let Some(last) = g.first_mut() else { return false };
-    if last.kind != "text" {
-        return false;
-    }
-    let id = last.id.clone();
-    let rel = crate::store::text_rel(&id);
-    write_text_entity(&dir, &rel, text);
-    last.set_text_path(Some(rel));
-    last.size = text.len() as u64;
-    let (preview, truncated) = text_preview_parts(text);
-    last.preview = preview;
-    last.preview_truncated = truncated;
-    last.subtype = Some(detect_subtype(text).unwrap_or("").to_string());
-    // 富文本一并换掉（第二次往往才带格式）
-    if let Some(h) = html {
-        let (hrel, imgs) = store_rich_html(&dir, &id, h.as_str());
-        last.set_html_path(Some(hrel));
-        last.rich_images = imgs;
-    }
-    if let Some(r) = rtf {
-        let rrel = crate::store::rtf_rel(&id);
-        write_text_entity(&dir, &rrel, r);
-        last.set_rtf_path(Some(rrel));
-    }
-    let updated = last.clone();
-    drop(g);
+
+    // **锁内只取 id，写盘全部放到锁外**。这里要写加密正文 + 富文本 HTML
+    // （还可能把内嵌图片落盘）+ RTF，持锁做等于把采集线程堵在 IO 上
+    // （代码审查 P1-1）。
+    let id = {
+        let Ok(g) = hist.lock() else { return false };
+        let Some(last) = g.first() else { return false };
+        if last.kind != "text" {
+            return false;
+        }
+        last.id.clone()
+    };
+
+    let trel = crate::store::text_rel(&id);
+    write_text_entity(&dir, &trel, text);
+    let rich = html
+        .as_ref()
+        .map(|h| store_rich_html(&dir, &id, h.as_str()));
+    let rrel = rtf.as_ref().map(|r| {
+        let rel = crate::store::rtf_rel(&id);
+        write_text_entity(&dir, &rel, r);
+        rel
+    });
+
+    // 回到锁内只改元数据，按 id 定位（这两次加锁之间列表可能已经变了）
+    let updated = {
+        let Ok(mut g) = hist.lock() else { return false };
+        let Some(last) = g.iter_mut().find(|m| m.id == id) else {
+            return false;
+        };
+        last.set_text_path(Some(trel));
+        last.size = text.len() as u64;
+        let (preview, truncated) = text_preview_parts(text);
+        last.preview = preview;
+        last.preview_truncated = truncated;
+        last.subtype = Some(detect_subtype(text).unwrap_or("").to_string());
+        if let Some((hrel, imgs)) = rich {
+            last.set_html_path(Some(hrel));
+            last.rich_images = imgs;
+        }
+        if let Some(rrel) = rrel {
+            last.set_rtf_path(Some(rrel));
+        }
+        last.clone()
+    };
+
     // 编辑保存几乎把整条都换了（正文、预览、子类型、富文本），写整条最直接，
     // 也仍然是幂等的：同 id upsert。帧里是完整 HistoryItem（投影一次）。
     append_op(
@@ -4889,10 +4908,24 @@ fn enforce_limit(dir: &Path, hist: &mut Vec<crate::store::Meta>, max: usize) {
         return;
     }
     let ids = overflow.ids;
-    for item in hist.iter().filter(|i| ids.iter().any(|d| d == &i.id)) {
-        remove_item_files(dir, item);
-    }
+    // **删实体文件挪到后台线程**：一次上限清理可能涉及几百条，每条要删正文/富文本/
+    // 缩略图/原图（几百 KB 到几 MB）。调用方是持着 `HISTORY` 锁进来的，就地删等于
+    // 把界面刷新和采集一起卡住（代码审查 P1-1）。
+    // 锁内只做两件必须原子的事：内存移除 + WAL 追加。
+    let doomed: Vec<crate::store::Meta> = hist
+        .iter()
+        .filter(|i| ids.iter().any(|d| d == &i.id))
+        .cloned()
+        .collect();
     hist.retain(|i| !ids.iter().any(|d| d == &i.id));
+    if !doomed.is_empty() {
+        let d = dir.to_path_buf();
+        std::thread::spawn(move || {
+            for item in &doomed {
+                remove_item_files(&d, item);
+            }
+        });
+    }
     let ops: Vec<crate::store::Op> = ids
         .iter()
         .map(|id| crate::store::Op::Delete { id: id.clone() })
