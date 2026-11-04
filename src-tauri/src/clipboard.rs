@@ -771,6 +771,12 @@ pub fn set_clipboard_text(text: String, changed: bool) -> Result<(), String> {
     if text.is_empty() {
         return Err("内容为空，未写入剪贴板".into());
     }
+    // 迁移缓存目录期间不写回剪贴板：这一写会走采集链路（`dispatch_raw`），
+    // 可能落盘到正在被搬走的旧目录（复核指出的缺口）。迁移几秒后就会重启，
+    // 直接让用户重试即可。
+    if MIGRATING.load(Ordering::Relaxed) {
+        return Err("正在整理存储，请稍后重试".into());
+    }
     match unsafe { write_text_to_clipboard(&text) } {
         Ok(()) => {
             // 只记字符数，绝不记内容本身（编辑后的正文同样是用户数据）。
@@ -1675,9 +1681,12 @@ pub fn on_clipboard_update() {
                 classify_shot(&origin)
             };
             // **二次检查**（TOCTOU）：从入口到这里之间，迁移可能已经开始 ——
-            // 那样这一条会写进旧目录。窗口极窄（毫秒级、只在换缓存目录时），
-            // 但属真实的写旧目录竞态（复核 P1-终审-3）。宁可丢这一次复制：
-            // 迁移完就重启，用户会重试；写进旧目录则是静默丢数据。
+            // 那样这一条会写进旧目录。窗口从「整个函数」收窄到几条指令，
+            // 但仍**没有完全关闭**：检查通过之后、`dispatch_raw` 内部给 PENDING++
+            // 之前，迁移方的 `flush_pending` 仍可能看到 0 并开始搬目录。
+            // 这段残余窗口（毫秒级、只在换缓存目录时）是可以接受的：真要彻底消除，
+            // 需要把「检查 + PENDING++」放进同一把锁，代价是采集热路径多一次锁。
+            // 取舍是：宁可极小概率丢这一次复制，也不写进旧目录（迁移完会重启，用户会重试）。
             if MIGRATING.load(Ordering::Relaxed) {
                 return;
             }

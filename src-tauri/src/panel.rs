@@ -265,7 +265,7 @@ fn toast_after_copy(panel: Option<(i32, i32)>, keep_open: bool) {
 /// **必须在主线程**：`w.hide()` 是 Tauri 的窗口操作，`SetForegroundWindow` /
 /// `SendInput` 也对调用线程有要求。所以这个函数**不能**放进 `spawn_blocking` ——
 /// 上游只把「解码 + 写剪贴板」那一半（`copy_back_sync`）挪到阻塞线程。
-pub fn paste_after_copy(app: &AppHandle, id: &str) -> Result<(), String> {
+pub fn paste_after_copy(app: &AppHandle) -> Result<(), String> {
     // 必须在收起之前取：收起后窗口就没了，落点会退化成光标位置
     let anchor = panel_anchor(app);
     // 这一条要不要收起决定了提示落哪：读了就不受后面动作影响
@@ -352,12 +352,23 @@ pub async fn panel_paste(app: AppHandle, id: String) -> Result<(), String> {
     // 下半段 `paste_after_copy`：收起面板（Tauri 窗口 API）、抢焦点、`SendInput`，
     // **必须在主线程**，跨线程调用不保证安全 —— 所以不能把整个流程一起塞进
     // `spawn_blocking`（上一版就是那样，属于错误改法）。
-    let id_for_copy = id.clone();
+    let id_for_copy = id;
     tauri::async_runtime::spawn_blocking(move || {
         crate::clipboard::copy_back_sync(id_for_copy, Some(false))
     })
     .await
     .map_err(|e| e.to_string())??;
 
-    paste_after_copy(&app, &id)
+    // **必须显式回主线程**：async command 的 `.await` 续体跑在 async runtime 的
+    // worker 上，不是主线程 —— 直接在这里调 `paste_after_copy` 与它「必须主线程」
+    // 的约定矛盾（`w.hide()` 是 Tauri 窗口 API，`SendInput` 也对线程有要求）。
+    // 与 `panel_toggle` 的收尾同一个模式（`run_on_main_thread`）。
+    let app2 = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(e) = paste_after_copy(&app2) {
+            crate::log_err!("panel", "面板粘贴后续动作失败：{e}");
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
