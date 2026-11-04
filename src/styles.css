@@ -843,7 +843,11 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 
 .toolbar.is-selecting .selectbar {
   display: flex;
-  /* 布局：已选数目靠左、提示语撑满中间并居中、按钮贴右。 */
+  /* 三元素  会在两侧各留一大块空白，而这层背景是
+      从左上到右下的渐变 —— 空白处直接露出渐变，右侧就显得发灰，
+     看着像盖了块遮罩（实测反馈）。
+     改成「文字与说明靠左连成一段、按钮推到最右」，中间只剩一处空白，
+     视觉上就是一条正常的工具栏。 */
   justify-content: flex-start;
 }
 
@@ -856,14 +860,10 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 /* 一行「怎么用」：进入批量模式后界面上只剩几个按钮，不说明的话
    用户不知道自己已经在选择模式里（实测反馈）。 */
 .selectbar-hint {
-  /* 居中：`flex: 1` 撑满剩余宽度，文字在其中居中。
-     不用绝对定位 —— 那会让元素脱离流、把中间整块留空。 */
-  flex: 1;
-  text-align: center;
+  margin-left: 10px;
   color: var(--text-dim);
   font-size: 12px;
   white-space: nowrap;
-  pointer-events: none; /* 纯说明文字，不挡点击 */
 }
 
 .selectbar-actions {
@@ -886,10 +886,6 @@ html:not(.hovers-off) .seg button:not(.on):hover {
    · 删除禁用态：45% 透明糊成一团 → 0.62，仍明显是禁用，但字读得清 */
 .selectbar-actions .btn-ghost {
   color: var(--text);
-  /* 全局 .btn-ghost 的半透明白底在浅色背景上是一团「白蒙蒙」的雾
-     → 操作条里改透明底 + 描边，只留形状和文字。 */
-  background: transparent;
-  border-color: color-mix(in srgb, var(--text) 22%, transparent);
 }
 
 .selectbar-actions .btn-danger:disabled {
