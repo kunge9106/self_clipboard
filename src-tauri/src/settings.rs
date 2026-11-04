@@ -1072,6 +1072,8 @@ pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
 /// 提前建反而会让用户看到一次「关了却又自己出现」。
 #[tauri::command]
 pub fn set_release_idle_secs(value: u32) -> Result<(), String> {
+    // 夹到 0..=1 天：0 = 关闭；再大就没有实际意义，还会让隐藏线程睡太久
+    let value = value.min(86_400);
     crate::log_print!(
         "[settings] 后台释放界面：{}",
         match value {
@@ -1127,6 +1129,9 @@ pub fn set_tray_on_close(app: tauri::AppHandle, value: bool) -> Result<(), Strin
 
 #[tauri::command]
 pub fn set_retention_days(days: u32) -> Result<(), String> {
+    // 与 set_alpha 对齐做夹取：只防离谱值（0 天 = 立刻清空、u32::MAX 天 = 溢出风险），
+    // 不设业务下限，免得和前端档位打架。
+    let days = days.clamp(1, 36_500);
     update(|c| c.retention_days = days);
     // 立即按新天数清理一次
     crate::clipboard::prune_retention(days);
@@ -1151,6 +1156,8 @@ pub fn set_dedup_mode(value: String) -> Result<(), String> {
 /// 改条数上限。改小之后**立即**按新上限清理一次（用户刚把上限调小，就该看到效果）。
 #[tauri::command]
 pub fn set_max_items(items: u32) -> Result<(), String> {
+    // 0 表示不限，保留；其余夹到 [100, 1000 万]，防「填个 1 把自己历史清了」和溢出。
+    let items = if items == 0 { 0 } else { items.clamp(100, 10_000_000) };
     update(|c| c.max_items = items);
     crate::clipboard::trim_history_to_limit();
     crate::log_print!(
