@@ -881,8 +881,15 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   align-self: center;
 }
 
+/* 操作条是「要你立刻做决定」的地方，两个按钮都得一眼看清：
+   · 取消：全局 .btn-ghost 用 --text-dim，在灰底上偏淡 → 这里提到正文色
+   · 删除禁用态：45% 透明糊成一团 → 0.62，仍明显是禁用，但字读得清 */
+.selectbar-actions .btn-ghost {
+  color: var(--text);
+}
+
 .selectbar-actions .btn-danger:disabled {
-  opacity: 0.45;
+  opacity: 0.62;
   cursor: not-allowed;
 }
 
