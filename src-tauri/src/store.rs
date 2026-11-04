@@ -2099,7 +2099,7 @@ mod tests {
         // 继续之后的第一次整理：快照里不再引用坏帧之后的任何 op。
         // 这是「别让同一个丢失窗口一直挂着」的落点 —— 整理完再加载，
         // b-2 / c-3 不能因为日志被截断而以任何方式复活。
-        compact(dir.path(), &loaded.items).unwrap();
+        persist(dir.path(), &loaded.items).unwrap();
         assert_eq!(wal_len(dir.path()), 0, "整理后日志应清空");
         let again = load_index(dir.path());
         assert_eq!(again.items.len(), 1, "坏帧之后的 op 不得复活");
@@ -2135,7 +2135,7 @@ mod tests {
         assert!(loaded.items.iter().any(|i| i.id == "c-3"));
 
         // 完整走一遍 compact 之后：状态不变、日志清空
-        compact(dir.path(), &loaded.items).unwrap();
+        persist(dir.path(), &loaded.items).unwrap();
         assert_eq!(wal_len(dir.path()), 0);
         let after = load_index(dir.path());
         assert_eq!(after.items, loaded.items, "整理前后状态必须逐条相等");

@@ -8207,7 +8207,7 @@ fn bench_scale() {
         let cloned = back.clone();
         let t_clone = t.elapsed();
         let t = Instant::now();
-        crate::store::compact(&dir, &cloned).unwrap();
+        crate::store::persist(&dir, &cloned).unwrap();
         let t_compaction = t.elapsed();
 
         let t = Instant::now();
