@@ -2959,28 +2959,6 @@ fn image_fingerprint(dib: &[u8]) -> u64 {
     h
 }
 
-/// 距上一次键鼠输入过了多少毫秒。取不到时返回 u64::MAX（视作「不确定」）。
-///
-/// ⚠️ 当前**没有调用点**（保留是因为 2.1.11 期间反复用到，删了下次还要重写）。
-///
-/// 曾经用它区分「应用后台补写」与「用户主动操作」，实测证明**行不通**：
-/// 用户按下复制键后，应用在几秒内就补写，此时「距上次输入」必然很短 ——
-/// 两个信号在时间上完全重叠，无法区分。判重最终改用「捕获时刻 + 滑动窗口」，
-/// 不再需要输入活跃度。若将来要用，先想清楚这一点。
-#[allow(dead_code)]
-fn idle_ms() -> u64 {
-    unsafe {
-        let mut li = LastInputInfo {
-            cb_size: std::mem::size_of::<LastInputInfo>() as u32,
-            dw_time: 0,
-        };
-        if GetLastInputInfo(&mut li) == 0 {
-            return u64::MAX;
-        }
-        // GetTickCount 约 49.7 天回绕，这里按 u32 自然回绕做减法（wrapping 语义）
-        GetTickCount().wrapping_sub(li.dw_time) as u64
-    }
-}
 
 fn image_file_to_dib(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
     // 缓存命中判定：同一路径 + 文件的 (mtime, size) 未变 → 说明还是同一张图，
@@ -6171,16 +6149,6 @@ fn make_id(ts: u64) -> String {
     format!("{:x}-{}", ts, c)
 }
 
-/// LASTINPUTINFO：dwTime 是最后一次键鼠输入的 tick 计数。
-///
-/// 必须定义在 `extern` 块**外面** —— extern 块内只允许声明 foreign item
-/// （函数/静态量），不能放 struct 定义。
-#[repr(C)]
-pub struct LastInputInfo {
-    pub cb_size: u32,
-    pub dw_time: u32,
-}
-
 fn non_null<T>(v: T) -> Option<T>
 where
     T: PartialEq + Default,
@@ -6556,8 +6524,6 @@ extern "system" {
         lpdwSize: *mut u32,
     ) -> i32;
     fn CloseHandle(hObject: isize) -> i32;
-    fn GetLastInputInfo(pli: *mut LastInputInfo) -> i32;
-    fn GetTickCount() -> u32;
 
     fn GlobalAlloc(flags: u32, bytes: usize) -> isize;
     fn GlobalLock(handle: isize) -> *mut std::ffi::c_void;
@@ -7759,7 +7725,7 @@ mod tests {
         // 真实代码用的是 `p == path`（path 是 &Path）；这里等价模拟一次剔除
         let keep: Vec<_> = g2
             .iter()
-            .filter(|(p, s, _)| *s != (1, 100))
+            .filter(|(_, s, _)| *s != (1, 100))
             .cloned()
             .collect();
         assert_eq!(keep.len(), 1, "旧 stamp 的条目应被剔除");
