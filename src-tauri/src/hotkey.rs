@@ -229,7 +229,7 @@ unsafe fn register_slots(slots: &[(i32, String)]) -> Result<(), String> {
         }
         match parse_combo(combo).and_then(|(mods, vk)| {
             if RegisterHotKey(0, *id, mods | MOD_NOREPEAT, vk) == 0 {
-                Err(format!("{combo} 已被其它程序占用，请换一个组合"))
+                Err("这个组合已被其他程序占用，请换一个".into())
             } else {
                 Ok(())
             }
@@ -336,11 +336,11 @@ fn is_fn_key(name: &str) -> bool {
 pub(crate) fn normalize_panel_close_key(combo: &str) -> Result<String, String> {
     let (mods, key) = parse_combo_with(combo, true)?;
     if RESERVED_CLOSE_KEYS.contains(&key.as_str()) {
-        return Err("上下键与回车是面板的选择 / 粘贴键，不能用作关闭键".into());
+        return Err("↑↓ Enter 已被面板使用，请换一个键".into());
     }
     let bare_ok = BARE_CLOSE_KEYS.contains(&key.as_str()) || is_fn_key(&key);
     if mods == 0 && !bare_ok {
-        return Err("这个键要带修饰键（Ctrl / Alt / Shift / Win），否则打字时会关掉面板".into());
+        return Err("请加上 Ctrl / Alt / Shift，避免打字时误关面板".into());
     }
     // 带修饰键时主键也必须在认识的范围内：面板按同一张表匹配，写错了只是永远不触发
     if !bare_ok {

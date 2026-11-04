@@ -166,7 +166,7 @@ async function setThemeMode(mode) {
   } catch (e) {
     // 不能静默：最常见的原因是跑着旧二进制（改了 Rust 没重新编译），
     // 命令根本不存在，用户看到的就是「点了没反应」。
-    toast(`主题切换失败：${e}`);
+    toast("主题未切换，请重试");
     console.error("set theme mode failed", e);
     return;
   }
@@ -261,13 +261,13 @@ function doCloseWindow() {
   if (settings && settings.cleanOnClose && settings.cleanConfirmExit) {
     openExitModal();
   } else {
-    appWindow.close().catch((err) => toast("关闭失败：" + err));
+    appWindow.close().catch((err) => toast("无法关闭窗口，请重试"));
   }
 }
 
 function bindWindowControls() {
   const guard = (label, p) =>
-    p.catch((err) => toast(label + "失败：" + err));
+    p.catch((err) => toast(label + "未保存，请重试"));
   document.getElementById("btn-minimize").onclick = () =>
     guard("最小化", appWindow.minimize());
   document.getElementById("btn-maximize").onclick = () =>
@@ -380,7 +380,7 @@ function bindExitModal() {
     try {
       await invoke("exit_app");
     } catch (e) {
-      toast("退出失败：" + e);
+      toast("退出失败，请重试");
     }
   };
 }
@@ -425,7 +425,7 @@ function bindClearAllModal() {
       render();
       toast("已清空全部历史");
     } catch (e) {
-      toast("清空失败：" + e);
+      toast("清空失败，请重试");
     }
   };
 }
@@ -465,7 +465,7 @@ async function openClearMissingModal() {
     // 只做 exists()，不读内容 —— 几百条也是毫秒级
     dead = await invoke("check_files_alive", { ids });
   } catch (e) {
-    toast("检测失败：" + e);
+    toast("检测失败，请重试");
     return;
   }
   if (dead.length === 0) {
@@ -560,7 +560,7 @@ function bindClearMissingModal() {
       removeCards(ids);
       toast(`已清空 ${ids.length} 条失效条目`);
     } catch (e) {
-      toast("清空失败：" + e);
+      toast("清空失败，请重试");
     }
   };
 }
@@ -622,7 +622,7 @@ async function deleteSelected() {
     const note = await invoke("delete_items", { ids, deleteLocalFiles: purge });
     if (note) toast(note);
   } catch (e) {
-    toast("删除失败：" + e);
+    toast("删除失败，请重试");
     return;
   }
   selectMode = false;
@@ -674,7 +674,7 @@ async function clearViewWindow() {
   try {
     stats = await invoke("filter_stats", { filter });
   } catch (e) {
-    toast("读取失败：" + e);
+    toast("读取失败，请重试");
     return;
   }
   if (!stats || stats.total === 0) {
@@ -728,7 +728,7 @@ async function doClearViewFilter({ includePinned, includeFavorites }) {
     }
     toast(query ? `已清理 ${n} 条搜索结果` : `已清理 ${n} 条`);
   } catch (e) {
-    toast("清理失败：" + e);
+    toast("清理失败，请重试");
   }
 }
 
@@ -1074,8 +1074,8 @@ async function renderWindow({ keepScroll = false } = {}) {
     });
   } catch (e) {
     if (token === wlToken) {
-      view.innerHTML = `<div class="empty"><div class="empty-title">列表读取失败</div>
-        <div class="empty-sub">${escFmt(String(e))}</div></div>`;
+      view.innerHTML = `<div class="empty"><div class="empty-title">列表加载失败</div>
+        <div class="empty-sub">请重试，或查看日志</div></div>`;
       if (wl) {
         wl.destroy();
         wl = null;
@@ -1592,7 +1592,7 @@ async function copyBack(item, plain = false) {
     const warn = await invoke("copy_back", { id: item.id, plain });
     toast(warn || "已复制到剪贴板");
   } catch (e) {
-    toast("复制失败：" + e);
+    toast("复制失败，请重试");
   }
   // 复制完立刻重查这一条：原文件可能刚被删或挪走，而列表上的「已失效」是**渲染时**
   // 算出来的 —— 不在这里补一刀，用户看到的就是「提示已经不存在，但卡片上没有任何标记」，
@@ -1946,7 +1946,7 @@ async function openDetail(item, { startEdit = false } = {}) {
   try {
     data = await invoke("get_full_content", { id: item.id });
   } catch (err) {
-    toast("读取失败：" + err);
+    toast("读取失败，请重试");
     return;
   }
 
@@ -2053,7 +2053,7 @@ function bindDetailModal() {
       toast(changed ? "已保存并记入历史" : "已保存");
       closeDetail();
     } catch (err) {
-      toast("保存失败：" + err);
+      toast("未保存，请重试");
     }
   };
 
@@ -2076,7 +2076,7 @@ function bindDetailModal() {
       await invoke("copy_back", { id: detailItem.id, plain: true });
       toast("已复制纯文本");
     } catch (e) {
-      toast("复制失败：" + e);
+      toast("复制失败，请重试");
     }
   };
 
@@ -2090,7 +2090,7 @@ function bindDetailModal() {
       toast(hint || "已复制全文");
       closeDetail();
     } catch (err) {
-      toast("复制失败：" + err);
+      toast("复制失败，请重试");
     }
   };
 
@@ -2468,7 +2468,7 @@ function bindHotkeyRow(view, opts) {
         enabled.checked ? "已开启" : "已关闭"
       }`);
     } catch (e) {
-      toast("快捷键设置失败：" + e);
+      toast("快捷键未保存，请重试");
       enabled.checked = !enabled.checked;
     }
   };
@@ -2482,7 +2482,7 @@ function bindHotkeyRow(view, opts) {
     try {
       await invoke("hotkey_suspend");
     } catch (e) {
-      toast("暂停热键失败：" + e);
+      toast("无法准备录制，请重试");
     }
   };
   // 点到别处 = 放弃录制
@@ -2525,7 +2525,7 @@ function bindHotkeyRow(view, opts) {
       toast("快捷键已改为 " + comboLabel(combo));
     } catch (err) {
       // 后端已回滚并重注册旧组合，这里只把界面拉回去
-      toast("该组合不可用：" + err);
+      toast("该组合已被占用，请换一个");
       btn.textContent = label();
     }
   };
@@ -2596,7 +2596,7 @@ function bindPanelCloseKey(view) {
       stop();
       toast("关闭键已改为 " + comboLabel(parsed.combo));
     } catch (err) {
-      toast("保存失败：" + err);
+      toast("未保存，请重试");
       stop();
     }
   };
@@ -3173,7 +3173,7 @@ function renderUpdatePanels() {
     tip.textContent = `正在下载 v${info?.latest || ""}…`;
   } else if (dlState.error) {
     tip.className = "about-state is-err";
-    tip.textContent = "下载失败：" + dlState.error;
+    tip.textContent = "下载失败，请检查网络";
   } else if (has && info?.downloadedPath) {
     // 有新版，且包已经下好了（用户上次在安装器上取消了）→ 提示直接装
     tip.className = "about-state is-new";
@@ -3273,7 +3273,7 @@ async function startDownload() {
       error: downloaded ? `启动安装程序失败（${e}）` : String(e),
     };
     renderUpdatePanels();
-    toast(downloaded ? "无法启动安装程序：" + e : "下载失败：" + e);
+    toast(downloaded ? "无法启动安装，请重新下载" : "下载失败，请检查网络");
   }
 }
 
@@ -3289,7 +3289,7 @@ async function installDownloaded() {
     await invoke("install_downloaded", { path });
   } catch (e) {
     // UAC 点否 / 安装器起不来：文件还在，按钮保持「重新安装」
-    toast("无法启动安装程序：" + e);
+    toast("无法启动安装，请重新下载");
     renderUpdatePanels();
   }
 }
@@ -3621,7 +3621,7 @@ function bindFirstRunModals() {
         await invoke("set_autostart", { value: true });
         toast("已开启开机自启");
       } catch (e) {
-        toast("开启失败：" + e);
+        toast("未能开启，请重试");
       }
       await dismiss("autostart");
       await refresh();
@@ -3645,7 +3645,7 @@ function bindFirstRunModals() {
       // 直接走关闭：Rust 侧 CloseRequested 会按 tray_on_close 把窗口收进托盘。
       // 刻意**不**经过 doCloseWindow()——用户刚选了后台运行，
       // 这时再弹「退出并清理」确认是自相矛盾的。
-      appWindow.close().catch((err) => toast("关闭失败：" + err));
+      appWindow.close().catch((err) => toast("无法关闭窗口，请重试"));
     };
   const closeQuit = document.getElementById("frc-quit");
   if (closeQuit)
@@ -3673,7 +3673,7 @@ async function aboutFeedback() {
       encodeURIComponent(body);
     await invoke("open_external", { url });
   } catch (e) {
-    toast("打开反馈页面失败：" + e);
+    toast("无法打开页面，请检查网络");
   }
 }
 
@@ -3732,7 +3732,7 @@ function bindSettings(view) {
         settings = await invoke("get_settings");
         toast(`${title}已${el.checked ? "开启" : "关闭"}`);
       } catch (e) {
-        toast(`${title}保存失败：${e}`);
+        toast(title + "未保存，请重试");
         el.checked = !el.checked;
       }
     };
@@ -3760,7 +3760,7 @@ function bindSettings(view) {
         );
       } catch (e) {
         splitCheck.checked = !want;
-        toast("保存失败：" + e);
+        toast("未保存，请重试");
       }
     };
   }
@@ -3786,7 +3786,7 @@ function bindSettings(view) {
           .forEach((b) => b.classList.toggle("on", b === btn));
         toast(perm ? "已改为永久删除（不可恢复）" : "已改为移入回收站");
       } catch (err) {
-        toast("保存失败：" + err);
+        toast("未保存，请重试");
       }
     });
   }
@@ -3848,7 +3848,7 @@ function bindSettings(view) {
         syncPanelKeep();
         toast(`面板失焦${panelStay.checked ? "保持打开" : "即收起"}`);
       } catch (e) {
-        toast("保存失败：" + e);
+        toast("未保存，请重试");
         panelStay.checked = !panelStay.checked;
       }
     };
@@ -3860,7 +3860,7 @@ function bindSettings(view) {
         settings = await invoke("get_settings");
         toast(panelKeep.checked ? "点选后保持打开" : "点选后收起面板");
       } catch (e) {
-        toast("保存失败：" + e);
+        toast("未保存，请重试");
         panelKeep.checked = !panelKeep.checked;
       }
     };
@@ -3946,7 +3946,7 @@ function bindSettings(view) {
         syncShotMode();
         toast(mode === "system" ? "截图改为系统工具" : "截图改为内置覆盖层");
       } catch (err) {
-        toast("切换失败：" + err);
+        toast("未切换，请重试");
       }
     });
   }
@@ -3966,7 +3966,7 @@ function bindSettings(view) {
           .forEach((b) => b.classList.toggle("on", b === btn));
         toast(`截图格式：${fmt.toUpperCase()}`);
       } catch (err) {
-        toast("保存失败：" + err);
+        toast("未保存，请重试");
       }
     });
   }
@@ -4013,7 +4013,7 @@ function bindSettings(view) {
         items = await invoke("list_item_ids");
         toast(pinGlobal.checked ? "置顶已改为全分类互通" : "置顶已改为按分类独立");
       } catch (e) {
-        toast("保存失败：" + e);
+        toast("未保存，请重试");
         pinGlobal.checked = !pinGlobal.checked;
       }
     };
@@ -4030,7 +4030,7 @@ function bindSettings(view) {
         render();
         toast(days === 0 ? "已改为永久保留" : `仅保留近 ${days} 天`);
       } catch (e) {
-        toast("保存失败：" + e);
+        toast("未保存，请重试");
       }
     };
 
@@ -4055,7 +4055,7 @@ function bindSettings(view) {
               : "已改为 60 秒内去重"
         );
       } catch (err) {
-        toast("保存失败：" + err);
+        toast("未保存，请重试");
       }
     });
 
@@ -4082,7 +4082,7 @@ function bindSettings(view) {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
       invoke("set_material_alpha", { value: v }).catch((e) =>
-        toast("保存失败：" + e)
+        toast("未保存，请重试")
       );
     });
   }
@@ -4116,7 +4116,7 @@ function bindSettings(view) {
             : `已切换为直角模式（保留背景模糊）· 浓度 ${alpha}%`
         );
       } catch (e) {
-        toast("保存失败：" + e);
+        toast("未保存，请重试");
         round.checked = !round.checked;
       }
     };
@@ -4137,19 +4137,19 @@ function bindSettings(view) {
       } catch (e) {
         // 迁移中途失败时进度遮罩可能已经挂出来了，必须收掉，否则它挡住整个界面
         hideMoveProgress();
-        toast("更改目录失败：" + e);
+        toast("目录未更改，请重试");
       }
     };
 
   const openDir = view.querySelector("#btn-open-dir");
   if (openDir)
     openDir.onclick = () =>
-      invoke("open_cache_dir").catch((e) => toast("打开失败：" + e));
+      invoke("open_cache_dir").catch((e) => toast("无法打开文件夹"));
 
   const openLog = view.querySelector("#btn-open-log");
   if (openLog)
     openLog.onclick = () =>
-      invoke("open_log_dir").catch((e) => toast("打开失败：" + e));
+      invoke("open_log_dir").catch((e) => toast("无法打开文件夹"));
 
   // 「关于」页的按钮同理，只在切到该分类时存在 → 同样做存在性保护；
   // 顺便在进入该页时就把版本号与运行环境拉出来。
@@ -4185,7 +4185,7 @@ function bindSettings(view) {
         await invoke("copy_diagnostics");
         toast("诊断信息已复制，可直接粘贴到反馈里");
       } catch (e) {
-        toast("复制失败：" + e);
+        toast("复制失败，请重试");
       }
     };
 
@@ -4430,7 +4430,7 @@ document.addEventListener("click", async (e) => {
     try {
       n = Number(await invoke("delete_older_than", { days })) || 0;
     } catch (err) {
-      toast("清理失败：" + err);
+      toast("清理失败，请重试");
       return;
     }
     try {
@@ -4480,7 +4480,7 @@ document.addEventListener("click", async (e) => {
     try {
       n = Number(await invoke("delete_older_than", { days })) || 0;
     } catch (err) {
-      toast("清理失败：" + err);
+      toast("清理失败，请重试");
       return;
     }
     try {
@@ -4502,7 +4502,7 @@ document.addEventListener("click", async (e) => {
       await invoke("snooze_limit_warning", { days: 7 });
       toast("7 天内不再提示");
     } catch (err) {
-      toast("设置失败：" + err);
+      toast("未保存，请重试");
     }
     return;
   }
@@ -4510,7 +4510,7 @@ document.addEventListener("click", async (e) => {
   try {
     n = await invoke("trim_history_to_limit");
   } catch (err) {
-    toast("清理失败：" + err);
+    toast("清理失败，请重试");
     return;
   }
   try {
