@@ -585,6 +585,8 @@ function toggleSelect(id, card) {
 }
 
 function syncSelectBar() {
+  // 批量选择时给 body 打标：侧栏/状态栏由 CSS 置灰并禁用点击（见 styles.css）
+  document.body.classList.toggle("is-selecting", selectMode);
   const n = selectedIds.size;
   const count = document.getElementById("select-count");
   if (count) count.textContent = `已选 ${n} 项`;

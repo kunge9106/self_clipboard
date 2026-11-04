@@ -1691,6 +1691,16 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   user-select: none;
 }
 
+/* 批量选择模式：只允许操作卡片与选择操作条。
+   侧栏与状态栏一律不可交互 —— 否则「选了 5 条之后手滑点一下侧栏」就直接换分类、
+   选中态被静默清空，用户会以为是自己没选中。 */
+body.is-selecting .sidebar,
+body.is-selecting .statusbar {
+  pointer-events: none;
+  opacity: 0.45;
+  transition: opacity var(--dur-fast, 0.12s) var(--ease-standard, ease);
+}
+
 .statusbar-version {
   justify-self: center;
   opacity: 0.75;
@@ -1832,6 +1842,10 @@ html:not(.hovers-off) .statusbar-clear:hover {
   display: grid;
   place-items: center;
   background: rgba(0, 0, 0, 0.32);
+  /* 背后的界面整屏模糊：确认框是「停下来做决定」的时刻，底下列表继续清晰
+     既分散注意力，也容易让人以为还能点。 */
+  backdrop-filter: blur(6px) saturate(120%);
+  -webkit-backdrop-filter: blur(6px) saturate(120%);
 }
 
 /* hidden 属性依赖 UA 的 display:none，但会被上面的 display:grid 覆盖，必须显式声明 */
