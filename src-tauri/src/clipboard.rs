@@ -1565,6 +1565,13 @@ pub fn init(app: &AppHandle) {
 ///   - 延迟渲染（微信登记格式、数据稍后才补）：下一拍补上，直到读到为止；
 ///   - 窗口隐藏/最小化导致消息没投递：轮询本身就是兜底。
 pub fn on_clipboard_update() {
+    // 迁移期间不接受任何新内容。`RemoveClipboardFormatListener` 只保证**之后**
+    // 不再投递，挡不住队列里残留的事件，也挡不住「设标志」与「摘监听」之间到达的
+    // 那一条 —— 否则 flush 通过之后仍可能有一条消息写进旧目录（复核补充）。
+    // watchdog 已有同款闸门，这条是事件通道（WndProc）的对应项。
+    if MIGRATING.load(Ordering::Relaxed) {
+        return;
+    }
     let seq = unsafe { GetClipboardSequenceNumber() };
     let last = LAST_SEQ.load(Ordering::Relaxed);
     if seq == 0 || seq == last {
@@ -1682,7 +1689,7 @@ fn dispatch_raw(raw: RawClip, edited: bool, shot: bool) {
 ///
 /// 异步化带来的新风险：复制完立刻退出时，工作线程可能还在解码大图，
 /// 进程一退就丢了这条记录。所以在退出流程里先等一小会儿。
-/// 等所有已捕获的内容落盘。返回  表示**超时**（仍有未落盘的）。
+/// 等所有已捕获的内容落盘。返回 `false` 表示**超时**（仍有未落盘的）。
 ///
 /// 退出流程忽略返回值（等不及也得退）；**迁移流程必须看**：带着未落盘的写入搬
 /// 目录，搬完那些内容会落在旧路径上，等于丢数据（代码审查 P1-4 补充）。
@@ -4060,7 +4067,7 @@ fn thumb_rel(id: &str) -> String {
 
 /// 写缩略图（自动建目录）。失败返回原因，由调用方决定是否记日志。
 fn write_thumb(dir: &std::path::Path, id: &str, png: &[u8]) -> Result<(), &'static str> {
-    let path = dir.join(thumb_rel(id));
+    let path = safe_join(dir, &thumb_rel(id)).ok_or("缩略图路径非法")?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|_| "缩略图目录创建失败")?;
     }
@@ -4792,6 +4799,12 @@ static COMPACTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 /// 起一个后台线程做一次整理。
 fn spawn_compact(dir: PathBuf) {
+    // 迁移期间不发起新整理：`flush_pending` 等到 0 的那一刻，最后一笔 `handle_clip`
+    // 可能刚 spawn 出一轮整理，而「等 COMPACTING」发生在那之前 —— 那一轮会在搬运
+    // 期间把索引写回旧目录（复核补充）。这里一票拦死。
+    if MIGRATING.load(Ordering::Relaxed) {
+        return;
+    }
     if COMPACTING.swap(true, Ordering::SeqCst) {
         return; // 已经有一个在跑，它会把该固化的都固化掉
     }
@@ -5061,7 +5074,9 @@ fn store_rich_html(dir: &PathBuf, id: &str, html: &str) -> (String, Vec<String>)
 
 /// 列出某个条目已落盘的内联图，按序号排好（重建索引时用）。
 fn list_rich_images(dir: &Path, id: &str) -> Vec<String> {
-    let sub = dir.join(crate::store::rich_dir_rel(id));
+    let Some(sub) = safe_join(dir, &crate::store::rich_dir_rel(id)) else {
+        return Vec::new();
+    };
     let Ok(rd) = fs::read_dir(&sub) else {
         return Vec::new();
     };
@@ -5345,14 +5360,20 @@ fn remove_item_files(dir: &Path, item: &crate::store::Meta) {
         }
     }
     // 富文本拆出来的内联图：整目录删。放在 rels 之外，因为它是目录而不是文件。
-    let rich_dir = dir.join(crate::store::rich_dir_rel(&item.id));
+    let Some(rich_dir) = safe_join(dir, &crate::store::rich_dir_rel(&item.id)) else {
+        crate::log_warn!("[clipboard] 拒绝访问非法富文本目录：{}", item.id);
+        return;
+    };
     if rich_dir.exists() {
         if let Err(e) = fs::remove_dir_all(&rich_dir) {
             crate::log_err!("clipboard", "删除富文本图片目录失败（{}）：{e}", rich_dir.display());
         }
     }
     // 缩略图与原图同生命周期，一并清掉
-    let thumb = dir.join(thumb_rel(&item.id));
+    let Some(thumb) = safe_join(dir, &thumb_rel(&item.id)) else {
+        crate::log_warn!("[clipboard] 拒绝访问非法缩略图路径：{}", item.id);
+        return;
+    };
     if let Err(e) = fs::remove_file(&thumb) {
         if e.kind() != std::io::ErrorKind::NotFound {
             crate::log_err!("clipboard", "删除缩略图失败（{}）：{e}", thumb.display());
@@ -6244,7 +6265,10 @@ fn extract_inline_images(html: &str, dir: &PathBuf, id: &str) -> (String, Vec<St
             }
             let n = paths.len();
             let rel_path = format!("{}/{n}.{ext}", crate::store::rich_dir_rel(id));
-            let full = dir.join(&rel_path);
+            let Some(full) = safe_join(dir, &rel_path) else {
+                // 闭包返回 Option：非法路径直接放弃这一张，不影响其它图
+                return None;
+            };
             if let Some(parent) = full.parent() {
                 let _ = fs::create_dir_all(parent);
             }
