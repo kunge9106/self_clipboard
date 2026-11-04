@@ -843,10 +843,9 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 
 .toolbar.is-selecting .selectbar {
   display: flex;
-  /* 不加主色底：整条蓝底抢视线，而且和旁边按钮的视觉层级打架（实测反馈）。
-     靠「文字加深 + 加粗 + 一行用法说明」来区分就够了。 */
-  margin: 0 4px;
-  padding: 3px 6px;
+  /* 只做布局，不加任何底色/内边距：加了 padding 会在工具栏里圈出一块
+     与周围不同的区域，看起来像盖了层遮罩（实测两次反馈）。 */
+
 }
 
 .selectbar-count {
@@ -861,7 +860,6 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   margin-left: 10px;
   color: var(--text-dim);
   font-size: 12px;
-  opacity: 0.9;
   white-space: nowrap;
 }
 
