@@ -640,8 +640,17 @@ pub struct FullContent {
 ///
 /// 文本条目读 `data/<id>.txt`；文件条目读 `files/<id>.txt` 的路径清单 —— 两者
 /// 都落在缓存目录里，也都能长到列表显示不下，所以共用一个通道。
+///
+/// **异步**：读 12MB 正文 + 解密 + base64 编码是纯 CPU/IO 活，同步 command 跑在
+/// 主线程上会把这期间的所有交互冻住（代码审查 P2-2）。
 #[tauri::command]
-pub fn get_full_content(id: String) -> Result<FullContent, String> {
+pub async fn get_full_content(id: String) -> Result<FullContent, String> {
+    tauri::async_runtime::spawn_blocking(move || get_full_content_sync(id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn get_full_content_sync(id: String) -> Result<FullContent, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let item = {
         let hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
