@@ -888,6 +888,10 @@ html:not(.hovers-off) .seg button:not(.on):hover {
    · 删除禁用态：45% 透明糊成一团 → 0.62，仍明显是禁用，但字读得清 */
 .selectbar-actions .btn-ghost {
   color: var(--text);
+  /* 全局 .btn-ghost 是半透明白底（var(--glass)），压在灰背景上就是一块
+     「白蒙蒙」的雾 → 操作条里改成透明底 + 描边，只留形状和文字。 */
+  background: transparent;
+  border-color: color-mix(in srgb, var(--text) 22%, transparent);
 }
 
 .selectbar-actions .btn-danger:disabled {
