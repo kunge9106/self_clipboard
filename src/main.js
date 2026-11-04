@@ -84,7 +84,12 @@ const TIER_CLASS = {
 };
 
 // 全局状态
-let items = []; // 历史条目（内存中仅元数据，内容在磁盘）
+// 轻量索引：**只存 `{id, kind}`**，不存预览/文件清单（代码审查 P2-1）。
+//
+// 列表渲染走 `wl`（窗口 API），这份数据只服务三件事：状态栏计数、文件类条目的
+// 失效检测（需要全量 id）、本地删除后同步。以前它是「全量 HistoryItem」，
+// 1000 条约几百 KB，每次变更还要整表重拉。
+let items = [];
 let currentView = "history";
 
 // 批量删除：由右键菜单进入。进入后点击条目即切换选中（不再复制回剪贴板），
@@ -4241,7 +4246,7 @@ function bindSettings(view) {
       try {
         await invoke("set_pin_global", { value: pinGlobal.checked });
         settings = await invoke("get_settings");
-        items = await invoke("get_history");
+        items = await invoke("list_item_ids");
         toast(pinGlobal.checked ? "置顶已改为全分类互通" : "置顶已改为按分类独立");
       } catch (e) {
         toast("保存失败：" + e);
@@ -4256,7 +4261,7 @@ function bindSettings(view) {
       try {
         await invoke("set_retention_days", { days });
         // 立即按新天数清理并刷新列表，让「修改生效」可见
-        items = await invoke("get_history");
+        items = await invoke("list_item_ids");
         settings = await invoke("get_settings");
         render();
         toast(days === 0 ? "已改为永久保留" : `仅保留近 ${days} 天`);
@@ -4473,7 +4478,7 @@ async function main() {
 
   // 初始历史
   try {
-    items = await invoke("get_history");
+    items = await invoke("list_item_ids");
   } catch (e) {
     console.error("load history failed", e);
   }
@@ -4685,7 +4690,7 @@ document.addEventListener("click", async (e) => {
       return;
     }
     try {
-      items = await invoke("get_history");
+      items = await invoke("list_item_ids");
       // 删完之后所有页都可能变了：不失效缓存的话，列表要切一次视图才刷新
       api.invalidate();
       render();
@@ -4735,7 +4740,7 @@ document.addEventListener("click", async (e) => {
       return;
     }
     try {
-      items = await invoke("get_history");
+      items = await invoke("list_item_ids");
       // 删完之后所有页都可能变了：不失效缓存的话，列表要切一次视图才刷新
       api.invalidate();
       render();
@@ -4765,7 +4770,7 @@ document.addEventListener("click", async (e) => {
     return;
   }
   try {
-    items = await invoke("get_history");
+    items = await invoke("list_item_ids");
     render();
   } catch {
     /* 列表刷新失败不阻塞提示 */

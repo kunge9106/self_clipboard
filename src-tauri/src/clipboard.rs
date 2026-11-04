@@ -308,6 +308,30 @@ pub struct HistoryItem {
 ///
 /// 内容**只含元数据**，不含任何剪贴板正文 —— 与日志同一条红线。
 /// 写剪贴板会走 `mark_skip()`，所以这条诊断文本不会被记成一条历史。
+/// 前端只需要「条数 + 文件类条目的 id + 本地删除同步」，用不到 preview/files 这些
+/// 大字段。原来用  拉全量：1000 条含预览与文件清单约几百 KB 到数 MB，
+/// 后端还要深拷贝一遍（代码审查 P2-1）。这个接口只传两列，传输量与内存都降两个
+/// 数量级；`items` 也因此从「第二份列表数据」收窄为「轻量索引」。
+#[derive(serde::Serialize)]
+pub struct ItemRef {
+    pub id: String,
+    pub kind: String,
+}
+
+#[tauri::command]
+pub fn list_item_ids() -> Vec<ItemRef> {
+    let Some(hist) = HISTORY.get() else {
+        return Vec::new();
+    };
+    let g = hist.lock().unwrap_or_else(|p| p.into_inner());
+    g.iter()
+        .map(|m| ItemRef {
+            id: m.id.clone(),
+            kind: m.kind.clone(),
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub fn copy_diagnostics() -> Result<String, String> {
     let info = crate::about::about_info();
@@ -4663,10 +4687,16 @@ pub(crate) fn encrypt_text(plain: &str) -> Vec<u8> {
             out
         }
         None => {
-            crate::log_warn!(
-                "[clipboard] DPAPI 加密失败，本条按明文落盘（内容不丢）；失败码见上方 DPAPI 加密错误"
+            // **绝不写明文**：用户内容以明文落盘意味着任何进程、任何本机账户都能读
+            // （代码审查 P2-4）。改为只写魔数、body 为空表示「这条加密失败」。
+            // 读取端据此返回空串（见 decode_text_bytes 的空 body 分支）——
+            // 条目还在列表里（preview 来自 AES 索引，仍能看到前两行），详情为空，
+            // 一眼能看出异常，也不会把内容泄漏到磁盘上。
+            crate::log_err!(
+                "clipboard",
+                "DPAPI 加密失败，本条正文改为空占位（不写明文）；失败码见上方 DPAPI 错误"
             );
-            plain.as_bytes().to_vec()
+            ENC_MAGIC.to_vec()
         }
     }
 }
@@ -4674,7 +4704,15 @@ pub(crate) fn encrypt_text(plain: &str) -> Vec<u8> {
 /// 把落盘字节还原成文本，**同时兼容历史明文文件**（没有魔数前缀的就是老数据）。
 pub(crate) fn decode_text_bytes(raw: &[u8]) -> Option<String> {
     if raw.starts_with(ENC_MAGIC) {
-        let plain = dpapi(&raw[ENC_MAGIC.len()..], false)?;
+        let body = &raw[ENC_MAGIC.len()..];
+        // 空 body 只可能来自 `encrypt_text` 的「加密失败占位」：正常的 DPAPI
+        // 加密连空串也会产出非空 blob（含校验头），所以不会误伤真数据。
+        // 没有这行的话，空 body 会走 CryptUnprotectData 失败 → None →
+        // 读侧报「内容解密失败」，与占位语义对不上（复核指出）。
+        if body.is_empty() {
+            return Some(String::new());
+        }
+        let plain = dpapi(body, false)?;
         // 密文解出来一定是当初写进去的 UTF-8；非法字节说明 blob 被破坏
         String::from_utf8(plain).ok()
     } else {
