@@ -951,29 +951,52 @@ pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
     let Some(hist) = HISTORY.get() else {
         return Vec::new();
     };
-    let hist = hist.lock().unwrap();
-    let mut dead = Vec::new();
-    for id in ids {
-        let Some(item) = hist.iter().find(|i| i.id == id) else {
-            continue;
-        };
-        if item.kind != "files" {
-            continue;
+
+    // **锁内只收集「id → 路径来源」，读盘/解密/查存在全在锁外**。
+    //
+    // 原来整个循环都在锁里：每个 id 一次 `iter().find`（200×1 万 ≈ 200 万次比较）
+    // + 一次 `read_text_entity`（读盘 + AES 解密）+ N 次 `Path::exists`。
+    // 而它在每次渲染和 prefetch 之后都会触发 —— 等于每次滚动都把采集线程堵在 IO 上
+    // （代码审查 P1-1）。顺带把逐 id 查找换成一次遍历建映射。
+    let wanted: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+    let mut todo: Vec<(String, Option<String>, Vec<String>)> = Vec::new();
+    {
+        let g = hist.lock().unwrap_or_else(|p| p.into_inner());
+        for item in g.iter() {
+            if item.kind != "files" || !wanted.contains(item.id.as_str()) {
+                continue;
+            }
+            match item.files_rel() {
+                // 有实体文件：只带走相对路径，出锁再读
+                Some(rel) => todo.push((item.id.clone(), Some(rel), Vec::new())),
+                // 老索引里可能直接内联了路径清单
+                None => todo.push((
+                    item.id.clone(),
+                    None,
+                    item.files.clone().unwrap_or_default(),
+                )),
+            }
         }
-        let paths: Vec<String> = match item.files_rel() {
-            Some(rel) => read_text_entity(&dir, &rel)
+    }
+
+    // 锁外做 IO
+    let mut dead: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (id, rel, inline) in todo {
+        let paths: Vec<String> = match rel {
+            Some(r) => read_text_entity(&dir, &r)
                 .unwrap_or_default()
                 .lines()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .collect(),
-            None => item.files.clone().unwrap_or_default(),
+            None => inline,
         };
         if paths.is_empty() || paths.iter().any(|p| !std::path::Path::new(p).exists()) {
-            dead.push(id);
+            dead.insert(id);
         }
     }
-    dead
+    // 按入参顺序返回，保持调用方看到的行为不变
+    ids.into_iter().filter(|id| dead.contains(id)).collect()
 }
 
 #[tauri::command]
@@ -1864,20 +1887,37 @@ fn is_same_origin_recent(text: &str, ts: u64) -> bool {
     let (Some(dir), Some(hist)) = (DIR.get().cloned(), HISTORY.get()) else {
         return false;
     };
-    let Ok(g) = hist.lock() else { return false };
-    let Some(last) = g.first() else { return false };
-    if last.kind != "text" {
-        return false;
-    }
-    if ts.saturating_sub(last.ts) > TEXT_SAME_ORIGIN_MS {
-        return false;
-    }
-    let Some(rel) = last.text_rel() else {
-        return false;
+    // **锁内只取最近一条的路径与时间，读盘/解密放到锁外**：这里可能读到 1MB 正文，
+    // 持锁做等于把采集线程堵在读盘上（代码审查 P1-1）。
+    let rel = {
+        let Ok(g) = hist.lock() else { return false };
+        let Some(last) = g.first() else { return false };
+        if last.kind != "text" || ts.saturating_sub(last.ts) > TEXT_SAME_ORIGIN_MS {
+            return false;
+        }
+        match last.text_rel() {
+            Some(r) => r,
+            None => return false,
+        }
     };
     match read_text_entity(&dir, &rel) {
         Ok(prev) => same_origin(&prev, text),
         Err(_) => false,
+    }
+}
+
+/// 同源相似度只看前这么多**字符**。
+///
+/// 判定目的是拦「同一次复制的两种表示（Markdown 原文 vs 渲染文本）」，前 4K 字符
+/// 足够区分；而 1MB 文本建两个 char bigram 集合要几十毫秒，且这段跑在采集热路径上
+/// （代码审查 P1-1）。
+const SAME_ORIGIN_PREFIX_CHARS: usize = 4096;
+
+/// 取字符串的前 n 个**字符**（不是字节），避免切断 UTF-8。
+fn prefix_chars(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((i, _)) => &s[..i],
+        None => s,
     }
 }
 
@@ -1890,6 +1930,8 @@ fn is_same_origin_recent(text: &str, ts: u64) -> bool {
 /// 归一化时去掉空白与常见标记符号（`# * ` | - _ > [ ] ( ) ! ~`），
 /// 这样 `## 标题` 与 `标题` 在归一化后一致。
 fn same_origin(a: &str, b: &str) -> bool {
+    let a = prefix_chars(a, SAME_ORIGIN_PREFIX_CHARS);
+    let b = prefix_chars(b, SAME_ORIGIN_PREFIX_CHARS);
     let norm = |s: &str| -> Vec<char> {
         s.chars()
             .filter(|c| {
