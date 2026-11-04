@@ -487,21 +487,39 @@ let purgeResolve = null;
 
 /// 返回 true 表示「用户确认要连本地文件一起处理」。
 /// 返回 false 的两条路径（设置没开 / 没有文件条目）都不弹窗，直接按旧行为删记录。
-function askPurgeFiles(targets) {
-  if (!settings?.deleteFilesWithItem) return Promise.resolve(false);
+async function askPurgeFiles(targets) {
+  if (!settings?.deleteFilesWithItem) return false;
   // `items` 已收窄为 `{id, kind}`（P2-1），拿不到 `files` 路径清单了。
   // 旧写法 `.flatMap((i) => i.files || [])` 在这里恒为空 → 确认框被直接跳过 →
   // 「删除时同时删本地文件」静默失效。改按**文件条目数**说明：
   // 具体删哪些文件由后端 `delete_items` 从索引里读，弹窗只需要让用户确认范围。
   const fileItems = targets.filter((i) => i.kind === "files");
-  if (fileItems.length === 0) return Promise.resolve(false);
+  if (fileItems.length === 0) return false;
+
+  // **失效的条目不该弹确认**：文件早就不在了，问「要不要连本地文件一起删」
+  // 没有意义 —— 用户确认之后只会收到「1 个未能处理」的提示（实测反馈）。
+  // 先问后端哪些已经失效，只对仍然存在的条目弹窗。
+  let alive = fileItems;
+  try {
+    const dead = new Set(
+      await invoke("check_files_alive", { ids: fileItems.map((i) => i.id) })
+    );
+    alive = fileItems.filter((i) => !dead.has(i.id));
+  } catch {
+    /* 检测失败就按「全部存在」处理：宁可多问一句，也不静默跳过删除 */
+  }
+  if (alive.length === 0) {
+    // 全都失效了：没有本地文件可删，直接按普通删除走
+    toast("关联的本地文件已不存在，只删除记录");
+    return false;
+  }
 
   const perm = !!settings.deleteFilesPermanent;
   const how = perm ? "永久删除" : "移入回收站";
   const tail = perm ? "（不可恢复）" : "（之后可从回收站还原）";
 
   document.getElementById("purge-modal-text").textContent =
-    `将${how} ${fileItems.length} 个文件条目关联的本地文件${tail}。\n\n` +
+    `将${how} ${alive.length} 个文件条目关联的本地文件${tail}。\n\n` +
     `具体文件以记录中的路径为准。`;
   document.getElementById("purge-confirm").textContent = perm ? "永久删除" : "移入回收站";
   document.getElementById("purge-modal").hidden = false;

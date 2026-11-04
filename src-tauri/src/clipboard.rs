@@ -441,6 +441,17 @@ fn purge_local_files(items: &[crate::store::Meta]) -> Option<String> {
     }
 
     let total = paths.len();
+    // 诊断：把每条路径的判定结果记下来。「文件明明在桌面、却报未能处理」这种
+    // 反馈，只看结果猜不出来 —— 是路径不对、是目录、还是权限，必须逐条看。
+    for p in &paths {
+        let path = std::path::Path::new(p);
+        crate::log_print!(
+            "[clipboard] 待处理本地文件：{p}（绝对路径={} 存在={} 是文件={}）",
+            path.is_absolute(),
+            path.exists(),
+            path.is_file()
+        );
+    }
     let (ok, failed) = crate::purge::purge(&paths, cfg.delete_files_permanent);
     let how = if cfg.delete_files_permanent {
         "永久删除"
