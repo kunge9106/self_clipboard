@@ -986,7 +986,6 @@ function absorbPage(offset, pageItems) {
   } else {
     wlState = { start: offset, items: pageItems.slice() };
   }
-  items = wlState.items; // 既有 helper（失效检测、批量删除）只看已加载行
   if (wl) {
     wl.setTotal(wlTotal);
     wl.setWindow(wlState.start, wlState.items);
@@ -1113,7 +1112,6 @@ async function renderWindow({ keepScroll = false } = {}) {
   }
 
   wlState = { start: res.offset, items: res.items.slice() };
-  items = wlState.items;
   wl.setTotal(wlTotal);
   wl.setWindow(wlState.start, wlState.items);
   if (anchor) wl.restoreAnchor(anchor);
@@ -4468,12 +4466,9 @@ async function main() {
     //   2. **去重命中并置顶** —— 顺序变了，必须重排，否则用户看不到它跳到最前。
     // 早先这里直接 return，于是「不会重复出现了，但也没到最前面」。
     // 统一走一次轻量刷新，80ms 节流，连发也只做一次。
-    if (items.some((i) => i.id === item.id)) {
-      scheduleWindowRender();
-      return;
-    }
     // 数据在后端：让页缓存失效并重取。用户停在顶部时不做锚点还原，
     // 新内容立刻可见；停在中间时锚点会把他正在看的那条钉在原地。
+    // （去重命中也要重排到最前，所以「是不是已存在」不再影响处理方式。）
     scheduleWindowRender();
   });
 }
@@ -4506,7 +4501,9 @@ async function checkHistoryLimit() {
     return;
   }
   const max = Number(st?.max || 0);
-  const count = items.length || Number(st?.count || 0);
+  // 优先用后端计数：`items` 只是轻量索引，而且渲染后可能只剩「已加载页」——
+  // 用它算会偏小，导致超上限却不弹提示（复核指出）。
+  const count = Number(st?.count || 0) || items.length;
   if (!max || count <= max) return;
   // 用户点过「暂不清理」：7 天内不再打扰
   if (Number(st?.snoozeUntil || 0) > Date.now()) return;
