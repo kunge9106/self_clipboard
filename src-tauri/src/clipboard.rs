@@ -147,6 +147,14 @@ static THUMB_TX: OnceLock<std::sync::mpsc::Sender<crate::store::Meta>> = OnceLoc
 /// 已投递给工作线程、尚未落盘完成的条数。退出前据此等待，避免「刚复制就退出」丢数据。
 static PENDING: AtomicU32 = AtomicU32::new(0);
 
+/// 正在迁移缓存目录。
+///
+/// 迁移是「把整个目录搬走」，而摘掉剪贴板监听只挡住了事件通道：watchdog（20ms
+/// 轮询）根本不看监听，序号一变照样读取并落盘；整理 ticker 与缩略图线程也会把索引 /
+/// 缩略图写回旧路径。三者在迁移期间必须全部空转，否则搬完之后旧目录里又冒出文件、
+/// 新目录缺内容（代码审查 P1-4 补充）。
+static MIGRATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 「图片文件路径 → 已解码 DIB」的小 LRU 缓存。
 ///
 /// **为什么需要**：微信复制一张图后会在一两分钟内**反复**把图片重新放进剪贴板，
@@ -571,7 +579,7 @@ pub fn get_image(id: String) -> Result<String, String> {
     let hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
     let item = hist.iter().find(|i| i.id == id).ok_or("条目不存在")?;
     let rel = item.img_path.as_ref().ok_or("该条目不是图片")?.clone();
-    let path = dir.join(&rel);
+    let path = safe_join(&dir, &rel).ok_or("图片路径非法（越出缓存目录）")?;
     let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     drop(hist);
     if size > MAX_IMAGE_BYTES {
@@ -897,7 +905,7 @@ pub(crate) fn copy_back_sync(id: String, plain: Option<bool>) -> Result<Option<S
                 //   - 其它  → 原图（jpg/png/tiff/svg…），此刻才解码成 DIB
                 // 解码放在这里，是因为它只发生在**用户点击回贴**时，感知不到延迟。
                 let rel = item.img_path.ok_or("图片文件缺失")?;
-                let path = dir.join(rel.clone());
+                let path = safe_join(&dir, &rel).ok_or("图片路径非法（越出缓存目录）")?;
                 let bytes = fs::read(&path).map_err(|e| e.to_string())?;
                 let dib = if rel.ends_with(".bmp") {
                     if bytes.len() < 54 || &bytes[0..2] != b"BM" {
@@ -1114,6 +1122,12 @@ fn spawn_clipboard_watchdog() {
 
             loop {
                 std::thread::sleep(POLL);
+                // 迁移期间完全空转：这条通道不看剪贴板监听是否已摘
+                if MIGRATING.load(Ordering::Relaxed) {
+                    trying_seq = 0;
+                    tries = 0;
+                    continue;
+                }
                 let seq = unsafe { GetClipboardSequenceNumber() };
                 if seq == 0 || seq == LAST_SEQ.load(Ordering::Relaxed) {
                     // 序号没变（或已被事件路径处理过）：本次只花了一次整数读取。
@@ -1301,6 +1315,10 @@ fn spawn_thumb_worker() {
         .name("clipboard-thumb".into())
         .spawn(move || {
             while let Ok(item) = rx.recv() {
+                // 迁移期间不写缩略图：否则 images/thumbs/ 会落在旧目录
+                if MIGRATING.load(Ordering::Relaxed) {
+                    continue;
+                }
                 if let Some(dir) = DIR.get() {
                     // ensure_thumb 内部：已有则跳过；否则解码原图生成；失败则写占位图。
                     let _ = ensure_thumb(dir, &item);
@@ -1664,18 +1682,23 @@ fn dispatch_raw(raw: RawClip, edited: bool, shot: bool) {
 ///
 /// 异步化带来的新风险：复制完立刻退出时，工作线程可能还在解码大图，
 /// 进程一退就丢了这条记录。所以在退出流程里先等一小会儿。
-pub fn flush_pending(timeout: std::time::Duration) {
+/// 等所有已捕获的内容落盘。返回  表示**超时**（仍有未落盘的）。
+///
+/// 退出流程忽略返回值（等不及也得退）；**迁移流程必须看**：带着未落盘的写入搬
+/// 目录，搬完那些内容会落在旧路径上，等于丢数据（代码审查 P1-4 补充）。
+pub fn flush_pending(timeout: std::time::Duration) -> bool {
     let start = std::time::Instant::now();
     while PENDING.load(Ordering::Relaxed) > 0 {
         if start.elapsed() >= timeout {
             let n = PENDING.load(Ordering::Relaxed);
             crate::log_warn!(
-                "[clipboard] 退出等待超时，仍有 {n} 条未落盘，强制退出（可能丢失未保存记录）"
+                "[clipboard] 等待落盘超时，仍有 {n} 条未完成"
             );
-            return;
+            return false;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    true
 }
 
 /// 工作线程里跑的一整条落盘流水线。
@@ -4102,9 +4125,9 @@ fn placeholder_png(side: u32) -> Vec<u8> {
 
 fn ensure_thumb(dir: &std::path::Path, item: &crate::store::Meta) -> Option<Vec<u8>> {
     let rel = item.img_path.as_ref()?;
-    let src = dir.join(rel);
+    let src = safe_join(dir, rel)?;
     // 1) 已有缩略图直接读
-    let thumb_path = dir.join(thumb_rel(&item.id));
+    let thumb_path = safe_join(dir, &thumb_rel(&item.id))?;
     if let Ok(bytes) = fs::read(&thumb_path) {
         return Some(bytes);
     }
@@ -4962,6 +4985,10 @@ fn enforce_limit(dir: &Path, hist: &mut Vec<crate::store::Meta>, max: usize) {
 fn spawn_compaction_ticker(dir: PathBuf) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(5));
+        // 迁移期间不整理：否则 index.bin / WAL 会被写回旧目录
+        if MIGRATING.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
         if crate::store::wal_len(&dir) == 0 {
             continue;
         }
@@ -5305,7 +5332,12 @@ fn remove_item_files(dir: &Path, item: &crate::store::Meta) {
         rels.push(rel);
     }
     for rel in rels {
-        let p = dir.join(&rel);
+        // 同一个 `safe_join`：索引被篡改/损坏时，这里不能变成「删缓存目录之外的
+        // 任意文件」的通道（代码审查 P1-8）。
+        let Some(p) = safe_join(dir, &rel) else {
+            crate::log_warn!("[clipboard] 拒绝删除非法路径（越出缓存目录）：{rel}");
+            continue;
+        };
         if let Err(e) = fs::remove_file(&p) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 crate::log_err!("clipboard", "删除实体失败（{}）：{e}", p.display());
@@ -5732,24 +5764,52 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
         sub
     };
 
-    // ── 迁移前先「静场」（代码审查 P1-4）──
+    // ── 迁移前先「静场」（代码审查 P1-4，含复核补充）──
     //
-    // 迁移是把整个目录搬走，而采集线程、落盘 worker、后台整理都还在跑：
-    //   · 快照之后复制的内容，实体会写进旧目录 → 搬不完，留下的就是丢数据
-    //   · 后台整理可能把新索引写回旧路径 → 搬完之后旧目录里又冒出文件
-    // 顺序：先停监听（不再产生新内容）→ 等已捕获的落盘完成 → 再搬。
-    // 搬完进程会重启（`DIR` 是 `OnceLock`），所以成功后不必恢复监听。
-    let clip_hwnd = unsafe { CLIP_HWND.get().copied() }.unwrap_or(0);
+    // 迁移是把整个目录搬走。**摘掉剪贴板监听只挡住了事件通道**：
+    //   · watchdog（20ms 轮询）根本不看监听，序号一变照样读取并落盘到旧路径
+    //   · 整理 ticker 会把 index.bin / WAL 写回旧目录
+    //   · 缩略图线程会把 images/thumbs/ 写进旧目录
+    // 所以要先打开全局闸门让它们全部空转，再等已捕获的内容落盘。
+    MIGRATING.store(true, Ordering::SeqCst);
+    let clip_hwnd = CLIP_HWND.get().copied().unwrap_or(0);
     if clip_hwnd != 0 {
         unsafe {
             RemoveClipboardFormatListener(clip_hwnd);
         }
     }
-    flush_pending(std::time::Duration::from_secs(3));
+    // **进行中的整理也要等**：`MIGRATING` 只能拦住「新发起」的整理，已经在写
+    // index.bin / 截 WAL 的那一轮仍在跑，会把它写回旧目录（复核指出的缺口）。
+    let wait_start = std::time::Instant::now();
+    while COMPACTING.load(Ordering::SeqCst) {
+        if wait_start.elapsed() >= std::time::Duration::from_secs(5) {
+            MIGRATING.store(false, Ordering::SeqCst);
+            if clip_hwnd != 0 {
+                unsafe {
+                    AddClipboardFormatListener(clip_hwnd);
+                }
+            }
+            return Err("正在整理索引，请稍后重试".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // **超时就必须中止**：带着未落盘的写入搬目录，那些内容会落在旧路径上——
+    // 搬完等于丢了（复核指出的缺口）。
+    if !flush_pending(std::time::Duration::from_secs(3)) {
+        MIGRATING.store(false, Ordering::SeqCst);
+        if clip_hwnd != 0 {
+            unsafe {
+                AddClipboardFormatListener(clip_hwnd);
+            }
+        }
+        return Err("仍有内容正在保存，请稍后重试".into());
+    }
 
     // ── 防线③在 move_dir_contents 内部（结构性杜绝无限递归）──
     if let Err(e) = move_dir_contents(&old, &target_root, &app) {
-        // 迁移失败必须把监听装回去，否则程序会变成「界面能开、但不再记录任何内容」
+        // 迁移失败必须把闸门和监听都恢复，否则程序会变成「界面能开、但不再记录内容」
+        MIGRATING.store(false, Ordering::SeqCst);
         if clip_hwnd != 0 {
             unsafe {
                 AddClipboardFormatListener(clip_hwnd);
@@ -5757,6 +5817,7 @@ pub async fn pick_cache_dir(app: AppHandle) -> Result<Option<(String, bool)>, St
         }
         return Err(format!("迁移缓存文件失败：{e}"));
     }
+    // 成功路径不恢复：进程即将重启，`DIR` 是 `OnceLock`，改了也不会生效
 
     let new_dir_str = strip_ext_prefix(&target_root.to_string_lossy());
     crate::settings::update(|c| c.cache_dir = Some(new_dir_str.clone()));

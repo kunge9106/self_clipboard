@@ -473,11 +473,6 @@ pub fn persist_at(dir: &Path, metas: &[Meta], cp: Checkpoint) -> Result<(), Save
     Ok(())
 }
 
-/// 后台整理：语义与 [`persist`] 完全一致，只是个说得清用途的名字。
-pub fn compact(dir: &Path, metas: &[Meta]) -> Result<(), SaveError> {
-    persist(dir, metas)
-}
-
 /// 快照已经写到磁盘之后才做的事：把旧索引改名保留、记下 `storage_version`。
 ///
 /// 顺序不可颠倒 —— 旧文件必须在新快照完整落盘之后才改名，否则迁移中途被杀
