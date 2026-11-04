@@ -607,12 +607,8 @@ async function deleteSelected() {
   }
   selectMode = false;
   selectedIds.clear();
-  // 退出选择模式要手动收尾：原来靠整表重绘顺手清掉，现在只摘卡片
-  if (wrapEl) {
-    wrapEl
-      .querySelectorAll(".card.is-selected")
-      .forEach((el) => el.classList.remove("is-selected"));
-  }
+  // 退出选择模式：卡片由虚拟列表自己重建，不需要手工摘 is-selected
+  // （旧实现靠 `wrapEl` 遍历 DOM，但那个变量随旧渲染路径一起删掉了）
   document.querySelector(".toolbar")?.classList.remove("is-selecting");
   // 保留滚动位置：删几条不该把人踹回列表顶部（与单条删除同一口径）
   removeCards(ids);
@@ -701,50 +697,17 @@ async function doClearViewFilter({ includePinned, includeFavorites }) {
     });
     render({ keepScroll: false });
     const n = res?.deleted ?? 0;
+    // 按筛选删除拿不到「删了哪些 id」，只能整表刷新索引 ——
+    // 不刷的话这些条目会留在 items 里变成幽灵 id（复核点出的根因）。
+    try {
+      items = await invoke("list_item_ids");
+    } catch {
+      /* 刷新失败不影响已完成的清理 */
+    }
     toast(query ? `已清理 ${n} 条搜索结果` : `已清理 ${n} 条`);
   } catch (e) {
     toast("清理失败：" + e);
   }
-}
-
-async function doClearView(ids) {
-  const uniq = [...new Set(ids)];
-  if (uniq.length === 0) {
-    toast("没有选中可清理的条目");
-    return;
-  }
-  try {
-    await invoke("delete_items", { ids: uniq, deleteLocalFiles: false });
-    removeCards(uniq);
-    toast(query ? `已清理 ${uniq.length} 条搜索结果` : `已清理 ${uniq.length} 条`);
-  } catch (e) {
-    toast("清理失败：" + e);
-  }
-}
-
-function openClearViewModal({ normal, pinned, favs }) {
-  clearViewTargets = { normal, pinned, favs };
-
-  document.getElementById("clear-view-modal-text").textContent =
-    normal.length > 0
-      ? `将清除 ${normal.length} 条${query ? "搜索结果" : "内容"}，默认保留置顶与收藏。`
-      : "范围内没有普通条目（全是置顶或收藏），勾选下方选项可一并清除。";
-
-  const pinRow = document.getElementById("clear-view-pinned-row");
-  const favRow = document.getElementById("clear-view-fav-row");
-  pinRow.hidden = pinned.length === 0;
-  favRow.hidden = favs.length === 0;
-  document.getElementById("clear-view-pinned-label").textContent =
-    `同时清除置顶（${pinned.length} 条）`;
-  document.getElementById("clear-view-fav-label").textContent =
-    `同时清除收藏（${favs.length} 条）`;
-  document.getElementById("clear-view-pinned").checked = false;
-  document.getElementById("clear-view-fav").checked = false;
-  // 两组都不存在时，空容器仍会撑出两道 12px 的间隙，整块隐藏掉
-  document.getElementById("clear-view-checks").hidden =
-    pinned.length === 0 && favs.length === 0;
-
-  document.getElementById("clear-view-modal").hidden = false;
 }
 
 // 弹窗是 index.html 的常驻元素（不在 #view 内），启动时绑一次即可，
@@ -765,12 +728,6 @@ function bindClearViewModal() {
       });
       return;
     }
-    const ids = t.normal.map((i) => i.id);
-    if (document.getElementById("clear-view-pinned").checked)
-      ids.push(...t.pinned.map((i) => i.id));
-    if (document.getElementById("clear-view-fav").checked)
-      ids.push(...t.favs.map((i) => i.id));
-    await doClearView(ids);
   };
 }
 
@@ -846,10 +803,6 @@ function isPinnedIn(item, view) {
   return Array.isArray(vs) && (vs.includes(PIN_ALL) || vs.includes(view));
 }
 
-/** 是否在任何分类里置顶过（用于清理豁免，避免误删别处置顶的内容） */
-function isPinnedAnywhere(item) {
-  return Array.isArray(item.pinnedViews) && item.pinnedViews.length > 0;
-}
 
 
 function timeStr(ts) {
@@ -1144,7 +1097,6 @@ function rerenderNow() {
 
 function render({ keepScroll = false } = {}) {
   hideHoverPreview(); // 重绘后旧卡片已销毁，避免浮层残留
-  const prevTop = keepScroll && wrapEl ? wrapEl.scrollTop : 0;
   const view = document.getElementById("view");
   const toolbar = document.querySelector(".toolbar");
   const isSettings = currentView === "settings";
@@ -1186,34 +1138,6 @@ function render({ keepScroll = false } = {}) {
 }
 
 /**
- * 还原滚动位置。
- *
- * 渐进渲染下第一批只有 PAGE_SIZE 条，撑不到原来的位置，所以边追加批次边还原，
- * 直到内容够高（或全部渲染完）。追加的批数正好等于重建前 DOM 里的卡片数，
- * 因此内存占用不会比渲染前更高。
- */
-function restoreScroll(top) {
-  if (!wrapEl || top <= 0) return;
-  let guard = 0;
-  while (
-    wrapEl.scrollHeight - wrapEl.clientHeight < top &&
-    renderedUpTo < renderList.length &&
-    guard++ < 1000
-  ) {
-    appendBatch();
-  }
-  wrapEl.scrollTop = top;
-}
-
-/// 状态栏计数文案。`n` 是当前视图过滤后的条数。
-function statusCountText(n) {
-  const total = fileCopyOn()
-    ? items.length
-    : items.filter((i) => i.kind !== "files").length;
-  return query ? `找到 ${n} 条结果` : `共 ${total} 条`;
-}
-
-/**
  * 局部删除：只摘掉被删的那几张卡片，不整表重绘。
  *
  * 为什么不用 `render({ keepScroll: true })`：那会 `view.innerHTML = ""` 重建
@@ -1226,97 +1150,12 @@ function statusCountText(n) {
 function removeCards(ids) {
   const drop = new Set(ids);
   if (drop.size === 0) return;
+  // 索引同步：批量删除 / 清失效之后，这些 id 在 `items` 里已经不存在了。
+  // 原先这行写在 `return` 之后的死区里，于是它们变成幽灵 id（下次批量删会带上
+  // 一起发给后端、后端忽略；但「共 N 条」和上限判断会偏大）。
+  items = items.filter((i) => !drop.has(i.id));
   // 数据在后端：重取当前窗口并按锚点还原位置（不需要手工扣高度）
   rerenderNow();
-  return;
-  let removedAbove = 0; // 视口上沿之上被删掉的总高度（含间距）
-  let removedRendered = 0; // 已渲染卡片里被删掉的数量
-  if (wrapEl) {
-    const wrapTop = wrapEl.getBoundingClientRect().top;
-    const gap = parseFloat(getComputedStyle(wrapEl).rowGap) || 0;
-    const doomed = [];
-    for (const el of wrapEl.querySelectorAll(".card")) {
-      if (!drop.has(el.dataset.id)) continue;
-      const r = el.getBoundingClientRect();
-      // 完全落在视口上沿之上 → 删掉它会让下面整体上移，需要补滚动
-      if (r.bottom <= wrapTop) removedAbove += r.height + gap;
-      doomed.push(el);
-    }
-    removedRendered = doomed.length;
-    for (const el of doomed) el.remove();
-  }
-
-  // 数据层同步：不同步的话下次 render 会把删掉的又「复活」
-  items = items.filter((i) => !drop.has(i.id));
-  renderList = renderList.filter((i) => !drop.has(i.id));
-  renderedUpTo = Math.max(0, renderedUpTo - removedRendered);
-
-  if (wrapEl && removedAbove > 0) {
-    wrapEl.scrollTop = Math.max(0, wrapEl.scrollTop - removedAbove);
-  }
-
-  if (renderList.length === 0) {
-    render({ keepScroll: false });
-    return;
-  }
-  const countEl = document.getElementById("status-count");
-  if (countEl) countEl.textContent = statusCountText(renderList.length);
-}
-
-// ---------------------------------------------------------------------------
-// 渐进渲染
-//
-// 为什么需要：渲染进程的内存主要由「实际渲染出多少个卡片」决定（实测历史 272 条
-// 时渲染进程专用工作集约 67MB，随条数线性上涨）。一次全量渲染会让内存随使用时间
-// 持续增长，这与「内容走磁盘、不常驻内存」的设计目标相悖。
-//
-// 做法：DOM 中最多保留约一屏 + 一批的量，其余滚动到时再生成。
-// ---------------------------------------------------------------------------
-const PAGE_SIZE = 60; // 每批渲染的条数
-let renderList = []; // 当前视图过滤后的完整列表（仅元数据，很轻）
-let renderedUpTo = 0; // 已渲染到的下标
-let wrapEl = null; // 当前列表滚动容器
-let moreObserver = null; // 观察「加载更多」哨兵
-let sentinelEl = null; // 哨兵元素本身
-
-function setupMoreObserver() {
-  if (moreObserver) moreObserver.disconnect();
-  moreObserver = new IntersectionObserver(
-    (entries) => {
-      if (entries.some((e) => e.isIntersecting)) appendBatch();
-    },
-    { root: wrapEl, rootMargin: "600px 0px" } // 提前 600px 预渲染，滚动不卡顿
-  );
-}
-
-/** 追加下一批卡片；若仍有剩余，在末尾放一个不可见哨兵，滚到附近时触发下一批 */
-function appendBatch() {
-  if (!wrapEl || renderedUpTo >= renderList.length) return;
-
-  if (sentinelEl) {
-    moreObserver.unobserve(sentinelEl);
-    sentinelEl.remove();
-    sentinelEl = null;
-  }
-
-  const end = Math.min(renderedUpTo + PAGE_SIZE, renderList.length);
-  const frag = document.createDocumentFragment();
-  for (let i = renderedUpTo; i < end; i++) {
-    frag.appendChild(cardEl(renderList[i]));
-  }
-  wrapEl.appendChild(frag);
-  renderedUpTo = end;
-
-  // 只为本批新卡片里尚未加载的缩略图登记观察（已加载的已摘掉 data-img-id 标记）
-  observeImages(wrapEl);
-  applyMissingMarks(); // 新追加的批次也要补上失效标记
-
-  if (renderedUpTo < renderList.length) {
-    sentinelEl = document.createElement("div");
-    sentinelEl.className = "load-more";
-    wrapEl.appendChild(sentinelEl);
-    moreObserver.observe(sentinelEl);
-  }
 }
 
 /** 各视图的空态文案（需求 #5），搜索时显示「暂无 xxx 相关内容」（需求 #3） */
@@ -1345,12 +1184,6 @@ function emptyHtml() {
       : "";
   return `<div class="empty"><div class="empty-title">${title}</div>
     <div class="empty-sub">${sub || ""}</div>${tip}</div>`;
-}
-
-function cardEl(item) {
-  const card = document.createElement("div");
-  fillCard(card, item);
-  return card;
 }
 
 /**
