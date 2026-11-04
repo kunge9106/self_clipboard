@@ -56,10 +56,14 @@ pub fn purge(paths: &[String], permanent: bool) -> (usize, Vec<String>) {
                 continue;
             }
             if !path.is_file() {
-                // 「已不存在」仍然算未处理：它是**事实告知**（你复制的那个文件本来
-                // 就不在了），静默算成功会让用户以为是我们删的。
-                // 与「删失败（占用/权限）」的区别由 `purge_local_files` 的文案区分。
-                failed.push(format!("{raw}（不是文件或已不存在）"));
+                // 目录**绝不**递归删除：一个 `remove_dir_all` 写错就是整棵树没了，
+                // 而用户复制文件夹到剪贴板时，多半并不想「删掉整个文件夹」。
+                // 这两类要分开报，否则用户看到「未能处理」根本不知道为什么。
+                if path.is_dir() {
+                    failed.push(format!("{raw}（是文件夹，未处理）"));
+                } else {
+                    failed.push(format!("{raw}（已不存在）"));
+                }
                 continue;
             }
             match std::fs::remove_file(path) {
@@ -88,8 +92,12 @@ pub fn move_to_recycle(paths: &[String]) -> (usize, Vec<String>) {
             continue;
         }
         if !path.is_file() {
-            // 目录 / 已不存在的路径：目录**绝不**处理（防整棵树被带走）
-            failed.push(format!("{raw}（不是文件或已不存在）"));
+            // 目录**绝不**处理（防整棵树被带走）；与「已不存在」分开报
+            if path.is_dir() {
+                failed.push(format!("{raw}（是文件夹，未处理）"));
+            } else {
+                failed.push(format!("{raw}（已不存在）"));
+            }
             continue;
         }
 
