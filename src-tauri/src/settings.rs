@@ -1129,9 +1129,16 @@ pub fn set_tray_on_close(app: tauri::AppHandle, value: bool) -> Result<(), Strin
 
 #[tauri::command]
 pub fn set_retention_days(days: u32) -> Result<(), String> {
-    // 与 set_alpha 对齐做夹取：只防离谱值（0 天 = 立刻清空、u32::MAX 天 = 溢出风险），
-    // 不设业务下限，免得和前端档位打架。
-    let days = days.clamp(1, 36_500);
+    // **0 必须放行**：全项目语义是「0 = 永久保留」（见字段注释、`prune_history`
+    // 的 `if days == 0 { return }`、前端 `min="0"` 与「已改为永久保留」提示）。
+    // 早先这里写成 `clamp(1, …)`，等于用户选「永久」时被改成 1 天并立刻
+    // `prune_retention(1)` —— 一次点击删光所有历史，属于数据丢失级回归。
+    // 夹取只针对「非 0 的离谱值」（防 u32::MAX 溢出），与 `set_max_items` 保 0 一致。
+    let days = if days == 0 {
+        0
+    } else {
+        days.clamp(1, 36_500)
+    };
     update(|c| c.retention_days = days);
     // 立即按新天数清理一次
     crate::clipboard::prune_retention(days);
