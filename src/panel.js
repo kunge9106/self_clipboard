@@ -89,7 +89,18 @@ function applyFilter() {
  * `wantTotal = true` 是为了状态栏能报出真实总数：面板只显示前 60 条，
  * 「共 3 万条」和「共 60 条」对用户是两件事。
  */
+/**
+ * 请求令牌：只让**最新**一次 fetch 的结果落地。
+ *
+ * `reload`（每次弹出）、搜索去抖、`panel-refresh` 三者会并发调用 `fetchRows`。
+ * 没有令牌时，慢的旧响应回来晚了会覆盖新结果 —— 表现是「搜索完列表又跳回全部」
+ * 或「刚弹出的面板显示上一次的内容」（代码审查 P1-6）。主窗口有 `wlToken`，
+ * 这里一直缺一份。
+ */
+let fetchToken = 0;
+
 async function fetchRows(q) {
+  const token = ++fetchToken;
   const ask = (limit) =>
     api.fetchWindow({
       filter: buildFilter({ view: "history", query: q }),
@@ -109,12 +120,15 @@ async function fetchRows(q) {
       res = await ask(MAX_ROWS + res.pinnedCount);
     }
   } catch (e) {
+    if (token !== fetchToken) return; // 已经被更新的请求取代，别用旧错误盖住它
     rows = [];
     total = 0;
     render();
     setStatus("读取失败：" + e);
     return;
   }
+  // 两次 await 之间可能又有新请求发出，统一在这里丢弃过期结果
+  if (token !== fetchToken) return;
   rows = res.items;
   total = res.total;
   if (sel >= rows.length) sel = Math.max(0, rows.length - 1);

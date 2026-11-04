@@ -338,13 +338,14 @@ pub fn key_for(dir: &Path) -> Option<Key> {
             return key.clone();
         }
     }
-    let key = match crypto::load_or_create_key(dir) {
+    match crypto::load_or_create_key(dir) {
         Ok(k) => {
             crate::log_print!(
                 "[store] 密钥就绪：key_id={:016x} created={}",
                 k.key_id(),
                 k.created_ms()
             );
+            *guard = Some((dir.to_path_buf(), Some(k.clone())));
             Some(k)
         }
         Err(e) => {
@@ -353,11 +354,12 @@ pub fn key_for(dir: &Path) -> Option<Key> {
                 "密钥不可用（{}）：本次运行无法读写加密索引，历史仍可读取但不会落盘",
                 e
             );
+            // **不缓存失败**（代码审查 P1-9）。用户可能稍后把 key.bin 补回来，
+            // 若把 None 钉在缓存里，他必须重启进程才能恢复；下次调用重试即可，
+            // DPAPI 读取本来就是微秒级。
             None
         }
-    };
-    *guard = Some((dir.to_path_buf(), key.clone()));
-    key
+    }
 }
 
 // ---------------------------------------------------------------------------

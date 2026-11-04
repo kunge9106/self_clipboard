@@ -164,7 +164,16 @@ static PENDING: AtomicU32 = AtomicU32::new(0);
 /// 实测一次复制最多涉及 3 个路径。
 static DECODE_CACHE: Mutex<Vec<(PathBuf, (u64, u64), Vec<u8>)>> = Mutex::new(Vec::new());
 /// 解码缓存条数上限（LRU：最老的先淘汰）。
+///
+/// **但条数不是真正的限额**：同一份缓存同时服务缩略图（512px，约 1MB）和回贴
+/// （`PASTE_MAX_SIDE` 8192px，约 256MB）—— 按条数封顶等于没有上限，最坏能钉住
+/// 768MB（代码审查 P1-2）。所以真正的闸门是下面两个字节上限。
 const DECODE_CACHE_CAP: usize = 3;
+/// 缓存**总字节**上限。超了就从最旧的开始丢，直到回到预算内。
+const DECODE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+/// 单条上限：超过它干脆不缓存。一条就能吃掉大半预算，而大图回贴本身是慢路径，
+/// 缓存收益抵不上这部分常驻内存。
+const DECODE_CACHE_MAX_ENTRY: usize = 24 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // 数据结构
@@ -409,7 +418,7 @@ fn purge_local_files(items: &[crate::store::Meta]) -> Option<String> {
 #[tauri::command]
 pub fn delete_item(id: String, delete_local_files: Option<bool>) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
-    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    let mut hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(pos) = hist.iter().position(|i| i.id == id) {
         let item = hist.remove(pos);
         let kind = item.kind.clone();
@@ -535,7 +544,7 @@ pub fn toggle_favorite(id: String) -> Result<(), String> {
 #[tauri::command]
 pub fn clear_all() -> Result<(), String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
-    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    let mut hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
     // 只删条目自己的实体（文本 / 图片 / 文件清单），不碰目录里其它内容——
     // 尤其不碰 `log/`（见 CONTENT_DIRS 注释）。
     let n = hist.len();
@@ -559,7 +568,7 @@ const MAX_IMAGE_BYTES: u64 = 96 * 1024 * 1024;
 #[tauri::command]
 pub fn get_image(id: String) -> Result<String, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
-    let hist = HISTORY.get().unwrap().lock().unwrap();
+    let hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
     let item = hist.iter().find(|i| i.id == id).ok_or("条目不存在")?;
     let rel = item.img_path.as_ref().ok_or("该条目不是图片")?.clone();
     let path = dir.join(&rel);
@@ -627,7 +636,7 @@ pub struct FullContent {
 pub fn get_full_content(id: String) -> Result<FullContent, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let item = {
-        let hist = HISTORY.get().unwrap().lock().unwrap();
+        let hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
         hist.iter()
             .find(|i| i.id == id)
             .cloned()
@@ -756,7 +765,7 @@ pub fn set_clipboard_text(text: String, changed: bool) -> Result<(), String> {
 pub async fn get_image_thumb(id: String) -> Result<String, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
     let item = {
-        let hist = HISTORY.get().unwrap().lock().unwrap();
+        let hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
         hist.iter()
             .find(|i| i.id == id)
             .cloned()
@@ -796,7 +805,7 @@ pub async fn copy_back(id: String, plain: Option<bool>) -> Result<Option<String>
 /// 真正的回贴实现（在 blocking 线程上跑，不在主线程）。
 pub(crate) fn copy_back_sync(id: String, plain: Option<bool>) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
-    let hist = HISTORY.get().unwrap().lock().unwrap();
+    let hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
     let item = hist
         .iter()
         .find(|i| i.id == id)
@@ -973,7 +982,7 @@ pub fn delete_items(
     delete_local_files: Option<bool>,
 ) -> Result<Option<String>, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
-    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    let mut hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
     // 先把待处理的目标捞出来：`retain` 里拿不到可变借用之外的东西，
     // 而本地文件必须在条目被移除**之前**按它自己记录的路径处理。
     let purge_targets: Vec<crate::store::Meta> = if delete_local_files.unwrap_or(false) {
@@ -1494,7 +1503,7 @@ pub fn init(app: &AppHandle) {
 
     crate::log_print!(
         "[clipboard] 初始化完成，历史条目 {} 条，目录 {}",
-        HISTORY.get().unwrap().lock().unwrap().len(),
+        HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner()).len(),
         dir.display()
     );
 }
@@ -2878,13 +2887,24 @@ fn image_file_to_dib(path: &std::path::Path, max_side: u32) -> Option<Vec<u8>> {
     let dib = decode_image_file(path, max_side)?;
 
     if let Some(st) = stamp {
-        if let Ok(mut g) = DECODE_CACHE.lock() {
-            // 同路径但内容变了（st 不同）→ 先剔除旧的那条，避免占位。
-            g.retain(|(p, s, _)| !(p == path && *s == st));
-            g.push((path.to_path_buf(), st, dib.clone()));
-            let len = g.len();
-            if len > DECODE_CACHE_CAP {
-                g.drain(0..len - DECODE_CACHE_CAP);
+        // 单条超限就不进缓存：回贴大图（8192px ≈ 256MB）本来就慢，
+        // 把它钉在内存里换不到什么，反而吃掉整个预算。
+        if dib.len() <= DECODE_CACHE_MAX_ENTRY {
+            if let Ok(mut g) = DECODE_CACHE.lock() {
+                // 同路径但内容变了（st 不同）→ 先剔除旧的那条，避免占位。
+                g.retain(|(p, s, _)| !(p == path && *s == st));
+                g.push((path.to_path_buf(), st, dib.clone()));
+                let len = g.len();
+                if len > DECODE_CACHE_CAP {
+                    g.drain(0..len - DECODE_CACHE_CAP);
+                }
+                // 再按**总字节**收一次：条数达标不代表内存达标（每条大小差两个数量级）。
+                // 至少留一条，避免刚放进去就被自己挤掉。
+                let mut total: usize = g.iter().map(|(_, _, d)| d.len()).sum();
+                while total > DECODE_CACHE_BYTES && g.len() > 1 {
+                    let (_, _, dropped) = g.remove(0);
+                    total = total.saturating_sub(dropped.len());
+                }
             }
         }
     }
@@ -3465,7 +3485,7 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
     }
 
     {
-        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        let mut hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
         // 按 ts 二分插入，而不是 `insert(0, _)`：后者隐含「新条目 ts 一定最大」，
         // 系统时钟回拨（NTP 校时 / 用户改时间）时就会把新内容排到中间去，
         // 而列表「ts 严格降序」是分页切片的前提。正常情况命中下标 0，与老行为一致。
@@ -3476,7 +3496,7 @@ fn store_raw(raw: RawClip, edited: bool, shot: bool) -> HistoryItem {
     append_op(&dir, crate::store::Op::Insert { item: item.clone() });
     // 上限清理：超了就删最旧的非保护条目（走批量 Delete，不写快照）
     {
-        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        let mut hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
         enforce_history_limit(&dir, &mut hist);
     }
     // ⚠️ 只记**元数据**，绝不记内容。
@@ -5208,7 +5228,7 @@ fn patch_item<F: FnOnce(&mut crate::store::Meta)>(id: &str, f: F) -> Result<(), 
     // 先留一份改动前的样子：改完之后拿它跟新值比，才知道该写哪种 op。
     // 只改了收藏就写一个 `Fav` 帧（约 60 B），不必把整条重新写一遍。
     let (before, after) = {
-        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        let mut hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
         let Some(item) = hist.iter_mut().find(|i| i.id == id) else {
             return Err("条目不存在".into());
         };
@@ -5239,7 +5259,7 @@ pub fn delete_by_filter(
     include_favorites: Option<bool>,
 ) -> Result<crate::query::DeleteReport, String> {
     let dir = DIR.get().cloned().ok_or("存储目录未初始化")?;
-    let mut hist = HISTORY.get().unwrap().lock().unwrap();
+    let mut hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
     let all = crate::query::matching_ids(&hist, &filter);
     // `include_*` 默认 false = **保留**置顶与收藏，与今天「清空当前视图」的默认口径一致
     // （那个弹窗的两个勾选项就是这两个开关）。这层保护必须在后端做：让前端先筛一遍
@@ -5332,7 +5352,7 @@ pub fn delete_by_filter(
 pub fn prune_retention(days: u32) {
     if let Some(dir) = DIR.get() {
         let include_pinned = crate::settings::get().prune_include_pinned;
-        let mut hist = HISTORY.get().unwrap().lock().unwrap();
+        let mut hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
         let before = hist.len();
         *hist = prune_history(hist.clone(), dir, days, include_pinned);
         crate::query::bump_epoch();
@@ -5864,7 +5884,7 @@ pub fn on_app_exit() {
             save_index(dir, &Vec::new());
         } else {
             // 保留置顶/收藏：只删普通条目的内容文件
-            let mut hist = HISTORY.get().unwrap().lock().unwrap();
+            let mut hist = HISTORY.get().unwrap().lock().unwrap_or_else(|p| p.into_inner());
             hist.retain(|i| {
                 if is_protected(i) {
                     true
