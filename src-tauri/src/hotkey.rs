@@ -164,12 +164,24 @@ pub fn apply(main: (&str, bool), shot: (&str, bool)) -> Result<(), String> {
     post(slots)
 }
 
+/// 串行化整批注册。
+///
+/// `PENDING` 是单槽：`post` 先把 `(slots, tx)` 写进去，投递 `WM_RELOAD`，再等回执。
+/// 两个线程同时调用时会互相覆盖 —— 先到者的 `tx` 被顶掉，它的 `rx` 永远收不到，
+/// 800ms 后报「注册超时」；而且两次 `WM_RELOAD` 会让热键线程把 suspend/resume
+/// 交错执行（代码审查 P1-5）。录制快捷键时 suspend + apply 恰好就是并发调用。
+///
+/// 用一把锁把「写 PENDING → 投递 → 等回执」整段串起来，代价是并发时排队
+/// （最坏 800ms），换来的是状态不再互相踩。
+static POST_LOCK: Mutex<()> = Mutex::new(());
+
 fn post(slots: Vec<(i32, String)>) -> Result<(), String> {
     let tid = THREAD_ID.load(Ordering::SeqCst);
     if tid == 0 {
         // 线程还没起来（极少见：启动瞬间改了设置）—— 配置已存，启动时会注册
         return Ok(());
     }
+    let _serial = POST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (tx, rx) = std::sync::mpsc::channel();
     *PENDING.lock().map_err(|_| "热键状态锁失效")? = Some((slots, tx));
     unsafe {

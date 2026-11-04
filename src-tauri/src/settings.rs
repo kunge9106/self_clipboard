@@ -350,6 +350,9 @@ pub struct UpdateCache {
     /// 安装包字节数（0 = 未知）
     #[serde(default)]
     pub asset_size: u64,
+    /// 安装包 SHA-256（GitHub `assets[].digest`，形如 `sha256:...`）；空 = 无校验信息
+    #[serde(default)]
+    pub asset_digest: String,
     /// 检查时间（epoch 秒）
     #[serde(default)]
     pub checked_at: u64,
@@ -1069,6 +1072,8 @@ pub fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
 /// 提前建反而会让用户看到一次「关了却又自己出现」。
 #[tauri::command]
 pub fn set_release_idle_secs(value: u32) -> Result<(), String> {
+    // 夹到 0..=1 天：0 = 关闭；再大就没有实际意义，还会让隐藏线程睡太久
+    let value = value.min(86_400);
     crate::log_print!(
         "[settings] 后台释放界面：{}",
         match value {
@@ -1124,6 +1129,16 @@ pub fn set_tray_on_close(app: tauri::AppHandle, value: bool) -> Result<(), Strin
 
 #[tauri::command]
 pub fn set_retention_days(days: u32) -> Result<(), String> {
+    // **0 必须放行**：全项目语义是「0 = 永久保留」（见字段注释、`prune_history`
+    // 的 `if days == 0 { return }`、前端 `min="0"` 与「已改为永久保留」提示）。
+    // 早先这里写成 `clamp(1, …)`，等于用户选「永久」时被改成 1 天并立刻
+    // `prune_retention(1)` —— 一次点击删光所有历史，属于数据丢失级回归。
+    // 夹取只针对「非 0 的离谱值」（防 u32::MAX 溢出），与 `set_max_items` 保 0 一致。
+    let days = if days == 0 {
+        0
+    } else {
+        days.clamp(1, 36_500)
+    };
     update(|c| c.retention_days = days);
     // 立即按新天数清理一次
     crate::clipboard::prune_retention(days);
@@ -1148,6 +1163,8 @@ pub fn set_dedup_mode(value: String) -> Result<(), String> {
 /// 改条数上限。改小之后**立即**按新上限清理一次（用户刚把上限调小，就该看到效果）。
 #[tauri::command]
 pub fn set_max_items(items: u32) -> Result<(), String> {
+    // 0 表示不限，保留；其余夹到 [100, 1000 万]，防「填个 1 把自己历史清了」和溢出。
+    let items = if items == 0 { 0 } else { items.clamp(100, 10_000_000) };
     update(|c| c.max_items = items);
     crate::clipboard::trim_history_to_limit();
     crate::log_print!(

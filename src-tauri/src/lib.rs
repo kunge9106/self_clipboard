@@ -288,6 +288,7 @@ pub fn run() {
             popup::panel_begin_drag,
             effects::resize_start,
             clipboard::get_history,
+            clipboard::list_item_ids,
             clipboard::copy_diagnostics,
             clipboard::history_limit,
             clipboard::trim_history_to_limit,
