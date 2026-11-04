@@ -450,6 +450,17 @@ fn purge_local_files(items: &[crate::store::Meta]) -> Option<String> {
     if failed.is_empty() {
         crate::log_print!("[clipboard] 已{how} {ok} 个本地文件");
         Some(format!("已{how} {ok} 个本地文件"))
+    } else if failed.iter().all(|f| f.contains("已不存在")) {
+        // 全部「已不存在」：不是失败，是事实 —— 文件早就不在了，记录已清理。
+        // 原来统一说成「未能处理（可能被占用）」，用户会去查权限，方向就错了。
+        crate::log_print!(
+            "[clipboard] {how}本地文件：{ok} 个已处理，{} 个原本已不存在",
+            failed.len()
+        );
+        Some(format!(
+            "已{how} {ok} 个；{} 个原本已不存在（记录已清理）",
+            failed.len()
+        ))
     } else {
         crate::log_warn!(
             "[clipboard] {how}本地文件：成功 {ok}/{total}，失败 {} 个（详见界面提示）",

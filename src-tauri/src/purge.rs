@@ -56,6 +56,9 @@ pub fn purge(paths: &[String], permanent: bool) -> (usize, Vec<String>) {
                 continue;
             }
             if !path.is_file() {
+                // 「已不存在」仍然算未处理：它是**事实告知**（你复制的那个文件本来
+                // 就不在了），静默算成功会让用户以为是我们删的。
+                // 与「删失败（占用/权限）」的区别由 `purge_local_files` 的文案区分。
                 failed.push(format!("{raw}（不是文件或已不存在）"));
                 continue;
             }
