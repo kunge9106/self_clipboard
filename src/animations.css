@@ -100,4 +100,23 @@
   .fx-stagger > * {
     animation: none;
   }
+
+  /* 过渡也一起关：它不是 `animation`，但同样是「动」。清单里十几处 transition
+     现在都走 `--dur-*` 令牌，这一条能把它们全部盖住（审查 C3）。
+     用 0.01ms 而不是 `transition: none`：保留 `transitionend` 事件 —— 有些收尾
+     逻辑靠它触发（弹层关闭后清状态），直接 none 会让那段静默不执行。 */
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+  }
+
+  /* 确认框/弹窗遮罩的整屏模糊在弱 GPU 上是弹窗卡顿的主因（审查 C2）。
+     降级成纯半透明黑底：可读性不受影响，只是少了背景虚化。
+     只对「已经要求减少视觉效果」的用户生效，不动默认观感。 */
+  .modal-mask {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 }
