@@ -82,11 +82,12 @@
   /* 强调色的淡底：主按钮的悬停/聚焦用。实心蓝在毛玻璃上像贴了块塑料板，
      与材质语言冲突；但主操作又必须比次操作醒目，所以用「淡色底 + 强调边 + 强调字」。 */
   --accent-soft: rgba(47, 107, 255, 0.1);
-  /* 聚焦底色：**淡灰**，与悬停的提亮刻意区分。
-     悬停是「鼠标扫过」的瞬时反馈，提亮更像玻璃被照亮；
-     聚焦是「键盘选中在这里」的持久状态，需要一点压暗才有「落定」的感觉。
-     同一个按钮两种状态用两种方向，是因为它们回答的是不同问题。 */
-  --focus-bg: rgba(0, 0, 0, 0.055);
+  /* 小控件（按钮 / 图标键 / 菜单项 / 导航项）的悬停与聚焦底色：**淡灰**。
+     与卡片用的 --state-hover（白 .45 提亮）刻意分开：
+       · 卡片是「内容块」，悬停要像玻璃被照亮 → 提亮；
+       · 按钮是「可点的东西」，悬停要像被按住的实体 → 压暗一点点。
+     实测原话：「取消按钮悬停时可以加一点淡淡的灰色，让人知道选中了」。 */
+  --state-hover-dim: rgba(0, 0, 0, 0.055);
   /* 主按钮的**填充色**：比 --accent 深一档。
      #2f6bff 饱和度 100%、明度很高，铺成实底在毛玻璃上刺眼；
      Fluent 自己的强调蓝是 #005FB8 那种深沉色。这里取中间值，
@@ -306,8 +307,8 @@ body.dark {
   /* 深色下「压暗」在深底上看不出来，按下改为比悬停再亮一档。 */
   --state-active: rgba(255, 255, 255, 0.14);
   --accent-soft: rgba(91, 140, 255, 0.16);
-  /* 深色下「压暗」看不出来，聚焦改为比悬停再亮一档 */
-  --focus-bg: rgba(255, 255, 255, 0.1);
+  /* 深色下「压暗」看不出来，小控件改为亮一档 */
+  --state-hover-dim: rgba(255, 255, 255, 0.1);
   /* 深色下反过来：填充用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清 */
   --accent-fill: #6b9bff;
   --accent-on: #12121a;
@@ -466,22 +467,35 @@ button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible,
-a:focus-visible,
 [tabindex]:focus-visible {
+  /* **键盘 Tab 聚焦保留蓝环**（无障碍需要「一眼看到焦点在哪」），
+     但它只属于 Tab —— 鼠标打开弹窗时的程序化聚焦走 [data-autofocus]，不画环
+     （实测：「蓝色边框，我说的是取消按钮上的」「tab 聚焦不用删蓝环」）。
+     offset 取 -2px：环落在元素边界内，不向外扩一圈 —— 小按钮上外扩会顶到容器边。 */
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline-offset: -2px;
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
-/* 控件类聚焦时**同时给底色**：
-   光有一圈环在小按钮上不够 —— 尤其弹窗的「取消」这类次要按钮，边框本来就淡，
-   环又贴在按钮边界外侧，一眼看不出「现在焦点在这」（实测提问：能不能加个底色）。
-   底色走 --state-hover（与悬停同色），环提供锐利边界，两者一个管「亮」一个管「准」。
-   只给表单/按钮类，不给卡片与导航项：它们的选中态已经有底色，再叠会过亮。 */
-button:focus-visible,
+/* 两个例外：`a` 没有容器（底色无处可落），`.detail-body` 是大块滚动区
+   （整块变灰太怪）。它们用强调色的细边 —— 1px，不是环。 */
+a:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.detail-body:focus-visible {
+  outline: none;
+  /* inset 不占布局，避免聚焦时内容被挤动 1px */
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* 输入类没有「按钮底色」可借用，改为边框变强调色 —— 它本来就有 1px 边，
+   把那条边变色比在框外再画一圈自然得多。 */
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
-  background-image: linear-gradient(var(--focus-bg), var(--focus-bg));
+  border-color: var(--accent);
 }
 
 /* 主按钮本身是强调色实底，叠白会褪色；改为提亮，保持色相 */
@@ -491,9 +505,10 @@ select:focus-visible {
 }
 
 .btn-primary:focus-visible {
-  /* 填充底上不叠色，焦点只靠环；再加一层白会把它洗成淡蓝 */
+  /* 填充底上不叠灰（会脏），靠提亮 + 一圈同色外发光表示选中 */
   background-image: none;
-  filter: brightness(1.12);
+  filter: brightness(1.1);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 /* 打开弹窗时的默认焦点（程序化 focus）。
@@ -501,17 +516,18 @@ select:focus-visible {
    焦点其实已经在按钮上，但屏幕上看不出任何标记（实测「还是按钮不在当前步骤」）。
    用 [data-autofocus] 补同一套样式，用户一按 Tab / 点鼠标就移除、交回 :focus-visible。 */
 [data-autofocus]:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  background-image: linear-gradient(var(--focus-bg), var(--focus-bg));
+  /* 程序化聚焦（打开弹窗时的默认焦点）**不画环** —— 用户没有按 Tab，
+     冒出一圈蓝边会像「按钮坏了」。焦点本身是真的，靠底色表达足够。 */
+  outline: none;
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 /* 强调色实底的主按钮：同上，不叠白、改提亮 */
 .btn-primary[data-autofocus]:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: none;
   background-image: none;
-  filter: brightness(1.12);
+  filter: brightness(1.1);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 /* 按下态：原来全项目 **0 处** :active —— 点下去没有任何反馈，用户只能靠「松手后
@@ -541,23 +557,9 @@ button:active:not(:disabled) {
   cursor: not-allowed;
 }
 
-/* 滚动容器内的元素环要**内缩**：外扩 2px 会被 .history / .view / .ctx-menu 的
-   overflow 裁掉，只留左右两边、上下没有，看着像坏掉的边框。
-   这条与 .card.is-selected 当初被迫改成 inset 是同一个原因。 */
-/* 环宽 2px + offset -2px = 环完全落在元素边界内，**与悬浮底色同尺寸**。
-   offset 取正值会外扩一圈，小图标按钮（窗口控制 34×30、搜索清除 20×20）尤其明显 ——
-   实测「三个聚焦环太大了，与聚焦底色大小一致就行」。 */
-.card:focus-visible,
-.nav-item:focus-visible,
-.ctx-item:focus-visible,
-.settings-tabs .tab:focus-visible,
-.p-row:focus-visible,
-.detail-body:focus-visible,
-.wc-btn:focus-visible,
-.search-clear:focus-visible,
-.statusbar-clear:focus-visible {
-  outline-offset: -2px;
-}
+/* 说明：这里原先有一张「哪些元素要内缩 outline」的清单。
+   现在控件与可聚焦块统一用底色表达焦点、不再画环，清单自然消失 ——
+   少一份需要同步的名单，也就少一处会忘。 */
 
 /* 悬浮态开关（html.hovers-off）。
    Chromium 的 :hover 是「引擎内部状态」，只在收到真实鼠标移动时才重算。
@@ -745,7 +747,7 @@ body.dark .app::after {
 }
 
 html:not(.hovers-off) .wc-btn:hover {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 html:not(.hovers-off) .wc-close:hover {
@@ -811,7 +813,7 @@ html:not(.hovers-off) .wc-close:hover {
 }
 
 html:not(.hovers-off) .nav-item:hover {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
   color: var(--text);
 }
 
@@ -819,7 +821,7 @@ html:not(.hovers-off) .nav-item:hover {
   /* **选中与悬停同一底色**：原来用 --glass-strong（白 .28），比悬停的白 .45 还淡，
      点完反而像「被点掉了」（实测反馈：聚焦色比选中色深，应该一致）。
      区分交给字重（700），底色只负责「这一行是活的」。 */
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
   color: var(--text);
   /* 常态与选中态同为黑色，靠加粗（中文会落到 Bold）明确区分 */
   font-weight: 700;
@@ -947,7 +949,7 @@ html:not(.hovers-off) #update-banner .ub-btn:hover {
 }
 
 html:not(.hovers-off) #update-banner .ub-close:hover {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 .nav-icon {
@@ -1181,7 +1183,7 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 }
 
 html:not(.hovers-off) .search-clear:hover {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
   color: var(--text);
 }
 
@@ -1233,12 +1235,12 @@ html:not(.hovers-off) .search-clear:hover {
 /* 分段控件：原来 hover / active 一条都没有 —— 鼠标移上去毫无反馈，
    用户不知道「这两个选项是可点的」。按下由通用 button:active 覆盖，这里只补 hover。 */
 html:not(.hovers-off) .seg:not([data-disabled]) button:hover {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
   color: var(--text);
 }
 
 html:not(.hovers-off) .btn-ghost:hover {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 /* 主操作按钮（首次运行引导的「开启自启」「后台运行」这类推荐项）：
@@ -1669,7 +1671,7 @@ body.round .tag {
 }
 
 html:not(.hovers-off) .ctx-item:hover {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 .ctx-item.danger {
@@ -1737,12 +1739,12 @@ html:not(.hovers-off) .ctx-item.danger:hover {
 /* hover 必须带 hovers-off 门控：窗口隐藏/最小化再回来时 Chromium 不会重算 :hover，
    不加门控会让光标下的标签一直留着底色（与侧栏同一套规则）。 */
 html:not(.hovers-off) .settings-tabs .tab:hover {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 .settings-tabs .tab.is-active {
   /* 与悬停同一底色，理由同 .nav-item.is-active */
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
   /* 常态与选中态都是正文色，靠加粗（中文会落到 Bold）区分 */
   font-weight: 700;
 }
@@ -2037,7 +2039,7 @@ body.is-selecting .statusbar {
 }
 
 html:not(.hovers-off) .statusbar-clear:hover {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
   color: var(--text);
 }
 
