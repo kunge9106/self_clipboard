@@ -157,16 +157,30 @@ function applyTheme(dark) {
  * 若写回去，切回浅色就恢复不回原值了（这正是之前把 0.96 写死在 CSS 里犯的错，
  * 只是换了个位置）。
  */
+/**
+ * 把浓度同步到设置页滑块：值 + 读数 + 自绘轨道的已填充比例（--fill）。
+ * 滑块不在页面上时静默跳过 —— 深浅切换的后台路径也走这里。
+ *
+ * 之前有四处各自 `el.value = …; lab.textContent = …`，自绘轨道引入 --fill 后
+ * 每处还得再多写一行，按「同一逻辑只留一份」收拢。
+ */
+function setMaterialSlider(v) {
+  const el = document.getElementById("set-material");
+  const lab = document.getElementById("material-val");
+  if (el) {
+    el.value = String(v);
+    el.style.setProperty("--fill", `${v}%`);
+  }
+  if (lab) lab.textContent = `${v}%`;
+}
+
 function applyThemeDependentAlpha(wasDark, isDark) {
   // 三个条件缺一不可：模式是高级材质、用户没关掉这个行为、主题真的变了
   if (!settings?.roundMode || settings.autoAlphaDark === false || wasDark === isDark) return;
   const v = isDark ? 90 : (settings.materialAlpha ?? 90);
   applyGlassAlpha(v);
   // 滑块在设置页可见时同步读数，否则界面显示 60、实际 90
-  const el = document.getElementById("set-material");
-  const lab = document.getElementById("material-val");
-  if (el) el.value = String(v);
-  if (lab) lab.textContent = `${v}%`;
+  setMaterialSlider(v);
 }
 
 /// 侧栏那个切换按钮的文案跟着当前深浅变：深色时写「浅色」，点了就去浅色。
@@ -248,8 +262,11 @@ async function applyThemeMode(mode) {
 function applyGlassAlpha(pct) {
   // 兜底档（没有真材质）必须保持不透明，否则会直接看见桌面
   if (document.body.classList.contains("tier-solid")) return;
-  // 与后端 ALPHA_MIN / ALPHA_MAX 一致：1–100 无极。上限放到 100（完全不透）——
-  // 原来卡在 95 是为了避开 1.0，但 calc 里已经 min(1, …) 夹过，没必要留这 5 的空档。
+  // 与后端 ALPHA_MIN / ALPHA_MAX 一致：1–100 无极，两端都是真极端：
+  //   1%   → 窗口底只剩 ~1%（高级材质下看到的就是纯系统模糊）
+  //   100% → 关材质时完全不透；开材质时封顶 92%，留住材质感（见 styles.css）
+  // 表面层（卡片 / 侧栏 / 控件底）由 CSS 的 --mat-k 跟着一起收敛，
+  // 否则底透了、卡片还是 68% 白，「拉到 1 不够极端」。
   const a = Math.max(1, Math.min(100, Number(pct) || 0)) / 100;
   document.documentElement.style.setProperty("--glass-alpha", String(a));
 }
@@ -4382,19 +4399,18 @@ function bindSettings(view) {
 
   const material = view.querySelector("#set-material");
   if (material) {
-    const label = view.querySelector("#material-val");
+    // 首帧：HTML 的 value 只决定滑点位置，自绘轨道的 --fill 得单独给，
+    // 否则一进设置页轨道是空的（滑点在中间、轨道却显示成 0%）
+    setMaterialSlider(material.value);
     // 只显示百分比：括号里的说明与上方「越高越厚实 · 越低越通透」重复，
     // 而且拖动时文字长度跳动，视觉上像"突然冒出一串括号"（用户实测反馈）。
-    const show = (v) => {
-      if (label) label.textContent = `${v}%`;
-    };
     // 拖动中：只改观感与本地状态，不落盘（高频写 config.json 没必要）。
     // 关键是同步模块级 settings —— settingsHtml() 读的就是它，
     // 不同步的话切到别的分类再回来，滑块会显示成旧值（看起来像「恢复默认」）。
     material.addEventListener("input", () => {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
-      show(v);
+      setMaterialSlider(v);
       applyGlassAlpha(v);
       syncAlphaToSettings(v);
     });
@@ -4424,10 +4440,7 @@ function bindSettings(view) {
         // 关掉时若正处在深色 + 高级材质，要把浓度还原成用户设的值，否则会停在 90
         if (!autoDark.checked) {
           applyGlassAlpha(settings.materialAlpha ?? 90);
-          const el = view.querySelector("#set-material");
-          const lab = view.querySelector("#material-val");
-          if (el) el.value = String(settings.materialAlpha ?? 90);
-          if (lab) lab.textContent = `${settings.materialAlpha ?? 90}%`;
+          setMaterialSlider(settings.materialAlpha ?? 90);
         }
       } catch (e) {
         reportFrontend("warn", "settings", e);
@@ -4446,13 +4459,10 @@ function bindSettings(view) {
         settings = await invoke("get_settings");
         const alpha = settings.materialAlpha ?? 50;
         applyGlassAlpha(alpha);
-        const slider = view.querySelector("#set-material");
-        if (slider) slider.value = alpha;
-        const label = view.querySelector("#material-val");
         // 与拖动滑块那条路径保持一致：只显示百分比。
         // 这里曾经写成 `${alpha}%（越高越厚实 · 越低越通透）`，用户切一次模式
         // 括号就又冒出来了 —— 说明与上方「越高越厚实 · 越低越通透」重复。
-        if (label) label.textContent = `${alpha}%`;
+        setMaterialSlider(alpha);
         toast(
           round.checked
             ? `已切换为圆角模式（无背景模糊）· 浓度 ${alpha}%`

@@ -64,7 +64,7 @@
     "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
 
   /* 玻璃叠加层（light） */
-  --glass: rgba(255, 255, 255, 0.16);
+  --glass: rgba(255, 255, 255, calc(0.16 * var(--mat-k)));
   /* 条目卡片底色。比 --glass 实得多，理由：浅色材质底（Mica 白灰）上叠 16% 白，
      卡片与背景几乎同色，整块看起来「发灰」、分不出层次（用户实测反馈）。
      --glass 还要服务侧栏与按钮，那些地方需要更透，所以这里单独一个变量。 */
@@ -76,7 +76,7 @@
      套到悬停上就是错的：毛玻璃上压暗看着像凹进去、发灰（实测「条目聚焦时还是灰色的，
      不好看不如原来的」）；提亮才像玻璃被照亮、浮起来。
      叠在 62% 白的卡片上 ≈ 79% 白：够明显，又不至于变成实心块。 */
-  --state-hover: rgba(255, 255, 255, 0.45);
+  --state-hover: rgba(255, 255, 255, calc(0.45 * var(--mat-k)));
   /* 按下：物理上「被压下去 = 遮住光」，所以比常态**暗**一档（WinUI 的
      ButtonBackgroundPressed 也是比 normal 暗）。浅色用中性黑，深色用更低的白。 */
   --state-active: rgba(0, 0, 0, 0.06);
@@ -102,7 +102,7 @@
      同一个「不可用」有四种淡法，用户看到的是「有的灰有的不灰」。 */
   --disabled-opacity: 0.45;
   --card-hover: var(--state-hover);
-  --glass-strong: rgba(255, 255, 255, 0.28);
+  --glass-strong: rgba(255, 255, 255, calc(0.28 * var(--mat-k)));
   --glass-hover: var(--state-hover);
   /* 悬浮浮层**自己的**材质，与窗口那套（--glass / --material-rgb / 设置里的
      材质浓度）完全解耦 —— 那套是给整窗调的，浮层跟着变只会越调越难对齐。
@@ -155,6 +155,13 @@
      原来这里写 0.62、实际运行是 0.50 —— 审计测的是「一个用户看不到的配置」，
      数字再漂亮也没意义。 */
   --glass-alpha: 0.5;
+  /* 表面层（窗口底以上的卡片 / 侧栏 / 控件底）随浓度收敛的系数：
+       k = min(1, 2a)  →  ≥50% 时 k=1，现在的观感一分不变；
+                          越低越薄，1% 时几乎看不见。
+     ⚠ 为什么要有它：窗口底已经全透了、卡片还压着 68% 白，
+     用户看到的就是「拉到 1 还是白花花一片，不够极端」（实测反馈）。
+     只塌低浓度段而不是整体乘 a，是为了不动 50%–90% 这段已经调好的观感。 */
+  --mat-k: min(1, calc(var(--glass-alpha) * 2));
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
@@ -283,8 +290,8 @@
   --surface-1: transparent;
   /* .68：实测「条目卡片白色又加深了」。压到 .6 是为了层级差，但代价是卡片发灰 ——
      层级差交给 elev-1 阴影，卡片本身要够白才像玻璃上的白片。 */
-  --surface-2: rgba(255, 255, 255, 0.68);
-  --surface-3: rgba(255, 255, 255, 0.9);
+  --surface-2: rgba(255, 255, 255, calc(0.68 * var(--mat-k)));
+  --surface-3: rgba(255, 255, 255, calc(0.9 * var(--mat-k)));
   --hairline: rgba(0, 0, 0, 0.06);
   /* 卡片高度：**半透明卡片必须靠阴影定界**。
      62% 白叠在白壁纸上只有 1.03 的亮度差，肉眼看不出 —— 这是毛玻璃的物理限制
@@ -317,9 +324,9 @@ body.dark {
         5% 的量在近黑底上仍是很深的黑灰，不会泛白；
      3. hover/strong 同比例下调，保证「越上层越亮」的层次还在，
         但整体保持在黑调里。 */
-  --glass: rgba(255, 255, 255, 0.05);
+  --glass: rgba(255, 255, 255, calc(0.05 * var(--mat-k)));
   --card-bg: var(--surface-2);
-  --state-hover: rgba(255, 255, 255, 0.09);
+  --state-hover: rgba(255, 255, 255, calc(0.09 * var(--mat-k)));
   /* 深色下「压暗」在深底上看不出来，按下改为比悬停再亮一档。 */
   --state-active: rgba(255, 255, 255, 0.14);
   --accent-soft: rgba(91, 140, 255, 0.16);
@@ -330,7 +337,7 @@ body.dark {
   --accent-fill: #6b9bff;
   --accent-on: #12121a;
   --card-hover: var(--state-hover);
-  --glass-strong: rgba(255, 255, 255, 0.09);
+  --glass-strong: rgba(255, 255, 255, calc(0.09 * var(--mat-k)));
   --glass-hover: var(--state-hover);
   /* 深色浮层：同样不跟窗口浓度走。上端比下端亮一档才浮得起来，
      发丝边换成浅色（深底上白边才看得见），内高光压到很低否则发灰。 */
@@ -418,8 +425,8 @@ body.dark {
   /* 深色同理：卡片半透明、略亮一档，不压暗内容区。
      **深色只有三阶**：窗口底与内容区同层 —— 把底色再压暗只会产生「陷进去」的错觉。 */
   --surface-1: transparent;
-  --surface-2: rgba(255, 255, 255, 0.07);
-  --surface-3: rgba(255, 255, 255, 0.13);
+  --surface-2: rgba(255, 255, 255, calc(0.07 * var(--mat-k)));
+  --surface-3: rgba(255, 255, 255, calc(0.13 * var(--mat-k)));
   --hairline: rgba(255, 255, 255, 0.07);
   --elev-1: 0 0 0 0.5px rgba(255, 255, 255, 0.04), 0 1px 2px rgba(0, 0, 0, 0.2);
   --elev-2: 0 12px 32px -10px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.3),
@@ -631,11 +638,20 @@ body {
   overflow: hidden;
   /* 主体材质层：浓度由 --glass-alpha 控制（设置页「材质浓度」实时调）。
      系统 blur 会从这层半透明里透出来，所以窗口既有一层可控的明暗、
-     又保留下面的模糊。 */
+     又保留下面的模糊。
+
+     ⚠ 高级材质下的 100% **不是 1.0**，封顶 0.92：全不透明会把背后的
+     系统 acrylic 与本层的 blur/saturate 一起盖死，看起来就是一块死板色块，
+     等于「拉到最厚反而没有材质了」（用户：「开到 100 也应该是高级材质」）。
+     留 8% 透光，材质感始终在，同时 92% 已经厚到内容透不出来。
+
+     160° 的明暗差（±0.05）在两端收敛到 0：1% 要真的几乎全透，
+     100% 要真的是一整块最厚材质。两个 `min(1, 2a)` 分别把靠近 0 / 靠近 1
+     的偏移压到 0，中段保持原样。 */
   background: linear-gradient(
     160deg,
-    rgb(var(--material-rgb) / calc(var(--glass-alpha) + 0.05)),
-    rgb(var(--material-rgb) / calc(var(--glass-alpha) - 0.05)) 62%
+    rgb(var(--material-rgb) / min(0.92, calc(var(--glass-alpha) * 0.92 + 0.05 * min(1, calc(var(--glass-alpha) * 2)) * min(1, calc((1 - var(--glass-alpha)) * 2))))),
+    rgb(var(--material-rgb) / max(0, calc(var(--glass-alpha) * 0.92 - 0.05 * min(1, calc(var(--glass-alpha) * 2)) * min(1, calc((1 - var(--glass-alpha)) * 2))))) 62%
   );
   /* ══ 自研「二级玻璃」——**只在高级材质下启用**（见下方 body.round）══════
      为什么不引库：window-vibrancy 用的就是同一套 DWM API（自带性能警告）；
@@ -666,13 +682,17 @@ body.round .app {
 }
 
 /* 关闭高级材质：**没有系统背景模糊**，半透明透过去就是清晰的桌面（而不是模糊底），
-   同浓度会比有模糊时更显透、更干扰，所以统一把面板加厚。
-   拉满（90%）时 clamp 到 1.0 —— 完全不透，符合「浓度拉满＝实心」的直觉。 */
+   同浓度会比有模糊时更显透、更干扰，所以比高级材质加厚（+0.32 / +0.20）。
+
+   ⚠ 加厚量必须**在低浓度时收敛到 0**：早期写成裸的 `+ 0.32`，浓度 1% 时
+   仍剩 33% 不透明，「1 = 几乎全透」直接失效（用户实测：拉到 1 还是不够透）。
+   用 `0.32 * min(1, 2a)` 让偏移在 0→50% 之间线性长到满值、之后保持，
+   于是 1% ≈ 全透、50% 以上观感与原来完全一致。 */
 body:not(.round) .app {
   background: linear-gradient(
     160deg,
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32))),
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.20))) 62%
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32 * min(1, calc(var(--glass-alpha) * 2))))),
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.20 * min(1, calc(var(--glass-alpha) * 2))))) 62%
   );
 }
 
@@ -1956,12 +1976,41 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   font-family: var(--font);
 }
 
-/* 材质浓度滑块 */
+/* 材质浓度滑块：**自绘**。
+   原来是原生 input[type=range] + accent-color —— 按下/拖动时 Chromium 会给轨道
+   和滑点叠一层自带的浅色态，看起来像蒙了块白遮罩（用户实测反馈），CSS 管不住。
+   与上方开关同一个决策门：原生绘制不受控 → 自绘，语义（可 Tab、方向键、读屏）全保留。
+   已填充部分用 --fill（JS 拖动时同步百分比），空轨用 --track-bg，按下不再有神秘浅色。 */
 .settings input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
   width: 180px;
   height: 20px;
-  accent-color: var(--accent);
+  background: transparent;
   cursor: default;
+}
+
+.settings input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent-fill) var(--fill, 50%),
+    var(--track-bg) var(--fill, 50%)
+  );
+}
+
+.settings input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  /* (20 - 4) / 2 - 14 / 2 = -5：把滑点垂直居中在 4px 轨道上 */
+  margin-top: -5px;
+  border-radius: 50%;
+  background: #fff;
+  /* 与自绘开关的滑点同一套投影：1px 投影让它「浮」在轨道上 */
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .settings .hint {
