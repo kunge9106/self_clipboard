@@ -21,6 +21,11 @@ use std::sync::OnceLock;
 const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
 const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
 const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+/// Win11 22000+：让非 UWP 窗口使用 host backdrop brush 语义。
+/// 与 `SYSTEMBACKDROP_TYPE` 搭配时，backdrop 改从**窗口后方**采样并绘制到重定向表面，
+/// 而不是从视觉后方采样 —— 表现是最大化/还原动画、以及被其他窗口遮挡时材质不再失效
+/// （原生 Acrylic 在动画期间会短暂退回实色，这是 DWM 的既有行为）。
+const DWMWA_USE_HOSTBACKDROPBRUSH: u32 = 17;
 const DWMWA_MICA_EFFECT: u32 = 1029;
 
 // DWM_SYSTEMBACKDROP_TYPE
@@ -640,6 +645,18 @@ fn set_immersive_dark(hwnd: isize, dark: bool) {
 /// Win11 22H2+：系统级 backdrop + 系统圆角
 fn apply_system_backdrop(hwnd: isize) -> Result<(), i32> {
     unsafe {
+        // 先声明「本窗口使用 host backdrop 采样」，再设 backdrop 类型。
+        // 顺序有讲究：这个 flag 影响 DWM 为窗口选择的重定向目标，
+        // 后设 backdrop 才能作用在正确的那块表面上。
+        // 失败不算错 —— 老版本（<22000）本来就返回失败，我们只当它不存在。
+        let on: i32 = 1;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_HOSTBACKDROPBRUSH,
+            &on as *const _ as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+
         let v: u32 = DWMSBT_TRANSIENTWINDOW;
         let hr = DwmSetWindowAttribute(
             hwnd,

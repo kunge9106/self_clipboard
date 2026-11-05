@@ -143,8 +143,13 @@
      再怎么调 card 的透明度都是白对白。
      Windows 11 的 Mica 浅色本身也是中性浅灰（约 #f3f4f6），不是白：
      它把壁纸去饱和后压到中性色，**灰落在底上**（衬托卡片），而不是落在卡片上。 */
-  --material-rgb: 232 234 239;
-  --glass-alpha: 0.62;
+  /* 底色取中性浅灰而不是白：白卡压白窗永远没有差（详见 §17 审计）。
+     压到 218 是为了在 alpha 0.5 下仍能得到 ≈#f2f3f6 的底 —— 既透又够暗。 */
+  --material-rgb: 218 220 226;
+  /* ⚠ 必须与 `STRAIGHT_ALPHA`（settings.rs，默认 50）一致。
+     原来这里写 0.62、实际运行是 0.50 —— 审计测的是「一个用户看不到的配置」，
+     数字再漂亮也没意义。 */
+  --glass-alpha: 0.5;
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
@@ -334,11 +339,12 @@ body.dark {
   --stroke: rgba(255, 255, 255, 0.08);
   --border-control: rgba(255, 255, 255, 0.15);
   --track-bg: rgba(255, 255, 255, 0.14);
-  /* 浓度给到 0.96：主体层是「渐变两端 = alpha ±0.05」，
-     也就是顶端 1.0（完全不透）、下端 0.91 —— 下端最多只透 9% 的桌面/系统材质，
-     深色因此站得住，不会被亮壁纸冲成灰。 */
+  /* ⚠ **不要在这里写死 --glass-alpha**。
+     曾经写 0.96（怕亮壁纸把深色冲成灰），代价是深色只透 4% —— 等于没有毛玻璃；
+     更糟的是它声明在 `body.dark` 上，**比 `html` 上由滑块写入的变量更近**，
+     于是「材质浓度」滑块在深色下完全失效（拖了没反应）。
+     深色要保持够深，靠的是更暗的色（--material-rgb: 10 10 12），不是更高的 alpha。 */
   --material-rgb: 10 10 12;
-  --glass-alpha: 0.96;
   --text: #f2f2f5;
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
@@ -809,6 +815,23 @@ html:not(.hovers-off) .wc-close:hover {
   gap: var(--gap-row);
 }
 
+/* ══ 行状态（整行可点项）══════════════════════════════════════════════
+   侧栏导航、设置页标签 —— 同一个交互角色：一列等高可选项，当前有一个是「活的」。
+   **底色只在这里定义一次**，hover 与 is-active 共用。
+
+   曾经 hover 与 is-active 各写一份（hover 用 --state-hover-dim、is-active 用
+   --state-hover），一次批量替换只改到其中一条，就变成「悬浮是灰、选中是白」的
+   分裂（实测截图：文件 vs 收藏）。写成一条规则后，物理上不可能再漂移。
+
+   为什么用**提亮**而不是压暗：整行面积压在毛玻璃上，压暗会透出壁纸色、显脏；
+   提亮像玻璃被照亮，和卡片悬停是同一套语言。小图标按钮才压暗（--state-hover-dim）。 */
+html:not(.hovers-off) .nav-item:hover,
+.nav-item.is-active,
+html:not(.hovers-off) .settings-tabs .tab:hover,
+.settings-tabs .tab.is-active {
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+}
+
 .nav-item {
   display: flex;
   align-items: center;
@@ -830,19 +853,17 @@ html:not(.hovers-off) .wc-close:hover {
     box-shadow var(--dur-fast) var(--ease-out);
 }
 
-html:not(.hovers-off) .nav-item:hover {
-  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
-  color: var(--text);
+/* 侧栏导航与设置页标签：**同一角色** —— 一列等高可选项，其中有一个是活的。
+   底色只由上方「行状态」那条规则给，这里不再写 background-image。
+   加粗是「选中」独有的语义（悬停不该加粗），所以单独一条。 */
+.nav-item.is-active,
+.settings-tabs .tab.is-active {
+  font-weight: 700;
 }
 
+html:not(.hovers-off) .nav-item:hover,
 .nav-item.is-active {
-  /* **选中与悬停同一底色**：原来用 --glass-strong（白 .28），比悬停的白 .45 还淡，
-     点完反而像「被点掉了」（实测反馈：聚焦色比选中色深，应该一致）。
-     区分交给字重（700），底色只负责「这一行是活的」。 */
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
   color: var(--text);
-  /* 常态与选中态同为黑色，靠加粗（中文会落到 Bold）明确区分 */
-  font-weight: 700;
 }
 
 /* 「有新版本」的小红点：挂在侧栏「设置」与设置页「关于」标签上。
@@ -1758,18 +1779,10 @@ html:not(.hovers-off) .ctx-item.danger:hover {
     box-shadow var(--dur-fast) var(--ease-out);
 }
 
-/* hover 必须带 hovers-off 门控：窗口隐藏/最小化再回来时 Chromium 不会重算 :hover，
-   不加门控会让光标下的标签一直留着底色（与侧栏同一套规则）。 */
-html:not(.hovers-off) .settings-tabs .tab:hover {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
-}
-
-.settings-tabs .tab.is-active {
-  /* 与悬停同一底色，理由同 .nav-item.is-active */
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
-  /* 常态与选中态都是正文色，靠加粗（中文会落到 Bold）区分 */
-  font-weight: 700;
-}
+/* 设置页标签的底色同样走「行状态」那条规则，这里不再重复定义。
+   hover 的 hovers-off 门控也在那条规则里 ——
+   窗口隐藏/最小化再回来时 Chromium 不会重算 :hover，不加门控会让光标下的标签
+   一直留着底色。 */
 
 /* 圆角模式下没有背景模糊，有底色的元素才需要阴影撑出层次；
    常态 .tab 是透明底，加阴影会变成「无底的浮影」，故只给有底色的状态。 */
