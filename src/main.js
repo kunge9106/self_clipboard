@@ -139,8 +139,33 @@ async function applyEffectInfo() {
 }
 
 function applyTheme(dark) {
+  const wasDark = document.body.classList.contains("dark");
   document.body.classList.toggle("dark", !!dark);
   syncThemeToggleLabel();
+  applyThemeDependentAlpha(wasDark, !!dark);
+}
+
+/**
+ * 圆角模式下，深浅切换要连带调整材质浓度。
+ *
+ * 圆角模式 = **没有系统背景模糊**，窗口后面就是清晰的桌面。这种状态下：
+ *   · 深色必须接近实心（90）才压得住亮壁纸，否则一片惨白；
+ *   · 浅色则要恢复用户自己调的那个值 —— 浅色本来就不怕亮壁纸。
+ *
+ * 所以只在**主题真的变了**时动作（启动时 `applyTheme` 也会被调，那时不该覆盖用户设置）。
+ * 刻意**不写回 settings**：90 是「深色下的派生值」，不是用户的选择；
+ * 若写回去，切回浅色就恢复不回原值了（这正是之前把 0.96 写死在 CSS 里犯的错，
+ * 只是换了个位置）。
+ */
+function applyThemeDependentAlpha(wasDark, isDark) {
+  if (!settings?.roundMode || wasDark === isDark) return;
+  const v = isDark ? 90 : (settings.materialAlpha ?? 90);
+  applyGlassAlpha(v);
+  // 滑块在设置页可见时同步读数，否则界面显示 60、实际 90
+  const el = document.getElementById("set-material");
+  const lab = document.getElementById("material-val");
+  if (el) el.value = String(v);
+  if (lab) lab.textContent = `${v}%`;
 }
 
 /// 侧栏那个切换按钮的文案跟着当前深浅变：深色时写「浅色」，点了就去浅色。

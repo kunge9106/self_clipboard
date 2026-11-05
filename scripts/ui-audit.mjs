@@ -242,14 +242,19 @@ function contrastRows(themeName, vars) {
     //     含义是「肉眼能看出这里是边界」，配合阴影使用。
     //     —— 这条是期 0 跑完第一版报告后修的：第一版对描边也用 3:1，结论会变成
     //     「必须把边加深到黑 .42」，那是错的。
-    for (const [label, key, min] of [
+    for (const [label, key, min, refOnly] of [
       ["正文", "--text", 4.5],
       ["次要文字", "--text-dim", 3.0],
       // 控件边框是**承担信息**的线（「这里能输入」），按 WCAG 非文本 3:1 的一半取 1.5：
       // 它不需要像图标那样断言「这是个控件」，只需明显强于装饰线。
       ["控件边框", "--border-control", 1.5],
-      // 层级线已经不是层级表达手段了（层级交给 surface + elev），只要求「能感知」。
-      ["层级线", "--stroke", 1.15],
+      // ⚠ 层级线**只记录、不判定**。
+      //   v1 给它定过 1.15（「能感知」）。但用户实测明确要求「线条就用 2.6.10 那种白色的」——
+      //   白 .35 叠在浅色面上合成后必然接近 1.00，这不是缺陷，是**白色高光的定义**：
+      //   它在浅色面上就该几乎看不见，只在深色/玻璃上显出一道亮边。
+      //   「区分层次」已由 surface 亮度差 + elev-1 阴影承担（见 §3b，全达标）；
+      //   继续拿它判 fail，等于要求「白线在白底上可见」，是自相矛盾的指标。
+      ["层级线（仅记录）", "--stroke", 0, true],
     ]) {
       const fg = parseColor(vars.get(key), vars);
       if (!fg) continue;
@@ -262,7 +267,8 @@ function contrastRows(themeName, vars) {
         token: key,
         color: toHex(composed),
         ratio: ratio.toFixed(2),
-        pass: ratio >= min,
+        refOnly: !!refOnly,
+        pass: refOnly ? true : ratio >= min,
         min,
       });
     }
@@ -380,7 +386,7 @@ ${Object.entries(states).map(([k, v]) => `| :${k} | ${v} |`).join("\n")}
 
 | 主题 | 壁纸 | 项 | 令牌 | 合成后 | 对比度 | 要求 | 结果 |
 |---|---|---|---|---|---|---|---|
-${contrastRowsAll.map((r) => `| ${r.theme} | ${r.wall} | ${r.label} | \`${r.token}\` | \`${r.color}\` | ${r.ratio}:1 | ≥${r.min} | ${r.pass ? "✅" : "❌"} |`).join("\n")}
+${contrastRowsAll.map((r) => `| ${r.theme} | ${r.wall} | ${r.label} | \`${r.token}\` | \`${r.color}\` | ${r.ratio}:1 | ≥${r.min} | ${r.refOnly ? "— 参考" : r.pass ? "✅" : "❌"} |`).join("\n")}
 
 ## 3b. 面层级差（「两块面分不分得出来」）
 
