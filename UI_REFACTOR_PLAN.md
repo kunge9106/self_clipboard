@@ -770,16 +770,32 @@ pin_dpi_context()
 | **B 每屏一个覆盖窗** | N 个窗口，共享一张虚拟桌面位图与一个**全局物理坐标**选区状态；各窗口按自己矩形裁剪绘制同一选区 | DPI 一定正确（每窗口天然对应一块屏） | 多窗口消息循环协调、焦点/Capture 归属、Esc 广播；工作量约为 A 的 2–3 倍 |
 | C 单屏 + 拖到边界自动延伸 | 只覆盖起始屏与相邻屏 | 改动小 | 逻辑更绕且仍不全覆盖（三屏以上露馅），没有存在价值，**不选** |
 
-**决策顺序（不拍脑袋）**：先做 A 的原型（约半天），在「100% + 150% 混合 DPI」下验证框选位置与截图内容是否对齐。
-- 对齐 → 用 A，改动面最小；
-- 错位/模糊 → 退到 B，A 的几何与位图代码可直接复用。
+**结论：直接走 B（每屏一窗），不再花时间验 A。**
+
+原本打算"先做 A 的原型再决定"，查了资料后这个步骤可以省掉 —— 三个成熟实现的说法完全一致：
+
+> "the capture overlay is **one borderless window per monitor**, each positioned in physical pixels
+> and running at its own monitor's DPI — **never a single window spanning the virtual desktop.
+> A single spanning surface is what breaks under mixed DPI.**" —— Aquashot（多屏混合 DPI 截图工具）
+
+> "覆盖窗口按显示器分别创建，**避免混合 DPI 时整体错位**" —— ScreenTranslator（DPI 与多显示器章节）
+
+> "Canonical coordinate space: **physical pixels in virtual desktop coordinates**；handles negative
+> virtual desktop coordinates；correct operation when dragging selection across monitor boundaries" —— XerahS.WinUI
+
+也就是说：**A 不是"可能有风险"，而是在混合 DPI 下必然错位**，不需要实测也能判定。
+同 DPI 的双屏 A 能用，但为此维护两条路径，不如只留一条。
+
+**附带纠正一个流行误解**：`SM_*VIRTUALSCREEN` + `GetDC(GetDesktopWindow())` 那套老教程（多屏截屏"其实很容易"）
+只对**同 DPI** 成立；微信桌面版至今仍是 System DPI Aware，混合缩放下截图区域实测偏移可达 ±87 逻辑像素
+（副屏在左时偏移 200–400px），所以**"微信同款"不是标准答案，恰恰是要避开的反例**。
 
 ### 16.4 关键技术风险（都要在方案里先认下来）
 
 | # | 风险 | 说明与对策 |
 |---|---|---|
 | **S1** | **负坐标** | 副屏在主屏左侧/上方时，虚拟桌面原点为负（如 `-1920,0`）。所有坐标必须走虚拟桌面坐标系，**不能假设 (0,0) 是左上**。现状 `grab()` 直接用显示器 left/top，天然支持负值，但新代码里任何「从 0 开始」的假设都会错 |
-| **S2** | **混合 DPI** | 见 §16.3。这是 A/B 分野的唯一判据，必须实测，不能靠推理 |
+| **S2** | **混合 DPI** | 见 §16.3：单窗跨虚拟桌面在混合 DPI 下**必然错位**（多个成熟实现的共同结论），所以直接选 B，不再实测 A |
 | **S3** | **位图内存与耗时** | 单屏 3840×2160 ≈ 33MB；4 屏 4K 拼接 ≈ 132MB，`BitBlt` + `GetDIBits` 的耗时也会翻几倍。现状日志里有「抓屏完成 … 耗时 Nms」可直接对比；若超过 ~120ms，要考虑分屏并行抓取 |
 | **S4** | **混合 GPU 下抓屏发黑** | 全屏 DC 抓取在「核显渲染 + 独显输出」的机器上可能抓到黑屏（WDDM 常见坑）。现状单屏已存在该风险，跨屏只是放大；验收必须包含一台双显卡机器（如果有） |
 | **S5** | **窗口吸附列表** | `list_windows()` 现在只枚举当前屏内的窗口；跨屏后要按虚拟桌面枚举，且窗口本身可能横跨两屏 —— 吸附判定要按「窗口与选区相交」而不是「窗口在选区内」 |
@@ -802,4 +818,50 @@ pin_dpi_context()
 
 - **代码不重叠**：只改 `shot_native.rs`，与 UI 改造的 `styles.css` / `index.html` / `main.js` 无交集，可并行。
 - **验收环境是硬依赖**：必须有**双屏 + 混合 DPI** 的机器才能验证。若你手上只有单屏，这条只能做到「代码完成、等你找环境验」，不能算通过。
-- 建议节奏：UI 期 0（审计脚本 + 基线截图）之后、期 1a 之前，插入这个功能的原型验证 —— 半天就能判定走 A 还是 B，不阻塞 UI 主线。
+- 建议节奏：UI 期 0（审计脚本 + 基线截图）之后、期 1a 之前开工，因为已确定走 B，不需要再做 A/B 判定原型；
+  估时以「每屏一窗 + 全局坐标 + 跨屏拼接」三段为主，可独立发 beta 验证，不阻塞 UI 主线。
+
+### 16.7 B 方案实现要点（跨屏拼接是最容易写错的一段）
+
+```text
+① 枚举显示器   EnumDisplayMonitors → 每屏 { left, top, w, h, dpi }
+                （注意：left/top 可为负；不要假设主屏在 (0,0)）
+② 每屏一个窗口 WS_POPUP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW
+                SetWindowPos 用物理像素；每个窗口各自 pin_dpi_context（现状已有）
+③ 每屏各自抓图  grab(该屏矩形) → 各自 dim 位图（现状已是这个结构，几乎不用改）
+④ 选区状态     全局唯一，用**虚拟桌面物理坐标**存（Arc<Mutex<...>>），所有窗口共享
+⑤ 鼠标跟随     WM_LBUTTONDOWN 时 SetCapture；移动用 GetCursorPos() 取全局物理坐标
+                ❌ 不要用 lParam —— 它相对窗口且受该窗口 DPI 影响，混合 DPI 下必错
+⑥ 绘制         每窗口把选区与自身 rect 求交 → IntersectClipRect → 只在交集内画遮罩/边框/尺寸标签
+                跨屏时边框分两段画，视觉上拼成一条连续的线
+⑦ 键盘         Capture 所在窗口收 Enter / Esc / 方向键微调；其余窗口通过共享状态 + PostMessage 重绘
+⑧ 确认后拼接   按屏逐块 BitBlt 到结果位图（下面这两个偏移必须分清）
+```
+
+拼接的坐标换算（写反了就会截到别的屏）：
+
+```text
+对每个显示器 m：
+    inter = intersect(selection, m.rect)
+    if inter 为空 → 跳过
+    目标坐标 = inter.left - selection.left ,  inter.top - selection.top
+    源坐标   = inter.left - m.left          ,  inter.top - m.top
+    BitBlt(dst_dc, 目标坐标, src_dc(m), 源坐标, inter.w, inter.h, SRCCOPY)
+```
+
+- 单屏时 `inter == selection`，两个偏移都是 0 → 行为与现状完全一致，**天然兼容回归**。
+- 结果为 `selection.w × selection.h`，跨屏时就是两块拼起来的宽度/高度（中间不会有缝，
+  因为虚拟桌面坐标系本身就是连续的）。
+
+**另一个易错点**：窗口吸附（`list_windows()`）现在只枚举当前屏内的窗口。跨屏后要按虚拟桌面枚举，
+且吸附判定要从「窗口在选区内」改成「窗口与选区**相交**」—— 否则横跨两屏的窗口永远吸不上。
+
+### 16.8 外部参考（2026-11-05 检索）
+
+| 来源 | 关键结论 |
+|---|---|
+| Aquashot（GitHub，多屏混合 DPI 截图工具） | 覆盖层**每屏一个无边框窗口**，各自按本屏 DPI 运行；**绝不用单窗口铺满虚拟桌面**，"a single spanning surface is what breaks under mixed DPI" |
+| XerahS.WinUI Region Capture（GitHub） | 统一坐标系 = **虚拟桌面的物理像素**；显式处理负坐标；允许选区跨越显示器边界 |
+| ScreenTranslator（GitHub） | 每屏维护 (物理矩形 / 逻辑原点 / dpr) 映射，换算只在该屏局部做偏移；**覆盖窗按显示器分别创建**，避免混合 DPI 整体错位 |
+| 腾讯云《双屏/多显示器截屏》 | `GetDC(GetDesktopWindow())` + `SM_*VIRTUALSCREEN` 的简法 —— 只对**同 DPI**成立，且强调 `SM_X/YVIRTUALSCREEN` 可为负 |
+| CSDN 案例（微信截图偏移） | 微信桌面版仍是 System DPI Aware，混合缩放下截图偏移可达 ±87 逻辑像素，副屏在左时 200–400px → **微信不是可抄的样本** |
