@@ -59,6 +59,12 @@
      不好看不如原来的」）；提亮才像玻璃被照亮、浮起来。
      叠在 62% 白的卡片上 ≈ 79% 白：够明显，又不至于变成实心块。 */
   --state-hover: rgba(255, 255, 255, 0.45);
+  /* 按下：物理上「被压下去 = 遮住光」，所以比常态**暗**一档（WinUI 的
+     ButtonBackgroundPressed 也是比 normal 暗）。浅色用中性黑，深色用更低的白。 */
+  --state-active: rgba(0, 0, 0, 0.06);
+  /* 禁用只有这一个强度。原来 4 处各写 .42 / .45 / .45 / .62 ——
+     同一个「不可用」有四种淡法，用户看到的是「有的灰有的不灰」。 */
+  --disabled-opacity: 0.45;
   --card-hover: var(--state-hover);
   --glass-strong: rgba(255, 255, 255, 0.28);
   --glass-hover: var(--state-hover);
@@ -260,6 +266,8 @@ body.dark {
   --glass: rgba(255, 255, 255, 0.05);
   --card-bg: var(--surface-2);
   --state-hover: rgba(255, 255, 255, 0.09);
+  /* 深色下「压暗」在深底上看不出来，按下改为比悬停再亮一档。 */
+  --state-active: rgba(255, 255, 255, 0.14);
   --card-hover: var(--state-hover);
   --glass-strong: rgba(255, 255, 255, 0.09);
   --glass-hover: var(--state-hover);
@@ -403,16 +411,61 @@ body.dark.tier-solid {
   padding: 0;
 }
 
-/* 焦点环：屏蔽各平台默认焦点环（Windows 下会渲染成突兀的彩色/红色描边），
-   统一改成设计语言内的强调色柔环，且仅在键盘聚焦时出现 */
-button:focus,
-input:focus,
-textarea:focus {
-  outline: none;
+/* 焦点环：**全项目只有这一处定义**。
+   原来只有 button:focus-visible 一条，且环色写死 rgba(47,107,255,.4)（等于浅色 accent 的
+   40%），暗色主题下完全不对；input / textarea 被上方 outline:none 干掉后**从未补过**，
+   键盘 Tab 进输入框看不见任何焦点 —— 这是无障碍硬伤，不是审美问题。
+
+   用 outline 而不是 box-shadow：卡片、浮层、按钮本来就带着 box-shadow，
+   用阴影画环要逐处合并（漏一处就被覆盖），outline 与阴影互不干扰。
+   配合 outline-offset 还能让环与元素之间留出呼吸，不糊在边框上。 */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
-button:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.4);
+
+/* 按下态：原来全项目 **0 处** :active —— 点下去没有任何反馈，用户只能靠「松手后
+   发生了什么」判断有没有点上。毛玻璃上纯色变化在按下瞬间不够快，配 0.5px 下沉
+   给一个即时反馈；**刻意不加 transition**，按下要立刻响应，过渡会拖慢它。
+   深色下用更亮的白（深底压暗看不见），浅色下用中性黑（物理上被压住 = 遮光）。 */
+button:active:not(:disabled),
+.nav-item:active,
+.ctx-item:active:not(:disabled),
+.settings-tabs .tab:active,
+.card:active,
+.p-row:active {
+  background-image: linear-gradient(var(--state-active), var(--state-active));
+}
+
+button:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+
+/* 禁用：**一个强度**。原来 4 处各写 .42 / .45 / .45 / .62 ——
+   同一个「不可用」四种淡法，用户看到的是「有的暗有的不暗」。 */
+:where(button, input, select, textarea):disabled,
+.seg[data-disabled],
+.row[data-disabled] {
+  opacity: var(--disabled-opacity);
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+/* 滚动容器内的元素环要**内缩**：外扩 2px 会被 .history / .view / .ctx-menu 的
+   overflow 裁掉，只留左右两边、上下没有，看着像坏掉的边框。
+   这条与 .card.is-selected 当初被迫改成 inset 是同一个原因。 */
+.card:focus-visible,
+.nav-item:focus-visible,
+.ctx-item:focus-visible,
+.settings-tabs .tab:focus-visible,
+.p-row:focus-visible,
+.detail-body:focus-visible {
+  outline-offset: -2px;
 }
 
 /* 悬浮态开关（html.hovers-off）。
@@ -849,12 +902,6 @@ body.dark #theme-toggle .i-sun {
    只做视觉禁用而没有 pointer-events 的话，点下去仍会触发命令，
    用户会看到「明明灰着却改成功了」这种自相矛盾的行为。
    `.row` 版用于整行是从属项的情况（例如「截图时右键取消」只对系统截图有意义）。 */
-.seg[data-disabled],
-.row[data-disabled] {
-  opacity: 0.45;
-  pointer-events: none;
-}
-
 .seg button {
   padding: 5px 14px;
   border: 0;
@@ -982,11 +1029,6 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   color: var(--text);
 }
 
-.selectbar-actions .btn-danger:disabled {
-  opacity: 0.62;
-  cursor: not-allowed;
-}
-
 .search-icon {
   width: 14px;
   height: 14px;
@@ -1001,6 +1043,8 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   flex: 1;
   min-width: 0;
   border: 0;
+  /* 有意不留自己的焦点环：焦点由外层 .search:focus-within 整框高亮表达。
+     输入框宽度撑满容器，再画一圈内环只会和容器边框重叠成双线。 */
   outline: 0;
   background: transparent;
   color: var(--text);
@@ -1514,12 +1558,6 @@ html:not(.hovers-off) .ctx-item.danger:hover {
   color: var(--danger-on);
 }
 
-/* 不可用项（例如「清理 N 天前」但确实没有旧内容） */
-.ctx-item:disabled {
-  opacity: 0.42;
-  pointer-events: none;
-}
-
 /* 菜单分组分隔线。
    ⚠️ 必须用 --track-bg（「比底色深一点的中性色」），不能用 --stroke：
    --stroke 是给**玻璃面**用的白色描边，而菜单底色接近不透明浅色，
@@ -1707,11 +1745,6 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.18);
 }
 
-.settings .hotkey-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
 .settings .row-ctrl {
   flex: none;
   display: flex;
@@ -1835,7 +1868,8 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 body.is-selecting .sidebar,
 body.is-selecting .statusbar {
   pointer-events: none;
-  opacity: 0.45;
+  /* 「不可用」只有一个强度令牌，与禁用按钮同源 */
+  opacity: var(--disabled-opacity);
   transition: opacity var(--dur-fast) var(--ease-out);
 }
 
@@ -2708,11 +2742,6 @@ body.dark .tour-dot.is-on {
    这里保留一条占位提示，让人知道原文里有图而不是内容缺失。 */
 .detail-body.is-rich img {
   display: none;
-}
-
-.detail-body:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 
 body.dark .detail-body {
