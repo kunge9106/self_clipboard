@@ -1178,29 +1178,48 @@ pub fn install_downloaded(app: tauri::AppHandle, path: String) -> Result<(), Str
     // 只允许运行我们自己下载目录里的文件：这个路径来自前端，
     // 不校验就等于开了一条「执行任意程序」的通道。
     let dir = crate::clipboard::cache_dir().join("update");
-    let p = std::path::PathBuf::from(&path);
-    if !p.starts_with(&dir) {
+
+    // **必须 canonicalize 之后再比较**。`Path::starts_with` 是逐组件比较前缀，
+    // 不解析 `..`：`<cache>\update\..\..\evil.exe` 的组件序列以 update 开头，
+    // 前缀判定通过，而 `is_file()` 会跟着 `..` 找到真正的文件 —— 校验在、
+    // 绕过也在（代码审查 S3）。规范化之后两边都是真实绝对路径，无法用 `..` 逃逸。
+    let dir_c = std::fs::canonicalize(&dir)
+        .map_err(|_| "下载目录不存在，请重新检查更新".to_string())?;
+    let p_c = std::fs::canonicalize(std::path::Path::new(&path))
+        .map_err(|_| "安装包不存在，可能已被删除".to_string())?;
+    if !p_c.starts_with(&dir_c) {
         return Err("安装包路径不合法".into());
     }
-    if !p.is_file() {
+    if !p_c.is_file() {
         return Err("安装包不存在，可能已被删除".into());
     }
-    // 二次完整性校验（代码审查 P0-5）：下载完成时验过一次，但这里 `path`
-    // 是前端传来的，且文件可能在下载后被改动。真正拉起安装器之前再算一遍
-    // SHA-256，才算把「只验大小就能执行任意程序」这条链彻底断掉。
-    // 旧缓存没有 digest 时降级为只验路径（向后兼容）。
-    if let Some(c) = crate::settings::get().update_cache {
-        if let Some(expected) = c.asset_digest.strip_prefix("sha256:") {
-            let got = sha256_hex(&p).map_err(|e| format!("安装包校验失败：{e}"))?;
-            if !got.eq_ignore_ascii_case(expected) {
-                return Err("安装包校验失败（SHA-256 不符），已拒绝执行".into());
-            }
-        }
+
+    // 二次完整性校验（P0-5）：下载完成时验过一次，但 `path` 是前端传来的，
+    // 文件可能在下载后被替换。真正拉起安装器之前再算一遍 SHA-256。
+    //
+    // **fail-closed**：拿不到 digest 就拒绝执行。原来 `if let Some(...)` 让
+    // 「无 digest」整段跳过哈希，旧缓存或异常发布就退回「只验路径就能 runas
+    // 执行」——而路径校验刚刚才证明可以被 `..` 绕过，两半都不设防等于没防
+    // （代码审查 S3）。GitHub 现行 API 都返回 digest，缺失说明不是我们下的包。
+    let expected = crate::settings::get()
+        .update_cache
+        .and_then(|c| c.asset_digest.strip_prefix("sha256:").map(str::to_string))
+        .ok_or("缺少校验信息，请重新检查更新")?;
+    let got = sha256_hex(&p_c).map_err(|e| format!("安装包校验失败：{e}"))?;
+    if !got.eq_ignore_ascii_case(&expected) {
+        return Err("安装包校验失败（SHA-256 不符），已拒绝执行".into());
     }
 
     let w = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let op = w("runas");
-    let file = w(&path);
+    // 用规范化后的路径启动：前面校验的是它，执行的也必须是同一个。
+    let file: Vec<u16> = {
+        use std::os::windows::ffi::OsStrExt;
+        p_c.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
     let rc = unsafe {
         ShellExecuteW(
             0,
@@ -1292,5 +1311,40 @@ mod tests {
         assert!(!is_newer("2.4.1-beta.2", "2.4.1"), "预发布低于正式版");
         assert!(is_newer("2.4.0", "2.3.9"));
         assert!(!is_newer("2.4.0", "2.4.0"), "同版本不算更新");
+    }
+
+    /// `..` 能穿过「前缀比较」的路径校验 —— 这条测试锁住为什么必须 canonicalize。
+    ///
+    /// 只断言文件系统语义，不碰 `install_downloaded`（它要 AppHandle）。
+    /// 旧写法 `p.starts_with(&dir)` 用组件前缀比较、不解析 `..`：
+    /// `update\..\evil.exe` 的组件以 `update` 开头就通过了，随后 `is_file()`
+    /// 会跟着 `..` 找到真正的文件 —— 校验在、绕过也在（代码审查 S3）。
+    #[test]
+    fn dotdot_escape_passes_naive_prefix_check_but_not_canonicalized() {
+        let base = std::env::temp_dir().join("qingtie-guard-dotdot");
+        let sub = base.join("update");
+        std::fs::create_dir_all(&sub).unwrap();
+        let outside = base.join("evil.exe");
+        std::fs::write(&outside, b"not really an installer").unwrap();
+        let sneaky = sub.join("..").join("evil.exe");
+
+        // 1) 旧校验：通过（这正是漏洞所在，写成断言以免有人「优化」回去）
+        assert!(
+            sneaky.starts_with(&sub),
+            "组件前缀比较不解析 ..，所以 naive 校验必然放行"
+        );
+
+        // 2) 规范化之后：两端都是真实绝对路径，越界立刻现形
+        let sc = std::fs::canonicalize(&sneaky).unwrap();
+        let bc = std::fs::canonicalize(&sub).unwrap();
+        assert!(
+            !sc.starts_with(&bc),
+            "canonicalize 后必须判定为越界：{} 不在 {} 内",
+            sc.display(),
+            bc.display()
+        );
+
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
