@@ -113,7 +113,7 @@
   /* 控件边界：搜索框 / 数字输入 / 路径输入 / 分段控件。
      这些地方线条**承担信息**（「这里能输入」「这是一组」），所以要比层级线更实；
      但它只属于控件，不该扩散到卡片和区块上去。 */
-  --border-control: rgba(0, 0, 0, 0.18);
+  --border-control: rgba(0, 0, 0, 0.19);
   /* 进度条空轨：玻璃白在浅色底上等于隐形，必须用「比底深一点」的中性色 */
   --track-bg: rgba(0, 0, 0, 0.08);
   /* 材质主体：系统 acrylic 只负责「模糊」（tint 已压到 8%，因为 SetWindowRgn
@@ -124,7 +124,7 @@
      再怎么调 card 的透明度都是白对白。
      Windows 11 的 Mica 浅色本身也是中性浅灰（约 #f3f4f6），不是白：
      它把壁纸去饱和后压到中性色，**灰落在底上**（衬托卡片），而不是落在卡片上。 */
-  --material-rgb: 236 238 242;
+  --material-rgb: 232 234 239;
   --glass-alpha: 0.62;
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
@@ -252,7 +252,7 @@
      **内容区与窗口底同层**（与深色一致）：毛玻璃上再压一层只会发灰，
      真正的层级只有「底 → 卡片」两阶，区分由材质色的灰 + elev-1 投影共同给出。 */
   --surface-1: transparent;
-  --surface-2: rgba(255, 255, 255, 0.72);
+  --surface-2: rgba(255, 255, 255, 0.6);
   --surface-3: rgba(255, 255, 255, 0.9);
   --hairline: rgba(0, 0, 0, 0.06);
   /* 卡片高度：**半透明卡片必须靠阴影定界**。
@@ -1907,7 +1907,9 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
   height: 28px;
-  padding: 0 8px 0 12px;
+  /* 左右都 12：原来右侧只有 8，右下角两个图标按钮的白底几乎贴住窗口边缘
+     （实测「聚焦环还是贴着边了」）。 */
+  padding: 0 12px;
   border-top: 1px solid var(--stroke);
   font-size: 11px;
   color: var(--text-dim);
