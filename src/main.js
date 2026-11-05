@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 // 查询封装与窗口化列表：两者都不依赖 DOM 之外的全局状态，可单独 import 测（见 test/）。
 import { buildFilter, createHistoryApi } from "./history-api.js";
+import { decidePurgeAction } from "./purge-decision.js";
 import { VirtualList } from "./virtual-list.js";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
@@ -503,12 +504,17 @@ let purgeResolve = null;
 /// → 不弹确认框 → 关联的本地文件静默不删（代码审查 F1，与 `e70a802` 同类）。
 /// 改为按 id 回查后端真源：前端索引再过期，这条破坏性路径也不受影响。
 async function askPurgeFiles(ids) {
-  if (!settings?.deleteFilesWithItem) return "records";
-  if (ids.length === 0) return "records";
-  // **重入门闩**：探针是异步的，此期间「删除」按钮还活着。连点两次会让两个
-  // Promise 抢同一个 `purgeResolve` 槽，先到的那个永远挂着 —— 用户看到「点了
-  // 没反应」（代码审查 F2）。正在问的时候，后来的调用直接中止，不重复执行。
-  if (purgeResolve) return "abort";
+  const enabled = !!settings?.deleteFilesWithItem;
+  // 不依赖后端的三条判断（设置关 / 空选 / 重入）先走一遍，省掉白跑的探针 IPC。
+  // 决策本身在 `purge-decision.js`，那里有单测钉住每个分支 —— 这段逻辑历史上
+  // 静默错过三次，靠手测抓不住（审查 T1）。
+  const pre = decidePurgeAction({
+    enabled,
+    idsCount: ids.length,
+    busy: !!purgeResolve,
+    probe: null,
+  });
+  if (pre.action !== "probe") return pre.action;
 
   let probe;
   try {
@@ -519,12 +525,15 @@ async function askPurgeFiles(ids) {
     reportFrontend("warn", "purge", "探针失败：" + e);
     probe = { files: ids.length, alive: ids.length };
   }
-  if (probe.files === 0) return "records";
-  if (probe.alive === 0) {
-    // 关联文件全都不在了：没有可删的东西，按普通删除走
-    toast("关联的本地文件已不存在，只删除记录");
-    return "records";
-  }
+  const { action, reason } = decidePurgeAction({
+    enabled,
+    idsCount: ids.length,
+    busy: false,
+    probe,
+  });
+  // 关联文件全都不在了：没有可删的东西，按普通删除走
+  if (reason === "all-missing") toast("关联的本地文件已不存在，只删除记录");
+  if (action !== "ask") return action;
 
   const perm = !!settings.deleteFilesPermanent;
   const tail = perm ? "（不可恢复）" : "（之后可从回收站还原）";
