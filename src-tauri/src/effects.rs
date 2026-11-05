@@ -260,14 +260,6 @@ fn classify(build: u32) -> Tier {
 // 施加材质
 // ---------------------------------------------------------------------------
 
-/// 对窗口施加材质，返回**实际使用**的档位。
-///
-/// `hwnd` 为原生窗口句柄的原始值（isize）。
-/// 同 [`apply_with`]，来源记为 `unspecified`。新代码请用带来源的那个。
-pub fn apply(hwnd: isize, dark: bool) -> Tier {
-    apply_with(hwnd, dark, "unspecified")
-}
-
 /// 应用窗口材质。
 ///
 /// `reason` 只用于日志：材质失效这类问题**只能靠「谁在什么时候动了它」定位** ——
@@ -382,10 +374,6 @@ pub fn reapply_after_restore(hwnd: isize, dark: bool) {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(delay));
             apply_with(hwnd, dark, "restore");
-            // 有系统材质时不能裁区域：矩形材质会在圆角外留下残影
-            if !is_round() {
-                apply_rounded_corners(hwnd);
-            }
         });
     }
 }
@@ -566,11 +554,9 @@ pub fn begin_resize(hwnd: isize, dark: bool) {
         if RESIZE_GEN.load(std::sync::atomic::Ordering::Relaxed) != gen {
             return; // 还在拖，等最后一次
         }
-        if is_round() {
-            let _ = apply_with(hwnd, dark, "resize-end");
-        } else {
-            apply_rounded_corners(hwnd);
-        }
+        // 圆角由 CSS（`--radius` + overflow）或系统给，不裁区域 ——
+        // 裁区域会破坏 DWM 的 backdrop（见本函数文档）。
+        let _ = apply_with(hwnd, dark, "resize-end");
     });
 }
 
@@ -936,10 +922,6 @@ fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
     // 施加还是清除，只有 `apply` 里那一个分支说了算。这里再加一份判断，
     // 就是又给自己留了一个「改一处忘一处」的机会。
     let _ = apply_with(hwnd, dark, "theme-refresh");
-    // 无系统材质时圆角靠区域裁剪；有系统材质时圆角由系统给（Win10 acrylic 只能直角）
-    if !is_round() {
-        apply_rounded_corners(hwnd);
-    }
     nudge(hwnd);
     crate::log_print!("[effects] 主题视觉重刷完成（第 {pass} 遍，dark={dark}）");
 }

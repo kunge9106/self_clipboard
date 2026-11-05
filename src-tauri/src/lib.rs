@@ -162,8 +162,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
         window.title().unwrap_or_default(),
     );
 
-    effects::apply(hwnd, dark);
-    effects::apply_rounded_corners(hwnd);
+    effects::apply_with(hwnd, dark, "startup");
     // 失焦/聚焦时 Windows 会发 WM_NCACTIVATE 重绘原生标题栏，必须拦截
     effects::install_focus_hook(hwnd, app);
 
@@ -186,9 +185,9 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                 // Resized 在最小化和恢复时都会触发，函数内部靠 IsIconic 翻转判断。
                 effects::reapply_after_restore(hwnd, dark);
             }
-            // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）。
+            // 焦点切换不再裁区域：所有档位 region_radius() 都是 0，
+            // `apply_rounded_corners` 是空操作，留着只会让人误以为这里有作用。
             tauri::WindowEvent::Focused(_active) => {
-                effects::apply_rounded_corners(hwnd);
                 // 实测（Win10/Win11 都有）：失焦/聚焦偶发把材质与 NC 渲染一起丢掉，
                 // 四周围上一圈 Win7 式边框，而托盘唤回路径的补涂管不到这里。
                 // 同步重刷会肉眼可见地闪（聚焦是高频动作），所以延迟 150ms 在后台
@@ -207,8 +206,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                         if let Ok(h) = w2.hwnd() {
                             let dark =
                                 matches!(w2.theme().unwrap_or(Theme::Light), Theme::Dark);
-                            effects::apply(h.0 as isize, dark);
-                            effects::apply_rounded_corners(h.0 as isize);
+                            effects::apply_with(h.0 as isize, dark, "focus-refresh");
                             effects::nudge(h.0 as isize);
                         }
                     }
@@ -216,12 +214,10 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                     drop(w2);
                 });
             }
-            // 跨屏拖动 DPI 变化后，半径要按新 DPI 重新换算；
-            // 同时窗口可能已经超出新显示器的工作区（缩放变了、可用逻辑分辨率也变了），
-            // 一并夹一次，否则底部会被切掉。
+            // 跨屏拖动 DPI 变化后窗口可能超出新显示器的工作区
+            //（缩放变了、可用逻辑分辨率也变了），夹一次，否则底部会被切掉。
             tauri::WindowEvent::ScaleFactorChanged { .. } => {
                 effects::apply_dpi_policy(&window_for_events);
-                effects::apply_rounded_corners(hwnd);
             }
             // 「关闭时后台运行」：隐藏到托盘而不是退出（迁移自 v1 trayOnClose）
             tauri::WindowEvent::CloseRequested { api, .. } => {
@@ -244,8 +240,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     std::thread::spawn(move || {
         for delay in [200u64, 600, 1200] {
             std::thread::sleep(std::time::Duration::from_millis(delay));
-            effects::apply(hwnd, dark);
-            effects::apply_rounded_corners(hwnd);
+            effects::apply_with(hwnd, dark, "startup-delayed");
             effects::nudge(hwnd);
         }
         crate::log_print!("[effects] 补涂流程结束，最终档位：{}", effects::current_tier().as_str());
