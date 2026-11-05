@@ -82,6 +82,11 @@
   /* 强调色的淡底：主按钮的悬停/聚焦用。实心蓝在毛玻璃上像贴了块塑料板，
      与材质语言冲突；但主操作又必须比次操作醒目，所以用「淡色底 + 强调边 + 强调字」。 */
   --accent-soft: rgba(47, 107, 255, 0.1);
+  /* 聚焦底色：**淡灰**，与悬停的提亮刻意区分。
+     悬停是「鼠标扫过」的瞬时反馈，提亮更像玻璃被照亮；
+     聚焦是「键盘选中在这里」的持久状态，需要一点压暗才有「落定」的感觉。
+     同一个按钮两种状态用两种方向，是因为它们回答的是不同问题。 */
+  --focus-bg: rgba(0, 0, 0, 0.055);
   /* 主按钮的**填充色**：比 --accent 深一档。
      #2f6bff 饱和度 100%、明度很高，铺成实底在毛玻璃上刺眼；
      Fluent 自己的强调蓝是 #005FB8 那种深沉色。这里取中间值，
@@ -301,6 +306,8 @@ body.dark {
   /* 深色下「压暗」在深底上看不出来，按下改为比悬停再亮一档。 */
   --state-active: rgba(255, 255, 255, 0.14);
   --accent-soft: rgba(91, 140, 255, 0.16);
+  /* 深色下「压暗」看不出来，聚焦改为比悬停再亮一档 */
+  --focus-bg: rgba(255, 255, 255, 0.1);
   /* 深色下反过来：填充用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清 */
   --accent-fill: #6b9bff;
   --accent-on: #12121a;
@@ -474,7 +481,7 @@ button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--focus-bg), var(--focus-bg));
 }
 
 /* 主按钮本身是强调色实底，叠白会褪色；改为提亮，保持色相 */
@@ -496,7 +503,7 @@ select:focus-visible {
 [data-autofocus]:focus {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  background-image: linear-gradient(var(--focus-bg), var(--focus-bg));
 }
 
 /* 强调色实底的主按钮：同上，不叠白、改提亮 */
