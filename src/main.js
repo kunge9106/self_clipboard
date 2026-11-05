@@ -146,9 +146,9 @@ function applyTheme(dark) {
 }
 
 /**
- * 圆角模式下，深浅切换要连带调整材质浓度。
+ * 高级材质（round 模式）下，深浅切换要连带调整材质浓度。
  *
- * 圆角模式 = **没有系统背景模糊**，窗口后面就是清晰的桌面。这种状态下：
+ * 它没有系统背景模糊，窗口后面就是清晰的桌面。这种状态下：
  *   · 深色必须接近实心（90）才压得住亮壁纸，否则一片惨白；
  *   · 浅色则要恢复用户自己调的那个值 —— 浅色本来就不怕亮壁纸。
  *
@@ -158,7 +158,8 @@ function applyTheme(dark) {
  * 只是换了个位置）。
  */
 function applyThemeDependentAlpha(wasDark, isDark) {
-  if (!settings?.roundMode || wasDark === isDark) return;
+  // 三个条件缺一不可：模式是高级材质、用户没关掉这个行为、主题真的变了
+  if (!settings?.roundMode || settings.autoAlphaDark === false || wasDark === isDark) return;
   const v = isDark ? 90 : (settings.materialAlpha ?? 90);
   applyGlassAlpha(v);
   // 滑块在设置页可见时同步读数，否则界面显示 60、实际 90
@@ -262,7 +263,8 @@ function syncAlphaToSettings(v) {
 }
 
 /**
- * 圆角模式：**圆角 + 不用系统模糊**。
+ * 高级材质（代码里沿用历史名 `round` / `roundMode`，改字段名要迁配置，故只改文案）：
+ * **圆角 + 不用系统模糊**。
  *
  * Win10 的 acrylic 由 DWM 合成、恒为矩形，裁不掉圆角，所以「圆角 + 系统模糊」
  * 必然在四角留下一圈矩形残留。两种模式各自规避这个矛盾：
@@ -3077,9 +3079,17 @@ function settingsAppearanceHtml(s) {
       ) +
         rowCheck(
           "set-round",
-          "圆角模式",
-          "圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感",
+          "高级材质",
+          // 原名「圆角模式」有歧义：Win11 上直角模式窗口也是圆角的（系统给的），
+          // 用户会以为关掉会变直角。它实际控制的是**用不用系统背景模糊**。
+          "关闭系统背景模糊，通透度完全由应用自己控制。四角更干净，代价是面板要更高浓度才压得住壁纸",
           s.roundMode
+        ) +
+        rowCheck(
+          "set-auto-dark-alpha",
+          "深色自动加浓",
+          "高级材质下切到深色时，浓度自动升到 90%；切回浅色恢复你设的值",
+          s.autoAlphaDark
         )
     ),
     block(
@@ -3368,7 +3378,7 @@ function settingsAboutHtml() {
         <span class="about-fact-v" id="ab-tier">—</span>
       </div>
       <div class="about-fact">
-        <span class="about-fact-k">圆角模式</span>
+        <span class="about-fact-k">高级材质</span>
         <span class="about-fact-v" id="ab-round">—</span>
       </div>
       <div class="about-fact">
@@ -4384,6 +4394,26 @@ function bindSettings(view) {
   // （后端 alpha_straight / alpha_round），切模式只是换用另一档 ——
   // 直角调到 68 → 切圆角（用圆角那档，比如 45）→ 切回直角仍是 68。
   // 这里把该模式记住的那一档取回来，同步到滑块 / 标签 / 观感。
+  const autoDark = view.querySelector("#set-auto-dark-alpha");
+  if (autoDark)
+    autoDark.onchange = async () => {
+      try {
+        await invoke("set_auto_alpha_dark", { value: autoDark.checked });
+        settings = await invoke("get_settings");
+        // 关掉时若正处在深色 + 高级材质，要把浓度还原成用户设的值，否则会停在 90
+        if (!autoDark.checked) {
+          applyGlassAlpha(settings.materialAlpha ?? 90);
+          const el = view.querySelector("#set-material");
+          const lab = view.querySelector("#material-val");
+          if (el) el.value = String(settings.materialAlpha ?? 90);
+          if (lab) lab.textContent = `${settings.materialAlpha ?? 90}%`;
+        }
+      } catch (e) {
+        reportFrontend("warn", "settings", e);
+        toast("设置没保存，请重试");
+      }
+    };
+
   const round = view.querySelector("#set-round");
   if (round)
     round.onchange = async () => {

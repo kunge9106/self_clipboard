@@ -157,6 +157,16 @@ pub struct Config {
     ///     同样没有任何残留。
     #[serde(default)]
     pub round_mode: bool,
+    /// 高级材质（`round_mode`）下，切到深色时是否自动把浓度拉到 90%。
+    ///
+    /// 为什么需要这个开关：高级材质**没有系统背景模糊**，窗口后面就是清晰的桌面。
+    /// 深色在这种状态下必须接近实心才压得住亮壁纸，否则一片惨白；而浅色不怕亮壁纸，
+    /// 应该回到用户自己调的值。这个「深色更浓」是**模式派生的合理默认**，不是铁律 ——
+    /// 有人就想要深色也通透，所以做成可关。
+    ///
+    /// 默认开：不开的话，深色 + 高级材质 + 亮壁纸 = 几乎不能用。
+    #[serde(default = "default_true")]
+    pub auto_alpha_dark: bool,
     /// 文件复制：是否记录「资源管理器里复制的文件」（CF_HDROP）。
     ///
     /// **默认关闭**——这是用户明确要求的默认值：文件复制涉及真实文件路径，
@@ -511,6 +521,7 @@ impl Default for Config {
             asked_autostart: false,
             asked_tray_on_close: false,
             round_mode: false,
+            auto_alpha_dark: true,
             file_copy: false, // 默认关闭：不记录文件复制
             // 默认关闭：删条目只删记录，不碰磁盘上的真实文件
             delete_files_with_item: false,
@@ -738,6 +749,7 @@ pub fn get_settings() -> serde_json::Value {
         "alphaStraight": cfg.alpha_straight,
         "alphaRound": cfg.alpha_round,
         "roundMode": cfg.round_mode,
+        "autoAlphaDark": cfg.auto_alpha_dark,
         "fileCopy": cfg.file_copy,
         "deleteFilesWithItem": cfg.delete_files_with_item,
         "deleteFilesPermanent": cfg.delete_files_permanent,
@@ -781,6 +793,13 @@ pub fn dismiss_onboarding(kind: String) -> Result<(), String> {
         }
         other => return Err(format!("未知的引导项：{other}")),
     }
+    Ok(())
+}
+
+/// 高级材质下「深色自动加浓」开关（设置页，默认开）
+#[tauri::command]
+pub fn set_auto_alpha_dark(value: bool) -> Result<(), String> {
+    update(|c| c.auto_alpha_dark = value);
     Ok(())
 }
 

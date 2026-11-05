@@ -337,6 +337,7 @@ pub fn run() {
             clipboard::confirm_cache_move,
             settings::set_panel_keep_after_copy,
             settings::set_panel_close_key,
+            settings::set_auto_alpha_dark,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,
