@@ -4305,10 +4305,15 @@ async function main() {
   }
   try {
     const rawVer = await getVersion();
-    // 预发布版（版本号含「-」如 2.2.1-beta.1）在尾部标 Beta，一眼可辨。
-    const isPre = rawVer.includes("-");
-    document.getElementById("status-version").textContent =
-      `Version：${rawVer}${isPre ? "（Beta）" : ""}`;
+    // 预发布版把后缀换成可读的「Beta」：`2.6.10-beta` → `2.6.10 Beta`。
+    //
+    // 原来写 `2.6.10-beta（Beta）`，同一个词说两遍；改成替换后缀而不是追加，
+    // 正式版（版本号不带后缀）自然回到 `2.6.10`，不用再改代码 —— 版本号是唯一开关。
+    const m = /^(\d+\.\d+\.\d+)-(.+)$/.exec(rawVer);
+    const shown = m
+      ? `${m[1]} ${m[2].replace(/^beta/i, "Beta").replace(/-/g, ".")}`
+      : rawVer;
+    document.getElementById("status-version").textContent = `Version：${shown}`;
   } catch (e) {
     // 版本号不在前端写死：它由 tauri.conf.json 引用 package.json 得到，
     // 写死会在下次发版后与真实版本不一致。取不到时留一个占位符。
