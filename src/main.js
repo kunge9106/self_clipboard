@@ -913,8 +913,22 @@ function currentFilter() {
   return buildFilter({ view: currentView, query });
 }
 
-/** 建滚动容器 + 虚拟列表（切视图、从设置页回来时都会重建，保证状态干净）。 */
+/** 建滚动容器 + 虚拟列表。**DOM 还在就复用**，只有被空态/设置页拆掉之后才重建。 */
 function ensureWindow(view) {
+  // **能复用就复用**（代码审查 U1）。
+  //
+  // 原来是「`wl.destroy()` + `view.innerHTML=""` + 新建」，而 `renderWindow` 每次
+  // 都会调它 —— 于是每次复制都先把整列卡片拆掉，等 fetchWindow 回来再重建。
+  // 那 1–2ms 里视口是空的，用户看到的就是「列表闪一下」。
+  //
+  // 虚拟列表本来就是为原地更新设计的（`setTotal` / `setWindow` 带锚点保位），
+  // 只要滚动容器还在文档里，就让它继续在着，取页回来后原地刷新 —— 旧内容在
+  // 等待期间保持可见，不会露出底色。
+  //
+  // 空态、设置页、加载失败都会把 `view.innerHTML` 整个换掉，那时 scroller 已经
+  // 脱离文档，必须重建。用 `isConnected` 判断（比对 `view.contains` 更直接）。
+  if (wl && wl.scroller.isConnected) return;
+
   if (wl) {
     wl.destroy();
     wl = null;
@@ -1060,6 +1074,9 @@ async function renderWindow({ keepScroll = false } = {}) {
   // 代价是一次取页（1–2 ms）；页缓存真正的作用是滚动时的相邻页与回滚，不受影响。
   api.invalidate();
   ensureWindow(view);
+  // 复用滚动容器后 scrollTop 会被保留 —— 但「不保位置」的调用（切分类、改搜索、
+  // 从设置页回来）语义就是回到顶部。原来靠重建 scroller 天然归零，现在要显式做。
+  if (!keepScroll) wl.scroller.scrollTop = 0;
   refreshStatusCount();
   wlBusy = true;
   let res;
