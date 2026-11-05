@@ -89,6 +89,9 @@
        · 按钮是「可点的东西」，悬停要像被按住的实体 → 压暗一点点。
      实测原话：「取消按钮悬停时可以加一点淡淡的灰色，让人知道选中了」。 */
   --state-hover-dim: rgba(0, 0, 0, 0.055);
+  /* 开关关闭态轨道：不能用 --track-bg（那是进度条空轨，浅到 #ececec），
+     白色滑点压上去看不见。取中性深灰，滑点才有依托。 */
+  --switch-off: rgba(0, 0, 0, 0.26);
   /* 主按钮的**填充色**：比 --accent 深一档。
      #2f6bff 饱和度 100%、明度很高，铺成实底在毛玻璃上刺眼；
      Fluent 自己的强调蓝是 #005FB8 那种深沉色。这里取中间值，
@@ -310,6 +313,7 @@ body.dark {
   --accent-soft: rgba(91, 140, 255, 0.16);
   /* 深色下「压暗」看不出来，小控件改为亮一档 */
   --state-hover-dim: rgba(255, 255, 255, 0.1);
+  --switch-off: rgba(255, 255, 255, 0.26);
   /* 深色下反过来：填充用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清 */
   --accent-fill: #6b9bff;
   --accent-on: #12121a;
@@ -1922,11 +1926,49 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   white-space: nowrap;
 }
 
+/* 设置页的开关：**自绘**。
+   原来是原生 checkbox（16×16 方块 + accent-color），系统绘制，不受圆角 / 阴影 /
+   材质影响，在高 DPI 下还会发虚 —— 全项目最不「有质感」的一处。
+   方案里的开关决策门是「轨道对比 < 3:1 就自绘」，原生那条边框约 1.3:1，正是该自绘。
+
+   appearance: none 之后仍保留原生语义：可 Tab、空格切换、读屏可读 ——
+   只是外观换成胶囊轨道 + 圆形滑点。 */
 .settings input[type="checkbox"] {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--switch-off);
+  cursor: default;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+/* 滑点：白色圆片 + 极轻投影，让它「浮」在轨道上而不是画在轨道里 */
+.settings input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
   width: 16px;
   height: 16px;
-  accent-color: var(--accent);
-  cursor: default;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.settings input[type="checkbox"]:checked {
+  background: var(--accent-fill);
+}
+
+.settings input[type="checkbox"]:checked::after {
+  transform: translateX(16px);
+}
+
+.settings input[type="checkbox"]:disabled {
+  opacity: var(--disabled-opacity);
 }
 
 /* 缓存块嵌在「存储位置」区块里，去掉它自己的外框、底色与阴影 ——
@@ -2974,11 +3016,38 @@ body.dark .detail-body {
   cursor: default;
 }
 
+/* 弹窗里的多选框：与设置页开关同一套语言（自绘、走令牌），但形态是方块 + 勾 ——
+   多选有「选中若干」的含义，胶囊开关表达的是「开/关」二态，两者不该混用。 */
 .modal-check input[type="checkbox"] {
+  appearance: none;
+  position: relative;
+  flex: none;
   width: 16px;
   height: 16px;
-  accent-color: var(--accent);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-control);
+  background: transparent;
   cursor: default;
+  transition: background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.modal-check input[type="checkbox"]:checked {
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
+}
+
+/* 勾用两条边画，不用图标 —— 尺寸只有 16px，SVG 在这个尺寸下反而糊 */
+.modal-check input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--accent-on);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
 }
 
 /* 同理 .modal-mask[hidden]：这两个都是 display:flex，会盖掉 hidden 属性自带的
