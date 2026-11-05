@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 // 查询封装与窗口化列表：两者都不依赖 DOM 之外的全局状态，可单独 import 测（见 test/）。
 import { buildFilter, createHistoryApi } from "./history-api.js";
 import { decidePurgeAction } from "./purge-decision.js";
+import { createTip } from "./tip.js";
 import { VirtualList } from "./virtual-list.js";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
@@ -2538,7 +2539,7 @@ function settingsHtml() {
       return (
         `<button class="tab${t.id === settingsTab ? " is-active" : ""}` +
         `${dot ? " has-dot" : ""}" data-tab="${t.id}"` +
-        `${dot ? ` title="${esc(dotTip)}"` : ""}>${t.label}</button>`
+        `${dot ? ` data-tip="${esc(dotTip)}"` : ""}>${t.label}</button>`
       );
     }
   ).join("")}</div>`;
@@ -3207,7 +3208,7 @@ function settingsAboutHtml() {
           <button class="btn-ghost" id="btn-check-update">${updateBtnLabel()}</button>
           <button class="btn-ghost" id="btn-repo">项目主页</button>
           <button class="btn-ghost" id="btn-feedback">问题反馈</button>
-          <button class="btn-ghost" id="btn-diag" title="复制版本、系统、材质、数据目录等排查信息">复制诊断信息</button>
+          <button class="btn-ghost" id="btn-diag" data-tip="复制版本、系统、材质、数据目录等排查信息">复制诊断信息</button>
         </div>
       </div>
     </div>
@@ -3560,7 +3561,7 @@ function showUpdateBanner() {
   el.innerHTML =
     `<span class="ub-text">发现新版本 <b>v${esc(updateInfo.latest)}</b></span>` +
     `<button class="ub-btn" id="ub-go">查看</button>` +
-    `<button class="ub-close" id="ub-close" title="关闭">×</button>`;
+    `<button class="ub-close" id="ub-close" data-tip="关闭" aria-label="关闭">×</button>`;
   document.body.appendChild(el);
 
   el.querySelector("#ub-go").onclick = () => {
@@ -4390,6 +4391,7 @@ async function main() {
   bindNav();
   bindThemeToggle();
   bindSearch();
+  createTip();
   startTimeTicker();
 
   await applyEffectInfo();

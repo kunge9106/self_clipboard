@@ -17,14 +17,14 @@
         </div>
         <div class="titlebar-spacer"></div>
         <div class="window-controls">
-          <button class="wc-btn" id="btn-minimize" title="最小化" aria-label="最小化">
+          <button class="wc-btn" id="btn-minimize" data-tip="最小化" aria-label="最小化">
             <svg viewBox="0 0 10 10"><path d="M0 5h10" /></svg>
           </button>
-          <button class="wc-btn" id="btn-maximize" title="最大化" aria-label="最大化">
+          <button class="wc-btn" id="btn-maximize" data-tip="最大化" aria-label="最大化">
             <svg class="ic-max" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9"/></svg>
             <svg class="ic-restore" viewBox="0 0 10 10"><rect x="0.5" y="2.5" width="7" height="7"/><path d="M2.8 2.5V0.5H9.5V7.2H7.5"/></svg>
           </button>
-          <button class="wc-btn wc-close" id="btn-close" title="关闭" aria-label="关闭">
+          <button class="wc-btn wc-close" id="btn-close" data-tip="关闭" aria-label="关闭">
             <svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" /></svg>
           </button>
         </div>
@@ -79,7 +79,7 @@
             <div class="search">
               <svg class="search-icon" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
               <input id="search" type="text" placeholder="搜索剪贴板历史…" autocomplete="off" spellcheck="false" />
-              <button class="search-clear" id="search-clear" type="button" title="清空搜索" hidden>
+              <button class="search-clear" id="search-clear" type="button" data-tip="清空搜索" hidden>
                 <svg viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
               </button>
             </div>
@@ -105,10 +105,10 @@
             <span class="statusbar-left" id="status-count">共 0 条</span>
             <span class="statusbar-version" id="status-version"></span>
             <div class="statusbar-actions">
-              <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清结果；置顶/收藏除外）">
+              <button class="statusbar-clear" id="btn-clear-view" data-tip="清空（搜索时只清结果；置顶/收藏除外）">
                 <svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>
               </button>
-              <button class="statusbar-clear" id="btn-clean-age" title="清理旧条目（按天数，置顶/收藏除外）">
+              <button class="statusbar-clear" id="btn-clean-age" data-tip="清理旧条目（按天数，置顶/收藏除外）">
                 <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.4 1.6"/></svg>
               </button>
             </div>

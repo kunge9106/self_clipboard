@@ -33,6 +33,20 @@
   /* 相邻可选行（导航项、菜单项、设置里的行）的统一间距。
      圆角块相邻时，间距小于圆角半径的一半就会「粘」成一个 —— 2px 在 8px 圆角下
      正是这种情况。所有「一排可选行」的容器都用这个值，不再各写各的。 */
+  /* ══ 层级（z-index）════════════════════════════════════════════════
+     只由这张表决定，**禁止再写裸数字**。顺序＝浮起来的程度，不是「谁后写谁大」。
+     原来散着 40 / 998 / 999 / 1000 / 1200 / 1500 / 2000 / 3000 八个值，
+     加一个新浮层只能猜「该比谁大」，猜错就被压住。 */
+  /* 遮罩浓度：弹窗 / 移动框 / 引导共用，不再各写一个 rgba */
+  --mask-bg: rgba(0, 0, 0, 0.28);
+  --z-banner: 40; /* 更新横幅：顶部常驻，低于所有浮层 */
+  --z-decor: 998; /* 噪点 / 光斑装饰层：在内容之上、交互浮层之下 */
+  --z-menu: 1000; /* 右键菜单 */
+  --z-tip: 1200; /* 提示气泡：必须能压住菜单（菜单项也需要提示） */
+  --z-preview: 1500; /* 悬停预览：带内容的大浮层 */
+  --z-modal: 2000; /* 弹窗与遮罩 */
+  --z-toast: 2100; /* toast：永远可见，压住弹窗 */
+  --z-grip: 3000; /* 缩放热区：贴窗口边缘，被任何浮层遮住就拖不动 */
   --gap-row: 4px;
   /* 密集菜单（右键菜单、下拉）行距更小：项高才 30px 上下，4px 会把菜单拉长。
      只有这两档 —— 不允许再出现「这里写 1px、那里写 3px」的散值。 */
@@ -558,7 +572,7 @@ body.round .settings .block {
   content: "";
   position: absolute;
   inset: 0;
-  z-index: 998;
+  z-index: var(--z-decor);
   pointer-events: none;
   border-radius: inherit;
   opacity: 0.028;
@@ -572,7 +586,7 @@ body.round .settings .block {
   content: "";
   position: absolute;
   inset: 0;
-  z-index: 999;
+  z-index: var(--z-decor);
   pointer-events: none;
   border-radius: inherit;
   background:
@@ -808,7 +822,7 @@ html:not(.hovers-off) .nav-item:hover {
   top: calc(var(--titlebar-h) + 8px);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 40;
+  z-index: var(--z-banner);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1513,7 +1527,7 @@ body.round .tag {
 /* 右键上下文菜单 */
 .ctx-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--z-menu);
   min-width: 132px;
   /* 内边距 + 行距：条目之间留一丝缝，悬浮高亮块才不会彼此贴死成一整块。
      走 --gap-row-dense（密集菜单档），与侧栏的 --gap-row 同属一套间距系统。 */
@@ -1948,9 +1962,48 @@ html:not(.hovers-off) .statusbar-clear:hover {
 
    材质见文件顶部 --hp-* 变量的注释：奶白渐变 + 发丝边 + 顶部内高光 + 大阴影，
    一套固定配方，不随窗口浓度 / 材质档位变化。 */
+/* ══ 提示气泡（tooltip）═════════════════════════════════════════════
+   与右键菜单 / toast **同一族**：`--solid-bg` + `--elev-2`。
+   刻意不复用 `.hover-preview`（那套 18 个 `--hp-*` 是奶白渐变的「实体预览」语言，
+   给单行文字套渐变会显脏），也不另造令牌 —— 浮层外观只有一套。
+
+   定位由 `tip.js` 计算（fixed + 视口夹取 + 越界翻转），这里只管外观。 */
+.tip {
+  position: fixed;
+  z-index: var(--z-tip);
+  max-width: 280px;
+  /* 内距与字号**对齐 toast**（同为一次性的短提示），不与卡片/菜单各调一套；
+     8×12 落在 4px 栅格上。 */
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--solid-bg);
+  box-shadow: var(--elev-2);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.5;
+  /* 长路径 / 长句要能断，不能顶出 max-width */
+  word-break: break-word;
+  /* 气泡永不接收鼠标：它是提示，不该挡住下面元素，也不该把自己的 mouseout 触发掉 */
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.tip.is-on {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.tip[hidden] {
+  display: none;
+}
+
 .hover-preview {
   position: fixed;
-  z-index: 1500;
+  z-index: var(--z-preview);
   /* 与 .card 相同的 10px 内边距：浮层是从卡片里「长出来」的一块，留白要接得上 */
   padding: 10px;
   border-radius: var(--radius-sm);
@@ -2039,7 +2092,7 @@ html:not(.hovers-off) .statusbar-clear:hover {
 .modal-mask {
   position: fixed;
   inset: 0;
-  z-index: 2000;
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
   background: rgba(0, 0, 0, 0.32);
@@ -2869,10 +2922,13 @@ html:not(.hovers-off) .btn-danger:hover {
 .move-mask {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  /* 它是一层遮罩，与 .modal-mask 同级。原来写 60 —— 比右键菜单（1000）还低，
+     移动框开着时点出菜单会盖在它上面，属于层级表之外的漏网值。 */
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.28);
+  /* 遮罩浓度与 .modal-mask 一致，不再单独调 */
+  background: var(--mask-bg);
 }
 
 .move-box {
@@ -2986,7 +3042,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 .rz-layer {
   position: fixed;
   inset: 0;
-  z-index: 3000;
+  z-index: var(--z-grip);
   pointer-events: none;
 }
 
