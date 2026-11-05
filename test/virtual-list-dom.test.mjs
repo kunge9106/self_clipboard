@@ -96,7 +96,7 @@ globalThis.requestAnimationFrame = (fn) => {
 };
 globalThis.cancelAnimationFrame = () => {};
 
-const { VirtualList, heightClassOf, findIndex: findIndexFor } = await import("../src/virtual-list.js");
+const { VirtualList, heightClassOf, imgPending, findIndex: findIndexFor } = await import("../src/virtual-list.js");
 
 /** 造一个列表：heightFor 决定每一行渲染后的高度（模拟 CSS 的真实结果）。 */
 function makeList({ total, itemsPerPage = 200, viewport = 600, heightFor }) {
@@ -224,4 +224,102 @@ test("空列表不崩", () => {
   const { vl } = makeList({ total: 0, itemsPerPage: 0 });
   assert.doesNotThrow(() => vl.render());
   assert.equal(vl.inner.children.length, 0);
+});
+
+// ── 图片未解码时不能参与标定 ──────────────────────────────────────────────
+//
+// 实测反馈：「复制新内容时，上边那条置顶会闪一下」。带图的那张卡在缩略图赋 src 之前
+// 高度是「没有图」的高度，曾被当成图片类高度写进类表 → 图一解码完整列先压紧再弹开。
+
+test("imgPending 只看当前这条图的解码状态", () => {
+  assert.equal(imgPending({ querySelector: () => null }), false, "没有缩略图的行永远算就绪");
+  const pending = { complete: false, naturalHeight: 0 };
+  assert.equal(imgPending({ querySelector: () => pending }), true, "还没开始解码");
+  assert.equal(
+    imgPending({ querySelector: () => ({ complete: true, naturalHeight: 0 }) }),
+    true,
+    "解码失败（有 complete 但没尺寸）也算没就绪"
+  );
+  assert.equal(
+    imgPending({ querySelector: () => ({ complete: true, naturalHeight: 120 }) }),
+    false
+  );
+});
+
+test("缩略图没解码完就不参与标定，不污染图片类高度", () => {
+  const { vl } = makeList({
+    total: 100,
+    heightFor: (item) => (heightClassOf(item) === 4 ? 120 : 50),
+  });
+  const before = vl.classHeights[4];
+  assert.equal(before, 120, "首帧按真实图卡高度标定过");
+
+  const row = vl.rendered.get(0); // 第 0 行是图片（i % 10 === 0）
+  row.h = 40; // 模拟「图还没加载，这一行只有文字那么高」
+  row.querySelector = () => ({ complete: false, naturalHeight: 0 });
+
+  vl.calibrate([0]);
+  assert.equal(vl.classHeights[4], before, "未解码的图不该把图片类高度量矮");
+  assert.equal(vl.known.get(0), 120, "该行仍用上一次的可信实测值");
+});
+
+test("标定改了偏移表后同帧重排，不等下一帧", () => {
+  const { vl } = makeList({ total: 50, heightFor: () => 50 });
+  const row = vl.rendered.get(5);
+  row.h = 200; // 这一行突然变高（例如内容变化）
+  vl.calibrate([5]);
+  assert.equal(
+    row.style.transform,
+    `translateY(${Math.round(vl.offsets[5])}px)`,
+    "标定后应立即按新偏移表定位，否则会先按旧位置画一帧再挪"
+  );
+});
+
+// ── 类高度表跨实例继承 ────────────────────────────────────────────────────
+//
+// 每次复制都新建列表。若类高度表从硬编码默认值起手，首帧就按错误高度排版：
+// 图片类默认 112、真实约 74 → 新内容先出现在离置顶那条几十像素的位置，等标定完
+// 再挪过去。用户看到的是「新内容从置顶里钻出来再滑下去」。
+
+test("类高度表从外部继承，且是拷贝（不与调用方共享数组）", () => {
+  const src = [40, 42, 44, 46, 70];
+  const vl = new VirtualList({
+    scroller: new Scroller(),
+    fillRow: () => {},
+    keyOf: (item) => item.id,
+    classHeights: src,
+  });
+  assert.deepEqual(vl.classHeights, [40, 42, 44, 46, 70], "构造时就该采用继承来的表");
+  assert.equal(vl.estimate, Math.round((40 + 46 + 70) / 3), "估值跟着继承的表算");
+
+  vl.classHeights[0] = 999;
+  assert.equal(src[0], 40, "必须拷贝，否则两个实例会互相改");
+});
+
+test("下标相关的度量不随类高度表一起继承", () => {
+  const vl = new VirtualList({
+    scroller: new Scroller(),
+    fillRow: () => {},
+    keyOf: (item) => item.id,
+    classHeights: [40, 42, 44, 46, 70],
+  });
+  assert.equal(vl.known.size, 0, "known 是「下标 → 高度」，换数据后下标含义会平移");
+  assert.equal(vl.knownIds.size, 0);
+  assert.equal(vl.rendered.size, 0, "行池与映射必须随实例新建");
+  assert.equal(vl.calibrated, false, "新实例仍要重新标定一次");
+});
+
+test("继承了类高度后，首帧偏移表就按真实高度排（不再先挤后弹）", () => {
+  const scroller = new Scroller();
+  scroller.clientHeight = 600;
+  const vl = new VirtualList({
+    scroller,
+    fillRow: () => {},
+    keyOf: (item) => item.id,
+    classHeights: [50, 52, 54, 56, 74], // 上一张列表量到的真实值
+  });
+  const items = Array.from({ length: 10 }, (_, i) => ({ id: `a${i}`, kind: "image", subtype: null }));
+  vl.setTotal(10);
+  vl.setWindow(0, items);
+  assert.equal(vl.offsets[1], 74 + 8, "首行是图片卡时，下一行应直接落在 74+gap");
 });

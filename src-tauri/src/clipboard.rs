@@ -403,6 +403,66 @@ pub(crate) fn with_history<T>(f: impl FnOnce(&[crate::store::Meta]) -> T) -> T {
 
 /// 处理条目引用的本地文件（回收站 / 永久删除），返回给前端的提示串。
 ///
+/// 把「路径来源」读成路径清单（可能读盘 + 解密）。
+///
+/// 来源有两种：实体文件 `files/<id>.txt`（完整清单）与内联的 `files` 字段
+/// （老索引形态、以及常驻的前 N 条）。三处调用方共用这一份实现
+/// （`purge_local_files` / `check_files_alive` / `probe_purge_targets`）。
+/// 一个条目的文件清单：优先读实体文件，读不出来**回退常驻清单**。
+///
+/// 不能把「读失败」当成「这个条目没有文件」：`purge` 拿到空清单就直接跳过，
+/// 用户看到「已删除 N 项」而磁盘上的文件原封不动（审查 E1′）。
+/// 实体可能因为换机器 / 换 Windows 账户解不开密（DPAPI），也可能被外部删掉 ——
+/// 这两种情况下 `files` 里的常驻前 N 条仍然是可信的（它随索引一起加密存储）。
+fn resolve_paths(dir: &PathBuf, rel: Option<String>, inline: Vec<String>) -> Vec<String> {
+    match rel {
+        Some(r) => match read_text_entity(dir, &r) {
+            Ok(text) => text
+                .lines()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+            Err(e) => {
+                crate::log_warn!(
+                    "[clipboard] 文件清单读取失败，回退常驻清单 {} 条：{e}",
+                    inline.len()
+                );
+                inline
+            }
+        },
+        None => inline,
+    }
+}
+
+/// 一个条目关联的本地文件路径清单。
+fn item_file_paths(dir: &PathBuf, item: &crate::store::Meta) -> Vec<String> {
+    resolve_paths(dir, item.files_rel(), item.files.clone().unwrap_or_default())
+}
+
+/// 失败明细，用于 WARN 日志。
+///
+/// **发布版不写路径**：路径里带着文件名（「离婚协议书.docx」），用户把日志发到
+/// 群里排查「删除失败」时，内容就跟着出去了（代码审查 S1）。开发版保留 ——
+/// 否则诊断「文件明明在桌面却报失败」只能靠猜。
+#[cfg(debug_assertions)]
+fn failure_detail(failures: &[crate::purge::PurgeFailure]) -> String {
+    use crate::purge::FailureKind;
+    let items: Vec<String> = failures
+        .iter()
+        .map(|f| match &f.kind {
+            FailureKind::NotAbsolute => format!("{}（不是绝对路径）", f.path),
+            FailureKind::Denied(e) => format!("{}（{e}）", f.path),
+        })
+        .collect();
+    format!("：{}", items.join("；"))
+}
+
+#[cfg(not(debug_assertions))]
+fn failure_detail(_failures: &[crate::purge::PurgeFailure]) -> String {
+    // 只说「有失败」，不落盘具体路径
+    String::new()
+}
+
 /// **两道闸**，缺一不可：
 ///   1. 前端必须显式要求（`delete_local_files = true`）—— 它来自用户在弹窗里的确认；
 ///   2. 设置里必须已开启 `delete_files_with_item` —— 防止前端 bug 或误调用直接把
@@ -415,34 +475,20 @@ fn purge_local_files(items: &[crate::store::Meta]) -> Option<String> {
     if !cfg.delete_files_with_item {
         return None;
     }
-    // 路径有两个来源，缺一不可：
-    //   · `files` 只是**常驻的前 N 条**（`FILES_RESIDENT_MAX`，为省内存）；
-    //   · 完整清单在实体文件 `files/<id>.txt` 里（`files_rel()`）。
-    // 原来只读 `files`，实体形态的条目一条都取不到 → 用户看到确认框弹了、
-    // 选了「移入回收站 / 永久删除」，但本地文件纹丝不动。
     let Some(dir) = DIR.get() else {
         return None;
     };
     let paths: Vec<String> = items
         .iter()
         .filter(|i| i.kind == "files")
-        .flat_map(|i| match i.files_rel() {
-            Some(rel) => read_text_entity(dir, &rel)
-                .unwrap_or_default()
-                .lines()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>(),
-            None => i.files.clone().unwrap_or_default(),
-        })
+        .flat_map(|i| item_file_paths(dir, i))
         .collect();
     if paths.is_empty() {
         return None;
     }
 
-    let total = paths.len();
-    // 诊断：把每条路径的判定结果记下来。「文件明明在桌面、却报未能处理」这种
-    // 反馈，只看结果猜不出来 —— 是路径不对、是目录、还是权限，必须逐条看。
+    // 逐条判定只在开发版记：路径里带文件名，发布版写进日志等于把用户内容带出本机。
+    #[cfg(debug_assertions)]
     for p in &paths {
         let path = std::path::Path::new(p);
         crate::log_print!(
@@ -452,33 +498,41 @@ fn purge_local_files(items: &[crate::store::Meta]) -> Option<String> {
             path.is_file()
         );
     }
-    let (deleted, recycled, failed) = crate::purge::purge(&paths, cfg.delete_files_permanent);
+
+    let total = paths.len();
+    let report = crate::purge::purge(&paths, cfg.delete_files_permanent);
+    let crate::purge::PurgeReport {
+        deleted,
+        recycled,
+        missing,
+        failures,
+    } = report;
+    let real = failures.len();
 
     // 结果分四类说清楚：永久删除 / 移入回收站 / 原本已不存在 / 真失败。
-    // 「文件夹走回收站」与用户的「永久删除」设置无关，必须单独说明，
-    // 否则用户会以为设置被偷偷改了。
+    //
+    // **回收站那一句必须按模式分开说**（代码审查 S2）：非永久模式下文件与文件夹
+    // 都进回收站，说成「N 个文件夹」会让删了 5 个普通文件的用户以为程序删错了；
+    // 永久模式下只有目录进回收站（文件已被永久删除），这时才是「文件夹」。
     let mut parts: Vec<String> = Vec::new();
     if deleted > 0 {
         parts.push(format!("已永久删除 {deleted} 个"));
     }
     if recycled > 0 {
-        parts.push(format!("{recycled} 个文件夹已移入回收站（可还原）"));
+        parts.push(if cfg.delete_files_permanent {
+            format!("{recycled} 个文件夹已移入回收站（可还原）")
+        } else {
+            format!("已移入回收站 {recycled} 个（可还原）")
+        });
     }
-    let gone = failed.iter().filter(|f| f.contains("已不存在")).count();
-    let real = failed.len() - gone;
-    if gone > 0 {
-        parts.push(format!("{gone} 个原本已不存在（记录已清理）"));
+    if missing > 0 {
+        parts.push(format!("{missing} 个原本已不存在（记录已清理）"));
     }
     if real > 0 {
         parts.push(format!("{real} 个未能处理（可能被占用）"));
         crate::log_warn!(
-            "[clipboard] 本地文件处理失败 {real} 个：{}",
-            failed
-                .iter()
-                .filter(|f| !f.contains("已不存在"))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("；")
+            "[clipboard] 本地文件处理失败 {real} 个{}",
+            failure_detail(&failures)
         );
     }
     if parts.is_empty() {
@@ -1035,19 +1089,19 @@ pub(crate) fn copy_back_sync(id: String, plain: Option<bool>) -> Result<Option<S
 ///
 /// 只做 `Path::exists()`（纯元数据查询，不读文件内容），几十条也是微秒级，
 /// 所以可以在每次渲染后调用。
-#[tauri::command]
-pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
-    let dir = DIR.get().cloned().unwrap_or_default();
+/// 按 ids 取「文件条目」的路径来源。**锁内只收集，不做任何 IO**。
+///
+/// 两个调用方共用：列表徽章判定（`check_files_alive`）与删除前的探针
+/// （`probe_purge_targets`）。两处要的都是「id → 路径清单」，只是判定规则不同
+/// （徽章看「是否完整」，探针看「还有没有可删的」），所以这里只负责取。
+///
+/// 原来整个循环都在锁里：每个 id 一次 `iter().find`（200×1 万 ≈ 200 万次比较）
+/// + 一次读盘解密 + N 次 `Path::exists`。而它在每次渲染和 prefetch 之后都会触发
+/// —— 等于每次滚动都把采集线程堵在 IO 上（代码审查 P1-1）。
+fn collect_files_items(ids: &[String]) -> Vec<(String, Option<String>, Vec<String>)> {
     let Some(hist) = HISTORY.get() else {
         return Vec::new();
     };
-
-    // **锁内只收集「id → 路径来源」，读盘/解密/查存在全在锁外**。
-    //
-    // 原来整个循环都在锁里：每个 id 一次 `iter().find`（200×1 万 ≈ 200 万次比较）
-    // + 一次 `read_text_entity`（读盘 + AES 解密）+ N 次 `Path::exists`。
-    // 而它在每次渲染和 prefetch 之后都会触发 —— 等于每次滚动都把采集线程堵在 IO 上
-    // （代码审查 P1-1）。顺带把逐 id 查找换成一次遍历建映射。
     let wanted: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
     let mut todo: Vec<(String, Option<String>, Vec<String>)> = Vec::new();
     {
@@ -1068,19 +1122,59 @@ pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
             }
         }
     }
+    todo
+}
 
+/// 删除前探针的结果。
+#[derive(serde::Serialize)]
+pub struct PurgeProbe {
+    /// 这批 id 里属于「文件」条目的数量
+    pub files: usize,
+    /// 其中**至少还有一条**关联文件真实存在的条目数
+    pub alive: usize,
+}
+
+/// 删除前探针：这批 id 里有几个文件条目、其中几个还真的有文件在。
+///
+/// **为什么必须由后端算**：批量删除的选中项来自渲染卡片（`wlState`），前端另有
+/// 一份 `{id,kind}` 轻量索引（`items`）。两份数据源的同步只要断一次（启动加载
+/// 失败、清理后未刷新、空视图误清），前端就会判成「没有文件条目」→ 不弹确认框
+/// → 关联的本地文件静默不删（代码审查 F1，与 `e70a802`、空视图抹索引是同一类
+/// 故障）。索引和窗口都可能过期，**只有按 id 回查后端才是真源**。
+///
+/// 只读：不改任何状态，也不碰任何文件。
+#[tauri::command]
+pub fn probe_purge_targets(ids: Vec<String>) -> PurgeProbe {
+    if ids.is_empty() {
+        return PurgeProbe {
+            files: 0,
+            alive: 0,
+        };
+    }
+    let dir = DIR.get().cloned().unwrap_or_default();
+    let mut files = 0usize;
+    let mut alive = 0usize;
+    for (_id, rel, inline) in collect_files_items(&ids) {
+        files += 1;
+        let paths = resolve_paths(&dir, rel, inline);
+        // 「还有一条在」就算有东西可处理 —— 与徽章判定不同：徽章标的是
+        // 「这个条目已不完整」，这里问的是「这次删除还有没有要动的东西」。
+        if paths.iter().any(|p| std::path::Path::new(p).exists()) {
+            alive += 1;
+        }
+    }
+    PurgeProbe { files, alive }
+}
+
+/// 只做 `Path::exists()`（纯元数据查询，不读文件内容），几十条也是微秒级，
+/// 所以可以在每次渲染后调用。
+#[tauri::command]
+pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
+    let dir = DIR.get().cloned().unwrap_or_default();
     // 锁外做 IO
     let mut dead: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (id, rel, inline) in todo {
-        let paths: Vec<String> = match rel {
-            Some(r) => read_text_entity(&dir, &r)
-                .unwrap_or_default()
-                .lines()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect(),
-            None => inline,
-        };
+    for (id, rel, inline) in collect_files_items(&ids) {
+        let paths = resolve_paths(&dir, rel, inline);
         if paths.is_empty() || paths.iter().any(|p| !std::path::Path::new(p).exists()) {
             dead.insert(id);
         }
@@ -1578,6 +1672,11 @@ pub fn init(app: &AppHandle) {
     }
     // 空闲维护：日志 30 秒没有新变更就固化，避免「关掉再打开时重放一大段日志」。
     spawn_compaction_ticker(dir.clone());
+    // 保留策略：上面那次是启动清理，这里管「一直开着」的那段时间。
+    // 打一行启动日志：这是唯一能确认 ticker 活着的地方（它平时不产生日志），
+    // 而「自动删数据」的链路一旦静默，排查只能靠猜。
+    crate::log_print!("[clipboard] 保留策略：后台检查已启动（每 10 分钟一次）");
+    spawn_retention_ticker();
 
     // 工作线程必须在订阅监听**之前**就位：否则第一批 WM_CLIPBOARDUPDATE
     // 到达时 WORKER 还没初始化，会退化成主线程同步落盘。
@@ -5612,6 +5711,36 @@ pub fn prune_retention(days: u32) {
     }
 }
 
+/// 保留策略的后台 ticker：应用连续开着，条目到点也要清掉。
+///
+/// 清理原本只有两个触发点 —— 启动时的 `load_history`、用户改设置时的
+/// `set_retention_days`。于是「设 15 天、一直不关机」这种最正常的用法里，到期条目
+/// 不会消失，用户看到的就是「到时间了没清理」（实测反馈；日志里同一份数据是在
+/// 重启那一瞬间才被清掉 23 条的）。
+///
+/// 间隔 10 分钟：先用 `count_older_than` 只读探一遍（锁内一次遍历，10 万条几毫秒），
+/// 真有过期条目才做 clone + 删文件 + 写索引。策略单位是「天」，10 分钟的误差没有
+/// 意义；但比一小时更不容易被长时间挂起/睡眠错过 —— 睡眠期间线程不走，醒来补一次。
+fn spawn_retention_ticker() {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(600));
+        let days = crate::settings::get().retention_days;
+        if days == 0 {
+            continue; // 0 = 永久保留
+        }
+        let expired = count_older_than(days);
+        if expired == 0 {
+            continue;
+        }
+        prune_retention(days);
+        // 后台删了数据，列表得跟着变，否则用户还能看到磁盘上已经不存在的条目。
+        // 前端收到后走 `scheduleWindowRender`（keepScroll），不会把人弹回顶部。
+        if let Some(app) = APP.get() {
+            let _ = app.emit("history-pruned", serde_json::json!({ "removed": expired }));
+        }
+    });
+}
+
 /// 统计早于 `days` 天的条目数（受保护的置顶/收藏按设置豁免）。
 ///
 /// 给「建议清理多少天以前的」提供数字：上限提示与清理页都用它，避免前端自己
@@ -6610,6 +6739,23 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 实体清单读不出来时**必须**回退到常驻 `files`，不能返回空。
+    ///
+    /// 空清单会让 `purge` 直接跳过这个条目：用户看到「已删除 N 项」，磁盘上的
+    /// 文件却还在（审查 E1′）。实体可能因换机器/换账户解不开密，也可能被外部删。
+    #[test]
+    fn resolve_paths_falls_back_to_inline_when_entity_missing() {
+        let dir = std::env::temp_dir().join("qingtie-resolve-fallback");
+        let _ = std::fs::create_dir_all(&dir);
+        let inline = vec!["C:\\a.txt".to_string(), "C:\\b.txt".to_string()];
+        let got = resolve_paths(
+            &dir,
+            Some("files/definitely-not-here.txt".to_string()),
+            inline.clone(),
+        );
+        assert_eq!(got, inline, "读失败应回退常驻清单，而不是当成「没有文件」");
+    }
 
     /// 单测只关心「有没有合并」，把返回的 `Option<String>`（命中的条目 id）
     /// 压成 bool。生产代码要用 id 去置顶，所以返回值不能是 bool。

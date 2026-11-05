@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 // 查询封装与窗口化列表：两者都不依赖 DOM 之外的全局状态，可单独 import 测（见 test/）。
 import { buildFilter, createHistoryApi } from "./history-api.js";
+import { decidePurgeAction } from "./purge-decision.js";
 import { VirtualList } from "./virtual-list.js";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
@@ -43,7 +44,10 @@ const appWindow = getCurrentWindow();
 function reportFrontend(level, tag, msg) {
   try {
     invoke("frontend_log", {
-      level,
+      // 统一大写：调用点历史上混用了 "warn" / "WARN" / "ERROR"，检索日志时
+      // 只搜大写会漏掉小写的那几条（审查 O2）。入口收口比逐个改调用点可靠 ——
+      // 新写的调用忘了规范也不会再分叉。
+      level: String(level).toUpperCase(),
       tag,
       msg: String(msg).slice(0, 2000),
     }).catch(() => {});
@@ -485,41 +489,57 @@ async function openClearMissingModal() {
 //   · 文案必须写清「几个文件 + 用什么方式」，回收站与永久删除的后果完全不同
 let purgeResolve = null;
 
-/// 返回 true 表示「用户确认要连本地文件一起处理」。
-/// 返回 false 的两条路径（设置没开 / 没有文件条目）都不弹窗，直接按旧行为删记录。
-async function askPurgeFiles(targets) {
-  if (!settings?.deleteFilesWithItem) return false;
-  // `items` 已收窄为 `{id, kind}`（P2-1），拿不到 `files` 路径清单了。
-  // 旧写法 `.flatMap((i) => i.files || [])` 在这里恒为空 → 确认框被直接跳过 →
-  // 「删除时同时删本地文件」静默失效。改按**文件条目数**说明：
-  // 具体删哪些文件由后端 `delete_items` 从索引里读，弹窗只需要让用户确认范围。
-  const fileItems = targets.filter((i) => i.kind === "files");
-  if (fileItems.length === 0) return false;
+/// 三态返回，**不能再是布尔**：
+///   `"purge"`  用户确认连本地文件一起处理
+///   `"records"` 无需处理文件，只删记录（设置没开 / 没有文件条目 / 文件全失效）
+///   `"abort"`  用户在确认框点了取消 → **整个删除中止**
+///
+/// 旧版只有 true/false，`false` 同时表示「不删文件」和「用户取消」，调用方一律
+/// 继续删记录 —— 于是点「取消」后条目照样消失，还弹「已删除 N 项」，而文件没动
+/// （实测反馈）。破坏性操作里「取消」必须是全取消，不能退化成「换个删法」。
+///
+/// **入参是 id 列表，不是条目对象**：批量删除的选中项来自渲染卡片（`wlState`），
+/// 前端另有一份 `{id, kind}` 轻量索引（`items`）。两份数据源的同步只要断一次
+/// （启动加载失败、清理后未刷新、空视图误清），这里就会判成「没有文件条目」
+/// → 不弹确认框 → 关联的本地文件静默不删（代码审查 F1，与 `e70a802` 同类）。
+/// 改为按 id 回查后端真源：前端索引再过期，这条破坏性路径也不受影响。
+async function askPurgeFiles(ids) {
+  const enabled = !!settings?.deleteFilesWithItem;
+  // 不依赖后端的三条判断（设置关 / 空选 / 重入）先走一遍，省掉白跑的探针 IPC。
+  // 决策本身在 `purge-decision.js`，那里有单测钉住每个分支 —— 这段逻辑历史上
+  // 静默错过三次，靠手测抓不住（审查 T1）。
+  const pre = decidePurgeAction({
+    enabled,
+    idsCount: ids.length,
+    busy: !!purgeResolve,
+    probe: null,
+  });
+  if (pre.action !== "probe") return pre.action;
 
-  // **失效的条目不该弹确认**：文件早就不在了，问「要不要连本地文件一起删」
-  // 没有意义 —— 用户确认之后只会收到「1 个未能处理」的提示（实测反馈）。
-  // 先问后端哪些已经失效，只对仍然存在的条目弹窗。
-  let alive = fileItems;
+  let probe;
   try {
-    const dead = new Set(
-      await invoke("check_files_alive", { ids: fileItems.map((i) => i.id) })
-    );
-    alive = fileItems.filter((i) => !dead.has(i.id));
-  } catch {
-    /* 检测失败就按「全部存在」处理：宁可多问一句，也不静默跳过删除 */
+    probe = await invoke("probe_purge_targets", { ids });
+  } catch (e) {
+    // 探针失败**不能**当成「没有文件」——那正是静默跳过删除。
+    // 按「可能有文件」处理：多问一句的代价，远小于该删的没删。
+    reportFrontend("warn", "purge", "探针失败：" + e);
+    probe = { files: ids.length, alive: ids.length };
   }
-  if (alive.length === 0) {
-    // 全都失效了：没有本地文件可删，直接按普通删除走
-    toast("关联的本地文件已不存在，只删除记录");
-    return false;
-  }
+  const { action, reason } = decidePurgeAction({
+    enabled,
+    idsCount: ids.length,
+    busy: false,
+    probe,
+  });
+  // 关联文件全都不在了：没有可删的东西，按普通删除走
+  if (reason === "all-missing") toast("关联的本地文件已不存在，只删除记录");
+  if (action !== "ask") return action;
 
   const perm = !!settings.deleteFilesPermanent;
-  const how = perm ? "永久删除" : "移入回收站";
   const tail = perm ? "（不可恢复）" : "（之后可从回收站还原）";
 
   document.getElementById("purge-modal-text").textContent =
-    `将处理 ${alive.length} 条文件记录对应的本地文件${tail}。\n\n此操作不可撤销。`;
+    `将处理 ${probe.alive} 条文件记录对应的本地文件${tail}。`;
   document.getElementById("purge-confirm").textContent = perm ? "永久删除" : "移入回收站";
   document.getElementById("purge-modal").hidden = false;
   return new Promise((resolve) => {
@@ -536,8 +556,8 @@ function bindPurgeModal() {
     purgeResolve = null;
     r?.(v);
   };
-  document.getElementById("purge-cancel").onclick = () => done(false);
-  document.getElementById("purge-confirm").onclick = () => done(true);
+  document.getElementById("purge-cancel").onclick = () => done("abort");
+  document.getElementById("purge-confirm").onclick = () => done("purge");
 }
 
 // 与清空全部历史弹窗同理：常驻元素，只绑一次，切分类重绘不会丢绑定
@@ -575,17 +595,49 @@ let clearViewTargets = null;
 // 批量删除
 // ---------------------------------------------------------------------------
 
+/**
+ * 批量模式的纯 UI 切换：只改类，**不重绘**。
+ *
+ * 原来 `enterSelectMode` / `exitSelectMode` 都调 `render({ keepScroll: true })` ——
+ * 为了切一个工具栏状态，把整张列表重新取页、拆掉、重建，进出各闪一下（实测反馈）。
+ * 列表内容和「是否处于批量模式」没有任何关系：
+ *   · 搜索栏 ↔ 操作条：`.toolbar.is-selecting`
+ *   · 侧栏/状态栏置灰：`body.is-selecting`（在 `syncSelectBar` 里）
+ *   · 某条已选：`.card.is-selected`（`toggleSelect` 直接改那一张）
+ * 三者都是类，切换它们不需要碰 DOM 结构，也不需要再问后端要数据。
+ */
+function applySelectModeUi() {
+  document
+    .querySelector(".toolbar")
+    ?.classList.toggle("is-selecting", selectMode && currentView !== "settings");
+  syncSelectBar();
+  // 工具栏高度变了 → 视口高度跟着变，补渲染一次露出来的行（只画视口，不重建）
+  wl?.scheduleRender();
+  schedulePrefetch();
+}
+
+/** 行池里的卡片会被复用，退出模式时不清掉高亮，下一个条目会带着别人的选中框出现。 */
+function clearRenderedSelection() {
+  if (!wl) return;
+  for (const el of wl.rendered.values()) {
+    el.querySelector(":scope > .card")?.classList.remove("is-selected");
+  }
+}
+
 function enterSelectMode() {
+  if (selectMode) return;
   selectMode = true;
   selectedIds.clear();
-  render({ keepScroll: true });
+  clearRenderedSelection();
+  applySelectModeUi();
 }
 
 function exitSelectMode() {
   if (!selectMode) return;
   selectMode = false;
   selectedIds.clear();
-  render({ keepScroll: true });
+  clearRenderedSelection();
+  applySelectModeUi();
 }
 
 /**
@@ -614,26 +666,40 @@ function syncSelectBar() {
 async function deleteSelected() {
   const ids = [...selectedIds];
   if (ids.length === 0) return;
-  // 先问「要不要连本地文件一起处理」——它是异步的，必须放在拿 ids 之后、
-  // 调删除之前；用户取消就退化成普通删除（只删记录）。
-  const purge = await askPurgeFiles(items.filter((i) => ids.includes(i.id)));
+  // **重入闸**：`askPurgeFiles` 内部要 await 探针，这期间按钮还活着。
+  // 连点两次会让两个 Promise 抢同一个 `purgeResolve` 槽，先到的那个永远挂着
+  // （代码审查 F2）。整段期间禁用按钮，退出/异常都在 finally 里恢复。
+  const del = document.getElementById("select-delete");
+  const prevDisabled = del ? del.disabled : false;
+  if (del) del.disabled = true;
   try {
-    const note = await invoke("delete_items", { ids, deleteLocalFiles: purge });
-    if (note) toast(note);
-  } catch (e) {
-    toast("删除失败，请重试");
-    return;
+    // 先问「要不要连本地文件一起处理」——异步，必须放在拿 ids 之后、调删除之前。
+    // **点取消等于整个操作不做**：记录也不删、不弹「已删除」。
+    const action = await askPurgeFiles(ids);
+    if (action === "abort") return;
+    try {
+      const note = await invoke("delete_items", {
+        ids,
+        deleteLocalFiles: action === "purge",
+      });
+      if (note) toast(note);
+    } catch (e) {
+      toast("删除失败，请重试");
+      return;
+    }
+    selectMode = false;
+    selectedIds.clear();
+    // **必须显式同步**：这之后的 `removeCards` 走 `renderWindow`，不经过 `render()`，
+    // 而 `syncSelectBar` 原来只在 `render()` 里调 —— 于是 `body.is-selecting` 残留，
+    // 侧栏与状态栏被永久禁用，用户只能再点一次「取消」才恢复（实测反馈）。
+    applySelectModeUi();
+    // 保留滚动位置：删几条不该把人踹回列表顶部（与单条删除同一口径）
+    removeCards(ids);
+    toast(`已删除 ${ids.length} 项`);
+  } finally {
+    // 已退出选择模式时按钮不再可见，别去改它；仍在该模式（用户取消/出错）才恢复
+    if (del && selectMode) del.disabled = prevDisabled;
   }
-  selectMode = false;
-  selectedIds.clear();
-  // **必须显式同步**：这之后的 `removeCards` 走 `renderWindow`，不经过 `render()`，
-  // 而 `syncSelectBar` 原来只在 `render()` 里调 —— 于是 `body.is-selecting` 残留，
-  // 侧栏与状态栏被永久禁用，用户只能再点一次「取消」才恢复（实测反馈）。
-  syncSelectBar();
-  document.querySelector(".toolbar")?.classList.remove("is-selecting");
-  // 保留滚动位置：删几条不该把人踹回列表顶部（与单条删除同一口径）
-  removeCards(ids);
-  toast(`已删除 ${ids.length} 项`);
 }
 
 function bindSelectBar() {
@@ -742,13 +808,17 @@ function bindClearViewModal() {
     modal.hidden = true;
     const t = clearViewTargets;
     if (!t) return;
-    if (t.window) {
-      await doClearViewFilter({
-        includePinned: document.getElementById("clear-view-pinned").checked,
-        includeFavorites: document.getElementById("clear-view-fav").checked,
-      });
+    if (!t.window) {
+      // 目前 `clearViewTargets` 只有「整窗 / 当前筛选」一种赋值（`:746`），所以这条
+      // 分支现在走不到。写出来而不是留空 else：将来加第二种清空入口（按时间范围、
+      // 按分类）时，漏实现会在这里留下一条日志，而不是「点了确认什么都没发生」。
+      reportFrontend("WARN", "clear-view", "未知的清空目标类型，已忽略");
       return;
     }
+    await doClearViewFilter({
+      includePinned: document.getElementById("clear-view-pinned").checked,
+      includeFavorites: document.getElementById("clear-view-fav").checked,
+    });
   };
 }
 
@@ -888,6 +958,15 @@ const SUBTYPE_BADGE = {
 /** 一页多少条。200 条约 100 KB，与设计文档的 IPC 预算是同一个数量级。 */
 const WINDOW_LIMIT = 200;
 
+/**
+ * 「算在顶部」的容差（px）。
+ *
+ * 不能写 `<= 0`：滚轮/触控板停下来常留 1–2px 残留，这时若走锚点路径，锚点还原与
+ * 标定重排会叠在同一帧，顶部那条会抖一下（实测：复制时置顶那条闪）。不足半行的
+ * 偏移一律当作「已经在顶部」，直接按归零处理 —— 代价是丢掉那 1–2px，看不出来。
+ */
+const TOP_EPS = 8;
+
 const api = createHistoryApi(invoke, { cachePages: 10 });
 
 let wl = null; // VirtualList 实例
@@ -913,8 +992,18 @@ function currentFilter() {
   return buildFilter({ view: currentView, query });
 }
 
-/** 建滚动容器 + 虚拟列表（切视图、从设置页回来时都会重建，保证状态干净）。 */
+/** 建滚动容器 + 虚拟列表。**每次重建**，状态干净（见 `renderWindow` 里的时序说明）。 */
 function ensureWindow(view) {
+  // 早先的「复用实例」写法（`wl.scroller.isConnected` 就 return）在这里被撤回：
+  // 行池、`known`（下标→实测高度）、`classHeights`、`dataset.vlFilled` 全是跨帧
+  // 状态，换一批数据后下标含义整体平移，任何一处没同步就会排成「行距小于卡片高度
+  // → 相邻卡片叠在一起」（实测：文本卡内容压到下一张的标签上、图片卡被压成一条）。
+  // 消除闪烁不靠复用，靠时序 —— 见 `renderWindow`：取页完成后才拆建。
+  // 行高类表**跨实例搬运**：它只由 kind/subtype 的样式决定，与下标无关。
+  // 不搬的话，新实例首帧按硬编码默认值排版（图片类默认 112，真实约 74），
+  // 新内容会先出现在离置顶那条几十像素的位置，等标定/图片加载完再挪过去 ——
+  // 实测反馈就是「新内容像从置顶那条里钻出来，再滑到下面」（审查 S1）。
+  const prevClasses = wl ? wl.classHeights.slice() : null;
   if (wl) {
     wl.destroy();
     wl = null;
@@ -925,6 +1014,7 @@ function ensureWindow(view) {
   view.appendChild(scroller);
   wl = new VirtualList({
     scroller,
+    classHeights: prevClasses,
     // 行是**容器**，卡片是它里面的元素 —— 不能把 vl-row 和 card 用同一个节点。
     //
     // fillCard 会重写 className（`card.className = "card …"`），直接把它用在行节点上
@@ -943,11 +1033,13 @@ function ensureWindow(view) {
     },
     keyOf: (item) => item.id,
     onNeedRange: () => schedulePrefetch(),
-    onRendered: () => {
+    onRendered: (rows) => {
       // 行池复用后有两件事必须重做：图片懒加载的观察（新节点换了 data-img-id）、
       // 文件失效徽章（新节点没有上一轮留下的 class）。
-      observeImages(scroller);
-      applyMissingMarks();
+      // **只处理这一帧新填的行**：列表每帧只换几十行，全量扫与重建 Observer 都是白费
+      // （审查 B2/B3）。
+      observeImages(scroller, rows);
+      for (const row of rows) applyMissingMarks(row);
     },
   });
   scroller.addEventListener(
@@ -1041,7 +1133,7 @@ async function renderWindow({ keepScroll = false } = {}) {
   syncSelectBar();
   const view = document.getElementById("view");
   const token = ++wlToken;
-  const wasAtTop = !wl || wl.scroller.scrollTop <= 0;
+  const wasAtTop = !wl || wl.scroller.scrollTop <= TOP_EPS;
   const anchor = keepScroll && wl && !wasAtTop ? wl.getAnchor() : null;
   // 保位置时取「锚点所在的那一页」而不是窗口起点：窗口可能有上千条（一路滚下来
   // 累积的），只取起点那一页会把视口里的内容整片丢掉。
@@ -1059,7 +1151,12 @@ async function renderWindow({ keepScroll = false } = {}) {
   // 散在十几个处理函数里，与其要求每一处都记得「失效缓存」，不如在这里统一失效。
   // 代价是一次取页（1–2 ms）；页缓存真正的作用是滚动时的相邻页与回滚，不受影响。
   api.invalidate();
-  ensureWindow(view);
+  // **先取页、后拆建**（U1 的正确修法）。
+  //
+  // 原来是「`ensureWindow(view)` → await 取页」：拆掉到重新渲染之间隔着一次 IPC，
+  // 浏览器把这段空白画了出来，就是「复制时列表闪一下」。把重建挪到数据到手之后，
+  // 拆与建落在同一个同步块里，中间不会产生绘制帧 —— 取页期间旧列表一直可见。
+  // 这样既没有空帧，也不必跨帧复用虚拟列表状态（复用的代价见 `ensureWindow`）。
   refreshStatusCount();
   wlBusy = true;
   let res;
@@ -1104,6 +1201,11 @@ async function renderWindow({ keepScroll = false } = {}) {
   }
 
   wlState = { start: res.offset, items: res.items.slice() };
+  // 数据到手，才拆掉旧列表并重建：与随后的 setWindow/render 同处一个同步块，
+  // 浏览器没有机会画出中间态。`keepScroll` 的位置由 `restoreAnchor` 还原，
+  // 所以这里统一归零后按锚点摆放。
+  ensureWindow(view);
+  if (!keepScroll) wl.scroller.scrollTop = 0;
   wl.setTotal(wlTotal);
   wl.setWindow(wlState.start, wlState.items);
   if (anchor) wl.restoreAnchor(anchor);
@@ -1133,6 +1235,9 @@ function render({ keepScroll = false } = {}) {
   // 掉进第一列（1fr）而不再居中；隐藏但占位才能保持居中。
   document.querySelector(".statusbar").classList.toggle("is-settings", isSettings);
   if (isSettings) {
+    // 作废在途的列表渲染：`renderWindow` 现在是「取页完成后才拆建」，
+    // 若不拦住，切到设置页后回来的那次渲染会把设置页整个覆盖成列表。
+    wlToken++;
     // 设置页的滚动容器是 .settings-body，与列表的 .history 不是同一个。
     // 不单独保住它的话，任何一次重绘都会把设置页弹回顶部 —— 用户正看着
     // 某一项时后台来了新内容，页面就自己跳了。
@@ -1148,6 +1253,8 @@ function render({ keepScroll = false } = {}) {
 
   // 「文件」入口保留，但文件复制关闭时（默认）只给一个说明页，不列任何条目
   if (currentView === "files" && !fileCopyOn()) {
+    // 同上：说明页不是列表，别让在途的列表渲染回来覆盖它
+    wlToken++;
     document.getElementById("status-count").textContent = "共 0 条";
     view.innerHTML = `<div class="empty">
       <div class="empty-title">文件复制已关闭</div>
@@ -1397,8 +1504,20 @@ async function loadImage(id) {
  * dataURL（不再走 IPC/磁盘），重新解码即可。
  */
 let imgObserver = null;
-function observeImages(rootEl) {
-  if (imgObserver) imgObserver.disconnect();
+let imgObserverRoot = null;
+
+/**
+ * 拿到当前滚动容器对应的观察器，**能复用就复用**。
+ *
+ * 原先每次 `onRendered` 都 `disconnect()` + `new IntersectionObserver()`：图片列表
+ * 快滚时每帧拆挂一次，白白重建观察器（审查 B2）。只有 root 换了才需要重建 ——
+ * root 是 `.history` 滚动容器，而 `ensureWindow` 每次渲染都会建新的，旧 scroller
+ * 脱离文档后旧 observer 也就跟着废了。
+ */
+function ensureImgObserver(rootEl) {
+  if (imgObserver && imgObserverRoot === rootEl) return imgObserver;
+  imgObserver?.disconnect();
+  imgObserverRoot = rootEl;
   imgObserver = new IntersectionObserver(
     (entries) => {
       for (const en of entries) {
@@ -1444,9 +1563,26 @@ function observeImages(rootEl) {
     },
     { root: rootEl, rootMargin: "700px 0px" }
   );
-  rootEl
-    .querySelectorAll(".card-image[data-img-id]")
-    .forEach((el) => imgObserver.observe(el));
+  return imgObserver;
+}
+
+/**
+ * 登记图片懒加载。
+ *
+ * `rows` 为空时扫整个容器（首次渲染 / 容器重建）；传了行列表就只处理这几行 ——
+ * `onRendered` 每帧只新填几十行，没有必要全量扫（审查 B3）。
+ */
+function observeImages(rootEl, rows = null) {
+  const ob = ensureImgObserver(rootEl);
+  const targets = rows
+    ? rows.flatMap((row) => [...row.querySelectorAll(".card-image[data-img-id]")])
+    : [...rootEl.querySelectorAll(".card-image[data-img-id]")];
+  for (const el of targets) {
+    // 行池节点被复用时 innerHTML 会重建，新节点没有这个标记，自然会重新登记
+    if (el.dataset.imgObserved === "1") continue;
+    el.dataset.imgObserved = "1";
+    ob.observe(el);
+  }
 }
 
 /** 主界面只维护「有没有建过」这一份状态，骨架与内容槽由 `preview.js` 提供。 */
@@ -1653,12 +1789,22 @@ async function recheckMissing(ids) {
 }
 
 /** 把失效状态同步到已渲染的卡片上（新追加的批次也要过一遍） */
-function applyMissingMarks() {
-  document.querySelectorAll(".card").forEach((el) => {
+/**
+ * 给卡片打「已失效」徽章。
+ *
+ * `root` 为空时扫整页 —— 数据变化后必须全量重标（`refreshMissing` 回来、清失效之后）。
+ * 传元素时只处理这一行：`onRendered` 每帧都有新填的行，原来无参调用会把「填充几十行」
+ * 变成「扫全表」（审查 B3）。
+ */
+function applyMissingMarks(root = document) {
+  const cards = root.matches?.(".card")
+    ? [root]
+    : [...root.querySelectorAll(".card")];
+  for (const el of cards) {
     const missing = missingFiles.has(el.dataset.id);
     el.classList.toggle("is-missing", missing);
     const meta = el.querySelector(".card-meta");
-    if (!meta) return;
+    if (!meta) continue;
     const tag = meta.querySelector(".tag-missing");
     if (missing && !tag) {
       const s = document.createElement("span");
@@ -1672,7 +1818,7 @@ function applyMissingMarks() {
     } else if (!missing && tag) {
       tag.remove();
     }
-  });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2229,14 +2375,23 @@ function openContextMenu(x, y, item) {
       icon: CTX_ICONS.trash,
       danger: true,
       act: async () => {
-        const purge = await askPurgeFiles([item]);
-        const note = await invoke("delete_item", {
-          id: item.id,
-          deleteLocalFiles: purge,
-        });
-        items = items.filter((i) => i.id !== item.id);
-        render({ keepScroll: true });
-        if (note) toast(note);
+        // 与批量删除同一口径：失败必须有提示。原来没有 try/catch，后端一失败
+        // 整段静默中断 —— 用户以为没点上反复点，或以为已删而列表还活着（代码审查 F3）。
+        try {
+          const action = await askPurgeFiles([item.id]);
+          // 取消 = 什么都不做（记录也保留），与批量删除同一口径
+          if (action === "abort") return;
+          const note = await invoke("delete_item", {
+            id: item.id,
+            deleteLocalFiles: action === "purge",
+          });
+          items = items.filter((i) => i.id !== item.id);
+          render({ keepScroll: true });
+          if (note) toast(note);
+        } catch (e) {
+          reportFrontend("warn", "delete", "右键删除失败：" + e);
+          toast("删除失败，请重试");
+        }
       },
     }
   );
@@ -4268,10 +4423,15 @@ async function main() {
   }
   try {
     const rawVer = await getVersion();
-    // 预发布版（版本号含「-」如 2.2.1-beta.1）在尾部标 Beta，一眼可辨。
-    const isPre = rawVer.includes("-");
-    document.getElementById("status-version").textContent =
-      `Version：${rawVer}${isPre ? "（Beta）" : ""}`;
+    // 预发布版把后缀换成可读的「Beta」：`2.6.10-beta` → `2.6.10 Beta`。
+    //
+    // 原来写 `2.6.10-beta（Beta）`，同一个词说两遍；改成替换后缀而不是追加，
+    // 正式版（版本号不带后缀）自然回到 `2.6.10`，不用再改代码 —— 版本号是唯一开关。
+    const m = /^(\d+\.\d+\.\d+)-(.+)$/.exec(rawVer);
+    const shown = m
+      ? `${m[1]} ${m[2].replace(/^beta/i, "Beta").replace(/-/g, ".")}`
+      : rawVer;
+    document.getElementById("status-version").textContent = `Version：${shown}`;
   } catch (e) {
     // 版本号不在前端写死：它由 tauri.conf.json 引用 package.json 得到，
     // 写死会在下次发版后与真实版本不一致。取不到时留一个占位符。
@@ -4343,6 +4503,14 @@ async function main() {
     // 列表本身仍交给窗口路径重取：去重命中时要重排到最前，用户停在中间时
     // 锚点会把正在看的那条钉在原地。80ms 节流，连发也只做一次。
     scheduleWindowRender();
+  });
+
+  // 后台保留策略到期清理：条目已经不在磁盘上了，列表必须跟着变，
+  // 否则用户还能点开一条「已删除」的记录。走同一个节流重绘（keepScroll），
+  // 正在看的内容不会被弹回顶部。
+  await listen("history-pruned", (e) => {
+    const removed = e.payload?.removed ?? 0;
+    if (removed > 0) scheduleWindowRender();
   });
 }
 

@@ -115,6 +115,25 @@ export function poolSizeFor(viewportH, rowH, overscan = 8) {
   return Math.max(8, Math.min(120, visible + overscan * 2));
 }
 
+/**
+ * 这一行的缩略图还没解码完？
+ *
+ * 图片是**滚入可视区才赋 `src`** 的（`observeImages`，为的是避免一次渲染几十张
+ * 大图的字符串峰值）。而 `render()` 里的标定跑在赋 src 之前 —— 那一刻 `<img>`
+ * 没有 src，高度为 0，量出来的是「文字卡高度」，却被当成图片类高度写进类高度表。
+ *
+ * 后果是连锁的：图片类高度从 112 掉到 50 → 所有未加载的图片行按 50 排 → 叠在一起；
+ * 等图解码完 ResizeObserver 再把类高度改回 112 → 整列「先压紧、再弹开」。用户看到的
+ * 就是带图的那张卡连同下面几行闪一下（实测反馈：「复制新内容时上边那条置顶会闪」）。
+ *
+ * 所以量之前先确认图已经就位；没就位就留给 ResizeObserver —— 它在图加载完那一刻
+ * 一定会触发，那时量到的才是可信值。
+ */
+export function imgPending(el) {
+  const img = el.querySelector("img");
+  return !!img && (!img.complete || img.naturalHeight === 0);
+}
+
 // ---------------------------------------------------------------------------
 // DOM 部分
 // ---------------------------------------------------------------------------
@@ -135,8 +154,9 @@ export class VirtualList {
    * @param {(first: number, last: number, why: string) => void} [o.onNeedRange] 需要数据的回调
    * @param {number} [o.overscan]
    * @param {number} [o.gap]  行间距（CSS 改了就跟着改；默认 8）
+   * @param {number[]} [o.classHeights]  上一张列表量到的行高类表（见下方注释）
    */
-  constructor({ scroller, fillRow, keyOf, onNeedRange, onRendered, overscan = 8, gap = 8 }) {
+  constructor({ scroller, fillRow, keyOf, onNeedRange, onRendered, overscan = 8, gap = 8, classHeights }) {
     this.scroller = scroller;
     this.fillRow = fillRow;
     this.keyOf = keyOf;
@@ -151,16 +171,30 @@ export class VirtualList {
     this.start = 0; // 已加载窗口的起始下标
     this.items = []; // 已加载窗口内的条目（连续）
     this.idToIndex = new Map();
-    // 兜底值只影响「第一帧还没量到真实高度」的那一瞬间，量到之后立刻被实测值替换。
-    // 取 52 量级是因为**实测文本卡约 50px**（设计稿按 1.5×DPI 估的 78 偏大一倍，
-    // 曾导致首页每行按 86px 排布、一屏只看到 4 条）。
-    this.classHeights = [52, 52, 54, 54, 112];
+    // 行高类表：**跨实例继承，不要从硬编码默认值起手**。
+    //
+    // 它只由 kind/subtype 的样式决定，与「装的是哪一条、在第几行」无关 —— 是样式
+    // 不变量的缓存，所以换实例时可以安全搬运。而每次复制都会新建一张列表（
+    // 不复用实例，理由见 main.js 的 ensureWindow），若不继承，首帧就只能按默认值
+    // 排版：真实图片卡 74px、默认写 112px，于是新内容先出现在离置顶那条 38px 的
+    // 位置，图一加载完再挪回去 —— 看起来就是「新内容从置顶里钻出来再滑下去」。
+    //
+    // **只继承这一张表**。`known` / `knownIds` / `rendered` / `vlFilled` 都是
+    // 下标相关的，换一批数据后下标含义整体平移，继承它们就是 a074ad0 那次的叠卡。
+    const inherited =
+      Array.isArray(classHeights) && classHeights.length === CLASS_COUNT
+        ? classHeights.slice()
+        : null;
+    // 兜底值只影响「一次都没量过」的冷启动。取 52 量级是因为**实测文本卡约 50px**
+    // （设计稿按 1.5×DPI 估的 78 偏大一倍，曾导致首页每行按 86px 排布、一屏只看 4 条）。
+    this.classHeights = inherited || [52, 52, 54, 54, 112];
     // 下标 → 实测高度。**同时记下这条高度是哪一条内容量的**（knownIds）：
     // 行池节点会被复用，同一个下标在翻页后可能装着另一条内容，那时这条高度就是
     // 别人的，拿来算偏移会让后面的行叠在一起。
     this.known = new Map();
     this.knownIds = new Map(); // 下标 → 当时量到的条目 id
-    this.estimate = 52;
+    // 未加载区域只能用平均值估：继承类高度后这个估值也跟着对上了。
+    this.estimate = this.estimateFromClasses();
     this.calibrated = false; // 是否已经从真实行反推过类高度
     this.offsets = computeOffsets({ total: 0, estimate: this.estimate, gap: this.gap });
     this.pool = [];
@@ -180,6 +214,17 @@ export class VirtualList {
   rowClass(i) {
     const item = this.items[i - this.start];
     return item ? heightClassOf(item) : -1;
+  }
+
+  /**
+   * 未加载区域的平均行高：取文本 / 文件 / 图片三类的均值。
+   *
+   * 不含代码与 Markdown：它们各自只占很小比例，而这三类覆盖绝大多数行。必须跟着
+   * 类高度表走 —— 继承来的表若与估值脱节，下半屏的滚动条长度就会对不上。
+   */
+  estimateFromClasses() {
+    const c = this.classHeights;
+    return Math.round((c[0] + c[3] + c[4]) / 3);
   }
 
   /**
@@ -203,6 +248,9 @@ export class VirtualList {
       const el = this.rendered.get(index);
       const item = this.items[index - this.start];
       if (!el || !item) continue;
+      // 缩略图还没解码完就别量：此时高度是「没有图」的高度，写进类高度表会把
+      // 图片类整体压扁，图加载完再改回来就是一次可见的压紧-弹开（见 imgPending）。
+      if (imgPending(el)) continue;
       const h = el.getBoundingClientRect().height;
       if (!(h > 0)) continue; // 窗口隐藏 / 还没布局 → 这一轮量不到，下次再量
       this.known.set(index, h);
@@ -217,10 +265,30 @@ export class VirtualList {
     this.calibrated = true;
     if (!changed) return;
     // 未加载的行没有类高度可用，用「文本/文件/图片」三类的均值当估值
-    this.estimate = Math.round((this.classHeights[0] + this.classHeights[3] + this.classHeights[4]) / 3);
+    this.estimate = this.estimateFromClasses();
     this.rebuild();
     this.inner.style.height = `${Math.round(this.offsets[this.total])}px`;
+    // **立刻重排，不等下一帧**。
+    //
+    // `render()` 是先按「当前偏移表」摆行、再调 `calibrate` 标定的：标定一旦改了
+    // 偏移表，行还停在旧位置，只靠 `scheduleRender()` 的 rAF 要下一帧才挪过去 ——
+    // 于是每次完整重绘都会「先按估值画一帧、下一帧再挪几像素」，看着就像闪一下。
+    // 同步重排之后，这一次绘制就是最终位置。
+    this.positionRows();
     if (anchor) this.restoreAnchor(anchor);
+  }
+
+  /**
+   * 按当前偏移表重排行位置（同步）。
+   *
+   * 只改 `transform`，不碰内容 —— 内容没变就没必要重填，这正是行池的意义。
+   */
+  positionRows() {
+    const last = this.offsets.length - 1;
+    for (const [index, el] of this.rendered) {
+      if (index < 0 || index >= last) continue;
+      el.style.transform = `translateY(${Math.round(this.offsets[index])}px)`;
+    }
   }
 
   setTotal(total) {
@@ -385,12 +453,15 @@ export class VirtualList {
     // 用一个 `vlFilled` 标记记住「这一行装的是哪一条」，没变就只更新位置。
     let filled = 0;
     const fresh = []; // 这一帧新填内容的行：它们的真实高度最可信，用来校准
+    const freshEls = []; // 同上，但给调用方（图片观察 / 失效徽章只需处理这几行）
     for (const index of keep) {
       const el = this.rendered.get(index);
       const item = this.items[index - this.start];
       el.style.display = "";
       el.style.transform = `translateY(${Math.round(this.offsets[index])}px)`;
-      const want = item ? `i${index}` : `s${index}`;
+      // 标记里**带上 id**，不只用下标：翻页/窗口位移后同一下标可能装着另一条内容，
+      // 只比下标就会跳过重填，卡片继续显示上一条（旧内容配新时间戳最难查）。
+      const want = item ? `i${index}:${this.keyOf(item)}` : `s${index}`;
       if (el.dataset.vlFilled === want) continue;
       el.dataset.vlFilled = want;
       el.dataset.vlIndex = String(index);
@@ -399,6 +470,7 @@ export class VirtualList {
       if (item) {
         el.classList.remove("vl-skeleton");
         this.fillRow(el, item, index);
+        freshEls.push(el);
       } else {
         // 骨架行：高度按类高度估，先把位置占住，滚动条就不会跳
         el.classList.add("vl-skeleton");
@@ -411,8 +483,9 @@ export class VirtualList {
 
     // 需要数据就喊一声（first/last 都是闭区间）
     this.onNeedRange(first, last, "render");
-    // 只有真的换过内容才通知（图片观察、失效徽章都只需在有新节点时重做）
-    if (filled > 0) this.onRendered(filled);
+    // 只有真的换过内容才通知。**传元素而不是数量**：图片观察与失效徽章只需要处理
+    // 这几行，原来拿不到行就只能全量扫 `.card`（审查 B3）。
+    if (filled > 0) this.onRendered(freshEls);
   }
 
   makeRow() {
@@ -459,8 +532,13 @@ export class VirtualList {
       }
     }
     if (changed) {
+      // 高度变了但偏移表还没更新：先按**旧**偏移表记住视口顶端那条，重排后还原 ——
+      // 否则图片长高的那一刻，正在看的内容会整体向下窜一截。
+      const anchor = this.getAnchor();
       this.rebuild();
       this.inner.style.height = `${Math.round(this.offsets[this.total])}px`;
+      this.positionRows();
+      if (anchor) this.restoreAnchor(anchor);
       this.scheduleRender();
     }
   }
