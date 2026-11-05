@@ -30,6 +30,13 @@
   /* 窗口圆角；JS 会按后端返回的档位上限覆盖它（Win10 acrylic = 20px）。
      控件圆角固定 8px：大圆角只属于窗口本体，否则按钮/卡片会变成胶囊形。 */
   --radius: 20px;
+  /* 相邻可选行（导航项、菜单项、设置里的行）的统一间距。
+     圆角块相邻时，间距小于圆角半径的一半就会「粘」成一个 —— 2px 在 8px 圆角下
+     正是这种情况。所有「一排可选行」的容器都用这个值，不再各写各的。 */
+  --gap-row: 4px;
+  /* 密集菜单（右键菜单、下拉）行距更小：项高才 30px 上下，4px 会把菜单拉长。
+     只有这两档 —— 不允许再出现「这里写 1px、那里写 3px」的散值。 */
+  --gap-row-dense: 1px;
   --radius-sm: 8px;
 
   /* 等宽字体：代码 / Markdown 预览与详情正文共用。原本详情页里内联了一串
@@ -46,9 +53,12 @@
   --card-bg: var(--surface-2);
   /* 悬停态：比常态略亮。不能沿用 --glass-hover（那是 10% 的通用悬停层），
      否则鼠标一移上去，实心卡片会瞬间变透明、像被"挖"了一下。 */
-  /* 悬浮底：浅色必须压暗（面用白、边与压暗层用黑）。原值 rgba(255,255,255,.72)
-     叠在近白窗口上等于没变化 —— 实测「卡片悬浮看不出」。.05 ≈ #f2f2f2。 */
-  --state-hover: rgba(0, 0, 0, 0.05);
+  /* 悬浮 = **提亮**，不是压暗。
+     1a 曾把它改成黑 .05，理由是「浅色面用白、压暗层用黑」—— 那条规则说的是**描边**，
+     套到悬停上就是错的：毛玻璃上压暗看着像凹进去、发灰（实测「条目聚焦时还是灰色的，
+     不好看不如原来的」）；提亮才像玻璃被照亮、浮起来。
+     叠在 62% 白的卡片上 ≈ 79% 白：够明显，又不至于变成实心块。 */
+  --state-hover: rgba(255, 255, 255, 0.45);
   --card-hover: var(--state-hover);
   --glass-strong: rgba(255, 255, 255, 0.28);
   --glass-hover: var(--state-hover);
@@ -207,14 +217,22 @@
      细线只有一种（hairline），且**默认不作为层级表达手段**：
      只在「必须有明确边界才能操作」的地方出现（输入框、表格行、菜单分隔）。 */
   --surface-base: var(--glass);
-  /* 浅色必须「压一层灰」才有层级：白窗 + 白卡片 = 白，这是「底色与背景一个色」的数学原因。
-     内容区压 3.5% 中性黑，卡片回到纯白 —— 这就是 Notion / Fluent 的「底 → 内容区 → 卡片」。 */
-  --surface-1: rgba(0, 0, 0, 0.035);
-  --surface-2: #ffffff;
-  --surface-3: #ffffff;
+  /* ⚠ 卡片必须**半透明**：这是毛玻璃应用，卡片一旦做实色就把材质整个盖住了 ——
+     实测反馈「聚焦时灰扑扑，与整体毛玻璃界面不符」。
+     Windows 官方的 CardBackgroundFillColorDefault 是 70% 白（不是纯白），
+     这里取 62%：比官方再透一点，材质感更明显；层级靠 elev-1 的极轻投影补。
+     内容区只压 2% —— 压多了整体发灰，压 0 又回到「白卡压白窗」。 */
+  --surface-1: rgba(0, 0, 0, 0.02);
+  --surface-2: rgba(255, 255, 255, 0.62);
+  --surface-3: rgba(255, 255, 255, 0.9);
   --hairline: rgba(0, 0, 0, 0.06);
-  --elev-1: 0 0 0 0.5px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.05),
-    0 2px 6px -2px rgba(0, 0, 0, 0.04);
+  /* 卡片高度：**半透明卡片必须靠阴影定界**。
+     62% 白叠在白壁纸上只有 1.03 的亮度差，肉眼看不出 —— 这是毛玻璃的物理限制
+     （底色由壁纸决定，不可控）。阴影是浅色下唯一稳定可见的线索：
+     0.5px 亚像素给锐利边缘，1px 给「贴着」的接触感，4px 扩散给柔和过渡。
+     三层都极淡，叠起来刚好够分辨，不会变成「一圈灰边」。 */
+  --elev-1: 0 0 0 0.5px rgba(0, 0, 0, 0.07), 0 1px 3px rgba(0, 0, 0, 0.08),
+    0 4px 12px -4px rgba(0, 0, 0, 0.07);
   --elev-2: 0 8px 28px -8px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.06),
     0 0 0 0.5px rgba(0, 0, 0, 0.05);
   /* 卡片不再自己叠阴影：层级由 surface-1 的亮度 + elev-1 的极轻投影共同给出 */
@@ -327,11 +345,10 @@ body.dark {
      Linear 的四阶是 10% / 14% / 18% / 22% 亮度，这里取对应比例。
      深色下 elev 只保留极轻的一层，用于「贴住」而不是「浮起」。 */
   --surface-base: var(--glass);
-  /* 深色反过来：阴影看不见，层级只能靠「越上越亮」（Linear 的 10/14/18/22）。
-     **深色只有三阶**：窗口底与内容区同层 —— 深色下把底色再压暗，只会在已经很深的
-     底上叠出「陷进去」的错觉，而用户真正要区分的是「卡片 vs 背景」。 */
-  --surface-1: rgba(255, 255, 255, 0.015);
-  --surface-2: rgba(255, 255, 255, 0.09);
+  /* 深色同理：卡片半透明、略亮一档，不压暗内容区。
+     **深色只有三阶**：窗口底与内容区同层 —— 把底色再压暗只会产生「陷进去」的错觉。 */
+  --surface-1: transparent;
+  --surface-2: rgba(255, 255, 255, 0.07);
   --surface-3: rgba(255, 255, 255, 0.13);
   --hairline: rgba(255, 255, 255, 0.07);
   --elev-1: 0 0 0 0.5px rgba(255, 255, 255, 0.04), 0 1px 2px rgba(0, 0, 0, 0.2);
@@ -351,6 +368,10 @@ body.tier-solid {
   /* 没有真材质时面要实：基底压一层极淡的灰，卡片才白得出来。
      原来 base 是 #f6f7f9、卡片是 .98 白 —— 差不到 3%，所以「底色与背景一模一样」。 */
   --glass: #f4f5f7;
+  /* 兜底档没有毛玻璃，**「提亮」在这里等于没变化**（浅灰底上叠白仍是白）。
+     悬停/选中改为极轻压暗，这是实底界面表达「活着的行」的标准做法。 */
+  --state-hover: rgba(0, 0, 0, 0.045);
+  /* 兜底档没有材质可透，此时实色才是对的（否则卡片与窗口同色）。 */
   --surface-1: #eceef1;
   --surface-2: #ffffff;
   --surface-3: #ffffff;
@@ -365,6 +386,8 @@ body.tier-solid {
 body.dark.tier-solid {
   /* 兜底档没有 acrylic，本就是实色 —— 与真材质档对齐到同一档黑 */
   --glass: #1c1d20;
+  /* 深色实底：提亮本来就有用，保持白系，只是略微加一点强度。 */
+  --state-hover: rgba(255, 255, 255, 0.1);
   --surface-1: #202124;
   --surface-2: #2a2b30;
   --surface-3: #323338;
@@ -608,11 +631,18 @@ html:not(.hovers-off) .wc-close:hover {
 .nav {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--gap-row);
 }
 
+/* 底部两个入口（深浅色 / 设置）原来没设 gap、也没 flex —— 两个按钮直接堆叠。
+   平时只有 hover 一个有底色，看不出来；一旦「设置」是选中态、鼠标又停在
+   「深色」上，两块底色就相切成一个整体（实测反馈「两个底色都粘在一块了」）。
+   这里不做特例，直接复用 --gap-row：**相邻可选行的间距只有一个来源**。 */
 .sidebar-footer {
   margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-row);
 }
 
 .nav-item {
@@ -642,7 +672,10 @@ html:not(.hovers-off) .nav-item:hover {
 }
 
 .nav-item.is-active {
-  background: var(--glass-strong);
+  /* **选中与悬停同一底色**：原来用 --glass-strong（白 .28），比悬停的白 .45 还淡，
+     点完反而像「被点掉了」（实测反馈：聚焦色比选中色深，应该一致）。
+     区分交给字重（700），底色只负责「这一行是活的」。 */
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
   color: var(--text);
   /* 常态与选中态同为黑色，靠加粗（中文会落到 Bold）明确区分 */
   font-weight: 700;
@@ -1410,10 +1443,10 @@ body.round .tag {
   position: fixed;
   z-index: 1000;
   min-width: 132px;
-  /* 内边距 + 1px 行距：条目之间留一丝缝，悬浮高亮块才不会彼此贴死成一整块。
-     改动前没有 gap，相邻两项的高亮圆角直接相接，看起来「间距很奇怪」。 */
+  /* 内边距 + 行距：条目之间留一丝缝，悬浮高亮块才不会彼此贴死成一整块。
+     走 --gap-row-dense（密集菜单档），与侧栏的 --gap-row 同属一套间距系统。 */
   padding: 5px;
-  gap: 1px;
+  gap: var(--gap-row-dense);
   display: flex;
   flex-direction: column;
   border-radius: var(--radius-sm);
@@ -1547,7 +1580,8 @@ html:not(.hovers-off) .settings-tabs .tab:hover {
 }
 
 .settings-tabs .tab.is-active {
-  background: var(--glass-strong);
+  /* 与悬停同一底色，理由同 .nav-item.is-active */
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
   /* 常态与选中态都是正文色，靠加粗（中文会落到 Bold）区分 */
   font-weight: 700;
 }
@@ -1589,9 +1623,11 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 .settings .block {
   padding: 4px 16px 8px;
   border-radius: var(--radius-sm);
-  /* 区块＝内容层，和列表卡片同一档：靠底色立起来，不画框。
-     设置页原来每个区块一圈线，一页能看到六七条平行线，既碎又抢注意力。 */
-  background: var(--surface-2);
+  /* 区块＝**面板层**，与关于页的 hero / facts / privacy / log 用同一个令牌。
+     曾经写成 surface-2（卡片那档，白 .62），结果设置页比关于页白一大截 ——
+     同一套界面里两种面板强度，用户一眼就看出不一致。
+     列表卡片才需要 .62（密集堆叠、每张都要分辨），面板不需要。 */
+  background: var(--glass-strong);
   box-shadow: var(--elev-1);
 }
 
@@ -1731,7 +1767,7 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 /* 缓存目录块（迁移自 v1 缓存信息区） */
 .cache-box {
   padding: 12px 14px;
-  border: 1px solid var(--stroke);
+  /* 面板不画框：边界由底色差 + 极轻投影说明（与设置区块同一套）。 */
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
   display: flex;
@@ -2991,7 +3027,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   justify-content: space-between;
   gap: 32px;
   padding: 20px 24px;
-  border: 1px solid var(--line);
+  /* 面板不画框：边界由底色差 + 极轻投影说明（与设置区块同一套）。 */
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
@@ -3089,7 +3125,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 
 .about-privacy-i {
   padding: 3px 10px;
-  border: 1px solid var(--line);
+  /* 面板不画框：边界由底色差 + 极轻投影说明（与设置区块同一套）。 */
   border-radius: 999px;
   font-size: 12px;
   color: var(--text-dim);
@@ -3100,7 +3136,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   display: flex;
   flex-direction: column;
   padding: 4px 0;
-  border: 1px solid var(--line);
+  /* 面板不画框：边界由底色差 + 极轻投影说明（与设置区块同一套）。 */
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
@@ -3143,7 +3179,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   flex-direction: column;
   gap: 10px;
   padding: 16px 20px 18px;
-  border: 1px solid var(--line);
+  /* 面板不画框：边界由底色差 + 极轻投影说明（与设置区块同一套）。 */
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
