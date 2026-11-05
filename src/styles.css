@@ -511,7 +511,7 @@ body.dark .app::after {
   place-items: center;
   border-radius: var(--radius-sm);
   cursor: default;
-  transition: background 0.12s ease;
+  transition: background var(--dur-fast) var(--ease-out);
 }
 
 .wc-btn svg {
@@ -576,7 +576,9 @@ html:not(.hovers-off) .wc-close:hover {
   font-size: 13px;
   text-align: left;
   cursor: default;
-  transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 
 html:not(.hovers-off) .nav-item:hover {
@@ -632,7 +634,7 @@ html:not(.hovers-off) .nav-item:hover {
   inset: 0;
   background: var(--accent);
   clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0);
-  transition: clip-path 0.2s ease-out;
+  transition: clip-path var(--dur-base) var(--ease-out);
 }
 
 .btn-ghost.is-downloading .dl-label {
@@ -651,7 +653,7 @@ html:not(.hovers-off) .nav-item:hover {
 .btn-ghost.is-downloading .dl-label-on {
   color: #fff;
   clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0);
-  transition: clip-path 0.2s ease-out;
+  transition: clip-path var(--dur-base) var(--ease-out);
 }
 
 /* 启动自检发现新版本时的一次性横幅（压在标题栏下方，不挡拖动区） */
@@ -674,7 +676,8 @@ html:not(.hovers-off) .nav-item:hover {
   font-size: 13px;
   color: var(--text);
   /* 自动收起（10s）与手动关闭都走 .is-out，淡出而不是瞬间消失 */
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
 }
 
 /* 收起中：往上飘一点并淡出；transform 里要带上原本的水平居中 */
@@ -817,7 +820,8 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
   border: 1px solid var(--stroke);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 
 /* 聚焦时描边高亮（同 V1） */
@@ -935,7 +939,8 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .search-clear svg {
@@ -1111,7 +1116,8 @@ html:not(.hovers-off) .btn-primary:hover {
   /* 高浓度下描边会与窗口底色糊在一起，靠阴影保证卡片可识别 */
   box-shadow: var(--card-shadow);
   cursor: default;
-  transition: background 0.12s ease, transform 0.08s ease;
+  transition: background var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 
 html:not(.hovers-off) .card:hover {
@@ -1365,7 +1371,7 @@ body.round .tag {
   padding: 7px 12px;
   border-radius: 5px;
   cursor: default;
-  transition: background 0.1s ease;
+  transition: background var(--dur-fast) var(--ease-out);
 }
 
 /* 菜单项左侧图标。
@@ -1463,7 +1469,8 @@ html:not(.hovers-off) .ctx-item.danger:hover {
   font-family: var(--font);
   font-size: 13px;
   cursor: default;
-  transition: background 0.12s ease, box-shadow 0.12s ease;
+  transition: background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 
 /* hover 必须带 hovers-off 门控：窗口隐藏/最小化再回来时 Chromium 不会重算 :hover，
@@ -1726,7 +1733,7 @@ body.is-selecting .sidebar,
 body.is-selecting .statusbar {
   pointer-events: none;
   opacity: 0.45;
-  transition: opacity var(--dur-fast, 0.12s) var(--ease-standard, ease);
+  transition: opacity var(--dur-fast) var(--ease-out);
 }
 
 .statusbar-version {
@@ -1752,7 +1759,8 @@ body.is-selecting .statusbar {
   display: grid;
   place-items: center;
   cursor: default;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .statusbar-clear svg {
@@ -2692,7 +2700,8 @@ html:not(.hovers-off) .btn-danger:hover {
   font-size: 13px;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  transition: opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
 }
 
 .toast.show {
@@ -2738,7 +2747,7 @@ html:not(.hovers-off) .btn-danger:hover {
   height: 100%;
   width: 0;
   background: var(--accent);
-  transition: width 0.2s linear;
+  transition: width var(--dur-base) linear;
 }
 
 .move-sub {
