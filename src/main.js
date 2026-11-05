@@ -230,6 +230,9 @@ function bindThemeToggle() {
  * 所以手动钉住时系统主题变化不会再影响界面。
  */
 async function applyThemeMode(mode) {
+  // 记录「用户点了什么」—— 材质类问题只能靠操作序列定位。
+  // 之前排查「材质不恢复」，日志里只有「材质应用完成」，看不出是谁触发的。
+  reportFrontend("INFO", "ui", `切换主题 → ${mode}`);
   if (mode === "light") return applyTheme(false);
   if (mode === "dark") return applyTheme(true);
   applyTheme((await appWindow.theme().catch(() => "light")) === "dark");
@@ -245,7 +248,9 @@ async function applyThemeMode(mode) {
 function applyGlassAlpha(pct) {
   // 兜底档（没有真材质）必须保持不透明，否则会直接看见桌面
   if (document.body.classList.contains("tier-solid")) return;
-  const a = Math.max(10, Math.min(95, Number(pct) || 0)) / 100;
+  // 与后端 ALPHA_MIN / ALPHA_MAX 一致：1–100 无极。上限放到 100（完全不透）——
+  // 原来卡在 95 是为了避开 1.0，但 calc 里已经 min(1, …) 夹过，没必要留这 5 的空档。
+  const a = Math.max(1, Math.min(100, Number(pct) || 0)) / 100;
   document.documentElement.style.setProperty("--glass-alpha", String(a));
 }
 
@@ -285,11 +290,20 @@ function applyRoundMode(on) {
   document.documentElement.style.setProperty("--radius", (on && acrylic ? 0 : maxRadius) + "px");
 }
 
+/** 上一次的最大化状态；null = 还没同步过 */
+let lastMaxState = null;
+
 /** 最大化 ↔ 还原：图标与提示词跟随窗口状态（需求 #6） */
 async function syncMaxState() {
   const maxBtn = document.getElementById("btn-maximize");
   if (!maxBtn) return;
   const max = await appWindow.isMaximized().catch(() => false);
+  // 只在状态**真的变了**时记 —— 它在每次 Resized 都会跑，拖动窗口时会狂刷日志，
+  // 把真正有用的操作序列淹掉。
+  if (lastMaxState !== max) {
+    lastMaxState = max;
+    reportFrontend("INFO", "ui", `窗口最大化 → ${max ? "是" : "否"}`);
+  }
   maxBtn.classList.toggle("is-max", max);
   maxBtn.title = max ? "还原" : "最大化";
 }
@@ -3081,7 +3095,7 @@ function settingsAppearanceHtml(s) {
       rowCtl(
         "材质浓度",
         "越高越厚实 · 越低越通透",
-        `<input type="range" id="set-material" min="10" max="90" value="${s.materialAlpha ?? 50}" /><span class="hint" id="material-val">${s.materialAlpha ?? 50}%</span>`
+        `<input type="range" id="set-material" min="1" max="100" value="${s.materialAlpha ?? 50}" /><span class="hint" id="material-val">${s.materialAlpha ?? 50}%</span>`
       ) +
         rowCheck(
           "set-round",
@@ -4388,6 +4402,7 @@ function bindSettings(view) {
     material.addEventListener("change", () => {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
+      reportFrontend("INFO", "ui", `材质浓度 → ${v}%`);
       invoke("set_material_alpha", { value: v }).catch((e) =>
         toast("未保存，请重试")
       );
@@ -4425,6 +4440,7 @@ function bindSettings(view) {
     round.onchange = async () => {
       try {
         await invoke("set_round_mode", { value: round.checked });
+        reportFrontend("INFO", "ui", `高级材质 → ${round.checked ? "开" : "关"}`);
         applyRoundMode(round.checked);
         // 模式变了 → 当前生效的那一档（materialAlpha）也随之改变，重新拉一次配置
         settings = await invoke("get_settings");

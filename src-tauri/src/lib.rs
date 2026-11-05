@@ -178,12 +178,12 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
             // SetWindowRgn 的区域不会随窗口缩放自动跟随，必须重设。
             // 但逐帧重建区域会让缩放卡顿 → 改为缩放中清区域、停止后恢复。
             tauri::WindowEvent::Resized(_) => {
-                effects::begin_resize(hwnd);
+                let dark =
+                    matches!(window_for_events.theme().unwrap_or(Theme::Light), Theme::Dark);
+                effects::begin_resize(hwnd, dark);
                 // 最小化 → 恢复：DWM 在最小化时会把 SYSTEMBACKDROP_TYPE 丢掉，
                 // 恢复后窗口变成不透明纯色（「还是灰扑扑的，不是毛玻璃」）。
                 // Resized 在最小化和恢复时都会触发，函数内部靠 IsIconic 翻转判断。
-                let dark =
-                    matches!(window_for_events.theme().unwrap_or(Theme::Light), Theme::Dark);
                 effects::reapply_after_restore(hwnd, dark);
             }
             // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）。

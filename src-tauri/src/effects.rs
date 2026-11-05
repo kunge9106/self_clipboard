@@ -263,16 +263,27 @@ fn classify(build: u32) -> Tier {
 /// 对窗口施加材质，返回**实际使用**的档位。
 ///
 /// `hwnd` 为原生窗口句柄的原始值（isize）。
+/// 同 [`apply_with`]，来源记为 `unspecified`。新代码请用带来源的那个。
 pub fn apply(hwnd: isize, dark: bool) -> Tier {
+    apply_with(hwnd, dark, "unspecified")
+}
+
+/// 应用窗口材质。
+///
+/// `reason` 只用于日志：材质失效这类问题**只能靠「谁在什么时候动了它」定位** ——
+/// 之前排查「最小化后不恢复」时，日志只有「材质应用完成」，根本看不出是谁触发的，
+/// 只能靠猜。现在每条都带来源（startup / theme-refresh / toggle-advanced / restore / …）。
+pub fn apply_with(hwnd: isize, dark: bool, reason: &str) -> Tier {
     let build = detect_build();
     let tier = classify(build);
     let _ = BUILD.set(build);
     let _ = TIER.set(tier);
 
     crate::log_print!(
-        "[effects] windows build={} → tier={} (radius≤{}px)",
+        "[effects] 应用材质（来源={reason}）build={} tier={} 高级材质={} (radius≤{}px)",
         build,
         tier.as_str(),
+        if is_round() { "开" } else { "关" },
         match tier.max_radius() {
             u32::MAX => 0,
             r => r,
@@ -324,7 +335,7 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
 
     match result {
         Ok(()) => {
-            crate::log_print!("[effects] 材质应用完成：{}", tier.as_str());
+            crate::log_print!("[effects] 材质应用完成：{}（来源={reason}）", tier.as_str());
             tier
         }
         Err(code) => {
@@ -370,8 +381,11 @@ pub fn reapply_after_restore(hwnd: isize, dark: bool) {
     for delay in [350u64, 900] {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(delay));
-            apply(hwnd, dark);
-            apply_rounded_corners(hwnd);
+            apply_with(hwnd, dark, "restore");
+            // 有系统材质时不能裁区域：矩形材质会在圆角外留下残影
+            if !is_round() {
+                apply_rounded_corners(hwnd);
+            }
         });
     }
 }
@@ -459,6 +473,13 @@ pub fn relayout(hwnd: isize) {
 /// - 半径按当前 DPI 从逻辑 px 换算成物理 px
 /// - 窗口尺寸变化后 region **不会**自动跟随，必须在 Resized 事件里重设
 /// - SystemBackdrop 档跳过（系统已经给了圆角）
+/// ⚠ **当前所有档位的 `region_radius()` 都是 0，本函数是空操作。**
+///
+/// 留着是因为 ADR-004 记录了「若 Win10 支持系统级圆角，可用区域裁剪兜底」；
+/// 但**不要再新增调用点**——真正会执行的只有下面那句 `if radius == 0 { return }`。
+/// 曾经的 `begin_resize` 在调用它之前先无条件 `SetWindowRgn(hwnd, 0, 1)`，
+/// 结果变成「只会破坏材质、从不会恢复材质」，是「材质消失、点一下深浅色才回来」
+/// 的真凶（见 `begin_resize` 的注释）。
 pub fn apply_rounded_corners(hwnd: isize) {
     let radius = current_tier().region_radius();
     if radius == 0 {
@@ -522,18 +543,32 @@ static RESIZE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 ///
 /// 逐帧 SetWindowRgn 对窗口本体做区域裁剪非常贵（大窗口尤甚），
 /// 会让缩放明显卡顿。这里改成「缩放中不裁剪、缩放后补一次」。
-pub fn begin_resize(hwnd: isize) {
-    unsafe {
-        extern "system" {
-            fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
-        }
-        // rgn=0 → 移除区域裁剪（直角）
-        SetWindowRgn(hwnd, 0, 1);
-    }
+/// 窗口尺寸变化后收尾。
+///
+/// ⚠ **这里是「材质莫名其妙丢失、点一下深浅色就恢复」的真正原因**。
+///
+/// 原来无条件在 120ms 后 `apply_rounded_corners`（= `SetWindowRgn`）。而在有系统
+/// 材质的档位上（Acrylic / Mica / SystemBackdrop），材质是 DWM **按窗口矩形**画的：
+/// 一旦用 `SetWindowRgn` 把窗口区域改成圆角矩形，DWM 对这块表面的 backdrop 就废了 ——
+/// 窗口还在、内容还在，但毛玻璃没了，退成实色。
+///
+/// 而切深浅色会走 `reapply_theme_visual` → 重新下发材质 → 「点一下就好了」。
+/// 这就是用户看到的现象。
+///
+/// 所以两条路分开：
+///   · 有系统材质（高级材质开）：**不裁区域**，改为重新下发一次材质 ——
+///     拖动/缩放本身也会让 DWM 重建表面，顺手补一次最稳；
+///   · 无系统材质（高级材质关）：照旧用区域裁剪画圆角。
+pub fn begin_resize(hwnd: isize, dark: bool) {
     let gen = RESIZE_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(120));
-        if RESIZE_GEN.load(std::sync::atomic::Ordering::Relaxed) == gen {
+        if RESIZE_GEN.load(std::sync::atomic::Ordering::Relaxed) != gen {
+            return; // 还在拖，等最后一次
+        }
+        if is_round() {
+            let _ = apply_with(hwnd, dark, "resize-end");
+        } else {
             apply_rounded_corners(hwnd);
         }
     });
@@ -735,7 +770,7 @@ fn apply_acrylic(hwnd: isize, dark: bool) -> Result<(), i32> {
 /// 语义一改就要改两处（本次正是踩到：改完 `apply` 忘了这里，切开关毫无反应）。
 /// **一处判断胜过两处同步**。
 pub fn apply_round_mode(hwnd: isize, dark: bool) {
-    let _ = apply(hwnd, dark);
+    let _ = apply_with(hwnd, dark, "toggle-advanced");
 }
 
 // ---------------------------------------------------------------------------
@@ -890,29 +925,20 @@ fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
     // 否则原生标题栏会重新出现
     strip_window_frame(hwnd, true);
     disable_nc_rendering(hwnd);
-    if is_round() {
-        // 圆角模式：系统材质已关，只重设区域。这里**不能**开 acrylic ——
-        // 矩形材质会把圆角外重新填上
+    // ⚠ **这一段曾是「材质不恢复」的真正原因**。
+    //
+    // 它手写了旧语义的分支：`is_round()` 为真时（旧语义＝圆角模式＝**没有材质**）
+    // 只重设区域、不重发材质。语义反转后 `is_round()` 变成「高级材质＝有材质」，
+    // 于是打开高级材质之后，**一切主题就把材质清掉且不再补回来** ——
+    // 用户看到的就是「又出现材质不恢复了」。
+    //
+    // 修法不是把 if/else 反过来（那只是把 bug 挪到另一边），而是**复用 `apply`**：
+    // 施加还是清除，只有 `apply` 里那一个分支说了算。这里再加一份判断，
+    // 就是又给自己留了一个「改一处忘一处」的机会。
+    let _ = apply_with(hwnd, dark, "theme-refresh");
+    // 无系统材质时圆角靠区域裁剪；有系统材质时圆角由系统给（Win10 acrylic 只能直角）
+    if !is_round() {
         apply_rounded_corners(hwnd);
-    } else {
-        // 非圆角：按**当前档位**重新应用材质。
-        //
-        // 原来这里只处理 Acrylic 一档，SystemBackdrop / Mica 两档什么都不做 ——
-        // DWM 在主题切换时会重建材质上下文，不重设就退成深灰实心（用户实测：
-        // 「切深浅色后材质没切回来，是小概率」）。重新下发一次是幂等的，
-        // 成本只有几个 DWM 调用。
-        match current_tier() {
-            Tier::SystemBackdrop => {
-                let _ = apply_system_backdrop(hwnd);
-            }
-            Tier::Mica => {
-                let _ = apply_mica(hwnd);
-            }
-            Tier::Acrylic => {
-                let _ = apply_acrylic(hwnd, dark);
-            }
-            Tier::Solid => {}
-        }
     }
     nudge(hwnd);
     crate::log_print!("[effects] 主题视觉重刷完成（第 {pass} 遍，dark={dark}）");

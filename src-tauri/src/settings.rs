@@ -466,8 +466,11 @@ fn default_alpha_round() -> u32 {
 }
 
 /// 浓度的合法区间（前端滑块 10–90，后端一律夹到这个范围）
-pub const ALPHA_MIN: u32 = 10;
-pub const ALPHA_MAX: u32 = 90;
+/// 浓度是**无极调节**，两端就是两个极端：1 = 几乎全透，100 = 完全不透。
+/// 早先卡在 10–90，用户实测「滑条不够极端」—— 想调到底却发现还差一截，
+/// 那不叫安全边距，叫不给选。
+pub const ALPHA_MIN: u32 = 1;
+pub const ALPHA_MAX: u32 = 100;
 
 impl Config {
     /// 当前模式生效的浓度。
