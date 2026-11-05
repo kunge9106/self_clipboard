@@ -55,6 +55,7 @@
      原来 2 / 3 / 5 / 6 / 10 散着，同一个「小圆角」有五种写法。 */
   --radius-xs: 4px;
   --radius-sm: 8px;
+  --radius-lg: 12px;
 
   /* 等宽字体：代码 / Markdown 预览与详情正文共用。原本详情页里内联了一串
      ui-monospace 列表，两处各写一遍就会漂移，抽成变量。 */
@@ -593,7 +594,7 @@ body {
   background: transparent;
   color: var(--text);
   font-family: var(--font);
-  font-size: 14px;
+  font-size: 13px;
   -webkit-font-smoothing: antialiased;
   user-select: none;
   cursor: default;
@@ -716,7 +717,7 @@ body.dark .app::after {
 .brand-logo {
   width: 20px;
   height: 20px;
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   display: block;
 }
 
@@ -917,7 +918,7 @@ html:not(.hovers-off) .nav-item:hover {
   /* 8×16：左侧给文字留出呼吸，右侧 8 让关闭按钮贴边不悬空（原 7×14 是档外值） */
   padding: 8px 8px 8px 16px;
   /* 浮层的边界靠 elev-2 的投影说明，不靠描边 —— 描边会让它看起来像嵌在页面里。 */
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--glass-strong);
   box-shadow: var(--card-shadow);
   font-family: var(--font);
@@ -938,7 +939,7 @@ html:not(.hovers-off) .nav-item:hover {
   height: 24px;
   padding: 0 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   background: var(--accent);
   color: #fff;
   font-family: var(--font);
@@ -950,7 +951,7 @@ html:not(.hovers-off) .nav-item:hover {
   width: 22px;
   height: 22px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-dim);
   font-size: 15px;
@@ -1012,7 +1013,7 @@ body.dark #theme-toggle .i-sun {
 .seg button {
   padding: 5px 14px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-dim);
   font-family: inherit;
@@ -1452,7 +1453,7 @@ html:not(.hovers-off) .card:hover {
 .card-preview code.md-inline,
 .detail-body.is-rich code.md-inline {
   padding: 0 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--glass-strong);
   font-family: var(--font-mono);
   font-size: 0.92em;
@@ -1486,7 +1487,7 @@ html:not(.hovers-off) .card:hover {
    —— 类型=中性、置顶=accent 蓝、收藏=琥珀、失效=红。 */
 .tag {
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .tag-missing {
@@ -1604,7 +1605,7 @@ body.round .tag {
   width: auto;
   height: auto;
   object-fit: contain;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   border: 1px solid var(--stroke);
   margin-top: 2px;
   /* .card-body 是 flex 列，默认 align-items:stretch 会把图拉到整行宽 → 改为按比例左对齐 */
@@ -1653,7 +1654,7 @@ body.round .tag {
   gap: 9px;
   text-align: left;
   padding: 7px 12px;
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   cursor: default;
   transition: background var(--dur-fast) var(--ease-out);
 }
@@ -1727,7 +1728,7 @@ html:not(.hovers-off) .ctx-item.danger:hover {
 }
 
 .settings h2 {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
 }
 
@@ -1900,7 +1901,7 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   width: 80px;
   height: 28px;
   padding: 0 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   border: 1px solid var(--border-control);
   background: var(--glass-strong);
   color: var(--text);
@@ -2140,7 +2141,7 @@ html:not(.hovers-off) .statusbar-clear:hover {
   max-width: 340px;
   max-height: 260px;
   /* 内圆角比外框小一档，避免「内框圆角顶到外框」的错位感 */
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 /* 文本：保留换行与缩进，长单词 / 长 URL 强制断行。
@@ -2224,7 +2225,7 @@ html:not(.hovers-off) .statusbar-clear:hover {
 }
 
 .modal-title {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text);
 }
@@ -2376,7 +2377,7 @@ body.dark .modal.is-tour::after {
   height: 32px;
   display: grid;
   place-items: center;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: var(--accent);
   background: linear-gradient(135deg, rgba(47, 107, 255, 0.2), rgba(124, 58, 237, 0.12));
   box-shadow: inset 0 0 0 1px rgba(47, 107, 255, 0.14);
@@ -2402,7 +2403,7 @@ body.dark .modal.is-tour::after {
 }
 
 .tour-title {
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 700;
   line-height: 1.3;
   letter-spacing: 0.2px;
@@ -2441,7 +2442,7 @@ body.dark .modal.is-tour::after {
 }
 
 .tour-card-v {
-  font-size: 11.5px;
+  font-size: 11px;
   line-height: 1.4;
   color: var(--text-dim);
 }
@@ -2522,7 +2523,7 @@ body.dark .modal.is-tour::after {
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   font-size: 12px;
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: var(--track-bg);
 }
 
@@ -2554,7 +2555,7 @@ body.dark .modal.is-tour::after {
 }
 
 .tour-cell-v {
-  font-size: 11.5px;
+  font-size: 11px;
   line-height: 1.45;
   color: var(--text-dim);
 }
@@ -2567,7 +2568,7 @@ body.dark .modal.is-tour::after {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  font-size: 11.5px;
+  font-size: 11px;
   line-height: 1.45;
   color: var(--text-dim);
 }
@@ -2612,7 +2613,7 @@ body.dark .modal.is-tour::after {
 .tour-dot {
   width: 6px;
   height: 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: var(--track-bg);
   transition: width var(--dur-base) var(--ease-out),
     background var(--dur-base) var(--ease-out),
@@ -2761,7 +2762,7 @@ body.dark .tour-dot.is-on {
   font-size: 20px;
 }
 .detail-body.is-rich h2 {
-  font-size: 17px;
+  font-size: 15px;
 }
 .detail-body.is-rich h3 {
   font-size: 15px;
@@ -2769,7 +2770,7 @@ body.dark .tour-dot.is-on {
 .detail-body.is-rich h4,
 .detail-body.is-rich h5,
 .detail-body.is-rich h6 {
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .detail-body.is-rich ul,
@@ -2799,7 +2800,7 @@ body.dark .tour-dot.is-on {
   height: 12px;
   margin-right: 7px;
   border: 1.5px solid var(--line);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   vertical-align: -1px;
 }
 
@@ -2852,7 +2853,7 @@ body.dark .tour-dot.is-on {
   max-width: 100%;
   height: auto;
   margin: 8px 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 /* 任务项不需要额外的列表符号间距 */
@@ -2884,7 +2885,7 @@ body.dark .tour-dot.is-on {
 .detail-body.is-rich code,
 .detail-body.is-rich .md-inline {
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--glass-strong);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -3060,7 +3061,7 @@ html:not(.hovers-off) .btn-danger:hover {
 .move-bar {
   margin-top: 12px;
   height: 4px;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   background: var(--stroke);
   overflow: hidden;
 }
@@ -3082,7 +3083,7 @@ html:not(.hovers-off) .btn-danger:hover {
 .move-path {
   margin-top: 10px;
   padding: 7px 9px;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   background: var(--glass);
   border: 1px solid var(--border-control);
   color: var(--text);
@@ -3256,7 +3257,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 }
 
 .about-name {
-  font-size: 26px;
+  font-size: 20px;
   font-weight: 600;
   line-height: 1.15;
   letter-spacing: 0.5px;
@@ -3411,7 +3412,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 
 .about-log-t {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -3474,7 +3475,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 
 .about-notes code {
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--glass);
   font-family: Consolas, "Cascadia Mono", monospace;
   font-size: 12px;
