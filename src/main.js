@@ -891,10 +891,23 @@ function bindModalBehavior() {
 
       if (open && at < 0) {
         stack.push({ mask, prev: document.activeElement });
-        // 下一帧再聚焦：元素刚由 hidden 变可见时，某些浏览器还拿不到焦点
-        requestAnimationFrame(() => focusTargetOf(mask)?.focus({ preventScroll: true }));
+        // 聚焦到「取消」，并**显式标记** —— 程序化 focus() 不算「键盘交互」，
+        // 浏览器不会给它 :focus-visible，用户看不到焦点落在哪个按钮上
+        // （实测「还是按钮不在当前步骤」）。标记由下一次真实键盘/鼠标操作清除。
+        const put = () => {
+          const el = focusTargetOf(mask);
+          if (!el) return;
+          el.focus({ preventScroll: true });
+          if (document.activeElement === el) el.setAttribute("data-autofocus", "");
+        };
+        // 双保险：元素刚从 hidden 变可见时，下一帧有时还拿不到焦点
+        requestAnimationFrame(put);
+        setTimeout(put, 80);
       } else if (!open && at >= 0) {
         const [item] = stack.splice(at, 1);
+        mask.querySelectorAll("[data-autofocus]").forEach((n) =>
+          n.removeAttribute("data-autofocus")
+        );
         // 焦点还给打开它的元素；它可能已经被列表重绘替换掉了（卡片删除后会重建）
         if (item.prev && item.prev.isConnected) item.prev.focus({ preventScroll: true });
       }
@@ -904,6 +917,15 @@ function bindModalBehavior() {
   document
     .querySelectorAll(".modal-mask")
     .forEach((m) => observer.observe(m, { attributes: true, attributeFilter: ["hidden"] }));
+
+  // 用户一旦真的按键 / 点击，焦点样式就交回 :focus-visible ——
+  // 标记只是「刚打开时让人看见默认焦点在哪」，不该一直粘着
+  const clearAutoFocus = () =>
+    document
+      .querySelectorAll("[data-autofocus]")
+      .forEach((n) => n.removeAttribute("data-autofocus"));
+  window.addEventListener("keydown", clearAutoFocus, true);
+  document.addEventListener("mousedown", clearAutoFocus, true);
 
   // Esc 只关**最上层**那个：底下的（例如先打开的清空确认）不该被连带关掉。
   // 冒泡阶段监听，让已有的 Esc 处理（编辑器退出、搜索清空）先跑；

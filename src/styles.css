@@ -79,6 +79,9 @@
   /* 按下：物理上「被压下去 = 遮住光」，所以比常态**暗**一档（WinUI 的
      ButtonBackgroundPressed 也是比 normal 暗）。浅色用中性黑，深色用更低的白。 */
   --state-active: rgba(0, 0, 0, 0.06);
+  /* 强调色的淡底：主按钮的悬停/聚焦用。实心蓝在毛玻璃上像贴了块塑料板，
+     与材质语言冲突；但主操作又必须比次操作醒目，所以用「淡色底 + 强调边 + 强调字」。 */
+  --accent-soft: rgba(47, 107, 255, 0.1);
   /* 禁用只有这一个强度。原来 4 处各写 .42 / .45 / .45 / .62 ——
      同一个「不可用」有四种淡法，用户看到的是「有的灰有的不灰」。 */
   --disabled-opacity: 0.45;
@@ -291,6 +294,7 @@ body.dark {
   --state-hover: rgba(255, 255, 255, 0.09);
   /* 深色下「压暗」在深底上看不出来，按下改为比悬停再亮一档。 */
   --state-active: rgba(255, 255, 255, 0.14);
+  --accent-soft: rgba(91, 140, 255, 0.16);
   --card-hover: var(--state-hover);
   --glass-strong: rgba(255, 255, 255, 0.09);
   --glass-hover: var(--state-hover);
@@ -450,6 +454,45 @@ a:focus-visible,
 [tabindex]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* 控件类聚焦时**同时给底色**：
+   光有一圈环在小按钮上不够 —— 尤其弹窗的「取消」这类次要按钮，边框本来就淡，
+   环又贴在按钮边界外侧，一眼看不出「现在焦点在这」（实测提问：能不能加个底色）。
+   底色走 --state-hover（与悬停同色），环提供锐利边界，两者一个管「亮」一个管「准」。
+   只给表单/按钮类，不给卡片与导航项：它们的选中态已经有底色，再叠会过亮。 */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+}
+
+/* 主按钮本身是强调色实底，叠白会褪色；改为提亮，保持色相 */
+.btn-danger:focus-visible {
+  /* 危险按钮：聚焦底色用淡红，不用中性白（白底会把红边冲淡） */
+  background-image: linear-gradient(var(--danger-soft-bg), var(--danger-soft-bg));
+}
+
+.btn-primary:focus-visible {
+  background-image: linear-gradient(var(--accent-soft), var(--accent-soft));
+}
+
+/* 打开弹窗时的默认焦点（程序化 focus）。
+   浏览器不把程序化聚焦算作「键盘交互」，于是不给 :focus-visible ——
+   焦点其实已经在按钮上，但屏幕上看不出任何标记（实测「还是按钮不在当前步骤」）。
+   用 [data-autofocus] 补同一套样式，用户一按 Tab / 点鼠标就移除、交回 :focus-visible。 */
+[data-autofocus]:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+}
+
+/* 强调色实底的主按钮：同上，不叠白、改提亮 */
+.btn-primary[data-autofocus]:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background-image: linear-gradient(var(--accent-soft), var(--accent-soft));
 }
 
 /* 按下态：原来全项目 **0 处** :active —— 点下去没有任何反馈，用户只能靠「松手后
@@ -1158,10 +1201,14 @@ html:not(.hovers-off) .search-clear:hover {
   cursor: default;
 }
 
+/* 三个变体统一为**幽灵按钮**：透明底 + 1px 边，语义只由「边色 + 字色」区分。
+   实心填充（蓝/白/红）在毛玻璃界面上是一块不透明的板子，与材质语言冲突 ——
+   实测要求：「所有的按钮其实都可以用幽灵按钮」。
+   层级不靠填充表达，靠颜色强弱：次要＝灰边灰字，主＝强调边强调字，危险＝红边红字。 */
 .btn-ghost {
   border-color: var(--border-control);
-  background: var(--glass);
   color: var(--text-dim);
+  background: transparent;
 }
 
 /* 分段控件：原来 hover / active 一条都没有 —— 鼠标移上去毫无反馈，
@@ -1178,12 +1225,13 @@ html:not(.hovers-off) .btn-ghost:hover {
 /* 主操作按钮（首次运行引导的「开启自启」「后台运行」这类推荐项）：
    跟 btn-ghost 同一尺寸，但用强调色实底，让「推荐的那个」一眼可辨。 */
 .btn-primary {
-  background: var(--accent);
-  color: #fff;
+  border-color: var(--accent);
+  color: var(--accent);
+  background: transparent;
 }
 
 html:not(.hovers-off) .btn-primary:hover {
-  filter: brightness(1.08);
+  background: var(--accent-soft);
 }
 
 /* 内容区 */
@@ -2552,8 +2600,12 @@ body.dark .tour-dot.is-on {
 
 /* 主按钮：渐变 + 光晕 + 悬停抬起，作为整条流程的终点该有的分量 */
 .btn-primary.is-cta {
-  background: linear-gradient(135deg, #2f6bff, #6a45e0);
-  box-shadow: 0 4px 14px rgba(47, 107, 255, 0.32);
+  /* 与全站按钮一致：**不铺实心渐变**。原来这行写死了 #2f6bff → #6a45e0 和
+     rgba(47,107,255,.32) 的投影 —— 既不在令牌体系内，也和「全幽灵」冲突。
+     改用强调色淡底 + 加粗，仍比普通按钮醒目，但不破坏材质。 */
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
   transition: transform var(--dur-fast) var(--ease-out),
     box-shadow var(--dur-fast) var(--ease-out);
 }
@@ -2902,8 +2954,10 @@ body.dark .detail-body {
 }
 
 html:not(.hovers-off) .btn-danger:hover {
-  background: var(--danger);
-  color: var(--danger-on);
+  /* 原来悬停变实心红 —— 与「全幽灵」冲突，且红块在毛玻璃上过于抢眼。
+     改为淡红底 + 保持红字，危险语义靠颜色不靠面积。 */
+  background: var(--danger-soft-bg);
+  color: var(--danger);
 }
 
 /* 复制反馈 toast：与整体玻璃风格一致 */
