@@ -323,6 +323,42 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     }
 }
 
+/// 最小化 → 恢复时补一次材质（**这是「最小化再打开变成灰扑扑纯色」的修复**）。
+///
+/// Windows 在窗口最小化时会把 `DWMWA_SYSTEMBACKDROP_TYPE` 丢掉（DWM 不再为不可见
+/// 窗口维护 backdrop）。恢复后窗口是激活的、内容正常，但材质永远回不来 ——
+/// 用户看到的就是「还是那种灰扑扑的材质，不是毛玻璃」。
+///
+/// 为什么不能只补一次：恢复动画期间 DWM 会**忽略**该属性（返回 S_OK 但没生效），
+/// 而不同的机器/壁纸下动画时长不一样。所以补两次（0.35s / 0.9s）。
+/// `apply` 是幂等的（重复设同一个值无副作用），多补一次的成本可以忽略。
+///
+/// 判断方式是 `IsIconic` 的状态翻转：Resized 在最小化与恢复时都会触发，
+/// 靠「上一次是不是最小化」区分到底是哪一个。
+pub fn reapply_after_restore(hwnd: isize, dark: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WAS_ICONIC: AtomicBool = AtomicBool::new(false);
+    unsafe {
+        extern "system" {
+            fn IsIconic(hwnd: isize) -> i32;
+        }
+        let iconic = IsIconic(hwnd) != 0;
+        let was = WAS_ICONIC.swap(iconic, Ordering::Relaxed);
+        // 正在最小化 → 只记状态；本来就没最小化 → 只是普通缩放，不补
+        if iconic || !was {
+            return;
+        }
+    }
+    crate::log_print!("[effects] 从最小化恢复 → 补材质（DWM 会丢 backdrop）");
+    for delay in [350u64, 900] {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            apply(hwnd, dark);
+            apply_rounded_corners(hwnd);
+        });
+    }
+}
+
 /// 触发 DWM 重算。Win10 acrylic 有时需要动一下窗口才真正铺开。
 ///
 /// 注意：这里刻意**不改窗口尺寸** —— 它会被 `apply`（圆角模式下走 `clear_accent`）

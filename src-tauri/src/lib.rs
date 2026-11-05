@@ -179,6 +179,12 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
             // 但逐帧重建区域会让缩放卡顿 → 改为缩放中清区域、停止后恢复。
             tauri::WindowEvent::Resized(_) => {
                 effects::begin_resize(hwnd);
+                // 最小化 → 恢复：DWM 在最小化时会把 SYSTEMBACKDROP_TYPE 丢掉，
+                // 恢复后窗口变成不透明纯色（「还是灰扑扑的，不是毛玻璃」）。
+                // Resized 在最小化和恢复时都会触发，函数内部靠 IsIconic 翻转判断。
+                let dark =
+                    matches!(window_for_events.theme().unwrap_or(Theme::Light), Theme::Dark);
+                effects::reapply_after_restore(hwnd, dark);
             }
             // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）。
             tauri::WindowEvent::Focused(_active) => {
@@ -187,6 +193,11 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                 // 四周围上一圈 Win7 式边框，而托盘唤回路径的补涂管不到这里。
                 // 同步重刷会肉眼可见地闪（聚焦是高频动作），所以延迟 150ms 在后台
                 // 补一次；apply 幂等，连续触发也只是多跑几遍。
+                // 最小化恢复后通常紧跟一次聚焦，这条路径要兜住
+                // （Focused 可能早于 DWM 完成恢复，所以内部有 350/900ms 二次补）。
+                let dark_now =
+                    matches!(window_for_events.theme().unwrap_or(Theme::Light), Theme::Dark);
+                effects::reapply_after_restore(hwnd, dark_now);
                 let w2 = window_for_events.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(150));
