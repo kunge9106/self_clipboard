@@ -340,7 +340,10 @@ ${Object.entries(terms).map(([k, v]) => `| ${k} | ${v} |`).join("\n")}
 `;
 
 if (process.argv.includes("--write")) {
-  const out = path.join(ROOT, "docs", `ui-audit-${today}.md`);
+  // 支持 --label：每期各存一份，否则新报告会把基线覆盖掉（踩过一次）。
+  const li = process.argv.indexOf("--label");
+  const label = li > 0 && process.argv[li + 1] ? `-${process.argv[li + 1]}` : "";
+  const out = path.join(ROOT, "docs", `ui-audit${label}-${today}.md`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, md);
   console.log(`已写入 ${path.relative(ROOT, out)}`);
