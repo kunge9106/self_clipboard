@@ -171,7 +171,7 @@ fn look(win: &WebviewWindow) -> MenuLook {
         // 菜单恒用**圆角模式**的样式与材质（DESIGN 7.2）：浓度固定取圆角模式的默认档 90%，
         // 不跟随设置页里调的浓度 —— 菜单是窄条、文字密度高，需要稳定厚实的底。
         alpha: crate::settings::ROUND_ALPHA as f64 / 100.0,
-        dark: matches!(win.theme().unwrap_or(tauri::Theme::Light), tauri::Theme::Dark),
+        dark: crate::effects::effective_dark(win),
     }
 }
 
@@ -184,9 +184,9 @@ pub fn tray_menu_look(app: AppHandle) -> Result<MenuLook, String> {
 
 #[cfg(windows)]
 fn apply_material(win: &WebviewWindow) {
-    use tauri::Theme;
     if let Ok(h) = win.hwnd() {
-        let dark = matches!(win.theme().unwrap_or(Theme::Light), Theme::Dark);
+        // 与主窗口同一套判定：手动切主题时 window.theme() 返回的是**系统**主题
+        let dark = crate::effects::effective_dark(win);
         // 菜单**固定圆角**（与主窗口的圆角模式无关），所以必须走「先关系统材质」的
         // 路径：系统 acrylic/backdrop 是矩形，CSS 圆角配上它四角会留一圈直角残留。
         crate::effects::apply_rounded(h.0 as isize, dark);
@@ -257,12 +257,15 @@ pub fn show_main(app: &AppHandle) {
         // 用户会看到「先出现、再变样」的闪烁（上一版就是这么闪的）。
         #[cfg(windows)]
         {
-            use tauri::Theme;
             if let Ok(h) = w.hwnd() {
                 let hwnd = h.0 as isize;
-                // 隐藏期间 DWM 会把 accent 材质丢掉 —— 先补回来
-                let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
-                crate::effects::apply_with(hwnd, dark, "tray-show");
+                // 隐藏期间 DWM 会丢掉 backdrop —— 先整份复位。
+                // 单靠 apply_with 不够：它样式位没变就早退，不发 FRAMECHANGED。
+                // 而且 hide→show 后 DWM 还会把 NC 渲染策略重置回 USEWINDOWSTYLE，
+                // 那一项不补，backdrop 属性在也画不出来（见 restore_visuals 文档）。
+                // restore_visuals_for = DWM 层 + WebView2 内容层，
+                // 少任何一层都会变成「属性全对、画面全灰」
+                let _ = crate::effects::restore_visuals_for(&w, "tray-show");
                 // hide() 不产生 WM_SIZE，WebView2 的内容尺寸可能停在隐藏前的大小
                 // （表现为唤回来排版不对）。此刻窗口还不可见，尺寸微调看不见。
                 crate::effects::relayout(hwnd);
@@ -283,14 +286,10 @@ pub fn show_main(app: &AppHandle) {
         {
             let w2 = w.clone();
             std::thread::spawn(move || {
-                use tauri::Theme;
                 for delay in [150u64, 500] {
                     std::thread::sleep(std::time::Duration::from_millis(delay));
-                    if let Ok(h) = w2.hwnd() {
-                        let dark = matches!(w2.theme().unwrap_or(Theme::Light), Theme::Dark);
-                        crate::effects::apply_with(h.0 as isize, dark, "tray-show-delayed");
-                        crate::effects::nudge(h.0 as isize);
-                    }
+                    // restore_visuals_for 内部已含 nudge 与 hwnd 检查，不用再补
+                    let _ = crate::effects::restore_visuals_for(&w2, "tray-show-delayed");
                 }
             });
         }

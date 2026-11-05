@@ -149,11 +149,11 @@ function applyTheme(dark) {
  * 高级材质（round 模式）下，深浅切换要连带调整材质浓度。
  *
  * 它没有系统背景模糊，窗口后面就是清晰的桌面。这种状态下：
- *   · 深色必须接近实心（90）才压得住亮壁纸，否则一片惨白；
+ *   · 深色必须拉满（100，完全不透）才压得住亮壁纸，否则一片惨白；
  *   · 浅色则要恢复用户自己调的那个值 —— 浅色本来就不怕亮壁纸。
  *
  * 所以只在**主题真的变了**时动作（启动时 `applyTheme` 也会被调，那时不该覆盖用户设置）。
- * 刻意**不写回 settings**：90 是「深色下的派生值」，不是用户的选择；
+ * 刻意**不写回 settings**：100 是「深色下的派生值」，不是用户的选择；
  * 若写回去，切回浅色就恢复不回原值了（这正是之前把 0.96 写死在 CSS 里犯的错，
  * 只是换了个位置）。
  */
@@ -177,7 +177,8 @@ function setMaterialSlider(v) {
 function applyThemeDependentAlpha(wasDark, isDark) {
   // 三个条件缺一不可：模式是高级材质、用户没关掉这个行为、主题真的变了
   if (!settings?.roundMode || settings.autoAlphaDark === false || wasDark === isDark) return;
-  const v = isDark ? 90 : (settings.materialAlpha ?? 90);
+  // 深色加浓到 100（浓度上限）：压得住亮壁纸，且与「无极调节」的极端语义一致
+  const v = isDark ? 100 : (settings.materialAlpha ?? 90);
   applyGlassAlpha(v);
   // 滑块在设置页可见时同步读数，否则界面显示 60、实际 90
   setMaterialSlider(v);
@@ -3125,7 +3126,7 @@ function settingsAppearanceHtml(s) {
         rowCheck(
           "set-auto-dark-alpha",
           "深色自动加浓",
-          "高级材质下切到深色时，浓度自动升到 90%；切回浅色恢复你设的值。浓度越高，透出的模糊越少",
+          "高级材质下切到深色时，浓度自动升到 100%；切回浅色恢复你设的值。浓度越高，透出的模糊越少",
           s.autoAlphaDark
         )
     ),
@@ -4437,7 +4438,7 @@ function bindSettings(view) {
       try {
         await invoke("set_auto_alpha_dark", { value: autoDark.checked });
         settings = await invoke("get_settings");
-        // 关掉时若正处在深色 + 高级材质，要把浓度还原成用户设的值，否则会停在 90
+        // 关掉时若正处在深色 + 高级材质，要把浓度还原成用户设的值，否则会停在 100
         if (!autoDark.checked) {
           applyGlassAlpha(settings.materialAlpha ?? 90);
           setMaterialSlider(settings.materialAlpha ?? 90);

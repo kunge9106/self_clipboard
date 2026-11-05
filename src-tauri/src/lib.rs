@@ -151,8 +151,6 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
         }
     };
 
-    let dark = matches!(window.theme().unwrap_or(Theme::Light), Theme::Dark);
-
     // —— 诊断：窗口运行时状态 ——
     crate::log_print!(
         "[debug] runtime: decorated={} resizable={} visible={} title={:?}",
@@ -162,7 +160,9 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
         window.title().unwrap_or_default(),
     );
 
-    effects::apply_with(hwnd, dark, "startup");
+    // 启动即走完整配方（DWM 层 + WebView2 内容层）：透明是两层的事，
+    // 只补 DWM 那层，webview 一旦不透明就会把 backdrop 整块盖住
+    let _ = effects::restore_visuals_for(&window, "startup");
     // 失焦/聚焦时 Windows 会发 WM_NCACTIVATE 重绘原生标题栏，必须拦截
     effects::install_focus_hook(hwnd, app);
 
@@ -177,13 +177,12 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
             // SetWindowRgn 的区域不会随窗口缩放自动跟随，必须重设。
             // 但逐帧重建区域会让缩放卡顿 → 改为缩放中清区域、停止后恢复。
             tauri::WindowEvent::Resized(_) => {
-                let dark =
-                    matches!(window_for_events.theme().unwrap_or(Theme::Light), Theme::Dark);
+                let dark = effects::effective_dark(&window_for_events);
                 effects::begin_resize(hwnd, dark);
                 // 最小化 → 恢复：DWM 在最小化时会把 SYSTEMBACKDROP_TYPE 丢掉，
                 // 恢复后窗口变成不透明纯色（「还是灰扑扑的，不是毛玻璃」）。
                 // Resized 在最小化和恢复时都会触发，函数内部靠 IsIconic 翻转判断。
-                effects::reapply_after_restore(hwnd, dark);
+                effects::reapply_after_restore(&window_for_events);
             }
             // 焦点切换不再裁区域：所有档位 region_radius() 都是 0，
             // `apply_rounded_corners` 是空操作，留着只会让人误以为这里有作用。
@@ -194,21 +193,15 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                 // 补一次；apply 幂等，连续触发也只是多跑几遍。
                 // 最小化恢复后通常紧跟一次聚焦，这条路径要兜住
                 // （Focused 可能早于 DWM 完成恢复，所以内部有 350/900ms 二次补）。
-                let dark_now =
-                    matches!(window_for_events.theme().unwrap_or(Theme::Light), Theme::Dark);
-                effects::reapply_after_restore(hwnd, dark_now);
+                effects::reapply_after_restore(&window_for_events);
                 let w2 = window_for_events.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(150));
                     #[cfg(windows)]
                     {
-                        use tauri::Theme;
-                        if let Ok(h) = w2.hwnd() {
-                            let dark =
-                                matches!(w2.theme().unwrap_or(Theme::Light), Theme::Dark);
-                            effects::apply_with(h.0 as isize, dark, "focus-refresh");
-                            effects::nudge(h.0 as isize);
-                        }
+                        // 完整双层复位：焦点切换同样会丢 NC 渲染策略与 webview 背景，
+                        // 只补材质 = 属性在、画面灰
+                        let _ = effects::restore_visuals_for(&w2, "focus-refresh");
                     }
                     #[cfg(not(windows))]
                     drop(w2);
@@ -240,8 +233,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     std::thread::spawn(move || {
         for delay in [200u64, 600, 1200] {
             std::thread::sleep(std::time::Duration::from_millis(delay));
-            effects::apply_with(hwnd, dark, "startup-delayed");
-            effects::nudge(hwnd);
+            let _ = effects::restore_visuals_for(&window, "startup-delayed");
         }
         crate::log_print!("[effects] 补涂流程结束，最终档位：{}", effects::current_tier().as_str());
     });

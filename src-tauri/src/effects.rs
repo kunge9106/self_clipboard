@@ -159,6 +159,14 @@ extern "system" {
         value_size: u32,
     ) -> i32; // HRESULT
 
+    /// dwmapi.dll —— 只用于把属性读回来打日志，判断「没设上」还是「没生效」
+    fn DwmGetWindowAttribute(
+        hwnd: isize,
+        attribute: u32,
+        value: *mut c_void,
+        value_size: u32,
+    ) -> i32; // HRESULT
+
     /// ntdll.dll —— 不受 app manifest 影响，比 GetVersionEx 可靠
     fn RtlGetVersion(info: *mut RtlOsVersionInfoExW) -> i32; // NTSTATUS
 }
@@ -355,7 +363,11 @@ pub fn apply_with(hwnd: isize, dark: bool, reason: &str) -> Tier {
 ///
 /// 判断方式是 `IsIconic` 的状态翻转：Resized 在最小化与恢复时都会触发，
 /// 靠「上一次是不是最小化」区分到底是哪一个。
-pub fn reapply_after_restore(hwnd: isize, dark: bool) {
+pub fn reapply_after_restore(window: &tauri::WebviewWindow) {
+    let Ok(h) = window.hwnd() else {
+        return;
+    };
+    let hwnd = h.0 as isize;
     use std::sync::atomic::{AtomicBool, Ordering};
     static WAS_ICONIC: AtomicBool = AtomicBool::new(false);
     unsafe {
@@ -370,10 +382,14 @@ pub fn reapply_after_restore(hwnd: isize, dark: bool) {
         }
     }
     crate::log_print!("[effects] 从最小化恢复 → 补材质（DWM 会丢 backdrop）");
+    let w = window.clone();
     for delay in [350u64, 900] {
+        let w2 = w.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(delay));
-            apply_with(hwnd, dark, "restore");
+            // 最小化与 hide→show 是同一类：表面重建 + NC 策略重置 + webview 背景失忆，
+            // 所以走完整双层复位，不是单发材质
+            let _ = restore_visuals_for(&w2, "restore");
         });
     }
 }
@@ -556,6 +572,11 @@ pub fn begin_resize(hwnd: isize, dark: bool) {
         }
         // 圆角由 CSS（`--radius` + overflow）或系统给，不裁区域 ——
         // 裁区域会破坏 DWM 的 backdrop（见本函数文档）。
+        //
+        // 这里**刻意**只发材质、不走 `restore_visuals`：缩放全程窗口都可见，
+        // NC 渲染策略不会被重置，不需要那两步；而 `strip_window_frame(force=true)`
+        // 在可见窗口上会强制整窗重绘，缩放停止瞬间会闪一下。
+        // 这不是抄漏 —— 场景不需要，就不付那个代价。
         let _ = apply_with(hwnd, dark, "resize-end");
     });
 }
@@ -630,6 +651,170 @@ fn strip_window_frame(hwnd: isize, force: bool) {
             0,
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+/// 「本窗口现在该用的深浅」。
+///
+/// 手动切主题时**不再**调 `set_theme`（见 `set_theme_mode` 的注释），所以
+/// `window.theme()` 返回的始终是**系统**主题。拿它推深浅，用户手动选了深色、
+/// 系统是浅色时就会算反 —— tint 变浅、卡片发白，看起来正是「灰扑扑」。
+/// 所有需要 dark 的地方统一从这里取，别各自拼一份。
+pub fn effective_dark(window: &tauri::WebviewWindow) -> bool {
+    match crate::settings::get().theme_mode.as_str() {
+        "dark" => true,
+        "light" => false,
+        _ => matches!(window.theme(), Ok(tauri::Theme::Dark)),
+    }
+}
+
+/// 把 DWM 侧与窗口视觉有关的状态**整份**重设一遍，返回实际档位。
+///
+/// 这是「材质不恢复」这类问题的**唯一配方**：任何需要重新挂上材质的时机
+/// （启动、切主题、托盘唤回、最小化恢复、缩放结束）都走这里，别再各写一份。
+///
+/// ⚠ 这里有血泪：`reapply_after_show` 曾经自己手抄了其中几行
+/// （剥边框 + 下发材质 + nudge），漏掉 `disable_nc_rendering` 与
+/// `set_immersive_dark`。结果托盘唤回后
+/// `DWMWA_SYSTEMBACKDROP_TYPE` 回读是 3（Acrylic）、`hr=0`，**属性明明在、
+/// 画面却是灰底** —— 因为 hide→show 后 DWM 把 `DWMWA_NCRENDERING_POLICY`
+/// 重置回 `USEWINDOWSTYLE`，backdrop 就不再被绘制。属性在、画面没有，
+/// 是最难查的一类：日志一切正常，只有用户的眼睛知道不对。
+///
+/// 「照抄一段能用的代码」本身就是隐患，抄漏一行就是一次线上 bug。
+pub fn restore_visuals(hwnd: isize, dark: bool, reason: &str) -> Tier {
+    set_immersive_dark(hwnd, dark);
+    // force：DWM 可能已经「忘掉」剥过边框，样式位没变也必须重发 FRAMECHANGED，
+    // 否则原生标题栏会带着投影重新出现
+    strip_window_frame(hwnd, true);
+    disable_nc_rendering(hwnd);
+    // 先把 backdrop 显式清成 NONE，再让 apply_with 设回去。
+    //
+    // DWM 对「设置相同值」直接跳过 —— 之前 4 次补涂全是 3→3，回读永远
+    // type=3 hr=0，画面却灰着。唯一没试过的就是**让值真的变一次**：
+    // 属性变化会强制 DWM 在下一次合成重建 backdrop。中间态 NONE 与目标值
+    // 在同一次同步调用序列里写完，DWM 按 vsync 合成，看不见闪烁。
+    //
+    // 「后台释放=立即」时反而从不灰，因为那是销毁重建的全新窗口，
+    // DWM 表面是新的 —— 也从侧面印证：旧表面 + 相同值 = 不重建。
+    clear_system_backdrop(hwnd);
+    // 重放宿主窗口的「全透明」状态。tao 只在**创建窗口时**调过一次
+    // `DwmEnableBlurBehindWindow`，hide→show 之后 DWM 会把它丢掉：
+    // 窗口不再透明，backdrop 画在下面也透不出来，整窗变成灰底 ——
+    // 属性全对、画面全灰。这是 tauri#16341 给的手法：空区域 + 立即失效重绘。
+    reassert_transparency(hwnd);
+    let tier = apply_with(hwnd, dark, reason);
+    nudge(hwnd);
+    log_backdrop_state(hwnd, reason);
+    tier
+}
+
+/// 把宿主窗口重新断言为「全透明」。
+///
+/// `DwmEnableBlurBehindWindow` + 空区域（`CreateRectRgn(0,0,-1,-1)`）是 tao 创建
+/// 透明窗口时用的原始配方；重放它等于恢复「窗口本体不画任何东西」的状态。
+/// 单独清 backdrop 不够 —— 那是**材质**层，而透明是**窗口**层，两层得分别管。
+fn reassert_transparency(hwnd: isize) {
+    unsafe {
+        extern "system" {
+            fn DwmEnableBlurBehindWindow(hwnd: isize, bb: *const BlurBehind) -> i32;
+            fn CreateRectRgn(x1: i32, y1: i32, x2: i32, y2: i32) -> isize;
+            fn DeleteObject(obj: isize) -> i32;
+            fn InvalidateRect(hwnd: isize, rect: *const c_void, erase: i32) -> i32;
+        }
+        #[repr(C)]
+        struct BlurBehind {
+            flags: u32,
+            enable: i32,
+            region: isize,
+            transition: i32,
+        }
+        const DWM_BB_ENABLE: u32 = 0x0000_0001;
+        const DWM_BB_BLURREGION: u32 = 0x0000_0002;
+
+        let rgn = CreateRectRgn(0, 0, -1, -1);
+        if rgn != 0 {
+            let bb = BlurBehind {
+                flags: DWM_BB_ENABLE | DWM_BB_BLURREGION,
+                enable: 1,
+                region: rgn,
+                transition: 0,
+            };
+            let hr = DwmEnableBlurBehindWindow(hwnd, &bb);
+            let _ = DeleteObject(rgn);
+            if hr < 0 {
+                crate::log_warn!("[effects] 重新断言窗口透明失败 hr=0x{:08X}", hr as u32);
+            }
+        }
+        // 立即失效一次，让 DWM 用新的透明状态重画
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+    }
+}
+
+/// 完整体检：DWM 层（[`restore_visuals`]）+ WebView2 内容层。
+///
+/// 「窗口重新出现」的路径都应该用这个，因为透明是**两层**的：
+///   · 宿主窗口 —— DWM 的 backdrop + blur-behind；
+///   · WebView2 内容 —— 自己的 `DefaultBackgroundColor`。
+/// 只补 DWM 那层，webview 一旦在 hide→show / GPU 进程重建后回到不透明，
+/// 就会把 backdrop 整块盖住，用户看到的就是「灰扑扑的实心窗口」。
+pub fn restore_visuals_for(window: &tauri::WebviewWindow, reason: &str) -> Option<Tier> {
+    let Ok(h) = window.hwnd() else {
+        return None;
+    };
+    let dark = effective_dark(window);
+    let tier = restore_visuals(h.0 as isize, dark, reason);
+    // alpha=0 才是透明（Windows 上非 0 的 alpha 会被替换成 255，所以只能全透）
+    if let Err(e) = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0))) {
+        crate::log_warn!("[effects] 重设 WebView 透明背景失败：{e}");
+    }
+    Some(tier)
+}
+
+/// 把 backdrop 清成 NONE。只配 [`restore_visuals`] 的 toggle 使用，
+/// 别在别处单独调 —— 「清掉不补」正是用户抱怨的画面。
+fn clear_system_backdrop(hwnd: isize) {
+    let v: u32 = DWMSBT_NONE;
+    let hr = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &v as *const _ as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    if hr < 0 {
+        crate::log_warn!("[effects] 清除 backdrop 失败 hr=0x{:08X}", hr as u32);
+    }
+}
+
+/// 把 backdrop 相关属性读回来打日志。
+///
+/// 「材质没生效」有两类完全不同的原因，日志里必须能分清，否则只能靠猜：
+///   · 属性丢了 / 没设上（hr 失败或 type=0）→ 我们的下发没成功，或有人清掉了；
+///   · 属性在、画面没有（type≠0 但看不到模糊）→ DWM 没把它挂到当前表面上，
+///     需要一次 frame recalc（正是上面 `reapply_after_show` 处理的那种）。
+fn log_backdrop_state(hwnd: isize, reason: &str) {
+    unsafe {
+        let mut kind: u32 = 0;
+        let hr = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &mut kind as *mut _ as *mut c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let mut brush: i32 = 0;
+        let hr2 = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_USE_HOSTBACKDROPBRUSH,
+            &mut brush as *mut _ as *mut c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+        crate::log_print!(
+            "[effects] backdrop 回读（来源={reason}）type={kind} hr=0x{:08X} hostbrush={brush} hr2=0x{:08X}",
+            hr as u32,
+            hr2 as u32
         );
     }
 }
@@ -893,36 +1078,11 @@ pub fn refresh_after_theme_switch(window: &tauri::WebviewWindow) {
 
 /// 主题视觉的实际刷新。`pass` 只用于日志。
 fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
-    // 这是「实际应该用的深浅」。不能靠 window.theme() 推 —— 手动切主题时已经不再调
-    // set_theme（见 set_theme_mode 的注释），theme() 返回的始终是**系统**主题。
-    let dark = match crate::settings::get().theme_mode.as_str() {
-        "dark" => true,
-        "light" => false,
-        // 跟随系统：读系统主题
-        _ => matches!(window.theme(), Ok(tauri::Theme::Dark)),
-    };
+    let dark = effective_dark(window);
     let Ok(h) = window.hwnd() else {
         return;
     };
-    let hwnd = h.0 as isize;
-
-    set_immersive_dark(hwnd, dark);
-    // force：DWM 可能已经"忘掉"剥过边框，样式位没变也必须重发 FRAMECHANGED，
-    // 否则原生标题栏会重新出现
-    strip_window_frame(hwnd, true);
-    disable_nc_rendering(hwnd);
-    // ⚠ **这一段曾是「材质不恢复」的真正原因**。
-    //
-    // 它手写了旧语义的分支：`is_round()` 为真时（旧语义＝圆角模式＝**没有材质**）
-    // 只重设区域、不重发材质。语义反转后 `is_round()` 变成「高级材质＝有材质」，
-    // 于是打开高级材质之后，**一切主题就把材质清掉且不再补回来** ——
-    // 用户看到的就是「又出现材质不恢复了」。
-    //
-    // 修法不是把 if/else 反过来（那只是把 bug 挪到另一边），而是**复用 `apply`**：
-    // 施加还是清除，只有 `apply` 里那一个分支说了算。这里再加一份判断，
-    // 就是又给自己留了一个「改一处忘一处」的机会。
-    let _ = apply_with(hwnd, dark, "theme-refresh");
-    nudge(hwnd);
+    restore_visuals(h.0 as isize, dark, "theme-refresh");
     crate::log_print!("[effects] 主题视觉重刷完成（第 {pass} 遍，dark={dark}）");
 }
 
