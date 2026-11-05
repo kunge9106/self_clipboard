@@ -1658,6 +1658,11 @@ pub fn init(app: &AppHandle) {
     }
     // 空闲维护：日志 30 秒没有新变更就固化，避免「关掉再打开时重放一大段日志」。
     spawn_compaction_ticker(dir.clone());
+    // 保留策略：上面那次是启动清理，这里管「一直开着」的那段时间。
+    // 打一行启动日志：这是唯一能确认 ticker 活着的地方（它平时不产生日志），
+    // 而「自动删数据」的链路一旦静默，排查只能靠猜。
+    crate::log_print!("[clipboard] 保留策略：后台检查已启动（每 10 分钟一次）");
+    spawn_retention_ticker();
 
     // 工作线程必须在订阅监听**之前**就位：否则第一批 WM_CLIPBOARDUPDATE
     // 到达时 WORKER 还没初始化，会退化成主线程同步落盘。
@@ -5690,6 +5695,36 @@ pub fn prune_retention(days: u32) {
             crate::log_print!("[clipboard] 保留策略清理 {removed} 条过期条目");
         }
     }
+}
+
+/// 保留策略的后台 ticker：应用连续开着，条目到点也要清掉。
+///
+/// 清理原本只有两个触发点 —— 启动时的 `load_history`、用户改设置时的
+/// `set_retention_days`。于是「设 15 天、一直不关机」这种最正常的用法里，到期条目
+/// 不会消失，用户看到的就是「到时间了没清理」（实测反馈；日志里同一份数据是在
+/// 重启那一瞬间才被清掉 23 条的）。
+///
+/// 间隔 10 分钟：先用 `count_older_than` 只读探一遍（锁内一次遍历，10 万条几毫秒），
+/// 真有过期条目才做 clone + 删文件 + 写索引。策略单位是「天」，10 分钟的误差没有
+/// 意义；但比一小时更不容易被长时间挂起/睡眠错过 —— 睡眠期间线程不走，醒来补一次。
+fn spawn_retention_ticker() {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(600));
+        let days = crate::settings::get().retention_days;
+        if days == 0 {
+            continue; // 0 = 永久保留
+        }
+        let expired = count_older_than(days);
+        if expired == 0 {
+            continue;
+        }
+        prune_retention(days);
+        // 后台删了数据，列表得跟着变，否则用户还能看到磁盘上已经不存在的条目。
+        // 前端收到后走 `scheduleWindowRender`（keepScroll），不会把人弹回顶部。
+        if let Some(app) = APP.get() {
+            let _ = app.emit("history-pruned", serde_json::json!({ "removed": expired }));
+        }
+    });
 }
 
 /// 统计早于 `days` 天的条目数（受保护的置顶/收藏按设置豁免）。
