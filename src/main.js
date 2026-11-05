@@ -843,6 +843,95 @@ function bindNav() {
   });
 }
 
+/**
+ * 弹窗行为统一（期 3b）。
+ *
+ * 12 个弹窗的 DOM 结构本来就一致（mask > modal > title/text/actions），
+ * 散的是**行为**：39 处零散的 `hidden = false/true`、Esc 只在 3 处单独处理、
+ * 打开时焦点还留在背后的界面上（键盘用户按 Tab 会走到底下的列表里，
+ * 而弹窗是模态的 —— 焦点跑到模态外面是明确的无障碍错误）。
+ *
+ * 刻意**不替换那 39 处调用点**：改动面太大，漏一处就是「半套行为」。
+ * 改为观察 `.modal-mask` 的 `hidden` 变化统一接管 —— DOM 已经被动过，
+ * 监听它比替换调用点可靠，而且以后新增弹窗**自动生效**，不用再记得调什么函数。
+ */
+function bindModalBehavior() {
+  /** 打开中的弹窗栈（理论上不应嵌套，但留着以防将来从弹窗里再开弹窗） */
+  const stack = [];
+
+  /**
+   * 打开时把焦点放到哪儿。
+   *
+   * **破坏性弹窗的默认焦点必须是「取消」**：这 12 个弹窗里 7 个的确认键是
+   * 「永久删除 / 清空 / 退出并清理」，焦点若落在它上面，用户只是想用键盘关掉弹窗、
+   * 或者手滑按了回车，就直接把内容删了 —— Windows 自己的删除确认框也是这么做的
+   * （默认按钮是「否」）。
+   *
+   * 所以顺序是：取消 → 普通按钮 → 危险按钮（最后才兜底）。
+   */
+  const focusTargetOf = (mask) => {
+    const actions = mask.querySelector(".modal-actions");
+    if (!actions) return mask.querySelector(".modal button:not(:disabled)");
+    return (
+      actions.querySelector('[id*="cancel" i]:not(:disabled), [id*="close" i]:not(:disabled)') ||
+      [...actions.querySelectorAll("button:not(:disabled)")].find((b) =>
+        /^(取消|关闭|知道了|暂不)/.test(b.textContent.trim())
+      ) ||
+      actions.querySelector(".btn-ghost:not(:disabled)") ||
+      actions.querySelector("button:not(:disabled)")
+    );
+  };
+
+  const observer = new MutationObserver((records) => {
+    for (const r of records) {
+      const mask = r.target;
+      if (!mask.classList || !mask.classList.contains("modal-mask")) continue;
+      const open = !mask.hidden;
+      const at = stack.findIndex((x) => x.mask === mask);
+
+      if (open && at < 0) {
+        stack.push({ mask, prev: document.activeElement });
+        // 下一帧再聚焦：元素刚由 hidden 变可见时，某些浏览器还拿不到焦点
+        requestAnimationFrame(() => focusTargetOf(mask)?.focus({ preventScroll: true }));
+      } else if (!open && at >= 0) {
+        const [item] = stack.splice(at, 1);
+        // 焦点还给打开它的元素；它可能已经被列表重绘替换掉了（卡片删除后会重建）
+        if (item.prev && item.prev.isConnected) item.prev.focus({ preventScroll: true });
+      }
+    }
+  });
+
+  document
+    .querySelectorAll(".modal-mask")
+    .forEach((m) => observer.observe(m, { attributes: true, attributeFilter: ["hidden"] }));
+
+  // Esc 只关**最上层**那个：底下的（例如先打开的清空确认）不该被连带关掉。
+  // 冒泡阶段监听，让已有的 Esc 处理（编辑器退出、搜索清空）先跑；
+  // 它们若已处理会 preventDefault，这里就不再抢。
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || e.defaultPrevented || stack.length === 0) return;
+    const top = stack[stack.length - 1];
+    // 可能已经被别处直接关掉了，MutationObserver 还没来得及更新栈
+    if (top.mask.hidden) return;
+
+    // ⚠ **不能直接把 hidden 设成 true**：purge / clear-view 这两个弹窗的返回值是
+    // Promise（`new Promise((r) => (purgeResolve = r))`），点取消才会 resolve。
+    // 直接隐藏会让调用方永远 await 着 —— 表现为「点了删除，界面没反应，卡片也删不掉」。
+    // 所以 Esc 等价于**点取消按钮**，走弹窗自己的关闭路径。
+    const cancel =
+      top.mask.querySelector('.modal-actions [id*="cancel" i], .modal-actions [id*="close" i]') ||
+      [...top.mask.querySelectorAll(".modal-actions button")].find((b) =>
+        /^(取消|关闭|知道了)/.test(b.textContent.trim())
+      );
+
+    if (cancel) cancel.click();
+    // 没有取消键的弹窗（引导、详情）直接关；这类不返回 Promise，关掉没有副作用
+    else top.mask.hidden = true;
+
+    e.preventDefault();
+  });
+}
+
 function bindSearch() {
   const el = document.getElementById("search");
   const clear = document.getElementById("search-clear");
@@ -4392,6 +4481,7 @@ async function main() {
   bindThemeToggle();
   bindSearch();
   createTip();
+  bindModalBehavior();
   startTimeTicker();
 
   await applyEffectInfo();
