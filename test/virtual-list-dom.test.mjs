@@ -96,7 +96,7 @@ globalThis.requestAnimationFrame = (fn) => {
 };
 globalThis.cancelAnimationFrame = () => {};
 
-const { VirtualList, heightClassOf, findIndex: findIndexFor } = await import("../src/virtual-list.js");
+const { VirtualList, heightClassOf, imgPending, findIndex: findIndexFor } = await import("../src/virtual-list.js");
 
 /** 造一个列表：heightFor 决定每一行渲染后的高度（模拟 CSS 的真实结果）。 */
 function makeList({ total, itemsPerPage = 200, viewport = 600, heightFor }) {
@@ -224,4 +224,53 @@ test("空列表不崩", () => {
   const { vl } = makeList({ total: 0, itemsPerPage: 0 });
   assert.doesNotThrow(() => vl.render());
   assert.equal(vl.inner.children.length, 0);
+});
+
+// ── 图片未解码时不能参与标定 ──────────────────────────────────────────────
+//
+// 实测反馈：「复制新内容时，上边那条置顶会闪一下」。带图的那张卡在缩略图赋 src 之前
+// 高度是「没有图」的高度，曾被当成图片类高度写进类表 → 图一解码完整列先压紧再弹开。
+
+test("imgPending 只看当前这条图的解码状态", () => {
+  assert.equal(imgPending({ querySelector: () => null }), false, "没有缩略图的行永远算就绪");
+  const pending = { complete: false, naturalHeight: 0 };
+  assert.equal(imgPending({ querySelector: () => pending }), true, "还没开始解码");
+  assert.equal(
+    imgPending({ querySelector: () => ({ complete: true, naturalHeight: 0 }) }),
+    true,
+    "解码失败（有 complete 但没尺寸）也算没就绪"
+  );
+  assert.equal(
+    imgPending({ querySelector: () => ({ complete: true, naturalHeight: 120 }) }),
+    false
+  );
+});
+
+test("缩略图没解码完就不参与标定，不污染图片类高度", () => {
+  const { vl } = makeList({
+    total: 100,
+    heightFor: (item) => (heightClassOf(item) === 4 ? 120 : 50),
+  });
+  const before = vl.classHeights[4];
+  assert.equal(before, 120, "首帧按真实图卡高度标定过");
+
+  const row = vl.rendered.get(0); // 第 0 行是图片（i % 10 === 0）
+  row.h = 40; // 模拟「图还没加载，这一行只有文字那么高」
+  row.querySelector = () => ({ complete: false, naturalHeight: 0 });
+
+  vl.calibrate([0]);
+  assert.equal(vl.classHeights[4], before, "未解码的图不该把图片类高度量矮");
+  assert.equal(vl.known.get(0), 120, "该行仍用上一次的可信实测值");
+});
+
+test("标定改了偏移表后同帧重排，不等下一帧", () => {
+  const { vl } = makeList({ total: 50, heightFor: () => 50 });
+  const row = vl.rendered.get(5);
+  row.h = 200; // 这一行突然变高（例如内容变化）
+  vl.calibrate([5]);
+  assert.equal(
+    row.style.transform,
+    `translateY(${Math.round(vl.offsets[5])}px)`,
+    "标定后应立即按新偏移表定位，否则会先按旧位置画一帧再挪"
+  );
 });

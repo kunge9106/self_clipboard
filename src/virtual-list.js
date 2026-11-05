@@ -115,6 +115,25 @@ export function poolSizeFor(viewportH, rowH, overscan = 8) {
   return Math.max(8, Math.min(120, visible + overscan * 2));
 }
 
+/**
+ * 这一行的缩略图还没解码完？
+ *
+ * 图片是**滚入可视区才赋 `src`** 的（`observeImages`，为的是避免一次渲染几十张
+ * 大图的字符串峰值）。而 `render()` 里的标定跑在赋 src 之前 —— 那一刻 `<img>`
+ * 没有 src，高度为 0，量出来的是「文字卡高度」，却被当成图片类高度写进类高度表。
+ *
+ * 后果是连锁的：图片类高度从 112 掉到 50 → 所有未加载的图片行按 50 排 → 叠在一起；
+ * 等图解码完 ResizeObserver 再把类高度改回 112 → 整列「先压紧、再弹开」。用户看到的
+ * 就是带图的那张卡连同下面几行闪一下（实测反馈：「复制新内容时上边那条置顶会闪」）。
+ *
+ * 所以量之前先确认图已经就位；没就位就留给 ResizeObserver —— 它在图加载完那一刻
+ * 一定会触发，那时量到的才是可信值。
+ */
+export function imgPending(el) {
+  const img = el.querySelector("img");
+  return !!img && (!img.complete || img.naturalHeight === 0);
+}
+
 // ---------------------------------------------------------------------------
 // DOM 部分
 // ---------------------------------------------------------------------------
@@ -203,6 +222,9 @@ export class VirtualList {
       const el = this.rendered.get(index);
       const item = this.items[index - this.start];
       if (!el || !item) continue;
+      // 缩略图还没解码完就别量：此时高度是「没有图」的高度，写进类高度表会把
+      // 图片类整体压扁，图加载完再改回来就是一次可见的压紧-弹开（见 imgPending）。
+      if (imgPending(el)) continue;
       const h = el.getBoundingClientRect().height;
       if (!(h > 0)) continue; // 窗口隐藏 / 还没布局 → 这一轮量不到，下次再量
       this.known.set(index, h);
@@ -220,7 +242,27 @@ export class VirtualList {
     this.estimate = Math.round((this.classHeights[0] + this.classHeights[3] + this.classHeights[4]) / 3);
     this.rebuild();
     this.inner.style.height = `${Math.round(this.offsets[this.total])}px`;
+    // **立刻重排，不等下一帧**。
+    //
+    // `render()` 是先按「当前偏移表」摆行、再调 `calibrate` 标定的：标定一旦改了
+    // 偏移表，行还停在旧位置，只靠 `scheduleRender()` 的 rAF 要下一帧才挪过去 ——
+    // 于是每次完整重绘都会「先按估值画一帧、下一帧再挪几像素」，看着就像闪一下。
+    // 同步重排之后，这一次绘制就是最终位置。
+    this.positionRows();
     if (anchor) this.restoreAnchor(anchor);
+  }
+
+  /**
+   * 按当前偏移表重排行位置（同步）。
+   *
+   * 只改 `transform`，不碰内容 —— 内容没变就没必要重填，这正是行池的意义。
+   */
+  positionRows() {
+    const last = this.offsets.length - 1;
+    for (const [index, el] of this.rendered) {
+      if (index < 0 || index >= last) continue;
+      el.style.transform = `translateY(${Math.round(this.offsets[index])}px)`;
+    }
   }
 
   setTotal(total) {
@@ -464,8 +506,13 @@ export class VirtualList {
       }
     }
     if (changed) {
+      // 高度变了但偏移表还没更新：先按**旧**偏移表记住视口顶端那条，重排后还原 ——
+      // 否则图片长高的那一刻，正在看的内容会整体向下窜一截。
+      const anchor = this.getAnchor();
       this.rebuild();
       this.inner.style.height = `${Math.round(this.offsets[this.total])}px`;
+      this.positionRows();
+      if (anchor) this.restoreAnchor(anchor);
       this.scheduleRender();
     }
   }
