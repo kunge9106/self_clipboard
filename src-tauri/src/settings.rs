@@ -441,7 +441,7 @@ fn default_alpha_round() -> u32 {
     ROUND_ALPHA
 }
 
-/// 浓度的合法区间（前端滑块 40–90，后端一律夹到这个范围）
+/// 浓度的合法区间（前端滑块 10–90，后端一律夹到这个范围）
 pub const ALPHA_MIN: u32 = 10;
 pub const ALPHA_MAX: u32 = 90;
 

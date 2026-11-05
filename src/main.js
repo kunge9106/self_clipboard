@@ -486,40 +486,42 @@ async function openClearMissingModal() {
 let purgeResolve = null;
 
 /// 返回 true 表示「用户确认要连本地文件一起处理」。
-/// 返回 false 的两条路径（设置没开 / 没有文件条目）都不弹窗，直接按旧行为删记录。
-async function askPurgeFiles(targets) {
+/// 返回 false 的两条路径（设置没开 / 没有可处理的文件）都不弹窗，直接删记录。
+///
+/// **入参是 id 列表，不是条目对象**：批量删除的选中项来自渲染卡片（`wlState`），
+/// 前端另有一份 `{id, kind}` 轻量索引（`items`）。两份数据源的同步只要断一次
+/// （启动加载失败、清理后未刷新、空视图误清），这里就会判成「没有文件条目」
+/// → 不弹确认框 → 关联的本地文件静默不删（代码审查 F1，与 `e70a802` 同类）。
+/// 改为按 id 回查后端真源：前端索引再过期，这条破坏性路径也不受影响。
+async function askPurgeFiles(ids) {
   if (!settings?.deleteFilesWithItem) return false;
-  // `items` 已收窄为 `{id, kind}`（P2-1），拿不到 `files` 路径清单了。
-  // 旧写法 `.flatMap((i) => i.files || [])` 在这里恒为空 → 确认框被直接跳过 →
-  // 「删除时同时删本地文件」静默失效。改按**文件条目数**说明：
-  // 具体删哪些文件由后端 `delete_items` 从索引里读，弹窗只需要让用户确认范围。
-  const fileItems = targets.filter((i) => i.kind === "files");
-  if (fileItems.length === 0) return false;
+  if (ids.length === 0) return false;
+  // **重入门闩**：探针是异步的，此期间「删除」按钮还活着。连点两次会让两个
+  // Promise 抢同一个 `purgeResolve` 槽，先到的那个永远挂着 —— 用户看到「点了
+  // 没反应」（代码审查 F2）。正在问的时候，后来的调用直接按「不处理」返回。
+  if (purgeResolve) return false;
 
-  // **失效的条目不该弹确认**：文件早就不在了，问「要不要连本地文件一起删」
-  // 没有意义 —— 用户确认之后只会收到「1 个未能处理」的提示（实测反馈）。
-  // 先问后端哪些已经失效，只对仍然存在的条目弹窗。
-  let alive = fileItems;
+  let probe;
   try {
-    const dead = new Set(
-      await invoke("check_files_alive", { ids: fileItems.map((i) => i.id) })
-    );
-    alive = fileItems.filter((i) => !dead.has(i.id));
-  } catch {
-    /* 检测失败就按「全部存在」处理：宁可多问一句，也不静默跳过删除 */
+    probe = await invoke("probe_purge_targets", { ids });
+  } catch (e) {
+    // 探针失败**不能**当成「没有文件」——那正是静默跳过删除。
+    // 按「可能有文件」处理：多问一句的代价，远小于该删的没删。
+    reportFrontend("warn", "purge", "探针失败：" + e);
+    probe = { files: ids.length, alive: ids.length };
   }
-  if (alive.length === 0) {
-    // 全都失效了：没有本地文件可删，直接按普通删除走
+  if (probe.files === 0) return false;
+  if (probe.alive === 0) {
+    // 关联文件全都不在了：没有可删的东西，按普通删除走
     toast("关联的本地文件已不存在，只删除记录");
     return false;
   }
 
   const perm = !!settings.deleteFilesPermanent;
-  const how = perm ? "永久删除" : "移入回收站";
   const tail = perm ? "（不可恢复）" : "（之后可从回收站还原）";
 
   document.getElementById("purge-modal-text").textContent =
-    `将处理 ${alive.length} 条文件记录对应的本地文件${tail}。\n\n此操作不可撤销。`;
+    `将处理 ${probe.alive} 条文件记录对应的本地文件${tail}。`;
   document.getElementById("purge-confirm").textContent = perm ? "永久删除" : "移入回收站";
   document.getElementById("purge-modal").hidden = false;
   return new Promise((resolve) => {
@@ -614,26 +616,37 @@ function syncSelectBar() {
 async function deleteSelected() {
   const ids = [...selectedIds];
   if (ids.length === 0) return;
-  // 先问「要不要连本地文件一起处理」——它是异步的，必须放在拿 ids 之后、
-  // 调删除之前；用户取消就退化成普通删除（只删记录）。
-  const purge = await askPurgeFiles(items.filter((i) => ids.includes(i.id)));
+  // **重入闸**：`askPurgeFiles` 内部要 await 探针，这期间按钮还活着。
+  // 连点两次会让两个 Promise 抢同一个 `purgeResolve` 槽，先到的那个永远挂着
+  // （代码审查 F2）。整段期间禁用按钮，退出/异常都在 finally 里恢复。
+  const del = document.getElementById("select-delete");
+  const prevDisabled = del ? del.disabled : false;
+  if (del) del.disabled = true;
   try {
-    const note = await invoke("delete_items", { ids, deleteLocalFiles: purge });
-    if (note) toast(note);
-  } catch (e) {
-    toast("删除失败，请重试");
-    return;
+    // 先问「要不要连本地文件一起处理」——异步，必须放在拿 ids 之后、调删除之前；
+    // 用户取消就退化成普通删除（只删记录）。
+    const purge = await askPurgeFiles(ids);
+    try {
+      const note = await invoke("delete_items", { ids, deleteLocalFiles: purge });
+      if (note) toast(note);
+    } catch (e) {
+      toast("删除失败，请重试");
+      return;
+    }
+    selectMode = false;
+    selectedIds.clear();
+    // **必须显式同步**：这之后的 `removeCards` 走 `renderWindow`，不经过 `render()`，
+    // 而 `syncSelectBar` 原来只在 `render()` 里调 —— 于是 `body.is-selecting` 残留，
+    // 侧栏与状态栏被永久禁用，用户只能再点一次「取消」才恢复（实测反馈）。
+    syncSelectBar();
+    document.querySelector(".toolbar")?.classList.remove("is-selecting");
+    // 保留滚动位置：删几条不该把人踹回列表顶部（与单条删除同一口径）
+    removeCards(ids);
+    toast(`已删除 ${ids.length} 项`);
+  } finally {
+    // 已退出选择模式时按钮不再可见，别去改它；仍在该模式（用户取消/出错）才恢复
+    if (del && selectMode) del.disabled = prevDisabled;
   }
-  selectMode = false;
-  selectedIds.clear();
-  // **必须显式同步**：这之后的 `removeCards` 走 `renderWindow`，不经过 `render()`，
-  // 而 `syncSelectBar` 原来只在 `render()` 里调 —— 于是 `body.is-selecting` 残留，
-  // 侧栏与状态栏被永久禁用，用户只能再点一次「取消」才恢复（实测反馈）。
-  syncSelectBar();
-  document.querySelector(".toolbar")?.classList.remove("is-selecting");
-  // 保留滚动位置：删几条不该把人踹回列表顶部（与单条删除同一口径）
-  removeCards(ids);
-  toast(`已删除 ${ids.length} 项`);
 }
 
 function bindSelectBar() {
@@ -2229,14 +2242,21 @@ function openContextMenu(x, y, item) {
       icon: CTX_ICONS.trash,
       danger: true,
       act: async () => {
-        const purge = await askPurgeFiles([item]);
-        const note = await invoke("delete_item", {
-          id: item.id,
-          deleteLocalFiles: purge,
-        });
-        items = items.filter((i) => i.id !== item.id);
-        render({ keepScroll: true });
-        if (note) toast(note);
+        // 与批量删除同一口径：失败必须有提示。原来没有 try/catch，后端一失败
+        // 整段静默中断 —— 用户以为没点上反复点，或以为已删而列表还活着（代码审查 F3）。
+        try {
+          const purge = await askPurgeFiles([item.id]);
+          const note = await invoke("delete_item", {
+            id: item.id,
+            deleteLocalFiles: purge,
+          });
+          items = items.filter((i) => i.id !== item.id);
+          render({ keepScroll: true });
+          if (note) toast(note);
+        } catch (e) {
+          reportFrontend("warn", "delete", "右键删除失败：" + e);
+          toast("删除失败，请重试");
+        }
       },
     }
   );
