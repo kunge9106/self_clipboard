@@ -128,13 +128,25 @@ function contrast(a, b) {
   return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
 }
 
-/** 窗口底色 = 材质色按 glass-alpha 叠在壁纸上；卡片底色再叠一层 card-bg。 */
+/**
+ * 逐层合成出四个面：
+ *   base  窗口底   = 材质色按 glass-alpha 叠在壁纸上
+ *   content 内容区 = surface-1 叠在 base 上（列表/设置页的底色）
+ *   card  卡片     = surface-2 叠在 content 上
+ *   overlay 浮层   = surface-3 / solid-bg（用于文字对比度）
+ *
+ * 之所以要分四层：**「底色与背景太相同」这个反馈，本质是缺了 content 这一层。**
+ * 只有 base 和 card 时，浅色下两者都是近白，差值靠 alpha 挤不出来。
+ */
 function surfaces(vars, wallpaper) {
   const rgb = (vars.get("--material-rgb") || "255 255 255").split(/\s+/).map(Number);
   const alpha = parseFloat(vars.get("--glass-alpha") || "1");
   const win = over([rgb[0], rgb[1], rgb[2], alpha], wallpaper);
-  const card = over(parseColor(vars.get("--card-bg"), vars) || [255, 255, 255, 1], win);
-  return { win, card };
+  const layer = (key, base, fallback) => over(parseColor(vars.get(key), vars) || fallback, base);
+  const content = layer("--surface-1", win, [0, 0, 0, 0]);
+  const card = layer("--surface-2", content, [255, 255, 255, 1]);
+  const overlay = layer("--surface-3", win, [255, 255, 255, 1]);
+  return { win, content, card, overlay };
 }
 
 // ── 1. 规则体内色值（基线 66）────────────────────────────────────────────
@@ -213,8 +225,11 @@ function contrastRows(themeName, vars) {
     for (const [label, key, min] of [
       ["正文", "--text", 4.5],
       ["次要文字", "--text-dim", 3.0],
-      ["面/控件描边", "--stroke", 1.5],
-      ["分隔线", "--line", 1.5],
+      // 控件边框是**承担信息**的线（「这里能输入」），按 WCAG 非文本 3:1 的一半取 1.5：
+      // 它不需要像图标那样断言「这是个控件」，只需明显强于装饰线。
+      ["控件边框", "--border-control", 1.5],
+      // 层级线已经不是层级表达手段了（层级交给 surface + elev），只要求「能感知」。
+      ["层级线", "--stroke", 1.15],
     ]) {
       const fg = parseColor(vars.get(key), vars);
       if (!fg) continue;
@@ -235,6 +250,35 @@ function contrastRows(themeName, vars) {
   return rows;
 }
 const contrastRowsAll = [...contrastRows("浅色", light), ...contrastRows("深色", dark)];
+
+// ── 3b. 面层级差（这才是「看不清」的第一性指标）──────────────────────
+// 对比度回答「文字/线条能不能读」；层级差回答「两块面能不能区分」。
+// 用户反馈「底色与背景太相同」属于后者 —— 只盯对比度会得出「全部达标」的错误结论。
+const surfaceRowsAll = [];
+for (const [themeName, vars] of [["浅色", light], ["深色", dark]]) {
+  for (const [wallName, wall] of [["白壁纸", WHITE], ["黑壁纸", BLACK]]) {
+    const { win, content, card } = surfaces(vars, wall);
+    for (const [label, a, b] of [
+      ["窗口底 → 内容区", win, content],
+      ["内容区 → 卡片", content, card],
+    ]) {
+      const ratio = contrast(a, b);
+      // 深色只有三阶（窗口底与内容区同层）：再分一层会变成「陷进去」的错觉，
+      // 而深色要区分的本来就是「卡片 vs 背景」。这条不是放过，是设计决策，写进报告可见。
+      const na = themeName === "深色" && label.startsWith("窗口底");
+      surfaceRowsAll.push({
+        theme: themeName,
+        wall: wallName,
+        label,
+        from: toHex(a),
+        to: toHex(b),
+        ratio: ratio.toFixed(2),
+        na,
+        pass: na || ratio >= 1.06,
+      });
+    }
+  }
+}
 
 // ── 4. body.dark 组件级覆盖（基线 9）────────────────────────────────────
 const darkOverrides = lines
@@ -259,7 +303,12 @@ const dual = [];
       if (hasBorder && hasShadow) dual.push({ ln: startLn, sel });
       sel = null;
     } else if (sel) {
-      if (/^border(-[a-z]+)?\s*:/.test(t)) hasBorder = true;
+      // transparent 边框是「占位」：状态色（置顶/选中）要复用它，
+      // 直接加 border 会让卡片尺寸跳 2px。它不构成视觉表达，不算双表达。
+      // 只认真正的边框声明：`border-radius` 不是边框线，
+      // 原正则 `border(-[a-z]+)?` 会把 border-radius 也算进来（虚报了若干处）。
+      if (/^border(-(top|right|bottom|left|width|style|color))?\s*:/.test(t) && !/transparent/.test(t))
+        hasBorder = true;
       if (/^box-shadow\s*:/.test(t)) hasShadow = true;
     }
   }
@@ -310,6 +359,17 @@ ${Object.entries(states).map(([k, v]) => `| :${k} | ${v} |`).join("\n")}
 | 主题 | 壁纸 | 项 | 令牌 | 合成后 | 对比度 | 要求 | 结果 |
 |---|---|---|---|---|---|---|---|
 ${contrastRowsAll.map((r) => `| ${r.theme} | ${r.wall} | ${r.label} | \`${r.token}\` | \`${r.color}\` | ${r.ratio}:1 | ≥${r.min} | ${r.pass ? "✅" : "❌"} |`).join("\n")}
+
+## 3b. 面层级差（「两块面分不分得出来」）
+
+对比度回答「文字能不能读」，**层级差回答「哪块是哪块」**。
+用户反馈的「底色与背景太相同」属于后者 —— 只盯对比度会得出「全部达标」的错误结论。
+门槛 1.06 ≈ 亮度差 3%，是 Linear / Notion / Fluent 共用的「whisper-quiet」档位：
+再低两块面就真的并成一片，再高就开始显得厚重。
+
+| 主题 | 壁纸 | 相邻两层 | 下 → 上 | 比值 | 结果 |
+|---|---|---|---|---|---|
+${surfaceRowsAll.map((r) => `| ${r.theme} | ${r.wall} | ${r.label} | \`${r.from}\` → \`${r.to}\` | ${r.ratio}:1 | ${r.na ? "— 同层" : r.pass ? "✅" : "❌"} |`).join("\n")}
 
 ## 4. body.dark 组件级覆盖 —— 基线 ${darkOverrides.length}
 
