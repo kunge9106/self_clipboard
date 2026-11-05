@@ -390,7 +390,9 @@ export class VirtualList {
       const item = this.items[index - this.start];
       el.style.display = "";
       el.style.transform = `translateY(${Math.round(this.offsets[index])}px)`;
-      const want = item ? `i${index}` : `s${index}`;
+      // 标记里**带上 id**，不只用下标：翻页/窗口位移后同一下标可能装着另一条内容，
+      // 只比下标就会跳过重填，卡片继续显示上一条（旧内容配新时间戳最难查）。
+      const want = item ? `i${index}:${this.keyOf(item)}` : `s${index}`;
       if (el.dataset.vlFilled === want) continue;
       el.dataset.vlFilled = want;
       el.dataset.vlIndex = String(index);
