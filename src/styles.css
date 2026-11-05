@@ -839,7 +839,7 @@ html:not(.hovers-off) .nav-item:hover {
   /* **选中与悬停同一底色**：原来用 --glass-strong（白 .28），比悬停的白 .45 还淡，
      点完反而像「被点掉了」（实测反馈：聚焦色比选中色深，应该一致）。
      区分交给字重（700），底色只负责「这一行是活的」。 */
-  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
   color: var(--text);
   /* 常态与选中态同为黑色，靠加粗（中文会落到 Bold）明确区分 */
   font-weight: 700;
@@ -1761,12 +1761,12 @@ html:not(.hovers-off) .ctx-item.danger:hover {
 /* hover 必须带 hovers-off 门控：窗口隐藏/最小化再回来时 Chromium 不会重算 :hover，
    不加门控会让光标下的标签一直留着底色（与侧栏同一套规则）。 */
 html:not(.hovers-off) .settings-tabs .tab:hover {
-  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
 }
 
 .settings-tabs .tab.is-active {
   /* 与悬停同一底色，理由同 .nav-item.is-active */
-  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
   /* 常态与选中态都是正文色，靠加粗（中文会落到 Bold）区分 */
   font-weight: 700;
 }
