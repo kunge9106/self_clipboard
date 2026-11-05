@@ -1,200 +1,348 @@
-# UI 统一改造方案
+# 轻贴 UI 统一改造方案（合并终版）
 
-> 状态：**待评审，未开工**。
-> 范围：实现层（令牌 / 组件 / 状态 / 材质消费方式）。**不动**信息架构、布局、文案。
-> 溯源：`DESIGN.md` §12.6 记的「浅色主题元素可见性」当时明确「功能收尾统一处理，不逐个临时打补丁」。
-> 本文把那笔账收口，并把同一批遗留（状态、组件重复、材质档位）一次做完 —— 分开做等于改两遍。
-
----
-
-## 1. 结论先说
-
-问题不是「颜色不好看」，是**没有语义层**：
-
-- 令牌按**层级**命名（`--glass` / `--glass-strong` / `--card-hover`），不是按**角色**（surface / border / state）；
-- 浅色主题直接复用深色的「白色叠加」，白窗上等于隐形（§12.6 已定性）；
-- 组件靠复制粘贴，同一件事有 2–5 份实现，且**已经漂移**（三套按钮的高/字号/内距已经不一致）。
-
-所以每加一个控件、每换一次主题都要重新判断，漏一处就是隐形。改造目标只有一句：
-**同一个视觉决定只留一处实现，其余全部引用它。**
+> 状态：**待评审，未开工**。范围：实现层（令牌值 / 状态 / 组件收敛 / 材质消费）。
+> **不动**信息架构、布局、文案、Rust 材质算法。
+>
+> 本文由两份独立方案合并而成：`UI_REFACTOR_PLAN.md` v1（基于浅色可见性根因 + 组件重复盘点）
+> 与外部评审稿《轻贴 UI 全面改造方案》（基于状态矩阵 + 逐件校准）。
+> 合并原则：**能取值的取更准的，能取范围的取更全的；互相矛盾的地方以代码为准，逐条裁决并记录**。
 
 ---
 
-## 2. 现状盘点（2026-11-05 实测，可复核）
+## 0. 合并说明（先说清楚改了谁、为什么）
 
-| 项 | 数字 |
+### 0.1 外部稿更强、已采纳的部分
+
+| 项 | 为什么采纳 |
 |---|---|
-| 样式规模 | `styles.css` 3225 行 · `panel.css` 181 · `tray.css` 80 · `animations.css` 122 |
-| 令牌 | 85 个（`:root` 80 / `body.dark` 74；几何与字体类只在 `:root`） |
-| 硬编码色值 | 200 处字面量，其中**规则体内 40 处 `rgba()`**（不在令牌定义里） |
-| 状态覆盖 | `:hover` 24 · `:focus` 6 · `:focus-visible` 2 · **`:active` 0** |
-| 状态类名 | 17 种并存：`on`(22 次) / `is-on` / `is-active` / `is-selected` / `is-current` / `is-ok` / `is-err` … |
-| 弹窗骨架 | 12 个 `modal-mask` 手写块（9 个业务弹窗 + 引导/提示） |
-| 按钮变体 | 5 套且**无基类**：`btn-ghost`24 / `btn-danger`8 / `btn-primary`4 / `wc-btn`3 / `statusbar-clear`2 |
-| 浮层令牌 | 18 个 `--hp-*`（自有明暗两套） |
-| 窗口 | 3 个页面：`index` / `panel` / `tray`（后两者已 `@import styles.css`，这点做对了，沿用） |
-| 材质档位 | 4 档，来自 `effects.rs::Tier`：`system-backdrop` / `mica` / `acrylic` / `solid` |
-| 其他缺口 | `::selection` 0 处 · `forced-colors` 0 处 · 滚动条 4 处硬编码 rgba |
+| **交互状态矩阵**（§2 的 9 个 `--state-*`） | v1 只说「要角色化」，没给出可落地的 token 清单与取值。这是本次改造的核心新建物，采纳其结构 |
+| **`html:not(.hovers-off)` 把 hover 拆散** | v1 看到了这个守卫，但没意识到它是「有的态有、有的态靠巧合」的成因。新增 hover 必须挂在这个守卫下，写进规范 |
+| **「执行既有约定」而非新建约定** | 文件头已写明「颜色一律走变量」「禁止组件级 `body.dark` 覆盖」，现在只是没执行到位。补执行比造新体系便宜 |
+| **开关先实测再决定** | v1 直接要求自绘 switch，属于无证据造组件。改为决策门（§7） |
+| **分期粒度** | 外部稿按「期 0–6」切，每期都能独立发测，比 v1 的「批 0–5」更贴实际节奏 |
+| **DoD 可判定** | 「截图并排能指出」「底+边至少两通道」这类表述可直接验收 |
 
----
+### 0.2 三处事实纠正（以代码为准）
 
-## 3. 五个结构性病因（都有代码证据）
-
-**A. 浅色主题复用了「白色叠加」**
-`--stroke: rgba(255,255,255,.35)`、`--glass: .16`、`--glass-hover: .24`、`--glass-strong: .28`。
-白色叠加在深色窗口上天然可见，在浅色窗口（`--material-rgb: 255 255 255`）上等于没有。
-后来加的 `--line: rgba(0,0,0,.09)` 是正解，但只有卡片在用（14 次），`--stroke` 仍被 22 处引用 —— 同一件事两套表达。
-
-**B. 令牌按层级不按角色**
-「悬浮底色」有四种写法：`--glass-hover`、`--card-hover`、`--glass`、以及 6 处硬编码 `rgba(255,255,255,.05)`。
-用户要「统一悬浮底色」，靠逐个改是改不干净的 —— 因为没有一个「角色」可以指。
-
-**C. 状态没有统一入口**
-三套按钮各自复制 `height / padding / border-radius / font-family / font-size / cursor`，已经漂移：
-`btn-ghost` 30px/12px/12px、`btn-danger` 32px/13px/14px、`btn-primary` 30px/12px/12px。
-`input:focus { outline: none }` 之后只给 `button:focus-visible` 补了环，**输入框键盘聚焦完全看不见**，且环色 `rgba(47,107,255,.4)` 写死（= 浅色 `--accent`，暗色主题下不对）。`:active` 全项目 0 处。
-
-**D. 组件靠复制**
-12 个 `modal-mask` 各自手写 `modal > title + text + actions`；右键菜单、悬浮浮层、toast 三种浮层各写一套底面/阴影；快捷面板用 `.p-row` 不复用卡片。
-
-**E. 材质 × 主题没有集中消费**
-4 档材质只有零散 `body.tier-solid` 之类的 body 类，浅色/深色各写一遍值；没有「某档材质下的 surface/border 该是什么」的统一答案。
-
----
-
-## 4. 目标架构：三层，禁止跨层
-
-```
-L0  ui/tokens.css       角色化语义 + 主题覆盖 + 材质覆盖
-L1  ui/*.css, ui/*.js   唯一实现：button / field / modal / toast / popover / tag / card / empty
-L2  styles.css          只组合，不写颜色字面量、不写状态
-```
-
-**角色命名**（替换现有层级命名）：
-
-```
---surface-base / -raised / -sunken / -overlay / -solid
---border-subtle / -strong / -focus
---state-hover / -active / -selected / -disabled
---text-primary / -secondary / -muted / -on-accent
---accent / -soft / -ring
---track-bg / --scrollbar-thumb / --selection-bg
-```
-
-**迁移手法（关键，保证能分批回滚）**：旧名先变别名 —— `--stroke: var(--border-subtle)`，
-逐批替换调用点，最后删别名。每批都不中断运行，视觉变化范围可预期。
-
-**材质消费**：`body[data-tier="solid|acrylic|mica|system-backdrop"]` 只覆盖 `--surface-*` / `--border-*`
-的 alpha 值。**组件层不出现任何 tier 判断** —— 现在零散写成 `body.tier-solid .xxx` 的规则全部删除。
-同理，前端只认 tier，不认「Win10 / Win11」：系统差异已经在 Rust 侧折算成档位了，
-前端再加一层版本判断就是第二个真源（`effects.rs` 注释里写过这条教训）。
-
----
-
-## 5. 逐项确认清单
-
-「用户点名的」+「我扫出来的」，共 28 项。`归属`列即后续唯一实现的位置。
-
-| # | 表面 | 现状 / 问题 | 改法 | 归属 |
-|---|---|---|---|---|
-| 1 | 弹窗 modal | 12 个骨架手写；标题/正文/按钮间距各写一遍 | `openModal({title, text, actions, tone})` 生成同一骨架，尺寸/阴影/入场动画一处定义 | `ui/modal` |
-| 2 | 危险确认 | 靠 `btn-danger` 颜色表达严重性，文案与按钮无联动 | modal 增 `tone: default \| danger`，由它决定确认键变体 | `ui/modal` |
-| 3 | Toast | `main.js` 内单例，只有 `.show` 一个状态 | 提为模块，info/warn/error 三态 + 停留时长 + 队列（不叠三条） | `ui/toast` |
-| 4 | 气泡（悬浮预览） | 18 个 `--hp-*`，自有渐变/描边/rim/阴影 | 与右键菜单共用 popover 底面；**渐变保留在内容层**（那是它的识别特征） | `ui/popover` |
-| 5 | 右键菜单 | JS 拼 class，样式在 `styles.css` 尾部；项只有 hover | 并入 popover；项补齐 hover/active/disabled/危险色 | `ui/popover` |
-| 6 | 材质 4 档 | 零散 body 类，浅深各写一遍 | `body[data-tier]` 只覆盖 surface/border alpha | `tokens` |
-| 7 | Win10 / Win11 | 差异在 Rust 侧，前端无感知（**正确**） | 保持：前端只认 tier；Win10 无模糊时靠 solid 的不透明度补偿 | `tokens` |
-| 8 | 开关 | 原生 `checkbox` 16px + `accent-color`，Win10/11 渲染不一致，无 disabled/focus | 自绘 switch（36×20，轨道/滑块/焦点环/禁用） | `ui/field` |
-| 9 | 复选 / 单选 | 与开关混用同一原生控件 | 自绘 checkbox（14px 勾）与 radio（14px 点） | `ui/field` |
-| 10 | 滑块 range | 只覆盖了轨道与滑块颜色 | 统一 thumb/track/focus/disabled | `ui/field` |
-| 11 | 选中底色 | 卡片 `.is-selected` 用 `--select` 淡金 + inset 描边 | 改 `--state-selected`，保留 inset（外扩会被滚动容器裁掉，这条已有注释，别动） | `ui/card` |
-| 12 | 悬浮底色 | `--card-hover` / `--glass-hover` / 硬编码三种并存 | 统一 `--state-hover` | `tokens` |
-| 13 | 聚焦底色 | 只覆盖 button；输入框无；环色写死 | `--border-focus` + `:focus-visible` 全局兜底（button/a/input/select/textarea/[tabindex]） | `tokens` + primitives |
-| 14 | 按下态 | 全项目 0 处 | 每个 primitive 一条 `--state-active` | primitives |
-| 15 | 禁用态 | 6 处零散 override | `--state-disabled` + 统一 opacity / pointer-events | primitives |
-| 16 | 标签徽章 tag | 14 种语义色（fg/bg 成对），生成函数在 `main.js` 里 | 保留语义色，补 size/shape；生成函数收进 `ui/tag` | `ui/tag` |
-| 17 | 快捷面板 | 独立窗口，自有 `.p-row`，不复用卡片 | 复用 `ui/card` 的 compact 变体 | `ui/card` |
-| 18 | 托盘菜单 | 已 `@import` 主样式（做对了） | 只补状态与焦点 | `tokens` |
-| 19 | 更新横幅 / 引导 tour | tour 12 个步骤块，深浅两套规则 | 复用 popover/modal 基底，只保留步骤排版 | `ui/popover` |
-| 20 | 空态 / 骨架行 | 空态文案散在各视图；骨架 `.vl-skeleton-bar` 单独实现 | 统一空态组件；骨架高度与卡片类高一致（已修） | `ui/empty` |
-| 21 | 滚动条 | 4 处硬编码 rgba；只有 `body.dark` 覆盖 thumb | `--scrollbar-thumb[-hover]` | `tokens` |
-| 22 | 标题栏 / 窗口按钮 / 拖拽把手 | `wc-btn` 3 个、`.rz` 9 个，无按下态 | 共用 button primitive，补 hover/active/close 危险色 | `ui/button` |
-| 23 | 搜索框 | `::placeholder` 只有 1 条；清除按钮自带样式 | 输入框基类（icon / 清除 / focus 环） | `ui/field` |
-| 24 | 下载 / 更新进度 | `.dl-fill` 单独实现 | 与 range 轨道共用 `--track-bg` | `ui/field` |
-| 25 | 文本选区 | `::selection` 0 处，走浏览器默认蓝 | `--selection-bg/-fg` | `tokens` |
-| 26 | 键盘可达 | Tab 顺序无定义；Esc 关弹窗散落各处；无焦点陷阱 | modal 内置焦点陷阱 + Esc；Esc 收敛到一处 | `ui/modal` |
-| 27 | 高对比度 | `forced-colors` 0 处 | 补 `@media (forced-colors: active)` 兜底边框 | `tokens` |
-| 28 | DPI 125% / 150% | `--radius` 固定 px，缩放后观感偏小 | 半径/间距走 4px 栅格 | `tokens` |
-
----
-
-## 6. 材质 × 主题 × 系统矩阵
-
-| 系统 | 可用档位 | 前端表现 |
+| 外部稿说法 | 实际 | 影响 |
 |---|---|---|
-| Win11 | `system-backdrop` / `mica` / `acrylic` / `solid` | 真模糊，surface alpha 可低 |
-| Win10 | `acrylic`（tint 压 8%）/ `solid` | 无真模糊，surface alpha 需抬高补偿 |
+| 「托盘菜单：系统绘制 — 不动」 | **错**。`tray.html` + `tray.css`（`@import styles.css`）是**自绘**菜单，`.tray-menu` 在 `tray.html` 里 | 必须纳入改造，否则托盘整套交互（hover/键盘/危险项）漏掉 |
+| 「写死颜色约 58 处」 | 197 处色值字面量中，**125 处在令牌块内**（合法定义），**72 处在规则体内**才是真硬编码 | 基线数字要准，否则期 6 的「72→0」验收无从判定 |
+| 「`body.dark .x` 组件级覆盖 16 处」 | **9 处**（`app::after`、主题图标×2、tour×5、`detail-body`、`scrollbar-thumb`） | 收口目标应为 9 而不是 16；其中 tour 与 scrollbar 属装饰，白名单化而非删除 |
 
-**每个组合下必须成立的三条不变量**：
+另：外部稿的「键集合 diff（`:root` vs `body.dark`）」审计**跑出来是干净的** —— 两边颜色令牌齐备，只差几何与字体。
+问题在**值**，不在**键**。所以审计脚本必须做**值级对比**（对比度/透明度），只做键集合会得出「没问题」的错误结论。
 
-1. 正文对比度 ≥ 4.5:1、次要文字 ≥ 3:1（无论背景是桌面、文档还是纯白）；
-2. 卡片/弹窗边界必须可见 —— 靠 `--border-subtle` 中性线，不靠阴影；
-3. 悬浮/选中/聚焦三态在同一元素上叠加时，优先级 聚焦 > 选中 > 悬浮，且互不吞没。
+### 0.3 一处根本修正（两边都没抓准，这是本期能一次修好的关键）
+
+外部稿把「看不清」归因为「状态缺失 + 局部覆盖破坏」；v1 归因为「浅色复用了深色的白色叠加」。
+**两者都不够准确。** 真实情况是：
+
+```css
+/* styles.css:299 —— 浅色 + 兜底实底档：边框/悬浮层已经改成了中性黑 */
+body.tier-solid {
+  --card-hover: #ffffff;
+  --glass-hover: rgba(0, 0, 0, 0.05);
+  --stroke: rgba(0, 0, 0, 0.08);
+}
+
+/* :root（浅色默认，作用于 acrylic / mica / system-backdrop 三档）*/
+--glass:        rgba(255, 255, 255, 0.16);
+--stroke:       rgba(255, 255, 255, 0.35);   /* 白窗上的白边 = 不存在 */
+--glass-hover:  rgba(255, 255, 255, 0.24);   /* 白窗上的白悬浮 = 不存在 */
+```
+
+**正确的浅色中性值已经写好了，但只在 `solid` 兜底档生效。** 真材质档（Win11 mica/system-backdrop、
+Win10 acrylic）仍在用白色叠加 —— 所以「浅色看不清」只在**有材质的机器**上明显，`solid` 机器反而正常。
+
+这条同时解释了为什么用户觉得「有的地方能看清、有的地方看不清」：取决于那台机器落到哪一档。
+
+**据此定下一条硬规则（贯穿全案）：**
+
+> 浅色主题：**面用白（提亮）、边与压暗层用黑**；深色主题：面和边都用白，靠 alpha 分层。
+> 即 `--stroke` / `--line` / `--state-hover` / `--track-bg` 在浅色下必须是黑系。
+
+推论：`--line`（黑 .09）与 `--stroke` 语义相同，**应合一**（`--line: var(--stroke)`），
+一次让 14 + 22 处调用点同时变对，不用改任何选择器。
+
+### 0.4 放弃的方案（v1 提过，撤回）
+
+v1 提出「角色化重命名」（`--surface-*` / `--border-*` / `--state-*`，旧名做别名逐批迁移）。
+**撤回。** 理由：
+
+- 问题在**值**不在**名**。`--stroke` 这个名字完全够用，是它的浅色值错了；
+- 改名要动 85 个令牌 + 100 余处调用点，换不来任何可见性改善，反而制造一次大规模 diff；
+- 与用户「不重复造轮子、不另起第二套」的约束冲突。
+
+**最终取舍：保留现有 `:root` / `body.dark` 命名体系，只补 `--state-*` 这一组真正缺失的令牌。**
 
 ---
 
-## 7. 分批落地（每批一支、可单测、可整体 revert）
+## 1. 现状基线（2026-11-05 @ `test/2.6.10-beta`，可复核）
 
-| 批 | 分支 | 内容 | 验收 |
+| 项 | 数字 | 口径 |
+|---|---|---|
+| 样式规模 | `styles.css` 3225 行 · `panel.css` 181 · `tray.css` 80 · `animations.css` 122 | — |
+| 顶层类 | **164** | 行首 `.class` 去重 |
+| 令牌 | 85（`:root` 80 / `body.dark` 74） | 颜色令牌成对，无缺项 |
+| 材质覆盖块 | `body.tier-solid`(8 条) · `body.dark.tier-solid`(7 条) | 只覆盖面/边/alpha |
+| 色值字面量 | 197（令牌块内 125 · **规则体内 72**） | 规则体内即真硬编码 |
+| 组件级 `body.dark` 覆盖 | **9** | 其中 tour×5、scrollbar×2 属装饰 |
+| 状态覆盖 | `:hover` 24 · `:focus` 6 · `:focus-visible` 2 · **`:active` 0** · `disabled` 6 | — |
+| 状态类名 | 17 种并存（`on`×22 / `is-on` / `is-active` / `is-selected` / `is-sel` / `is-current`…） | 无白名单 |
+| 弹窗骨架 | 12 个 `modal-mask` 手写块 | 9 个业务弹窗 + 引导/提示 |
+| 按钮变体 | 5 套，**无基类**，几何已漂移（30/32 高 · 12/13 字号 · 12/14 内距） | — |
+| 浮层 | 18 个 `--hp-*`（自有明暗两套） | — |
+| 窗口 | 3 个页面：`index` / `panel` / `tray`（均 `@import styles.css`） | 这点做对了，沿用 |
+| 材质档位 | 4：`system-backdrop` / `mica` / `acrylic` / `solid`（`effects.rs::Tier`） | 由 Rust 下发 body 类 |
+
+---
+
+## 2. 诊断（五条，均带证据）
+
+1. **浅色中性值只在 `solid` 档生效** —— 见 §0.3。这是「看不清」的直接成因。
+2. **状态色没有统一语义层** —— `:hover` 24 处里一半是硬编码 rgba；`:active` 全项目 0 处；`disabled` 6 处零散 override。
+3. **`hover` 被 `html:not(.hovers-off)` 拆散** —— 守卫本身正确（窗口失焦要屏蔽 hover 残留），但每处 hover 都得记得挂，漏一处就是「这儿的悬浮不灵」。
+4. **组件靠复制且已漂移** —— 5 套按钮各写几何；12 个弹窗骨架各写一遍；同一「悬浮底」有 4 种写法（`--card-hover` / `--glass-hover` / `--glass` / 6 处裸 rgba）。
+5. **键盘聚焦基本不可见** —— `input:focus{outline:none}` 之后只给 `button:focus-visible` 补了环，输入框 Tab 进去看不见；环色写死 `rgba(47,107,255,.4)`（= 浅色 `--accent`，暗色下不对）。
+
+---
+
+## 3. 改造原则（防重复造轮子，全案硬约束）
+
+1. **唯一颜色源**：只改 `:root` / `body.dark` 成对块；组件层禁止裸 `rgba()` 底/边。
+2. **唯一动效源**：`animations.css` 的 `--dur-*` / `--ease-*`（已合格，勿新增裸 keyframes）。
+3. **唯一材质源**：Rust `Tier` + `--material-rgb` / `--glass-alpha`。**前端不判 Win10/11** —— 系统差异已在 Rust 折算成档位，再判一次就是第二个真源。
+4. **tier 只负责 alpha**：`body.tier-*` 只许覆盖「不透明度/底色档位」，不许改变"中性 vs 白色叠加"的规则（那条由主题决定）。
+5. **新增状态先加 token，再写选择器**。
+6. **所有 `:hover` 必须挂在 `html:not(.hovers-off)` 下**（保留失焦屏蔽）。
+7. **panel / tray 只 `@import styles.css`**，新样式一律进主表。
+8. **禁止**引入组件库（antd / Fluent / Radix）、禁止第二套变量文件或 Tailwind。
+9. **禁止**在页面层写状态（`.is-xxx` 只允许白名单内的语义名）。
+10. **改视觉必须同一次提交改注释**（`CONTRIBUTING` §11 已定，样式同样适用）。
+
+---
+
+## 4. 交互状态矩阵（本次核心新建物）
+
+所有可点控件统一六态，令牌进 `:root` / `body.dark` 成对块：
+
+| Token | 用途 | 浅色 | 深色 |
 |---|---|---|---|
-| 0 | `chore/ui-audit` | 审计脚本：裸色值、裸 transition、状态类名白名单、重复 modal 骨架；`CONTRIBUTING` 增一条检查项 | 脚本可跑，输出基线数字 |
-| 1 | `refactor/ui-tokens` | L0 角色令牌 + 浅色中性化 + 旧名别名 | 明暗对比截图，**只有颜色变化，无布局变化** |
-| 2 | `refactor/ui-fields` | button / field（开关、复选、单选、滑块、输入框）/ tag | 设置页全控件 + 弹窗按钮 + 批量条 |
-| 3 | `refactor/ui-overlay` | modal / toast / popover 三件套；12 个骨架收敛为 `openModal` | 全部弹窗 + 右键菜单 + 浮层 + toast |
-| 4 | `refactor/ui-pages` | 卡片 / 快捷面板 / 托盘 / 空态 / 滚动条 / 标题栏收口 | 列表、面板、托盘三窗口 |
-| 5 | `fix/ui-matrix` | 4 材质 × 2 主题 × Win10/11 × 125%/150% 校准 | §8 验收清单全过 |
+| `--state-hover` | 悬浮底（卡片/按钮/菜单项/侧栏项**共用**） | **黑 .05**（= 现有 `tier-solid` 值） | 白 .09 |
+| `--state-active` | 按下（= hover 再压一档） | 黑 .09 | 白 .14（配 `scale(.985)` 走 `--dur-fast`） |
+| `--state-selected` | 选中底（批量勾选） | 金 .12 | 金 .20 |
+| `--state-selected-soft` | 当前分类/分段按钮 | accent .10 + 2px 左指示 | accent .18 |
+| `--state-focus` | 键盘焦点环 | `color-mix(in srgb, var(--accent) 70%, transparent)` | 同（accent 已提亮） |
+| `--state-disabled-opacity` | 禁用 | `0.45` + `cursor: not-allowed`（全局一处） | 同 |
+| `--state-danger-hover` | 危险按钮悬浮 | 深红提亮 | 同 |
+| `--track-bg` | 轨道/进度（保留，值加强） | 黑 .10（原 .08 太弱） | 白 .14 |
+| `--scrollbar-thumb[-hover]` | 滚动条（新增，替掉 4 处裸 rgba） | 黑 .16 / .28 | 白 .16 / .28 |
+| `--selection-bg/-fg` | 文本选区（新增，现走浏览器默认蓝） | accent .22 / `--text` | accent .30 / `#fff` |
 
-批 1 是纯值替换（不动选择器），风险最低但观感变化最明显；批 2/3 是新增目录、删旧规则，回滚就是删目录 + `git revert`。
+**收敛动作**（同义合流，这是"不重复造轮子"的实际落点）：
 
----
+```
+--card-hover  →  var(--state-hover)      （卡片不再单独一份）
+--glass-hover →  var(--state-hover)      （控件悬浮层同理）
+--line        →  var(--stroke)           （14 + 22 处调用点一次变对，不动选择器）
+--stroke      →  浅色改黑系 rgba(0,0,0,.10)
+```
 
-## 8. 验收清单
+**规则**：
 
-- [ ] 浅色下逐项可见：卡片描边、列表分隔线、状态栏分隔、hover、输入框边框、开关轨道、滚动条、右键菜单、空态
-- [ ] 键盘 Tab 走一圈：每个可交互元素都出现焦点环，明暗两套颜色都对
-- [ ] 4 档材质 × 明暗：正文 ≥4.5:1、次要 ≥3:1（DevTools 取色）
-- [ ] `grep` 复核：色值字面量只出现在 `tokens.css`；裸 `transition` 0 处；`:active` 覆盖所有可点元素
-- [ ] Win11（办公室）与 Win10（家里）各跑一遍：solid 档文字不吃背景
-- [ ] 125% / 150% 缩放：卡片不截断、弹窗不超屏、焦点环不被裁
-- [ ] 系统「减少动态效果」「高对比度」两个开关下不破版
-
----
-
-## 9. 不做 / 已知风险
-
-**不做**：
-
-- 不改信息架构与布局，不重排侧栏/工具栏/状态栏；
-- 不引第三方 UI 库（打包体积 + 与自绘窗口材质冲突 + 又一套设计语言）；
-- 不改 Rust 侧材质算法（`Tier` 已稳定），只改前端消费方式；
-- 不做「整窗换皮」式重写 —— 现有 HTML 结构与 id 全部保留，改造只发生在样式与生成函数。
-
-**风险**：
-
-- 批 1 会让浅色「突然有边界」，看起来像改了设计 —— 那是修好了，不是坏；
-- 自绘开关/复选会改变点击热区（16px → 36×20），需要手测误触；
-- 浮层统一底面可能让悬浮预览失去辨识度 → 渐变保留在内容层（已在清单里注明）；
-- 一次改 28 项必然有遗漏，所以批 0 的审计脚本必须先进主干，后续每批都跑。
+- 悬浮 ≠ 选中：悬浮=临时提亮/压暗；选中=**底 + 边**至少两通道（现在只有描边）；
+- 焦点环覆盖：`button / a / input / select / textarea / [tabindex]` 全部 `:focus-visible`；
+- 删掉 `input:focus{outline:none}` 这条陷阱（改为统一 `:focus-visible` 规则）；
+- 失焦窗口（`hovers-off`）下无 hover 残留，但选中态仍须可辨。
 
 ---
 
-## 10. 「不重复造轮子」的机制（比方案本身更重要）
+## 5. 全量清单（逐项确认，56 项）
 
-方案做完会再次腐化，除非把约束固化下来：
+图例：**A** 换 token · **B** 补状态 · **C** 微调间距/字号 · **D** 结构微调 · **—** 不动
 
-1. **一个视觉决定只允许一处实现。** 新增控件先查清单（§5 的「归属」列即组件表），没有才新建；
-   新建必须同时补进这张表，否则下一批又会复制一遍。
-2. **页面层禁止写颜色字面量与状态。** 审计脚本拦截，数字不得比基线上升。
-3. **状态类名白名单**：`is-*` 只允许登记过的语义（selected / pinned / missing / disabled / active…），
-   不再新增 `on` 这类无前缀短名。
-4. **改行为/改视觉必须同一次提交改注释**（`CONTRIBUTING` §11 已定），这条对样式同样适用。
+### 5.1 窗口 / 材质 / 标题栏（1–8）
+
+| # | UI | 动作 | 备注 |
+|---|---|---|---|
+| 1 | 窗口材质分档 | — | `effects.rs` Tier 完整，不动 |
+| 2 | `--material-rgb` / `--glass-alpha` | — | 已按档 + 用户滑块 |
+| 3 | 窗口圆角 `--radius` | — | JS 按 tier 上限 |
+| 4 | `.app::after` 叠加层 | A | 收进 `--app-overlay`（现 9 处 body.dark 之一） |
+| 5 | **`--stroke` 浅色值** | **A（核心）** | 改黑系，`--line` 合一；这一步解决大半「看不清」 |
+| 6 | `body.tier-solid` 覆盖 | A | 只保留 alpha/depth，删掉与主题重复的中性值 |
+| 7 | 标题栏 `.titlebar` / `.wc-btn` | B | focus-visible、active、close 危险色 |
+| 8 | 主题日/月图标 | A | 改用 `display` 按类切换，不靠 `body.dark` 覆盖 |
+
+### 5.2 列表 / 卡片（9–18）
+
+| # | UI | 动作 | 备注 |
+|---|---|---|---|
+| 9 | `.card` 默认面 | A | `--card-bg` 保留（浅色面用白是对的） |
+| 10 | `.card` hover | **B（用户投诉点）** | 浅色 + solid 档下 `--card-bg .98` 与 `#fff` 无可感差 → 改用黑 .05 叠加 |
+| 11 | `.card.is-selected` | B | 底（金 .12）+ `--select` 描边；inset 不能改外扩（会被滚动容器裁切） |
+| 12 | `.card.is-pinned` | A | accent 边，与选中金边可区分 |
+| 13 | `.card.is-missing` | A/B | 红系徽章 + 压暗，查 solid 档对比 |
+| 14 | `.tag-*` 14 色徽章 | C | 色板成对，只查 11px 字号在 solid 下对比 |
+| 15 | `.card-time` / 状态栏计数 | A | solid 档若不够则提高 `--text-dim` |
+| 16 | 骨架行 `.vl-skeleton` | B | 底色 `--track-bg`，动效走 token |
+| 17 | 滚动条 `::-webkit-scrollbar` | A | 4 处裸 rgba → `--scrollbar-thumb*` |
+| 18 | 文本选区 `::selection` | A | 新增令牌，现在是默认蓝 |
+
+### 5.3 工具栏 / 搜索 / 分段 / 批量条（19–25）
+
+| # | UI | 动作 |
+|---|---|---|
+| 19 | `.search` 输入框 | B：`focus-within` 边框转 accent + 环；placeholder 对比 |
+| 20 | `.seg` 分段（去重/截图格式） | B：`.on` 与 hover 拉开三态；补 focus |
+| 21 | `.selectbar` 批量条 | B：取消/删除 focus 环（2.6.9 调过间距） |
+| 22 | `.btn-ghost` / `.btn-primary` / `.btn-danger` | **A/B：抽 `.btn` 基类**，三变体只改颜色（几何已漂移必须在同一次统一） |
+| 23 | 下载态 `.btn-ghost.is-downloading` | C：进度文字对比 |
+| 24 | 热键录制 `.hotkey-btn.is-recording` | A：录制脉冲用 accent + 动效 token |
+| 25 | 键盘可达性 | B：Tab 序、Esc 关弹窗收敛到一处、弹窗焦点陷阱 |
+
+### 5.4 设置页（26–34）
+
+| # | UI | 动作 |
+|---|---|---|
+| 26 | `.settings-tabs` | B：active 与 hover 分离；focus-visible |
+| 27 | `.block` / `.row` | A：边框与底走 token |
+| 28 | 原生 `input[type=checkbox]` | **D 决策门**（§7）：先实测，不默认自绘 |
+| 29 | `input[type=number]` / `range` | B：focus、thumb 深浅可见性 |
+| 30 | `.hint` / `.row-desc` | A：`--text-dim`，solid 档确保 AA |
+| 31 | 危险区块 `.block.is-danger` | B：红边与说明对比 |
+| 32 | 缓存路径 `.cache-path` | C：`word-break` 已有，颜色走 token |
+| 33 | `.cache-box` | A：底色 `--glass-strong` → 与实底档统一 |
+| 34 | 设置页滚动容器 | B：`scrollbar-gutter` 已有，补 token |
+
+### 5.5 弹窗 / 遮罩 / 引导 / 详情（35–43）
+
+| # | UI | 动作 |
+|---|---|---|
+| 35 | `.modal-mask` 遮罩 | A：底色 → `--mask-bg`（现两处裸 `rgba(0,0,0,.28)` 之一） |
+| 36 | `.modal` 卡片 | A：`--solid-bg` + 边 + 阴影成套 |
+| 37 | `.modal-title` / `.modal-text` | C：字号层级表（15 / 13） |
+| 38 | `.modal-actions` 按钮对 | B：与 §5.3 同一套按钮态 |
+| 39 | `.modal-check` 勾选行 | B：hover / focus |
+| 40 | **12 个弹窗骨架** | **D：收敛为 `openModal({title, text, actions, tone})`**，骨架只写一次 |
+| 41 | `.modal.is-tour` 引导 | A：大量硬编码渐变 → `--tour-*`；`body.dark` 5 处覆盖收进变量 |
+| 42 | 详情 `.detail-body` | A：`body.dark` 覆盖收变量；focus-visible 已有 |
+| 43 | 引导 12 个步骤块 | C：排版复用 modal 基底 |
+
+### 5.6 轻反馈（44–49）
+
+| # | UI | 动作 |
+|---|---|---|
+| 44 | `.toast` | A/B：底 `--solid-bg` 已用；补出现动效走 token；solid 档描边可见 |
+| 45 | 缓存迁移 `.move-mask` / `.move-box` | A：裸 `rgba(0,0,0,.28)` → `--mask-strong` |
+| 46 | 更新横幅 `#update-banner` | A/B：与 toast 同一层级语言 |
+| 47 | `body.is-selecting` 禁用侧栏/状态栏 | B：`--state-disabled-opacity` 统一 |
+| 48 | 原生 `title` 提示 | — 保留；若做自绘 tooltip **只建一个** `.tip`，禁止各写一份 |
+| 49 | 空态 `.empty` / 加载失败 | A/C：`title > sub > tip` 色阶层级 |
+
+### 5.7 浮层 / 右键菜单 / 托盘（50–53）
+
+| # | UI | 动作 |
+|---|---|---|
+| 50 | `.hover-preview` 悬浮预览 | A：`--hp-*` 已很细，**只做**与 `--state-*` 对齐 + solid 档边框加强（渐变保留，是它的识别特征） |
+| 51 | 右键菜单 `.ctx-menu` / `.ctx-item` | **B：项 hover/active/disabled 与列表同语义**（JS 动态生成，易漏） |
+| 52 | **托盘菜单（自绘）** | A/B：`tray.css` 只 80 行、`@import` 主表；补 hover/键盘/危险项 —— 外部稿误判为系统绘制，实际要改 |
+| 53 | 快捷面板 `.p-row.is-sel` | A/B：选中底对齐 `--state-selected*`（与主列表同一套） |
+
+### 5.8 无障碍 / 系统档（54–56）
+
+| # | UI | 动作 |
+|---|---|---|
+| 54 | `prefers-reduced-motion` | 校验：新状态不引入裸动画（已有 transition 关停） |
+| 55 | `forced-colors` 高对比度 | **A：新增**（现 0 处），补兜底边框 |
+| 56 | DPI 125% / 150% | C：半径/间距走 4px 栅格，查卡片截断与弹窗超屏 |
+
+---
+
+## 6. 材质 × 主题矩阵（验收维度）
+
+| 系统 | 可用档 | 前端表现 | 校验重点 |
+|---|---|---|---|
+| Win11 | `system-backdrop` / `mica` / `acrylic` / `solid` | 真模糊，面 alpha 可低 | 亮桌面透光时文字对比 |
+| Win10 | `acrylic`（tint 压 8%）/ `solid` | 几乎无模糊，靠 `--material-rgb` + alpha | **本轮重点**：`--stroke` 修好前，浅色 acrylic 档正是最看不清的组合 |
+
+**每个组合必须成立的三条不变量**：
+
+1. 正文对比度 ≥ 4.5:1，次要文字 ≥ 3:1（背景可能是桌面、文档或纯白）；
+2. 卡片/弹窗边界可见 —— 靠中性描边，不靠阴影；
+3. 三态叠加优先级：聚焦 > 选中 > 悬浮，且互不吞没。
+
+四象限（浅/深 × 模糊/实底）为最小验收集；`mica` 与 `system-backdrop` 归入「模糊」象限。
+
+---
+
+## 7. 开关决策门（不默认造组件）
+
+| 选项 | 条件 |
+|---|---|
+| 保持原生 `checkbox` + `accent-color` | **默认**。成本 0，深浅已可用 |
+| 自绘 `.switch` | **仅当**实测不达标时做。判定标准：浅/深 × solid/acrylic 四象限中，任一象限里轨道与背景的对比 < 3:1，或勾选态不可辨 |
+| 引入 headless UI 库 | 禁止 |
+
+做也只做一个 `.switch` 进主表，设置页与未来面板共用。
+
+---
+
+## 8. 分期落地（每期可独立发测、可整体回滚）
+
+| 期 | 分支 | 内容 | 工作量 | 验收 |
+|---|---|---|---|---|
+| 0 | `chore/ui-audit` | 审计脚本：①规则体内色值清单（当前 72）②状态覆盖矩阵（164 类 × hover/focus/active/disabled）③**值级**对比度对比（不是键集合 diff）④`body.dark` 组件级覆盖清单（9） | S | 脚本可跑，输出基线；进 `CONTRIBUTING` 检查项 |
+| 1 | `refactor/ui-state-tokens` | **核心**：`--stroke` 浅色改黑系 + `--line` 合一 + `--state-*` 全组 + 焦点环统一 + hover 收敛（`--card-hover`/`--glass-hover` → `--state-hover`） | M | 浅色 × solid/acrylic 下边框、hover、输入框焦点肉眼可见；暗色无回退 |
+| 2 | `refactor/ui-controls` | `.btn` 基类 + 三变体收敛；`.seg` / `.nav-item` / `.search` / `.hotkey-btn` / `.p-row.is-sel` 状态补齐 | M | 键盘 Tab 全绿；三态互不吞没 |
+| 3 | `refactor/ui-overlay` | 12 个 modal 骨架 → `openModal()`；toast / move-box / update-banner / ctx-menu 统一底面与状态；遮罩 token | M | 全部弹窗 + 右键菜单 + toast |
+| 4 | `refactor/ui-settings-pages` | 设置页全控件（含开关决策门）、卡片与徽章、tour/detail 收 token、空态、滚动条 | M | 设置页四象限抽检 |
+| 5 | `fix/ui-matrix` | 4 档 × 2 主题 × Win10/11 × 125%/150% 校准；`forced-colors` 兜底；`::selection` | S | §9 DoD 全过 |
+
+**依赖关系**：期 1 必须先做 —— 它改的是值，后面所有「换 token」的动作都依赖这些值是对的。
+期 2/3/4 之间互不阻塞，可分头做，但都要在期 1 之后。
+
+---
+
+## 9. Definition of Done
+
+```text
+1. 悬浮：浅/深下相对默认有可感知差异（并排截图能指出）
+2. 选中：与悬浮同时出现仍可区分（底 + 边至少两通道）
+3. 键盘：Tab 可见焦点环；Enter/Space 激活不依赖 hover；Esc 关弹窗
+4. 失焦窗口（hovers-off）：无 hover 残留，选中态仍可辨
+5. 四象限（浅/深 × 模糊/实底）各抽 10 处无「灰上加灰」
+6. 规则体内色值字面量：72 → 0（白名单：纯白高光、阴影黑）
+7. body.dark 组件级覆盖：9 → 装饰性白名单（tour 渐变、scrollbar 除外归零）
+8. 全部 :hover 均在 html:not(.hovers-off) 下；:active 覆盖所有可点元素
+9. 状态类名收敛：on/is-on/is-active 合流，白名单外不新增
+10. vite build 通过；不新增运行时依赖
+```
+
+---
+
+## 10. 不做清单
+
+| 不做 | 原因 |
+|---|---|
+| 引入组件库 / 设计系统 npm 包 | 透明窗、Win10 acrylic、体积、中文场景全不匹配 |
+| 新建第二套变量文件 / 角色化重命名 | 问题在值不在名；改名只制造大 diff（§0.4） |
+| 改 Rust 材质分档逻辑 | `Tier` 已按 build 显式分档并有日志 |
+| 重写 `animations.css` | 已集中且合格 |
+| 为深浅各写一套组件规则 | 违反既有三条约定 |
+| 一次性 3000 行重排版 | 分期 diff，每期可回滚 |
+| 本轮做字号阶梯/字体令牌 | 与「看不清」无关，避免扩大范围 |
+
+---
+
+## 11. 两版分歧的裁决记录（防以后再吵）
+
+| 分歧 | 外部稿 | v1 | 裁决 | 依据 |
+|---|---|---|---|---|
+| 令牌要不要角色化重命名 | 不新建，扩展 `:root` | 建 `--surface-*` 层 + 别名迁移 | **取外部稿** | `tier-solid` 已证明「值对了就够」，改名无收益（§0.4） |
+| 硬编码色基线 | 58 | 200 | **72**（规则体内） | 197 总数中 125 在令牌块内属合法定义 |
+| 托盘菜单 | 系统绘制，不动 | 纳入清单 | **取 v1** | `tray.html` 自绘，`tray.css` 存在 |
+| 开关 | 先实测再定 | 直接自绘 | **取外部稿** | 无证据不造组件；给了判定标准（§7） |
+| 审计方式 | 键集合 diff | 硬编码清单 | **两者都要 + 值级对比** | 键集合实测是干净的，只做它会漏掉真问题 |
+| 「看不清」根因 | 状态缺失 + 局部覆盖 | 浅色复用深色值 | **中性值只在 solid 档生效** | `styles.css:299` vs `:root`（§0.3） |
