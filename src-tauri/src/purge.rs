@@ -76,6 +76,27 @@ pub enum FailureKind {
     Denied(String),
 }
 
+/// 两条分支共用的前置校验：必须是绝对路径，且真的存在。
+///
+/// `Ok(Some)` 可处理 / `Ok(None)` 已不存在（调用方计入 `missing`）/ `Err` 不可处理。
+/// 抽出来是因为「什么算可处理目标」必须只有一份定义 —— 永久删除与回收站两条分支
+/// 各写一遍时，任何一侧加规则（拒绝 UNC、拒绝符号链接、拒绝系统目录…）都只会改一半，
+/// 行为分叉后极难发现（审查 §4）。目录检查**不**在这里：永久删除拒绝目录，
+/// 回收站放行目录，这是两条分支的真实差异，不属于公共部分。
+fn precheck(raw: &str) -> Result<Option<std::path::PathBuf>, PurgeFailure> {
+    let path = std::path::PathBuf::from(raw);
+    if !path.is_absolute() {
+        return Err(PurgeFailure {
+            path: raw.to_string(),
+            kind: FailureKind::NotAbsolute,
+        });
+    }
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(path))
+}
+
 /// 处理一批本地路径。返回（永久删除数，移入回收站数，失败说明）。
 ///
 /// **目录始终走回收站**，与 `permanent` 无关 —— 递归永久删除不可逆，一次判断错
@@ -89,18 +110,17 @@ pub fn purge(paths: &[String], permanent: bool) -> PurgeReport {
 
     let mut report = PurgeReport::default();
     for raw in paths {
-        let path = std::path::Path::new(raw);
-        if !path.is_absolute() {
-            report.failures.push(PurgeFailure {
-                path: raw.clone(),
-                kind: FailureKind::NotAbsolute,
-            });
-            continue;
-        }
-        if !path.exists() {
-            report.missing += 1;
-            continue;
-        }
+        let path = match precheck(raw) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                report.missing += 1;
+                continue;
+            }
+            Err(f) => {
+                report.failures.push(f);
+                continue;
+            }
+        };
         if path.is_dir() {
             // 本次单独按回收站处理，不碰全局设置
             let sub = move_to_recycle(std::slice::from_ref(raw));
@@ -109,7 +129,7 @@ pub fn purge(paths: &[String], permanent: bool) -> PurgeReport {
             report.failures.extend(sub.failures);
             continue;
         }
-        match std::fs::remove_file(path) {
+        match std::fs::remove_file(&path) {
             Ok(()) => report.deleted += 1,
             Err(e) => report.failures.push(PurgeFailure {
                 path: raw.clone(),
@@ -128,18 +148,17 @@ pub fn move_to_recycle(paths: &[String]) -> PurgeReport {
     let mut report = PurgeReport::default();
 
     for raw in paths {
-        let path = std::path::Path::new(raw);
-        if !path.is_absolute() {
-            report.failures.push(PurgeFailure {
-                path: raw.clone(),
-                kind: FailureKind::NotAbsolute,
-            });
-            continue;
-        }
-        if !path.exists() {
-            report.missing += 1;
-            continue;
-        }
+        let path = match precheck(raw) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                report.missing += 1;
+                continue;
+            }
+            Err(f) => {
+                report.failures.push(f);
+                continue;
+            }
+        };
         // 目录也放行：`SHFileOperationW` + `FOF_ALLOWUNDO` 会把整棵目录树
         // 移进回收站，用户随时可以还原 —— 这比「删不掉」和「永久递归删除」
         // 都更合适。永久删除那条分支仍然拒绝目录（在 `purge` 里）。

@@ -408,14 +408,28 @@ pub(crate) fn with_history<T>(f: impl FnOnce(&[crate::store::Meta]) -> T) -> T {
 /// 来源有两种：实体文件 `files/<id>.txt`（完整清单）与内联的 `files` 字段
 /// （老索引形态、以及常驻的前 N 条）。三处调用方共用这一份实现
 /// （`purge_local_files` / `check_files_alive` / `probe_purge_targets`）。
+/// 一个条目的文件清单：优先读实体文件，读不出来**回退常驻清单**。
+///
+/// 不能把「读失败」当成「这个条目没有文件」：`purge` 拿到空清单就直接跳过，
+/// 用户看到「已删除 N 项」而磁盘上的文件原封不动（审查 E1′）。
+/// 实体可能因为换机器 / 换 Windows 账户解不开密（DPAPI），也可能被外部删掉 ——
+/// 这两种情况下 `files` 里的常驻前 N 条仍然是可信的（它随索引一起加密存储）。
 fn resolve_paths(dir: &PathBuf, rel: Option<String>, inline: Vec<String>) -> Vec<String> {
     match rel {
-        Some(r) => read_text_entity(dir, &r)
-            .unwrap_or_default()
-            .lines()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect(),
+        Some(r) => match read_text_entity(dir, &r) {
+            Ok(text) => text
+                .lines()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+            Err(e) => {
+                crate::log_warn!(
+                    "[clipboard] 文件清单读取失败，回退常驻清单 {} 条：{e}",
+                    inline.len()
+                );
+                inline
+            }
+        },
         None => inline,
     }
 }
@@ -6725,6 +6739,23 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 实体清单读不出来时**必须**回退到常驻 `files`，不能返回空。
+    ///
+    /// 空清单会让 `purge` 直接跳过这个条目：用户看到「已删除 N 项」，磁盘上的
+    /// 文件却还在（审查 E1′）。实体可能因换机器/换账户解不开密，也可能被外部删。
+    #[test]
+    fn resolve_paths_falls_back_to_inline_when_entity_missing() {
+        let dir = std::env::temp_dir().join("qingtie-resolve-fallback");
+        let _ = std::fs::create_dir_all(&dir);
+        let inline = vec!["C:\\a.txt".to_string(), "C:\\b.txt".to_string()];
+        let got = resolve_paths(
+            &dir,
+            Some("files/definitely-not-here.txt".to_string()),
+            inline.clone(),
+        );
+        assert_eq!(got, inline, "读失败应回退常驻清单，而不是当成「没有文件」");
+    }
 
     /// 单测只关心「有没有合并」，把返回的 `Option<String>`（命中的条目 id）
     /// 压成 bool。生产代码要用 id 去置顶，所以返回值不能是 bool。
