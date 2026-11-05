@@ -459,12 +459,17 @@ button:active:not(:disabled) {
 /* 滚动容器内的元素环要**内缩**：外扩 2px 会被 .history / .view / .ctx-menu 的
    overflow 裁掉，只留左右两边、上下没有，看着像坏掉的边框。
    这条与 .card.is-selected 当初被迫改成 inset 是同一个原因。 */
+/* 环宽 2px + offset -2px = 环完全落在元素边界内，**与悬浮底色同尺寸**。
+   offset 取正值会外扩一圈，小图标按钮（窗口控制 34×30、搜索清除 20×20）尤其明显 ——
+   实测「三个聚焦环太大了，与聚焦底色大小一致就行」。 */
 .card:focus-visible,
 .nav-item:focus-visible,
 .ctx-item:focus-visible,
 .settings-tabs .tab:focus-visible,
 .p-row:focus-visible,
-.detail-body:focus-visible {
+.detail-body:focus-visible,
+.wc-btn:focus-visible,
+.search-clear:focus-visible {
   outline-offset: -2px;
 }
 
@@ -1100,16 +1105,46 @@ html:not(.hovers-off) .search-clear:hover {
   gap: 8px;
 }
 
-.btn-ghost {
+/* ══ 按钮基类 ═══════════════════════════════════════════════════════
+   几何与排版**只有一个来源**，变体只负责颜色。
+
+   原来三个变体各自写一遍 height / padding / font-size，且已经漂移：
+   danger 是 32px / 0 14px / 13px，另两个是 30 / 0 12 / 12px ——
+   同一排按钮并排放着，高度差 2px、字号差 1px，肉眼能看出「不齐」。
+
+   刻意同时接受 `.btn` 与三个旧类名：老 HTML 写的是 `class="btn-ghost"`，
+   为了不逐个改模板（改漏一处就回到旧几何），让两者指向同一组几何；
+   新代码写 `class="btn btn-xxx"` 即可。 */
+.btn,
+.btn-ghost,
+.btn-primary,
+.btn-danger {
   height: 30px;
   padding: 0 12px;
-  border: 1px solid var(--border-control);
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  background: var(--glass);
-  color: var(--text-dim);
   font-family: var(--font);
   font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
   cursor: default;
+}
+
+.btn-ghost {
+  border-color: var(--border-control);
+  background: var(--glass);
+  color: var(--text-dim);
+}
+
+/* 分段控件：原来 hover / active 一条都没有 —— 鼠标移上去毫无反馈，
+   用户不知道「这两个选项是可点的」。按下由通用 button:active 覆盖，这里只补 hover。 */
+html:not(.hovers-off) .seg:not([data-disabled]) button:hover {
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+  color: var(--text);
 }
 
 html:not(.hovers-off) .btn-ghost:hover {
@@ -1119,15 +1154,8 @@ html:not(.hovers-off) .btn-ghost:hover {
 /* 主操作按钮（首次运行引导的「开启自启」「后台运行」这类推荐项）：
    跟 btn-ghost 同一尺寸，但用强调色实底，让「推荐的那个」一眼可辨。 */
 .btn-primary {
-  height: 30px;
-  padding: 0 12px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
   background: var(--accent);
   color: #fff;
-  font-family: var(--font);
-  font-size: 12px;
-  cursor: default;
 }
 
 html:not(.hovers-off) .btn-primary:hover {
@@ -2800,16 +2828,11 @@ body.dark .detail-body {
 }
 
 .btn-danger {
+  /* 布局归属，不属于几何 */
   align-self: flex-start;
-  height: 32px;
-  padding: 0 14px;
-  border: 1px solid var(--danger);
-  border-radius: var(--radius-sm);
+  border-color: var(--danger);
   background: transparent;
   color: var(--danger);
-  font-family: var(--font);
-  font-size: 13px;
-  cursor: default;
 }
 
 html:not(.hovers-off) .btn-danger:hover {
