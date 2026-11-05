@@ -1093,12 +1093,6 @@ html:not(.hovers-off) .btn-primary:hover {
   opacity: 0.55;
 }
 
-.history .load-more {
-  flex: 0 0 auto;
-  height: 1px;
-  margin-top: -8px;
-}
-
 .card {
   display: flex;
   gap: 10px;

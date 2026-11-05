@@ -122,21 +122,14 @@ test("页缓存：不同 filterKey 分开存，切换筛选不会串页", async 
   assert.ok(api.peek(99, 0));
 });
 
-test("fetchCounts / fetchIds / deleteByFilter 透传并失效缓存", async () => {
+test("deleteByFilter 透传参数并失效页缓存", async () => {
   const { invoke, calls } = fakeBackend({
-    history_count: () => 123,
-    list_ids: (args) => ({ ids: ["a", "b"], offset: args.offset }),
     delete_by_filter: () => ({ deleted: 2, note: null }),
     get_history_window: () => onePage(0),
   });
   const api = createHistoryApi(invoke);
   await api.fetchWindow({ filter: buildFilter(), offset: 0, limit: 200 });
   assert.ok(api.peek(7, 0));
-
-  assert.equal(await api.fetchCounts(buildFilter()), 123);
-  const page = await api.fetchIds(buildFilter(), 40, 20);
-  assert.deepEqual(page.ids, ["a", "b"]);
-  assert.equal(page.offset, 40);
 
   const res = await api.deleteByFilter(buildFilter({ view: "text" }), true);
   assert.equal(res.deleted, 2);

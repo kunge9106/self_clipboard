@@ -96,16 +96,6 @@ export function createHistoryApi(invoke, { cachePages = 10 } = {}) {
     return res;
   }
 
-  /** 过滤后的条数（用于状态栏与「全选当前视图」）。 */
-  async function fetchCounts(filter) {
-    return invoke("history_count", { filter });
-  }
-
-  /** 取一段 id（批量操作、文件失效检测用），不拉全量。 */
-  async function fetchIds(filter, offset, limit) {
-    return invoke("list_ids", { filter, offset, limit });
-  }
-
   /**
    * 「清空当前视图」：把筛选条件交给后端，由它自己算 id 并删。
    *
@@ -128,7 +118,13 @@ export function createHistoryApi(invoke, { cachePages = 10 } = {}) {
     return res;
   }
 
-  /** 直接从缓存里取一页（渲染时用，避免同一页重复走 IPC）。 */
+  /**
+   * 直接从缓存里取一页（渲染时用，避免同一页重复走 IPC）。
+   *
+   * 生产代码目前没有直接调用它 —— 但 `test/history-api.test.mjs` 用它验证
+   * 「最近 10 页 LRU」是否生效。删掉就得把测试改成绕过缓存再数 IPC，反而更差，
+   * 所以保留（审查 §11 把它列为死导出，实测有测试依赖）。
+   */
   function peek(filterKey, offset) {
     return cache.get(filterKey)?.get(offset) ?? null;
   }
@@ -136,11 +132,8 @@ export function createHistoryApi(invoke, { cachePages = 10 } = {}) {
   return {
     buildFilter,
     fetchWindow,
-    fetchCounts,
-    fetchIds,
     deleteByFilter,
     invalidate,
     peek,
-    _cacheSize: () => cache.size,
   };
 }

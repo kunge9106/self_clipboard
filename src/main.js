@@ -43,7 +43,10 @@ const appWindow = getCurrentWindow();
 function reportFrontend(level, tag, msg) {
   try {
     invoke("frontend_log", {
-      level,
+      // 统一大写：调用点历史上混用了 "warn" / "WARN" / "ERROR"，检索日志时
+      // 只搜大写会漏掉小写的那几条（审查 O2）。入口收口比逐个改调用点可靠 ——
+      // 新写的调用忘了规范也不会再分叉。
+      level: String(level).toUpperCase(),
       tag,
       msg: String(msg).slice(0, 2000),
     }).catch(() => {});
@@ -796,13 +799,17 @@ function bindClearViewModal() {
     modal.hidden = true;
     const t = clearViewTargets;
     if (!t) return;
-    if (t.window) {
-      await doClearViewFilter({
-        includePinned: document.getElementById("clear-view-pinned").checked,
-        includeFavorites: document.getElementById("clear-view-fav").checked,
-      });
+    if (!t.window) {
+      // 目前 `clearViewTargets` 只有「整窗 / 当前筛选」一种赋值（`:746`），所以这条
+      // 分支现在走不到。写出来而不是留空 else：将来加第二种清空入口（按时间范围、
+      // 按分类）时，漏实现会在这里留下一条日志，而不是「点了确认什么都没发生」。
+      reportFrontend("WARN", "clear-view", "未知的清空目标类型，已忽略");
       return;
     }
+    await doClearViewFilter({
+      includePinned: document.getElementById("clear-view-pinned").checked,
+      includeFavorites: document.getElementById("clear-view-fav").checked,
+    });
   };
 }
 
