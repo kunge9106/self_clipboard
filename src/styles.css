@@ -914,7 +914,8 @@ html:not(.hovers-off) .nav-item:hover {
   align-items: center;
   gap: 10px;
   max-width: calc(100% - 24px);
-  padding: 7px 8px 7px 14px;
+  /* 8×16：左侧给文字留出呼吸，右侧 8 让关闭按钮贴边不悬空（原 7×14 是档外值） */
+  padding: 8px 8px 8px 16px;
   /* 浮层的边界靠 elev-2 的投影说明，不靠描边 —— 描边会让它看起来像嵌在页面里。 */
   border-radius: 10px;
   background: var(--glass-strong);
@@ -1626,8 +1627,9 @@ body.round .tag {
   z-index: var(--z-menu);
   min-width: 132px;
   /* 内边距 + 行距：条目之间留一丝缝，悬浮高亮块才不会彼此贴死成一整块。
-     走 --gap-row-dense（密集菜单档），与侧栏的 --gap-row 同属一套间距系统。 */
-  padding: 5px;
+     走 --gap-row-dense（密集菜单档），与侧栏的 --gap-row 同属一套间距系统。
+     内距 4px 落在 4px 栅格上（原来是 5）。 */
+  padding: 4px;
   gap: var(--gap-row-dense);
   display: flex;
   flex-direction: column;
@@ -1702,11 +1704,13 @@ html:not(.hovers-off) .ctx-item.danger:hover {
    白线在上面等于隐形 —— 于是用户只看到一段莫名的空白，反馈「间距看着很奇怪」。
    --track-bg 在明/暗两套主题下都有定义，语义也正是「必须看得见的分隔」。 */
 .ctx-sep {
+  /* 分隔线走 --stroke（层级线），原来借用 --track-bg（进度条空轨）——
+     两个语义不同的东西共用一个值，调其中一个就会误伤另一个。 */
   height: 1px;
   /* 左右 12px = .ctx-item 的水平内边距，让分隔线两端与条目文字对齐，
      不会比文字多凸出去一截（原来 8px，线与文字错开，看着别扭）。 */
   margin: 4px 12px;
-  background: var(--track-bg);
+  background: var(--stroke);
 }
 
 /* 设置页 */
@@ -3004,7 +3008,8 @@ html:not(.hovers-off) .btn-danger:hover {
   left: 50%;
   bottom: 20px;
   transform: translateX(-50%) translateY(10px);
-  padding: 8px 18px;
+  /* 8×16：落在 4px 栅格（原来是 8×18） */
+  padding: 8px 16px;
   border-radius: var(--radius-sm);
   background: var(--solid-bg);
   /* 浮层的边界靠 elev-2 的投影说明，不靠描边 —— 描边会让它看起来像嵌在页面里。 */
@@ -3038,7 +3043,8 @@ html:not(.hovers-off) .btn-danger:hover {
 
 .move-box {
   width: 260px;
-  padding: 16px 18px;
+  /* 16：四边一致（原来是 16×18） */
+  padding: 16px;
   border-radius: var(--radius-sm);
   background: var(--solid-bg);
   /* 浮层的边界靠 elev-2 的投影说明，不靠描边 —— 描边会让它看起来像嵌在页面里。 */
