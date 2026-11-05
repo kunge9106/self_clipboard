@@ -61,6 +61,11 @@ pub struct PurgeReport {
 }
 
 /// 一条失败记录。
+///
+/// 字段只在**开发版**的 WARN 日志里读取（发布版刻意不写路径，见
+/// `clipboard::failure_detail`），所以 release 构建里它们"从未被读"——
+/// 用 cfg 条件关掉 dead_code，而不是删字段：诊断能力要留在开发版。
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub struct PurgeFailure {
     /// 出错的路径。**只用于开发版日志** —— 路径里带着文件名，属于内容级信息，
     /// 发布版不写进日志（见 `clipboard::purge_local_files`）。
@@ -69,6 +74,7 @@ pub struct PurgeFailure {
 }
 
 /// 失败原因。分类而不是拼字符串，调用方据此决定怎么说、要不要记 WARN。
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub enum FailureKind {
     /// 不是绝对路径：索引损坏或调用方构造错误
     NotAbsolute,
