@@ -312,6 +312,7 @@ pub fn run() {
             logger::frontend_log,
             clipboard::copy_back,
             clipboard::check_files_alive,
+            clipboard::probe_purge_targets,
             clipboard::cache_info,
             clipboard::pick_cache_dir,
             clipboard::open_cache_dir,

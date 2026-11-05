@@ -403,6 +403,52 @@ pub(crate) fn with_history<T>(f: impl FnOnce(&[crate::store::Meta]) -> T) -> T {
 
 /// 处理条目引用的本地文件（回收站 / 永久删除），返回给前端的提示串。
 ///
+/// 把「路径来源」读成路径清单（可能读盘 + 解密）。
+///
+/// 来源有两种：实体文件 `files/<id>.txt`（完整清单）与内联的 `files` 字段
+/// （老索引形态、以及常驻的前 N 条）。三处调用方共用这一份实现
+/// （`purge_local_files` / `check_files_alive` / `probe_purge_targets`）。
+fn resolve_paths(dir: &PathBuf, rel: Option<String>, inline: Vec<String>) -> Vec<String> {
+    match rel {
+        Some(r) => read_text_entity(dir, &r)
+            .unwrap_or_default()
+            .lines()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect(),
+        None => inline,
+    }
+}
+
+/// 一个条目关联的本地文件路径清单。
+fn item_file_paths(dir: &PathBuf, item: &crate::store::Meta) -> Vec<String> {
+    resolve_paths(dir, item.files_rel(), item.files.clone().unwrap_or_default())
+}
+
+/// 失败明细，用于 WARN 日志。
+///
+/// **发布版不写路径**：路径里带着文件名（「离婚协议书.docx」），用户把日志发到
+/// 群里排查「删除失败」时，内容就跟着出去了（代码审查 S1）。开发版保留 ——
+/// 否则诊断「文件明明在桌面却报失败」只能靠猜。
+#[cfg(debug_assertions)]
+fn failure_detail(failures: &[crate::purge::PurgeFailure]) -> String {
+    use crate::purge::FailureKind;
+    let items: Vec<String> = failures
+        .iter()
+        .map(|f| match &f.kind {
+            FailureKind::NotAbsolute => format!("{}（不是绝对路径）", f.path),
+            FailureKind::Denied(e) => format!("{}（{e}）", f.path),
+        })
+        .collect();
+    format!("：{}", items.join("；"))
+}
+
+#[cfg(not(debug_assertions))]
+fn failure_detail(_failures: &[crate::purge::PurgeFailure]) -> String {
+    // 只说「有失败」，不落盘具体路径
+    String::new()
+}
+
 /// **两道闸**，缺一不可：
 ///   1. 前端必须显式要求（`delete_local_files = true`）—— 它来自用户在弹窗里的确认；
 ///   2. 设置里必须已开启 `delete_files_with_item` —— 防止前端 bug 或误调用直接把
@@ -415,34 +461,20 @@ fn purge_local_files(items: &[crate::store::Meta]) -> Option<String> {
     if !cfg.delete_files_with_item {
         return None;
     }
-    // 路径有两个来源，缺一不可：
-    //   · `files` 只是**常驻的前 N 条**（`FILES_RESIDENT_MAX`，为省内存）；
-    //   · 完整清单在实体文件 `files/<id>.txt` 里（`files_rel()`）。
-    // 原来只读 `files`，实体形态的条目一条都取不到 → 用户看到确认框弹了、
-    // 选了「移入回收站 / 永久删除」，但本地文件纹丝不动。
     let Some(dir) = DIR.get() else {
         return None;
     };
     let paths: Vec<String> = items
         .iter()
         .filter(|i| i.kind == "files")
-        .flat_map(|i| match i.files_rel() {
-            Some(rel) => read_text_entity(dir, &rel)
-                .unwrap_or_default()
-                .lines()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>(),
-            None => i.files.clone().unwrap_or_default(),
-        })
+        .flat_map(|i| item_file_paths(dir, i))
         .collect();
     if paths.is_empty() {
         return None;
     }
 
-    let total = paths.len();
-    // 诊断：把每条路径的判定结果记下来。「文件明明在桌面、却报未能处理」这种
-    // 反馈，只看结果猜不出来 —— 是路径不对、是目录、还是权限，必须逐条看。
+    // 逐条判定只在开发版记：路径里带文件名，发布版写进日志等于把用户内容带出本机。
+    #[cfg(debug_assertions)]
     for p in &paths {
         let path = std::path::Path::new(p);
         crate::log_print!(
@@ -452,33 +484,41 @@ fn purge_local_files(items: &[crate::store::Meta]) -> Option<String> {
             path.is_file()
         );
     }
-    let (deleted, recycled, failed) = crate::purge::purge(&paths, cfg.delete_files_permanent);
+
+    let total = paths.len();
+    let report = crate::purge::purge(&paths, cfg.delete_files_permanent);
+    let crate::purge::PurgeReport {
+        deleted,
+        recycled,
+        missing,
+        failures,
+    } = report;
+    let real = failures.len();
 
     // 结果分四类说清楚：永久删除 / 移入回收站 / 原本已不存在 / 真失败。
-    // 「文件夹走回收站」与用户的「永久删除」设置无关，必须单独说明，
-    // 否则用户会以为设置被偷偷改了。
+    //
+    // **回收站那一句必须按模式分开说**（代码审查 S2）：非永久模式下文件与文件夹
+    // 都进回收站，说成「N 个文件夹」会让删了 5 个普通文件的用户以为程序删错了；
+    // 永久模式下只有目录进回收站（文件已被永久删除），这时才是「文件夹」。
     let mut parts: Vec<String> = Vec::new();
     if deleted > 0 {
         parts.push(format!("已永久删除 {deleted} 个"));
     }
     if recycled > 0 {
-        parts.push(format!("{recycled} 个文件夹已移入回收站（可还原）"));
+        parts.push(if cfg.delete_files_permanent {
+            format!("{recycled} 个文件夹已移入回收站（可还原）")
+        } else {
+            format!("已移入回收站 {recycled} 个（可还原）")
+        });
     }
-    let gone = failed.iter().filter(|f| f.contains("已不存在")).count();
-    let real = failed.len() - gone;
-    if gone > 0 {
-        parts.push(format!("{gone} 个原本已不存在（记录已清理）"));
+    if missing > 0 {
+        parts.push(format!("{missing} 个原本已不存在（记录已清理）"));
     }
     if real > 0 {
         parts.push(format!("{real} 个未能处理（可能被占用）"));
         crate::log_warn!(
-            "[clipboard] 本地文件处理失败 {real} 个：{}",
-            failed
-                .iter()
-                .filter(|f| !f.contains("已不存在"))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("；")
+            "[clipboard] 本地文件处理失败 {real} 个{}",
+            failure_detail(&failures)
         );
     }
     if parts.is_empty() {
@@ -1035,19 +1075,19 @@ pub(crate) fn copy_back_sync(id: String, plain: Option<bool>) -> Result<Option<S
 ///
 /// 只做 `Path::exists()`（纯元数据查询，不读文件内容），几十条也是微秒级，
 /// 所以可以在每次渲染后调用。
-#[tauri::command]
-pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
-    let dir = DIR.get().cloned().unwrap_or_default();
+/// 按 ids 取「文件条目」的路径来源。**锁内只收集，不做任何 IO**。
+///
+/// 两个调用方共用：列表徽章判定（`check_files_alive`）与删除前的探针
+/// （`probe_purge_targets`）。两处要的都是「id → 路径清单」，只是判定规则不同
+/// （徽章看「是否完整」，探针看「还有没有可删的」），所以这里只负责取。
+///
+/// 原来整个循环都在锁里：每个 id 一次 `iter().find`（200×1 万 ≈ 200 万次比较）
+/// + 一次读盘解密 + N 次 `Path::exists`。而它在每次渲染和 prefetch 之后都会触发
+/// —— 等于每次滚动都把采集线程堵在 IO 上（代码审查 P1-1）。
+fn collect_files_items(ids: &[String]) -> Vec<(String, Option<String>, Vec<String>)> {
     let Some(hist) = HISTORY.get() else {
         return Vec::new();
     };
-
-    // **锁内只收集「id → 路径来源」，读盘/解密/查存在全在锁外**。
-    //
-    // 原来整个循环都在锁里：每个 id 一次 `iter().find`（200×1 万 ≈ 200 万次比较）
-    // + 一次 `read_text_entity`（读盘 + AES 解密）+ N 次 `Path::exists`。
-    // 而它在每次渲染和 prefetch 之后都会触发 —— 等于每次滚动都把采集线程堵在 IO 上
-    // （代码审查 P1-1）。顺带把逐 id 查找换成一次遍历建映射。
     let wanted: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
     let mut todo: Vec<(String, Option<String>, Vec<String>)> = Vec::new();
     {
@@ -1068,19 +1108,59 @@ pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
             }
         }
     }
+    todo
+}
 
+/// 删除前探针的结果。
+#[derive(serde::Serialize)]
+pub struct PurgeProbe {
+    /// 这批 id 里属于「文件」条目的数量
+    pub files: usize,
+    /// 其中**至少还有一条**关联文件真实存在的条目数
+    pub alive: usize,
+}
+
+/// 删除前探针：这批 id 里有几个文件条目、其中几个还真的有文件在。
+///
+/// **为什么必须由后端算**：批量删除的选中项来自渲染卡片（`wlState`），前端另有
+/// 一份 `{id,kind}` 轻量索引（`items`）。两份数据源的同步只要断一次（启动加载
+/// 失败、清理后未刷新、空视图误清），前端就会判成「没有文件条目」→ 不弹确认框
+/// → 关联的本地文件静默不删（代码审查 F1，与 `e70a802`、空视图抹索引是同一类
+/// 故障）。索引和窗口都可能过期，**只有按 id 回查后端才是真源**。
+///
+/// 只读：不改任何状态，也不碰任何文件。
+#[tauri::command]
+pub fn probe_purge_targets(ids: Vec<String>) -> PurgeProbe {
+    if ids.is_empty() {
+        return PurgeProbe {
+            files: 0,
+            alive: 0,
+        };
+    }
+    let dir = DIR.get().cloned().unwrap_or_default();
+    let mut files = 0usize;
+    let mut alive = 0usize;
+    for (_id, rel, inline) in collect_files_items(&ids) {
+        files += 1;
+        let paths = resolve_paths(&dir, rel, inline);
+        // 「还有一条在」就算有东西可处理 —— 与徽章判定不同：徽章标的是
+        // 「这个条目已不完整」，这里问的是「这次删除还有没有要动的东西」。
+        if paths.iter().any(|p| std::path::Path::new(p).exists()) {
+            alive += 1;
+        }
+    }
+    PurgeProbe { files, alive }
+}
+
+/// 只做 `Path::exists()`（纯元数据查询，不读文件内容），几十条也是微秒级，
+/// 所以可以在每次渲染后调用。
+#[tauri::command]
+pub fn check_files_alive(ids: Vec<String>) -> Vec<String> {
+    let dir = DIR.get().cloned().unwrap_or_default();
     // 锁外做 IO
     let mut dead: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (id, rel, inline) in todo {
-        let paths: Vec<String> = match rel {
-            Some(r) => read_text_entity(&dir, &r)
-                .unwrap_or_default()
-                .lines()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect(),
-            None => inline,
-        };
+    for (id, rel, inline) in collect_files_items(&ids) {
+        let paths = resolve_paths(&dir, rel, inline);
         if paths.is_empty() || paths.iter().any(|p| !std::path::Path::new(p).exists()) {
             dead.insert(id);
         }
