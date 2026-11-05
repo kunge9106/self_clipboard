@@ -154,8 +154,9 @@ export class VirtualList {
    * @param {(first: number, last: number, why: string) => void} [o.onNeedRange] 需要数据的回调
    * @param {number} [o.overscan]
    * @param {number} [o.gap]  行间距（CSS 改了就跟着改；默认 8）
+   * @param {number[]} [o.classHeights]  上一张列表量到的行高类表（见下方注释）
    */
-  constructor({ scroller, fillRow, keyOf, onNeedRange, onRendered, overscan = 8, gap = 8 }) {
+  constructor({ scroller, fillRow, keyOf, onNeedRange, onRendered, overscan = 8, gap = 8, classHeights }) {
     this.scroller = scroller;
     this.fillRow = fillRow;
     this.keyOf = keyOf;
@@ -170,16 +171,30 @@ export class VirtualList {
     this.start = 0; // 已加载窗口的起始下标
     this.items = []; // 已加载窗口内的条目（连续）
     this.idToIndex = new Map();
-    // 兜底值只影响「第一帧还没量到真实高度」的那一瞬间，量到之后立刻被实测值替换。
-    // 取 52 量级是因为**实测文本卡约 50px**（设计稿按 1.5×DPI 估的 78 偏大一倍，
-    // 曾导致首页每行按 86px 排布、一屏只看到 4 条）。
-    this.classHeights = [52, 52, 54, 54, 112];
+    // 行高类表：**跨实例继承，不要从硬编码默认值起手**。
+    //
+    // 它只由 kind/subtype 的样式决定，与「装的是哪一条、在第几行」无关 —— 是样式
+    // 不变量的缓存，所以换实例时可以安全搬运。而每次复制都会新建一张列表（
+    // 不复用实例，理由见 main.js 的 ensureWindow），若不继承，首帧就只能按默认值
+    // 排版：真实图片卡 74px、默认写 112px，于是新内容先出现在离置顶那条 38px 的
+    // 位置，图一加载完再挪回去 —— 看起来就是「新内容从置顶里钻出来再滑下去」。
+    //
+    // **只继承这一张表**。`known` / `knownIds` / `rendered` / `vlFilled` 都是
+    // 下标相关的，换一批数据后下标含义整体平移，继承它们就是 a074ad0 那次的叠卡。
+    const inherited =
+      Array.isArray(classHeights) && classHeights.length === CLASS_COUNT
+        ? classHeights.slice()
+        : null;
+    // 兜底值只影响「一次都没量过」的冷启动。取 52 量级是因为**实测文本卡约 50px**
+    // （设计稿按 1.5×DPI 估的 78 偏大一倍，曾导致首页每行按 86px 排布、一屏只看 4 条）。
+    this.classHeights = inherited || [52, 52, 54, 54, 112];
     // 下标 → 实测高度。**同时记下这条高度是哪一条内容量的**（knownIds）：
     // 行池节点会被复用，同一个下标在翻页后可能装着另一条内容，那时这条高度就是
     // 别人的，拿来算偏移会让后面的行叠在一起。
     this.known = new Map();
     this.knownIds = new Map(); // 下标 → 当时量到的条目 id
-    this.estimate = 52;
+    // 未加载区域只能用平均值估：继承类高度后这个估值也跟着对上了。
+    this.estimate = this.estimateFromClasses();
     this.calibrated = false; // 是否已经从真实行反推过类高度
     this.offsets = computeOffsets({ total: 0, estimate: this.estimate, gap: this.gap });
     this.pool = [];
@@ -199,6 +214,17 @@ export class VirtualList {
   rowClass(i) {
     const item = this.items[i - this.start];
     return item ? heightClassOf(item) : -1;
+  }
+
+  /**
+   * 未加载区域的平均行高：取文本 / 文件 / 图片三类的均值。
+   *
+   * 不含代码与 Markdown：它们各自只占很小比例，而这三类覆盖绝大多数行。必须跟着
+   * 类高度表走 —— 继承来的表若与估值脱节，下半屏的滚动条长度就会对不上。
+   */
+  estimateFromClasses() {
+    const c = this.classHeights;
+    return Math.round((c[0] + c[3] + c[4]) / 3);
   }
 
   /**
@@ -239,7 +265,7 @@ export class VirtualList {
     this.calibrated = true;
     if (!changed) return;
     // 未加载的行没有类高度可用，用「文本/文件/图片」三类的均值当估值
-    this.estimate = Math.round((this.classHeights[0] + this.classHeights[3] + this.classHeights[4]) / 3);
+    this.estimate = this.estimateFromClasses();
     this.rebuild();
     this.inner.style.height = `${Math.round(this.offsets[this.total])}px`;
     // **立刻重排，不等下一帧**。

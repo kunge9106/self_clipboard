@@ -958,6 +958,15 @@ const SUBTYPE_BADGE = {
 /** 一页多少条。200 条约 100 KB，与设计文档的 IPC 预算是同一个数量级。 */
 const WINDOW_LIMIT = 200;
 
+/**
+ * 「算在顶部」的容差（px）。
+ *
+ * 不能写 `<= 0`：滚轮/触控板停下来常留 1–2px 残留，这时若走锚点路径，锚点还原与
+ * 标定重排会叠在同一帧，顶部那条会抖一下（实测：复制时置顶那条闪）。不足半行的
+ * 偏移一律当作「已经在顶部」，直接按归零处理 —— 代价是丢掉那 1–2px，看不出来。
+ */
+const TOP_EPS = 8;
+
 const api = createHistoryApi(invoke, { cachePages: 10 });
 
 let wl = null; // VirtualList 实例
@@ -990,6 +999,11 @@ function ensureWindow(view) {
   // 状态，换一批数据后下标含义整体平移，任何一处没同步就会排成「行距小于卡片高度
   // → 相邻卡片叠在一起」（实测：文本卡内容压到下一张的标签上、图片卡被压成一条）。
   // 消除闪烁不靠复用，靠时序 —— 见 `renderWindow`：取页完成后才拆建。
+  // 行高类表**跨实例搬运**：它只由 kind/subtype 的样式决定，与下标无关。
+  // 不搬的话，新实例首帧按硬编码默认值排版（图片类默认 112，真实约 74），
+  // 新内容会先出现在离置顶那条几十像素的位置，等标定/图片加载完再挪过去 ——
+  // 实测反馈就是「新内容像从置顶那条里钻出来，再滑到下面」（审查 S1）。
+  const prevClasses = wl ? wl.classHeights.slice() : null;
   if (wl) {
     wl.destroy();
     wl = null;
@@ -1000,6 +1014,7 @@ function ensureWindow(view) {
   view.appendChild(scroller);
   wl = new VirtualList({
     scroller,
+    classHeights: prevClasses,
     // 行是**容器**，卡片是它里面的元素 —— 不能把 vl-row 和 card 用同一个节点。
     //
     // fillCard 会重写 className（`card.className = "card …"`），直接把它用在行节点上
@@ -1118,7 +1133,7 @@ async function renderWindow({ keepScroll = false } = {}) {
   syncSelectBar();
   const view = document.getElementById("view");
   const token = ++wlToken;
-  const wasAtTop = !wl || wl.scroller.scrollTop <= 0;
+  const wasAtTop = !wl || wl.scroller.scrollTop <= TOP_EPS;
   const anchor = keepScroll && wl && !wasAtTop ? wl.getAnchor() : null;
   // 保位置时取「锚点所在的那一页」而不是窗口起点：窗口可能有上千条（一路滚下来
   // 累积的），只取起点那一页会把视口里的内容整片丢掉。
