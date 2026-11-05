@@ -1002,11 +1002,13 @@ function ensureWindow(view) {
     },
     keyOf: (item) => item.id,
     onNeedRange: () => schedulePrefetch(),
-    onRendered: () => {
+    onRendered: (rows) => {
       // 行池复用后有两件事必须重做：图片懒加载的观察（新节点换了 data-img-id）、
       // 文件失效徽章（新节点没有上一轮留下的 class）。
-      observeImages(scroller);
-      applyMissingMarks();
+      // **只处理这一帧新填的行**：列表每帧只换几十行，全量扫与重建 Observer 都是白费
+      // （审查 B2/B3）。
+      observeImages(scroller, rows);
+      for (const row of rows) applyMissingMarks(row);
     },
   });
   scroller.addEventListener(
@@ -1471,8 +1473,20 @@ async function loadImage(id) {
  * dataURL（不再走 IPC/磁盘），重新解码即可。
  */
 let imgObserver = null;
-function observeImages(rootEl) {
-  if (imgObserver) imgObserver.disconnect();
+let imgObserverRoot = null;
+
+/**
+ * 拿到当前滚动容器对应的观察器，**能复用就复用**。
+ *
+ * 原先每次 `onRendered` 都 `disconnect()` + `new IntersectionObserver()`：图片列表
+ * 快滚时每帧拆挂一次，白白重建观察器（审查 B2）。只有 root 换了才需要重建 ——
+ * root 是 `.history` 滚动容器，而 `ensureWindow` 每次渲染都会建新的，旧 scroller
+ * 脱离文档后旧 observer 也就跟着废了。
+ */
+function ensureImgObserver(rootEl) {
+  if (imgObserver && imgObserverRoot === rootEl) return imgObserver;
+  imgObserver?.disconnect();
+  imgObserverRoot = rootEl;
   imgObserver = new IntersectionObserver(
     (entries) => {
       for (const en of entries) {
@@ -1518,9 +1532,26 @@ function observeImages(rootEl) {
     },
     { root: rootEl, rootMargin: "700px 0px" }
   );
-  rootEl
-    .querySelectorAll(".card-image[data-img-id]")
-    .forEach((el) => imgObserver.observe(el));
+  return imgObserver;
+}
+
+/**
+ * 登记图片懒加载。
+ *
+ * `rows` 为空时扫整个容器（首次渲染 / 容器重建）；传了行列表就只处理这几行 ——
+ * `onRendered` 每帧只新填几十行，没有必要全量扫（审查 B3）。
+ */
+function observeImages(rootEl, rows = null) {
+  const ob = ensureImgObserver(rootEl);
+  const targets = rows
+    ? rows.flatMap((row) => [...row.querySelectorAll(".card-image[data-img-id]")])
+    : [...rootEl.querySelectorAll(".card-image[data-img-id]")];
+  for (const el of targets) {
+    // 行池节点被复用时 innerHTML 会重建，新节点没有这个标记，自然会重新登记
+    if (el.dataset.imgObserved === "1") continue;
+    el.dataset.imgObserved = "1";
+    ob.observe(el);
+  }
 }
 
 /** 主界面只维护「有没有建过」这一份状态，骨架与内容槽由 `preview.js` 提供。 */
@@ -1727,12 +1758,22 @@ async function recheckMissing(ids) {
 }
 
 /** 把失效状态同步到已渲染的卡片上（新追加的批次也要过一遍） */
-function applyMissingMarks() {
-  document.querySelectorAll(".card").forEach((el) => {
+/**
+ * 给卡片打「已失效」徽章。
+ *
+ * `root` 为空时扫整页 —— 数据变化后必须全量重标（`refreshMissing` 回来、清失效之后）。
+ * 传元素时只处理这一行：`onRendered` 每帧都有新填的行，原来无参调用会把「填充几十行」
+ * 变成「扫全表」（审查 B3）。
+ */
+function applyMissingMarks(root = document) {
+  const cards = root.matches?.(".card")
+    ? [root]
+    : [...root.querySelectorAll(".card")];
+  for (const el of cards) {
     const missing = missingFiles.has(el.dataset.id);
     el.classList.toggle("is-missing", missing);
     const meta = el.querySelector(".card-meta");
-    if (!meta) return;
+    if (!meta) continue;
     const tag = meta.querySelector(".tag-missing");
     if (missing && !tag) {
       const s = document.createElement("span");
@@ -1746,7 +1787,7 @@ function applyMissingMarks() {
     } else if (!missing && tag) {
       tag.remove();
     }
-  });
+  }
 }
 
 // ---------------------------------------------------------------------------

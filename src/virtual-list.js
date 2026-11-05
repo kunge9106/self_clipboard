@@ -385,6 +385,7 @@ export class VirtualList {
     // 用一个 `vlFilled` 标记记住「这一行装的是哪一条」，没变就只更新位置。
     let filled = 0;
     const fresh = []; // 这一帧新填内容的行：它们的真实高度最可信，用来校准
+    const freshEls = []; // 同上，但给调用方（图片观察 / 失效徽章只需处理这几行）
     for (const index of keep) {
       const el = this.rendered.get(index);
       const item = this.items[index - this.start];
@@ -401,6 +402,7 @@ export class VirtualList {
       if (item) {
         el.classList.remove("vl-skeleton");
         this.fillRow(el, item, index);
+        freshEls.push(el);
       } else {
         // 骨架行：高度按类高度估，先把位置占住，滚动条就不会跳
         el.classList.add("vl-skeleton");
@@ -413,8 +415,9 @@ export class VirtualList {
 
     // 需要数据就喊一声（first/last 都是闭区间）
     this.onNeedRange(first, last, "render");
-    // 只有真的换过内容才通知（图片观察、失效徽章都只需在有新节点时重做）
-    if (filled > 0) this.onRendered(filled);
+    // 只有真的换过内容才通知。**传元素而不是数量**：图片观察与失效徽章只需要处理
+    // 这几行，原来拿不到行就只能全量扫 `.card`（审查 B3）。
+    if (filled > 0) this.onRendered(freshEls);
   }
 
   makeRow() {
