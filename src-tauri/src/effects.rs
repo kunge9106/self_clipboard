@@ -303,11 +303,23 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     // 关掉 DWM 的非客户区渲染（双保险；部分系统上该属性已不再支持）
     disable_nc_rendering(hwnd);
 
-    let result = match tier {
-        Tier::SystemBackdrop => apply_system_backdrop(hwnd),
-        Tier::Mica => apply_mica(hwnd),
-        Tier::Acrylic => apply_acrylic(hwnd, dark),
-        Tier::Solid => Ok(()),
+    // ⚠ **语义已反转**（2026-11-05，用户实测要求「高级材质打开才应该是毛玻璃」）：
+    //   开（round_mode = true）→ **施加**系统材质，这才是毛玻璃；
+    //   关                    → 清掉所有系统材质，窗口退化为透明 layered，
+    //                           由 CSS 用更高浓度的实底兜住。
+    // 早先是反的（开＝关掉模糊换干净四角），名字还叫「圆角模式」，两头都不对：
+    // 用户以为开了是高级效果，实际得到的是"没有模糊"。
+    let result = if is_round() {
+        match tier {
+            Tier::SystemBackdrop => apply_system_backdrop(hwnd),
+            Tier::Mica => apply_mica(hwnd),
+            Tier::Acrylic => apply_acrylic(hwnd, dark),
+            Tier::Solid => Ok(()),
+        }
+    } else {
+        clear_system_material(hwnd, tier);
+        clear_accent(hwnd);
+        Ok(())
     };
 
     match result {
@@ -710,31 +722,20 @@ fn clear_accent(hwnd: isize) {
 
 /// Win10 1809–22H2：真·acrylic（tint 透明度取自「材质浓度」配置）
 fn apply_acrylic(hwnd: isize, dark: bool) -> Result<(), i32> {
-    if is_round() {
-        // 圆角模式：不施加任何系统 blur
-        clear_accent(hwnd);
-        return Ok(());
-    }
-    // 直角模式才会走到这里（圆角模式在上面的分支直接 clear_accent 返回），
-    // 所以 alpha() 取到的就是「直角档」那个值。
+    // 是否施加由 `apply` 统一判断（关闭高级材质时根本走不到这里）。
+    // tint 恒为 8%：明暗由 CSS 层负责，系统只提供「模糊」这一件事。
     let alpha = crate::settings::get().alpha();
     set_accent_state(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, tint_for(dark, alpha))
 }
 
-/// 切换「圆角模式」后立即生效（无需重启）
+/// 切换「高级材质」后立即生效（无需重启）。
 ///
-/// ⚠️ 不能无脑 `apply_acrylic`：Win11 走 **SystemBackdrop(Mica)** 档，正常材质是 Mica 而非 acrylic。
-/// - **开启圆角**：必须关掉**所有**系统材质（Mica/SystemBackdrop 的 backdrop + accent 都要清），
-///   否则系统材质的矩形 blur 仍在，圆角外会留直角残留；
-/// - **关闭圆角**：必须按当前档位**完整恢复**（SystemBackdrop→Mica、Acrylic→acrylic），
-///   只施加 acrylic 恢复不了 Mica，表现为「关了圆角材质还是圆角模式的样子」。
+/// 直接重跑 `apply` 即可 —— 施加还是清除，由 `apply` 里那一个分支统一决定。
+/// 早先这里手写了「开就清、关就恢复」两段逻辑，与 `apply` 各判断一次，
+/// 语义一改就要改两处（本次正是踩到：改完 `apply` 忘了这里，切开关毫无反应）。
+/// **一处判断胜过两处同步**。
 pub fn apply_round_mode(hwnd: isize, dark: bool) {
-    if is_round() {
-        clear_system_material(hwnd, current_tier());
-        clear_accent(hwnd);
-    } else {
-        let _ = apply(hwnd, dark);
-    }
+    let _ = apply(hwnd, dark);
 }
 
 // ---------------------------------------------------------------------------

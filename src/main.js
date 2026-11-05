@@ -276,7 +276,13 @@ function syncAlphaToSettings(v) {
  */
 function applyRoundMode(on) {
   document.body.classList.toggle("round", !!on);
-  document.documentElement.style.setProperty("--radius", (on ? maxRadius : 0) + "px");
+  // 圆角的归属变了（语义反转后）：
+  //   · **开高级材质** → 窗口上有系统材质。Win11 的系统圆角与 backdrop 不冲突，
+  //     保留圆角；Win10 的 acrylic 恒为矩形，给它圆角会在四角露出矩形残影，
+  //     所以那一档只能用直角 —— 这是平台限制，不是取舍。
+  //   · **关** → 窗口是无材质的透明 layered，圆角完全由我们自己画，干净。
+  const acrylic = document.body.classList.contains("tier-acrylic");
+  document.documentElement.style.setProperty("--radius", (on && acrylic ? 0 : maxRadius) + "px");
 }
 
 /** 最大化 ↔ 还原：图标与提示词跟随窗口状态（需求 #6） */
@@ -3082,13 +3088,13 @@ function settingsAppearanceHtml(s) {
           "高级材质",
           // 原名「圆角模式」有歧义：Win11 上直角模式窗口也是圆角的（系统给的），
           // 用户会以为关掉会变直角。它实际控制的是**用不用系统背景模糊**。
-          "关闭系统背景模糊，通透度完全由应用自己控制。四角更干净，代价是面板要更高浓度才压得住壁纸",
+          "开启后使用系统毛玻璃，并叠加一层自研增强（更浓的模糊与色彩）。关闭则用不透明底色，更省电、文字更稳",
           s.roundMode
         ) +
         rowCheck(
           "set-auto-dark-alpha",
           "深色自动加浓",
-          "高级材质下切到深色时，浓度自动升到 90%；切回浅色恢复你设的值",
+          "高级材质下切到深色时，浓度自动升到 90%；切回浅色恢复你设的值。浓度越高，透出的模糊越少",
           s.autoAlphaDark
         )
     ),

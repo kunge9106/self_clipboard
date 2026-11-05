@@ -637,7 +637,7 @@ body {
     rgb(var(--material-rgb) / calc(var(--glass-alpha) + 0.05)),
     rgb(var(--material-rgb) / calc(var(--glass-alpha) - 0.05)) 62%
   );
-  /* ══ 自研「二级玻璃」══════════════════════════════════════════════
+  /* ══ 自研「二级玻璃」——**只在高级材质下启用**（见下方 body.round）══════
      为什么不引库：window-vibrancy 用的就是同一套 DWM API（自带性能警告）；
      WinRT Composition 自建配方要重做 WebView2 层级，而且自己跑 blur pass 更耗。
      但 WebView2 本身就是 Chromium —— `backdrop-filter` 是现成的 GPU 合成通道，
@@ -648,17 +648,27 @@ body {
           saturate(150%) 把透上来的壁纸色拉回来 —— 「灰扑扑」的直接解药；
        2. **模糊叠加**：在系统模糊之上再糊一层，玻璃更有厚度。
 
-     ⚠ 单独一条属性：效果不对可整行删掉，不影响其它样式。 */
-  backdrop-filter: blur(18px) saturate(150%);
-  -webkit-backdrop-filter: blur(18px) saturate(150%);
+     ⚠ 关闭高级材质时窗口后没有系统材质，采样到的就是清晰桌面 ——
+     那时再糊一层只是白烧 GPU，所以它挂在 `body.round` 上。 */
 }
 
 /* 深色下主体色由 --material-rgb / --glass-alpha 一并切换，无需额外覆盖 */
 
-/* 圆角模式：这一档没有系统背景模糊，半透明透过去就是**清晰的桌面**（而不是
-   模糊底），同浓度会比直角模式更显透、更干扰，所以统一把面板加厚。
-   拉满（90%）时 clamp 到 1.0 —— 完全不透，符合「浓度拉满＝实心」的直觉。 */
+/* 高级材质：窗口后是系统材质（Acrylic / Mica），**在这里加自研增强**。
+   之所以敢用两层模糊叠加，是因为系统的 acrylic 本身已经很糊，
+   再叠 18px 只会让「玻璃厚度」更明显，不会糊成一片色块。
+
+   饱和增强是重点：DWM 的 acrylic 是**去饱和**的（这是微软为了文字可读性做的），
+   所以画面发灰。saturate(150%) 把透上来的颜色拉回来 —— 这是「灰扑扑」的直接解药。 */
 body.round .app {
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+}
+
+/* 关闭高级材质：**没有系统背景模糊**，半透明透过去就是清晰的桌面（而不是模糊底），
+   同浓度会比有模糊时更显透、更干扰，所以统一把面板加厚。
+   拉满（90%）时 clamp 到 1.0 —— 完全不透，符合「浓度拉满＝实心」的直觉。 */
+body:not(.round) .app {
   background: linear-gradient(
     160deg,
     rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32))),
@@ -669,18 +679,18 @@ body.round .app {
 /* 圆角模式（窗口接近实心）下，不止历史卡片，侧栏选中项与设置页的
    缓存卡片同样会与窗口底面糊在一起——用同一套阴影把边界立起来。
    常态的 .nav-item 是透明背景，加阴影会变成「无底的浮影」，故只给有底色的状态。 */
-body.round .nav-item.is-active,
-html:not(.hovers-off) body.round .nav-item:hover {
+body:not(.round) .nav-item.is-active,
+html:not(.hovers-off) body:not(.round) .nav-item:hover {
   box-shadow: var(--card-shadow);
 }
 
-body.round .cache-box {
+body:not(.round) .cache-box {
   box-shadow: var(--card-shadow);
 }
 
 /* 圆角模式下没有背景模糊，面板靠阴影立层次 —— 与关于页的 hero/facts/log 同一套。
    设置页的区块是「面板」，理应与它们一致；内层元素（如缓存块）由下面那条规则清阴影。 */
-body.round .settings .block {
+body:not(.round) .settings .block {
   box-shadow: var(--card-shadow);
 }
 
@@ -1616,7 +1626,7 @@ html:not(.hovers-off) .card:hover {
    看起来就跟纯文字一样 → 提高字重，让人一眼看出是徽章。
    原先这里还会把中性徽章刷成「加实底色 + 正文色文字」，那是为了救**灰色**徽章的
    辨识度；现在三个类型各有色相，再刷成正文色等于把刚分开的类型又抹平，所以去掉。 */
-body.round .tag {
+body:not(.round) .tag {
   font-weight: 500;
 }
 
@@ -1807,8 +1817,8 @@ html:not(.hovers-off) .ctx-item.danger:hover {
 
 /* 圆角模式下没有背景模糊，有底色的元素才需要阴影撑出层次；
    常态 .tab 是透明底，加阴影会变成「无底的浮影」，故只给有底色的状态。 */
-body.round .settings-tabs .tab.is-active,
-html:not(.hovers-off) body.round .settings-tabs .tab:hover {
+body:not(.round) .settings-tabs .tab.is-active,
+html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   box-shadow: var(--card-shadow);
 }
 
@@ -2007,7 +2017,7 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 
 /* 缓存块嵌在「存储位置」区块里，去掉它自己的外框、底色与阴影 ——
    否则区块里又浮出一张卡片，看着是「框里有框」（用户截图反馈，只在圆角模式出现：
-   因为 `body.round .cache-box` 会给它加 --card-shadow，而原先这里只清了边框与底色）。 */
+   因为 `body:not(.round) .cache-box` 会给它加 --card-shadow，而原先这里只清了边框与底色）。 */
 .settings .block .cache-box {
   padding: 4px 0 0;
   border: 0;
@@ -3606,10 +3616,10 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 }
 
 /* 圆角模式下没有背景模糊，有底色的块需要阴影撑层次 */
-body.round .about-log,
-body.round .about-hero,
-body.round .about-notes pre,
-body.round .about-notes code {
+body:not(.round) .about-log,
+body:not(.round) .about-hero,
+body:not(.round) .about-notes pre,
+body:not(.round) .about-notes code {
   box-shadow: var(--card-shadow);
 }
 

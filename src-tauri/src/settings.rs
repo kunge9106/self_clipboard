@@ -167,6 +167,16 @@ pub struct Config {
     /// 默认开：不开的话，深色 + 高级材质 + 亮壁纸 = 几乎不能用。
     #[serde(default = "default_true")]
     pub auto_alpha_dark: bool,
+    /// 浓度语义迁移标记（2026-11-05）。
+    ///
+    /// 早先 `round_mode = 开` 表示「**关掉**系统模糊、要更实」，两档默认是
+    /// 直角 50 / 圆角 90。语义反转后变成「开 = 高级材质 = **有**模糊」，默认 90 / 45。
+    /// 老配置里这两档是按旧语义调的，直接沿用会「一开就几乎不透」。
+    ///
+    /// 新用户走 `Default`（这里设 true，不交换）；老配置文件没有这个字段，
+    /// 反序列化得到 false → 交换一次并写回 true。
+    #[serde(default)]
+    pub alpha_inverted: bool,
     /// 文件复制：是否记录「资源管理器里复制的文件」（CF_HDROP）。
     ///
     /// **默认关闭**——这是用户明确要求的默认值：文件复制涉及真实文件路径，
@@ -440,8 +450,12 @@ fn default_screenshot_mode() -> String {
 /// 直角 / 圆角模式各自的**默认**浓度。
 ///
 /// 圆角模式没有背景模糊，同样浓度会显得更透，所以默认档更高。
-pub const STRAIGHT_ALPHA: u32 = 50;
-pub const ROUND_ALPHA: u32 = 90;
+/// 关闭高级材质时的默认浓度：**没有系统模糊**，窗口后面是清晰桌面，
+/// 必须接近实心才不刺眼。
+pub const STRAIGHT_ALPHA: u32 = 90;
+/// 高级材质（有系统模糊）的默认浓度：留出足够的透明度让模糊透上来。
+/// 90 会让模糊只剩 10%，等于白开。
+pub const ROUND_ALPHA: u32 = 45;
 
 fn default_alpha_straight() -> u32 {
     STRAIGHT_ALPHA
@@ -480,13 +494,21 @@ impl Config {
     /// 返回是否发生了迁移（调用方据此决定要不要立刻回写文件）。
     /// 归到哪个模式取决于**当时**的 `round_mode`——那个值就是用户当时正在用的模式。
     fn migrate(&mut self) -> bool {
-        match self.legacy_alpha.take() {
-            Some(v) => {
-                self.set_alpha(v);
-                true
-            }
-            None => false,
+        let mut changed = false;
+        if let Some(v) = self.legacy_alpha.take() {
+            self.set_alpha(v);
+            changed = true;
         }
+        // 浓度语义反转前，两档是按「开＝无模糊、更实」调的（直角 50 / 圆角 90）。
+        // 新语义下正好相反，交换一次即可让用户原来的观感延续：
+        //   原来「圆角 90（实）」→ 现在是「关闭 90（实）」
+        //   原来「直角 50（透）」→ 现在是「高级材质 50（透 + 有模糊）」
+        if !self.alpha_inverted {
+            std::mem::swap(&mut self.alpha_straight, &mut self.alpha_round);
+            self.alpha_inverted = true;
+            changed = true;
+        }
+        changed
     }
 }
 
@@ -522,6 +544,8 @@ impl Default for Config {
             asked_tray_on_close: false,
             round_mode: false,
             auto_alpha_dark: true,
+            // 新配置直接就是新语义，不需要交换
+            alpha_inverted: true,
             file_copy: false, // 默认关闭：不记录文件复制
             // 默认关闭：删条目只删记录，不碰磁盘上的真实文件
             delete_files_with_item: false,
