@@ -274,3 +274,52 @@ test("标定改了偏移表后同帧重排，不等下一帧", () => {
     "标定后应立即按新偏移表定位，否则会先按旧位置画一帧再挪"
   );
 });
+
+// ── 类高度表跨实例继承 ────────────────────────────────────────────────────
+//
+// 每次复制都新建列表。若类高度表从硬编码默认值起手，首帧就按错误高度排版：
+// 图片类默认 112、真实约 74 → 新内容先出现在离置顶那条几十像素的位置，等标定完
+// 再挪过去。用户看到的是「新内容从置顶里钻出来再滑下去」。
+
+test("类高度表从外部继承，且是拷贝（不与调用方共享数组）", () => {
+  const src = [40, 42, 44, 46, 70];
+  const vl = new VirtualList({
+    scroller: new Scroller(),
+    fillRow: () => {},
+    keyOf: (item) => item.id,
+    classHeights: src,
+  });
+  assert.deepEqual(vl.classHeights, [40, 42, 44, 46, 70], "构造时就该采用继承来的表");
+  assert.equal(vl.estimate, Math.round((40 + 46 + 70) / 3), "估值跟着继承的表算");
+
+  vl.classHeights[0] = 999;
+  assert.equal(src[0], 40, "必须拷贝，否则两个实例会互相改");
+});
+
+test("下标相关的度量不随类高度表一起继承", () => {
+  const vl = new VirtualList({
+    scroller: new Scroller(),
+    fillRow: () => {},
+    keyOf: (item) => item.id,
+    classHeights: [40, 42, 44, 46, 70],
+  });
+  assert.equal(vl.known.size, 0, "known 是「下标 → 高度」，换数据后下标含义会平移");
+  assert.equal(vl.knownIds.size, 0);
+  assert.equal(vl.rendered.size, 0, "行池与映射必须随实例新建");
+  assert.equal(vl.calibrated, false, "新实例仍要重新标定一次");
+});
+
+test("继承了类高度后，首帧偏移表就按真实高度排（不再先挤后弹）", () => {
+  const scroller = new Scroller();
+  scroller.clientHeight = 600;
+  const vl = new VirtualList({
+    scroller,
+    fillRow: () => {},
+    keyOf: (item) => item.id,
+    classHeights: [50, 52, 54, 56, 74], // 上一张列表量到的真实值
+  });
+  const items = Array.from({ length: 10 }, (_, i) => ({ id: `a${i}`, kind: "image", subtype: null }));
+  vl.setTotal(10);
+  vl.setWindow(0, items);
+  assert.equal(vl.offsets[1], 74 + 8, "首行是图片卡时，下一行应直接落在 74+gap");
+});
