@@ -51,6 +51,9 @@
   /* 密集菜单（右键菜单、下拉）行距更小：项高才 30px 上下，4px 会把菜单拉长。
      只有这两档 —— 不允许再出现「这里写 1px、那里写 3px」的散值。 */
   --gap-row-dense: 1px;
+  /* 圆角只有四档：4（小图标按钮）/ 8（卡片、菜单、按钮）/ 12（浮层）/ 999（胶囊）。
+     原来 2 / 3 / 5 / 6 / 10 散着，同一个「小圆角」有五种写法。 */
+  --radius-xs: 4px;
   --radius-sm: 8px;
 
   /* 等宽字体：代码 / Markdown 预览与详情正文共用。原本详情页里内联了一串
@@ -116,7 +119,12 @@
   /* 材质主体：系统 acrylic 只负责「模糊」（tint 已压到 8%，因为 SetWindowRgn
      管不住 acrylic，四角切不掉），窗口的明暗与浓淡由这一层负责。
      好处：四角的矩形残留淡到看不见，材质浓度也能在设置页实时调。 */
-  --material-rgb: 255 255 255;
+  /* ⚠ 不能是纯白。这是「卡片与背景分不清」的总根因：
+     窗口材质色为 255/255/255 时，叠在白壁纸上仍是白，白卡片压在白窗上永远没有差 ——
+     再怎么调 card 的透明度都是白对白。
+     Windows 11 的 Mica 浅色本身也是中性浅灰（约 #f3f4f6），不是白：
+     它把壁纸去饱和后压到中性色，**灰落在底上**（衬托卡片），而不是落在卡片上。 */
+  --material-rgb: 236 238 242;
   --glass-alpha: 0.62;
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
@@ -240,10 +248,11 @@
   /* ⚠ 卡片必须**半透明**：这是毛玻璃应用，卡片一旦做实色就把材质整个盖住了 ——
      实测反馈「聚焦时灰扑扑，与整体毛玻璃界面不符」。
      Windows 官方的 CardBackgroundFillColorDefault 是 70% 白（不是纯白），
-     这里取 62%：比官方再透一点，材质感更明显；层级靠 elev-1 的极轻投影补。
-     内容区只压 2% —— 压多了整体发灰，压 0 又回到「白卡压白窗」。 */
-  --surface-1: rgba(0, 0, 0, 0.02);
-  --surface-2: rgba(255, 255, 255, 0.62);
+     这里取 62%：比官方再透一点，材质感更明显。
+     **内容区与窗口底同层**（与深色一致）：毛玻璃上再压一层只会发灰，
+     真正的层级只有「底 → 卡片」两阶，区分由材质色的灰 + elev-1 投影共同给出。 */
+  --surface-1: transparent;
+  --surface-2: rgba(255, 255, 255, 0.72);
   --surface-3: rgba(255, 255, 255, 0.9);
   --hairline: rgba(0, 0, 0, 0.06);
   /* 卡片高度：**半透明卡片必须靠阴影定界**。
@@ -483,7 +492,8 @@ button:active:not(:disabled) {
 .p-row:focus-visible,
 .detail-body:focus-visible,
 .wc-btn:focus-visible,
-.search-clear:focus-visible {
+.search-clear:focus-visible,
+.statusbar-clear:focus-visible {
   outline-offset: -2px;
 }
 
@@ -1932,7 +1942,8 @@ body.is-selecting .statusbar {
   width: 24px;
   height: 22px;
   border: 0;
-  border-radius: 5px;
+  /* 22px 高的图标按钮用 4px：8px 会圆得像胶囊，5px 是系统外的散值 */
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-dim);
   display: grid;

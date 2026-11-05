@@ -81,6 +81,26 @@ function tokens(selector) {
 const light = tokens(":root {");
 const dark = tokens("body.dark {");
 
+// ── 材质档 ────────────────────────────────────────────────────────────
+// Windows 上有四档：system-backdrop / mica / acrylic（三者在前端共用同一套令牌）
+// 与 solid（兜底：关闭透明效果、节能模式、低端机、Win10 无 acrylic）。
+// **solid 档单独覆盖了一批令牌**（面变实、材质色变实），只审 :root 等于漏掉一整档 ——
+// 用户在「关闭透明效果」的机器上看到的就是这一档，而它从来没被测过。
+const solidLight = tokens("body.tier-solid {");
+const solidDark = tokens("body.dark.tier-solid {");
+const merge = (base, over) => {
+  const m = new Map(base);
+  for (const [k, v] of over) m.set(k, v);
+  return m;
+};
+/** [标签, 变量表] —— 四个组合都要过同一套门槛 */
+const themeSets = [
+  ["浅色·材质", light],
+  ["深色·材质", dark],
+  ["浅色·实底", merge(light, solidLight)],
+  ["深色·实底", merge(dark, solidDark)],
+];
+
 // ── 颜色解析与合成（对比度要算「叠完之后」的颜色，不能只看字面色）──────
 function parseColor(v, vars, depth = 0) {
   if (!v || depth > 4) return null;
@@ -249,13 +269,13 @@ function contrastRows(themeName, vars) {
   }
   return rows;
 }
-const contrastRowsAll = [...contrastRows("浅色", light), ...contrastRows("深色", dark)];
+const contrastRowsAll = themeSets.flatMap(([name, vars]) => contrastRows(name, vars));
 
 // ── 3b. 面层级差（这才是「看不清」的第一性指标）──────────────────────
 // 对比度回答「文字/线条能不能读」；层级差回答「两块面能不能区分」。
 // 用户反馈「底色与背景太相同」属于后者 —— 只盯对比度会得出「全部达标」的错误结论。
 const surfaceRowsAll = [];
-for (const [themeName, vars] of [["浅色", light], ["深色", dark]]) {
+for (const [themeName, vars] of themeSets) {
   for (const [wallName, wall] of [["白壁纸", WHITE], ["黑壁纸", BLACK]]) {
     const { win, content, card } = surfaces(vars, wall);
     for (const [label, a, b] of [
@@ -265,7 +285,9 @@ for (const [themeName, vars] of [["浅色", light], ["深色", dark]]) {
       const ratio = contrast(a, b);
       // 深色只有三阶（窗口底与内容区同层）：再分一层会变成「陷进去」的错觉，
       // 而深色要区分的本来就是「卡片 vs 背景」。这条不是放过，是设计决策，写进报告可见。
-      const na = themeName === "深色" && label.startsWith("窗口底");
+      // 内容区与窗口底同层（浅色深色都是）：毛玻璃上再压一层只会发灰，
+      // 真正的层级只有「底 → 卡片」两阶。这是设计决策，不是放过。
+      const na = label.startsWith("窗口底");
       surfaceRowsAll.push({
         theme: themeName,
         wall: wallName,
