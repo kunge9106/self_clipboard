@@ -80,11 +80,11 @@
   /* 按下：物理上「被压下去 = 遮住光」，所以比常态**暗**一档（WinUI 的
      ButtonBackgroundPressed 也是比 normal 暗）。浅色用中性黑，深色用更低的白。 */
   --state-active: rgba(0, 0, 0, 0.06);
-  /* 这里原有 `--accent-soft`（强调色 10% 淡底）。它的两个用途先后都消失了：
-     ① 主按钮常态底 —— 已收进幽灵体系（透明底 + 强调边）；
-     ② 主按钮焦点外发光 —— 实底上蓝环看不见才需要，改幽灵后通用蓝环足够。
-     0 引用即删，不留「看起来能用」的令牌：留着会让下一个人以为主按钮还有淡底这条路。
-     需要极淡强调色时用 `color-mix` 或直接写 rgba，别复活这个语义模糊的名字。 */
+  /* 强调色的淡底。**当前唯一用途**：实底主按钮的焦点外发光
+     （`.btn-primary:focus-visible` 的 2px 环 —— 蓝环压蓝底看不见，只能外扩一圈淡色）。
+     曾被删过一次，理由是「主按钮不用淡底了」，但实底恢复后它又有了唯一用途。
+     新增用途前先想清楚：它不是给「淡底按钮」准备的（那种按钮已不存在）。 */
+  --accent-soft: rgba(47, 107, 255, 0.1);
   /* 小控件（按钮 / 图标键 / 菜单项 / 导航项）的悬停与聚焦底色：**淡灰**。
      与卡片用的 --state-hover（白 .45 提亮）刻意分开：
        · 卡片是「内容块」，悬停要像玻璃被照亮 → 提亮；
@@ -101,6 +101,17 @@
   --accent-fill: #3560c4;
   /* 实底填充上的前景：浅色主题的填充是深蓝，所以字用白。 */
   --accent-on: #ffffff;
+  /* ── 实底主按钮的「厚度」五件套 ──────────────────────────────────
+     纯色块贴在毛玻璃上是平的，像一张色纸；这三层光影才有实体按键的质感：
+       顶部内高光（光从上方来）+ 底部内暗边（有厚度）+ 极轻外投影（离开玻璃一点）。
+     渐变两端从 --accent-fill 派生而不是另取色相 —— 色相一变，按钮就和强调色脱钩，
+     界面上会出现「两个蓝」。 */
+  --btn-fill-top: #3d6bd6; /* 比 --accent-fill(#3560c4) 亮一档 */
+  --btn-fill-bottom: #2c52ab; /* 暗一档，跨度小才不脏 */
+  --btn-edge: #24468f; /* 轮廓：比底再深一档，1px 足够，太深像描了黑边 */
+  --btn-gloss: rgba(255, 255, 255, 0.22); /* 顶部内高光 = 玻璃的受光面 */
+  --btn-shade: rgba(0, 0, 0, 0.16); /* 底部内暗边 = 厚度 */
+  --btn-lift: rgba(24, 44, 92, 0.26); /* 外投影 = 轻微浮起 */
   /* 禁用只有这一个强度。原来 4 处各写 .42 / .45 / .45 / .62 ——
      同一个「不可用」有四种淡法，用户看到的是「有的灰有的不灰」。 */
   --disabled-opacity: 0.45;
@@ -340,13 +351,22 @@ body.dark {
   --state-hover: rgba(255, 255, 255, 0.09);
   /* 深色下「压暗」在深底上看不出来，按下改为比悬停再亮一档。 */
   --state-active: rgba(255, 255, 255, 0.14);
-  /* 深色下的 `--accent-soft` 同步删除，理由见浅色变量表里的说明。 */
+  /* 深色下的强调淡底：实底主按钮的焦点外发光。深色实底是亮蓝，外发光要更亮一点才看得出来 */
+  --accent-soft: rgba(91, 140, 255, 0.16);
   /* 深色下「压暗」看不出来，小控件改为亮一档 */
   --state-hover-dim: rgba(255, 255, 255, 0.1);
   --switch-off: rgba(255, 255, 255, 0.26);
   /* 深色下反过来：填充用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清 */
   --accent-fill: #6b9bff;
   --accent-on: #12121a;
+  /* 深色下的按钮厚度：亮蓝本身已经很亮，渐变跨度要更小（否则顶部过曝、底部发黑）；
+     内高光可以更强（深底上白光不刺眼），外投影加重（暗环境下浮起靠影子而不是亮边）。 */
+  --btn-fill-top: #7ca9ff;
+  --btn-fill-bottom: #5b8bf0;
+  --btn-edge: #8ab2ff;
+  --btn-gloss: rgba(255, 255, 255, 0.3);
+  --btn-shade: rgba(0, 0, 0, 0.2);
+  --btn-lift: rgba(0, 0, 0, 0.45);
   --card-hover: var(--state-hover);
   --glass-strong: rgba(255, 255, 255, 0.09);
   --glass-hover: var(--state-hover);
@@ -548,11 +568,15 @@ select:focus-visible {
   background-image: none;
 }
 
-/* 这里原有 `.btn-primary:focus-visible` 一条（提亮 + 2px 淡色外发光），
-   是为「强调色实底」写的：实底上叠灰会脏，只能提亮，而蓝环压在蓝底上又看不出来，
-   所以额外加一圈同色外发光。主按钮改成幽灵后这两条理由同时消失 ——
-   通用 `button:focus-visible` 的 2px 蓝环落在透明底上本来就清楚，
-   留着只是给同一个状态画第二圈环。同理删掉了 `.btn-primary[data-autofocus]:focus`。 */
+/* 主按钮是强调色实底：叠灰会脏，只能提亮；而蓝环压在蓝底上看不出来，
+   所以额外加一圈同色外发光。
+   **绝不能写 background-image: none** —— 那句是纯色填充时代的遗留，现在
+   background-image 是按钮的渐变本体，写成 none 会让按钮当场变透明（踩过一次）。
+   加 :not(.is-cta)：向导导航那档是透明底，通用蓝环就够，不要给它套外发光。 */
+.btn-primary:not(.is-cta):focus-visible {
+  filter: brightness(1.06);
+  box-shadow: var(--btn-relief), 0 0 0 2px var(--accent-soft);
+}
 
 /* 打开弹窗时的默认焦点（程序化 focus）。
    浏览器不把程序化聚焦算作「键盘交互」，于是不给 :focus-visible ——
@@ -574,6 +598,14 @@ select:focus-visible {
   background-image: none;
 }
 
+/* 强调色实底的主按钮：程序化聚焦不画标记，但**浮雕必须留着** ——
+   基类的 box-shadow 会被这条规则整条覆盖，不带上就等于按钮一聚焦就变平。
+   同样不能写 background-image: none（会抹掉渐变）。 */
+.btn-primary:not(.is-cta)[data-autofocus]:focus {
+  outline: none;
+  box-shadow: var(--btn-relief);
+}
+
 /* 按下态：原来全项目 **0 处** :active —— 点下去没有任何反馈，用户只能靠「松手后
    发生了什么」判断有没有点上。毛玻璃上纯色变化在按下瞬间不够快，配 0.5px 下沉
    给一个即时反馈；**刻意不加 transition**，按下要立刻响应，过渡会拖慢它。
@@ -589,6 +621,14 @@ button:active:not(:disabled),
 
 button:active:not(:disabled) {
   transform: translateY(0.5px);
+}
+
+/* 实底主按钮的按下态**不能吃上面那条通用叠层** —— 那会把渐变换成一块纯色，
+   质感当场消失。改成物理上正确的表达：渐变反转（上暗下亮 = 被压扁）、
+   去掉外投影（压到玻璃上）、内阴影加深（凹进去）。 */
+button:active:not(:disabled).btn-primary:not(.is-cta) {
+  background-image: linear-gradient(180deg, var(--btn-fill-bottom) 0%, var(--btn-fill-top) 100%);
+  box-shadow: inset 0 2px 5px var(--btn-shade);
 }
 
 /* 禁用：**一个强度**。原来 4 处各写 .42 / .45 / .45 / .62 ——
@@ -1332,25 +1372,68 @@ html:not(.hovers-off) .btn-ghost:hover {
 
 /* 主操作按钮（首次运行引导的「开启自启」「后台运行」、编辑态的「保存」等推荐项）。
    **幽灵形态，不填充** —— 与 .btn-ghost 同一套几何与字色，只把边色换成强调色。 */
-/* 这里曾经写着「主按钮 = 填充，Fluent 的 Primary、Material 的 Filled 都是填充，
-   全幽灵会让确认和取消权重一样」。那段推理本身没错，但它默认了一个前提：
-   界面是没有背景的纯色面。**毛玻璃背景上不成立** —— 一块实心蓝是一块不透明的板子，
-   贴在玻璃上把材质截断，视觉上比「权重分不清」更刺眼。
-   实测顺序也是这么走的：先把引导页「下一步」的淡底 + 600 + 投影 + 悬停抬起全部推翻
-   （「这块也没必要填充，就正常显示就行」），再看那 4 处实底时才发现它们和引导页
-   是同一类问题 —— 变成「同一个应用里两种主按钮规则并存」，比任何一方的权重问题都更明显。
-   所以现在全站统一：**层级只由边色表达**（强调蓝 vs 中性灰 vs 红）。 */
+/* ══ 主按钮分两档，按**语义**分，不是按「统一」分 ═══════════════════
+
+   这里来回改过三次，结论是「统一」这个动作本身就是错的 —— 争议的两类按钮
+   承担的不是同一种职责：
+
+   ① 确认类（保存/取消编辑、开启自启/暂不开启、后台运行/直接退出、迁移后重启）：
+      主操作是流程的终点，旁边永远有一个「取消」作对照。实底填充是 Fluent 的
+      标准表达，用户有既有期待，且**不需要读**就能看出点哪个。
+   ② 向导导航（跳过 / 上一步 / 下一步）：同一排的同类动作，属于同一条流转动线。
+      其中任何一个变实底，都会显得像「另一套东西」（用户原话：「跟其他按钮
+      风格不一致」）。这一档用边色表达主次。
+
+   所以 `.btn-primary` 保持**实底**，向导导航另用 `.btn-primary.is-cta`（幽灵）。
+
+   曾经把 ② 的结论推到 ① 上，理由是「实心蓝会截断材质」。那个判断错在放大：
+   大面积填充（整条工具栏、整块卡片）确实像玻璃上贴了板子，但 80×30 的小控件
+   只是玻璃上一张贴纸，材质损失几乎察觉不到；而换成幽灵后，30px 高的小按钮上
+   「蓝边 vs 灰边」的差异在深色材质里太弱，主次得靠读才知道 —— 用真实的可用性
+   换了想象中的审美问题。用户看到实机后一句「感觉不如实底填充」就把它否了。 */
 .btn-primary {
-  border-color: var(--accent);
-  background: transparent;
-  /* 字色与 .btn-ghost 同档。同一排里主按钮字比副按钮更黑会被读成不一致而不是层级
-     （引导页实测原话：「下一步按钮字体颜色比其他更黑是怎么回事，其他像是灰色」）。 */
-  color: var(--text-dim);
+  /* 面部与浮雕各存一份变量：hover / focus / active 都要用到或改写它们，
+     逐条重抄三行 box-shadow 必然漂移（曾经红/白/蓝三个变体就各自漂过一遍）。 */
+  --btn-face: linear-gradient(180deg, var(--btn-fill-top) 0%, var(--btn-fill-bottom) 100%);
+  --btn-relief: inset 0 1px 0 var(--btn-gloss), inset 0 -1px 0 var(--btn-shade),
+    0 1px 2px var(--btn-lift);
+  border-color: var(--btn-edge);
+  /* 底色兜底：渐变不加载或色彩空间异常时不会露出浏览器默认灰钮 */
+  background-color: var(--btn-fill-bottom);
+  background-image: var(--btn-face);
+  color: var(--accent-on);
+  box-shadow: var(--btn-relief);
 }
 
 html:not(.hovers-off) .btn-primary:hover {
-  /* 透明底不能再用 brightness 提亮 —— 那会把字和边一起提亮，看着像按钮在闪。
-     与 .btn-ghost 同款：淡灰叠底。 */
+  /* 填充底上不能叠白（会褪色），用提亮；同时把投影推远一点，像被手指抬起 */
+  filter: brightness(1.08);
+  box-shadow: var(--btn-relief), 0 2px 7px var(--btn-lift);
+}
+
+/* 向导导航里的主操作（引导页「下一步」）：**幽灵形态**，与 .btn-ghost 同一套
+   几何与字色，只把边色换成强调色。理由见上方 ② 那一档。
+   名字沿用 is-cta（call to action），语义是「流程里往前一步」，不是「确认」。 */
+.btn-primary.is-cta {
+  border-color: var(--accent);
+  /* 简写会连 background-image 一起清掉，正好抵掉基类的渐变 */
+  background: transparent;
+  /* 字色必须与同排的 .btn-ghost 完全同档。曾用 --text（正文色，近黑），
+     用户一眼看出「比其他更黑，其他像灰色」—— 一排按钮里字色分级会被当成 bug。 */
+  color: var(--text-dim);
+  /* 必须显式清掉基类的浮雕：内高光/内暗边是给实底做的，套在透明底上会画出
+     一条顶部白线 + 一条底部黑线，像整块按钮没对齐。 */
+  box-shadow: none;
+}
+
+html:not(.hovers-off) .btn-primary.is-cta:hover {
+  /* 必须带 html:not 前缀：`.btn-primary:hover` 的 brightness 优先级更高
+     （多一个类型选择器 html），不显式盖住它会一直赢 —— 对透明底而言那只是把
+     字和边一起提亮，看着像按钮在闪。这里与 .btn-ghost 同款：淡灰叠底。
+     box-shadow 同样要显式 none：属性不会被更具体的规则「顺带」继承，
+     但基类 hover 那条会照常生效，把投影叠到幽灵按钮上。 */
+  filter: none;
+  box-shadow: none;
   background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
@@ -2759,11 +2842,9 @@ body.dark .tour-dot.is-on {
   flex: 1 1 auto;
 }
 
-/* 引导页「下一步」原有单独一条 `.btn-primary.is-cta`（透明底 + 强调边 + --text-dim 字），
-   因为当时只有它被推翻成幽灵，而 `.btn-primary` 还是实底。现在 `.btn-primary` 全站
-   统一为幽灵，那条规则的三条声明与基类逐字相同 —— 留着等于同一效果两份实现，
-   改动基类时会漂移。HTML 里的 `is-cta` 类名一并去掉，避免留下「这里还有特殊处理」
-   的错觉（规划文档里「渐变 + 光晕 + 悬停抬起」的描述也已作废）。 */
+/* 引导页「下一步」用 `.btn-primary.is-cta`：向导导航那一档，幽灵底 + 强调边。
+   规则本身已挪到按钮基类附近（与 `.btn-primary` 放在一起对照着看，避免两条
+   互相矛盾的规则隔着两千行各写一份注释）。 */
 
 /* ---------------------------------------------------------------------------
    全文详情弹窗
