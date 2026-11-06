@@ -199,9 +199,8 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                     std::thread::sleep(std::time::Duration::from_millis(150));
                     #[cfg(windows)]
                     {
-                        // 完整双层复位：焦点切换同样会丢 NC 渲染策略与 webview 背景，
-                        // 只补材质 = 属性在、画面灰
-                        let _ = effects::restore_visuals_for(&w2, "focus-refresh");
+                        // 静默双层补涂：焦点切换时窗口可见，响亮版会把材质拆了重建（闪）
+                        let _ = effects::reapply_visuals_for(&w2, "focus-refresh");
                     }
                     #[cfg(not(windows))]
                     drop(w2);
@@ -216,9 +215,14 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if settings::get().tray_on_close {
                     api.prevent_close();
-                    let _ = window_for_events.hide();
+                    // 「收进托盘」不再 hide()：hide 会让 DWM 把宿主窗口透明、
+                    // NC 渲染策略、backdrop 一次性全丢，唤回后的第一帧必然是灰的，
+                    // 补涂再快也追不上 DWM 的合成节奏（2.6.10 之所以丝滑，是因为
+                    // 那时没有系统材质，丢了也看不出来）。改为移到屏幕外驻留：
+                    // 窗口对 DWM 始终可见，材质永不丢，唤回 = 移回原位。
+                    tray::park_main_window(&window_for_events);
                     tray::create_tray(&app_for_events);
-                    crate::log_print!("[tray] 窗口已隐藏到托盘");
+                    crate::log_print!("[tray] 窗口已驻留屏幕外（托盘模式）");
                     // 低占用模式：闲置够久就把 WebView 一起释放
                     idle_release::note_hidden(app_for_events.clone());
                 }
@@ -233,7 +237,8 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     std::thread::spawn(move || {
         for delay in [200u64, 600, 1200] {
             std::thread::sleep(std::time::Duration::from_millis(delay));
-            let _ = effects::restore_visuals_for(&window, "startup-delayed");
+            // 窗口已可见：静默补涂，别把刚铺好的材质拆了重建
+            let _ = effects::reapply_visuals_for(&window, "startup-delayed");
         }
         crate::log_print!("[effects] 补涂流程结束，最终档位：{}", effects::current_tier().as_str());
     });
@@ -325,6 +330,7 @@ pub fn run() {
             settings::set_panel_keep_after_copy,
             settings::set_panel_close_key,
             settings::set_auto_alpha_dark,
+            settings::set_dark_alpha,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,

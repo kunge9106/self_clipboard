@@ -174,11 +174,25 @@ function setMaterialSlider(v) {
   if (lab) lab.textContent = `${v}%`;
 }
 
+/**
+ * 深色自动加浓此刻是否在「接管」浓度：
+ * 深色 + 高级材质 + 开关打开，三者齐了才接管。接管时滑条改的是
+ * `settings.darkAlpha`（深色专属值），日常浓度（浅色用）原封不动。
+ */
+function darkBoostActive() {
+  return (
+    document.body.classList.contains("dark") &&
+    !!settings?.roundMode &&
+    settings.autoAlphaDark !== false
+  );
+}
+
 function applyThemeDependentAlpha(wasDark, isDark) {
   // 三个条件缺一不可：模式是高级材质、用户没关掉这个行为、主题真的变了
   if (!settings?.roundMode || settings.autoAlphaDark === false || wasDark === isDark) return;
-  // 深色加浓到 100（浓度上限）：压得住亮壁纸，且与「无极调节」的极端语义一致
-  const v = isDark ? 100 : (settings.materialAlpha ?? 90);
+  // 深色用「深色专属值」（默认 100；用户在深色下拖过滑条就是他调的值），
+  // 浅色恢复日常浓度。两条线分开记，互不踩。
+  const v = isDark ? (settings.darkAlpha ?? 100) : (settings.materialAlpha ?? 90);
   applyGlassAlpha(v);
   // 滑块在设置页可见时同步读数，否则界面显示 60、实际 90
   setMaterialSlider(v);
@@ -3113,7 +3127,12 @@ function settingsAppearanceHtml(s) {
       rowCtl(
         "材质浓度",
         "越高越厚实 · 越低越通透",
-        `<input type="range" id="set-material" min="1" max="100" value="${s.materialAlpha ?? 50}" /><span class="hint" id="material-val">${s.materialAlpha ?? 50}%</span>`
+        `<input type="range" id="set-material" min="1" max="100" value="${
+          // 深色接管期间滑条代表的是「深色值」—— 显示日常值会让人以为没生效
+          darkBoostActive() ? s.darkAlpha ?? 100 : s.materialAlpha ?? 50
+        }" /><span class="hint" id="material-val">${
+          darkBoostActive() ? s.darkAlpha ?? 100 : s.materialAlpha ?? 50
+        }%</span>`
       ) +
         rowCheck(
           "set-round",
@@ -3126,7 +3145,7 @@ function settingsAppearanceHtml(s) {
         rowCheck(
           "set-auto-dark-alpha",
           "深色自动加浓",
-          "高级材质下切到深色时，浓度自动升到 100%；切回浅色恢复你设的值。浓度越高，透出的模糊越少",
+          "高级材质下切到深色时，浓度自动升到 100%（你在深色下调过的话就用你调的值）；切回浅色恢复你设的值",
           s.autoAlphaDark
         )
     ),
@@ -4413,16 +4432,18 @@ function bindSettings(view) {
       if (!Number.isFinite(v)) return;
       setMaterialSlider(v);
       applyGlassAlpha(v);
-      syncAlphaToSettings(v);
+      // 深色接管期间：改的是「深色专属值」，日常浓度（浅色用）原封不动 ——
+      // 否则切回浅色就恢复不回去了
+      if (darkBoostActive()) settings.darkAlpha = v;
+      else syncAlphaToSettings(v);
     });
     // 松手才持久化
     material.addEventListener("change", () => {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
       reportFrontend("INFO", "ui", `材质浓度 → ${v}%`);
-      invoke("set_material_alpha", { value: v }).catch((e) =>
-        toast("未保存，请重试")
-      );
+      const cmd = darkBoostActive() ? "set_dark_alpha" : "set_material_alpha";
+      invoke(cmd, { value: v }).catch((e) => toast("未保存，请重试"));
     });
   }
 

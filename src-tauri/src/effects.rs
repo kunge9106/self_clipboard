@@ -387,9 +387,9 @@ pub fn reapply_after_restore(window: &tauri::WebviewWindow) {
         let w2 = w.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(delay));
-            // 最小化与 hide→show 是同一类：表面重建 + NC 策略重置 + webview 背景失忆，
-            // 所以走完整双层复位，不是单发材质
-            let _ = restore_visuals_for(&w2, "restore");
+            // 窗口此时已可见：走**静默**补涂。响亮复位（清 backdrop 再设回）
+            // 会当着用户的面拆掉重建 —— 那正是「从灰重建为材质」的闪烁
+            let _ = reapply_visuals_for(&w2, "restore");
         });
     }
 }
@@ -750,6 +750,32 @@ fn reassert_transparency(hwnd: isize) {
         // 立即失效一次，让 DWM 用新的透明状态重画
         InvalidateRect(hwnd, std::ptr::null(), 0);
     }
+}
+
+/// 静默补涂（窗口**可见期间**用）。
+///
+/// 与 [`restore_visuals_for`] 一样两层齐全（blur-behind 重放 + WebView2 背景），
+/// 但**不做任何会引发可见重建的动作**：
+///   · 不 `clear_system_backdrop` —— 值变化会强制 DWM 把 backdrop 拆了重建，
+///     当着用户的面「先灰、再变毛玻璃」。这正是托盘唤回闪一下的来源
+///     （用户实测：「打开的瞬间会闪一下，从灰色重建为高级材质」）；
+///   · 无 force 的 strip —— 样式位没变就不发 FRAMECHANGED，无整窗重绘。
+///
+/// 值真的丢了时，Set 一个不同的值照样生效（DWM 自己重建）；值没丢就是纯 no-op。
+/// **旧版不闪靠的就是这个语义**（设相同值 DWM 直接跳过），这里把它找回来 ——
+/// 响亮复位留给「窗口还不可见」的时机（show 前），可见期间一律走这里。
+pub fn reapply_visuals_for(window: &tauri::WebviewWindow, reason: &str) -> Option<Tier> {
+    let Ok(h) = window.hwnd() else {
+        return None;
+    };
+    // blur-behind 重放仍然要做：它不拆 backdrop，而 hide→show 后被 DWM 丢掉的
+    // 恰恰是它。静默 ≠ 省略，只是不拆房子。
+    reassert_transparency(h.0 as isize);
+    let tier = apply_with(h.0 as isize, effective_dark(window), reason);
+    if let Err(e) = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0))) {
+        crate::log_warn!("[effects] 重设 WebView 透明背景失败：{e}");
+    }
+    Some(tier)
 }
 
 /// 完整体检：DWM 层（[`restore_visuals`]）+ WebView2 内容层。
@@ -1876,6 +1902,64 @@ unsafe extern "system" fn border_proc(
     }
     let prev = BORDER_ORIG.load(std::sync::atomic::Ordering::Relaxed);
     unsafe { CallWindowProcW(prev, hwnd, msg, wparam, lparam) }
+}
+
+/// 菜单窗口的 NC 边框拦截 —— 只拦 WM_NCACTIVATE，其余全部透传。
+///
+/// 为什么要单独一份：`install_focus_hook` 的原 proc 存在**单个全局**里，
+/// 再装第二个窗口会把它覆盖掉，主窗口的消息链就断了。菜单窗口只有一条
+/// 需求（失焦瞬间 Windows 会重绘非客户区，Win7 式边框闪一下，用户截图实锤），
+/// 所以这里用**独立的一对静态**，只拦那一条消息，互不影响。
+///
+/// 用 hwnd 做防重装护栏：菜单窗口是复用的，每次 open_menu 都调用这里，
+/// 同一个 hwnd 只装一次；窗口被重建（hwnd 变了）则自动换到新窗口上。
+static MENU_HOOKED_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static MENU_ORIG_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+pub fn install_menu_nc_hook(hwnd: isize) {
+    use std::sync::atomic::Ordering;
+    if MENU_HOOKED_HWND.load(Ordering::Relaxed) == hwnd {
+        return;
+    }
+    unsafe {
+        extern "system" {
+            fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+            fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, w: usize, l: isize) -> isize;
+            fn DefWindowProcW(hwnd: isize, msg: u32, w: usize, l: isize) -> isize;
+        }
+        const GWLP_WNDPROC: i32 = -4;
+        unsafe extern "system" fn menu_proc(
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+        ) -> isize {
+            if msg == WM_NCACTIVATE {
+                // lparam = -1 → 禁止重绘非客户区（与主窗口同一手法）
+                return unsafe {
+                    DefWindowProcW(hwnd, msg, wparam, -1)
+                };
+            }
+            unsafe {
+                CallWindowProcW(
+                    MENU_ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed),
+                    hwnd,
+                    msg,
+                    wparam,
+                    lparam,
+                )
+            }
+        }
+        let orig =
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, menu_proc as *const () as isize);
+        if orig == 0 {
+            crate::log_warn!("[effects] 菜单 NC hook 挂载失败");
+            return;
+        }
+        MENU_ORIG_WNDPROC.store(orig, Ordering::Relaxed);
+        MENU_HOOKED_HWND.store(hwnd, Ordering::Relaxed);
+        crate::log_print!("[effects] 菜单 NC hook 已挂载（WM_NCACTIVATE → 不重绘）");
+    }
 }
 
 pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {

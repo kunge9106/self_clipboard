@@ -167,6 +167,14 @@ pub struct Config {
     /// 默认开：不开的话，深色 + 高级材质 + 亮壁纸 = 几乎不能用。
     #[serde(default = "default_true")]
     pub auto_alpha_dark: bool,
+    /// 深色自动加浓用的**深色专属浓度**，默认 100。
+    ///
+    /// 用户在深色 + 自动加浓状态下亲手拖浓度滑条时，改的是这个值 ——
+    /// 自动加浓从「写死 100」升级为「100 或用户指定的值」。它与日常浓度
+    /// （alpha_straight / alpha_round）分开记：切回浅色恢复浅色值，
+    /// 切回深色用深色值，两条线互不踩。
+    #[serde(default = "default_dark_alpha")]
+    pub dark_alpha: u32,
     /// 浓度语义迁移标记（2026-11-05）。
     ///
     /// 早先 `round_mode = 开` 表示「**关掉**系统模糊、要更实」，两档默认是
@@ -453,9 +461,13 @@ fn default_screenshot_mode() -> String {
 /// 关闭高级材质时的默认浓度：**没有系统模糊**，窗口后面是清晰桌面，
 /// 必须接近实心才不刺眼。
 pub const STRAIGHT_ALPHA: u32 = 90;
-/// 高级材质（有系统模糊）的默认浓度：留出足够的透明度让模糊透上来。
-/// 90 会让模糊只剩 10%，等于白开。
-pub const ROUND_ALPHA: u32 = 45;
+/// 高级材质（有系统模糊）的默认浓度。
+///
+/// 40 是实测观感的最佳点：系统 backdrop 自带模糊 + 饱和增强，40% 的色层
+/// 在深浅两种主题下文字对比度都稳、毛玻璃又明显可见 ——
+/// 45 偏闷（模糊被盖住一半），30 以下亮壁纸读字吃力。
+/// 90 会让模糊只剩 10%，等于白开（早期默认，已被推翻）。
+pub const ROUND_ALPHA: u32 = 40;
 
 fn default_alpha_straight() -> u32 {
     STRAIGHT_ALPHA
@@ -463,6 +475,10 @@ fn default_alpha_straight() -> u32 {
 
 fn default_alpha_round() -> u32 {
     ROUND_ALPHA
+}
+
+fn default_dark_alpha() -> u32 {
+    100
 }
 
 /// 浓度的合法区间（前端滑块 10–90，后端一律夹到这个范围）
@@ -523,6 +539,8 @@ impl Default for Config {
             clean_include_pinned: false,
             clean_confirm_exit: false,
             retention_days: default_retention(),
+            // 深色自动加浓的指定值：默认 100（见 dark_alpha 字段注释）
+            dark_alpha: default_dark_alpha(),
             // 相同内容 60 秒内合并并置顶（见 default_dedup_mode 的说明）
             dedup_mode: default_dedup_mode(),
             // 置顶/收藏默认不受保留期影响
@@ -777,6 +795,7 @@ pub fn get_settings() -> serde_json::Value {
         "alphaRound": cfg.alpha_round,
         "roundMode": cfg.round_mode,
         "autoAlphaDark": cfg.auto_alpha_dark,
+        "darkAlpha": cfg.dark_alpha,
         "fileCopy": cfg.file_copy,
         "deleteFilesWithItem": cfg.delete_files_with_item,
         "deleteFilesPermanent": cfg.delete_files_permanent,
@@ -827,6 +846,14 @@ pub fn dismiss_onboarding(kind: String) -> Result<(), String> {
 #[tauri::command]
 pub fn set_auto_alpha_dark(value: bool) -> Result<(), String> {
     update(|c| c.auto_alpha_dark = value);
+    Ok(())
+}
+
+/// 深色自动加浓的「指定值」：用户在深色 + 自动加浓状态下拖浓度滑条时落盘到这里。
+/// 与 `set_material_alpha`（日常浓度）分开 —— 两条线互不踩（见 `dark_alpha` 字段注释）。
+#[tauri::command]
+pub fn set_dark_alpha(value: u32) -> Result<(), String> {
+    update(|c| c.dark_alpha = value.clamp(ALPHA_MIN, ALPHA_MAX));
     Ok(())
 }
 
