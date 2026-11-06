@@ -17,7 +17,7 @@
    选中项的背景由 CSS 在该类下让位给滑块；JS 没跑/出错时仍是原来的实底高亮。
    =========================================================================== */
 
-import { shouldAnimate, tokens } from "../runtime.js";
+import { shouldAnimate } from "../runtime.js";
 
 /** 已挂载的容器，避免重复注入 */
 const mounted = new WeakSet();
@@ -36,8 +36,6 @@ export function mountSegmented(container) {
   container.classList.add("has-seg-thumb");
   mounted.add(container);
 
-  const t = tokens();
-  const glideMs = t.ms("--seg-thumb-dur");
   let firstPaint = true;
 
   /** 把底块对齐到当前选中项。animate=false 时瞬时归位（首帧/尺寸变化用） */
@@ -53,7 +51,6 @@ export function mountSegmented(container) {
       thumb.style.transition = "none";
     } else {
       thumb.style.transition = "";
-      thumb.style.setProperty("--seg-thumb-ms", `${glideMs}ms`);
     }
     thumb.style.opacity = "1";
     thumb.style.width = `${active.offsetWidth}px`;
@@ -79,11 +76,31 @@ export function mountSegmented(container) {
     attributeFilter: ["class"],
   });
 
-  // 尺寸变化（窗口缩放、字体回退、内容换行）时瞬时归位，不要滑
-  const ro = new ResizeObserver(() => sync(false));
+  // 尺寸变化（窗口缩放、字体回退、内容换行）时瞬时归位，不要滑。
+  //
+  // ⚠ 这里有两个必须同时成立的约束，缺一个动画就永远不播：
+  //
+  // ① **只监听容器，不监听选中项**。选中项是每次切换都会变的东西，
+  //    监听它等于「一切换就 sync(false)」，等于把滑动掐掉。
+  // ② **小于 2px 的变化视为抖动，直接忽略**。切换选中项时字重从 400 变 600、
+  //    选中块的内阴影消失，容器宽度会抖 1px（实测 184 → 185）。ResizeObserver
+  //    对 1px 也会回调，于是刚启动的过渡当场被 sync(false) 覆盖。
+  //
+  // 现象就是「滑块一下子跳过去、傻快」：实测切换后 39ms 就到终点、
+  // thumb.getAnimations() 为空 —— 不是曲线快，是动画根本没播。
+  // 判定用 ≥2px 而不是 >0：窗口缩放、字体回退这类真实布局变化远大于 2px，
+  // 不会被漏掉；而选中态引起的亚像素抖动不会误伤动画。
+  let lastW = container.offsetWidth;
+  let lastH = container.offsetHeight;
+  const ro = new ResizeObserver(() => {
+    const w = container.offsetWidth;
+    const h = container.offsetHeight;
+    if (Math.abs(w - lastW) < 2 && Math.abs(h - lastH) < 2) return;
+    lastW = w;
+    lastH = h;
+    sync(false);
+  });
   ro.observe(container);
-  const activeForResize = container.querySelector(activeSel);
-  if (activeForResize) ro.observe(activeForResize);
 
   return {
     sync: () => sync(true),

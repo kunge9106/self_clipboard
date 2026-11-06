@@ -58,7 +58,9 @@
 }
 
 .fx-fade-up {
-  animation: fx-fade-up var(--dur-base) var(--ease-out) both;
+  /* 与 presets.js 的 "fade-up" 用同一个曲线 —— 同一个效果不能有两套参数，
+     否则「HTML 里写 class」和「JS 里 play()」出来的手感会不一样。 */
+  animation: fx-fade-up var(--dur-base) var(--ease-glide) both;
 }
 
 .fx-pop-in {

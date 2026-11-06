@@ -246,6 +246,26 @@
   --border-control: rgba(0, 0, 0, 0.19);
   /* 进度条空轨：玻璃白在浅色底上等于隐形，必须用「比底深一点」的中性色 */
   --track-bg: rgba(0, 0, 0, 0.08);
+
+  /* ── 分段控件（.seg）──────────────────────────────────────────────
+     原来是「8% 黑的槽 + 28% 白×mat-k 的选中块」，默认浓度下选中块只有
+     19.6% 白 —— 与槽的亮度几乎持平，看着既没有浮起感，滑动时也看不出
+     在动（用户反馈「丑、low」，同时觉得「有的分组没接动画」其实是同一件事）。
+     分段控件的选中块必须是**控件级实体**：近白、带下缘阴影，用凸起表达
+     「选中」。它不该跟着窗口材质一起变透 —— 控件读不清是可用性问题，
+     不是观感问题。 */
+  --seg-track-bg: rgba(0, 0, 0, 0.05);
+  --seg-track-edge: rgba(0, 0, 0, 0.06);
+  /* 槽的内凹：光从上方来，槽的上沿落在阴影里 */
+  --seg-track-inset: inset 0 1px 2px rgba(0, 0, 0, 0.05);
+  --seg-thumb-bg: #ffffff;
+  /* 滑块圆角 = 槽圆角 8 − 内距 3 = 5。这是**几何对齐值**，不是新的圆角档位：
+     内嵌块的圆角必须等于「外圆角 − 间距」，否则四角会露出不等宽的缝。
+     用 --radius-xs(4) 时上下差 1px，放大到 200% 能看出内角偏方。 */
+  --seg-thumb-radius: 5px;
+  /* 白块不需要顶部高光（自身已是亮面），靠下缘阴影表达离地 1px */
+  --seg-thumb-shadow: 0 1px 2px rgba(24, 36, 66, 0.13),
+    0 0 0 0.5px rgba(24, 36, 66, 0.06);
   /* 滚动条滑块：只是「你在哪儿」的辅助指示，不承担信息、不参与层级 ——
      所以是半透明中性色。原来四条规则各写一份裸 rgba（浅 .16/.28、深 .16/.28），
      想调一次色得同时想起另外三条，且深色那两条必须排在浅色之后才生效。 */
@@ -534,6 +554,17 @@ body.dark {
   --stroke: rgba(255, 255, 255, 0.12);
   --border-control: rgba(255, 255, 255, 0.15);
   --track-bg: rgba(255, 255, 255, 0.14);
+
+  /* 深色：槽比原来更暗（0.14 的浅槽在暗底上发灰），滑块是半透白 + 顶部高光。
+     ⚠ 原实现里滑块 rgba(255,255,255,.09) 压在槽 .14 上 —— **滑块比槽还暗**，
+     深色下选中项完全看不出来。这是本次重做要修的实际缺陷。 */
+  --seg-track-bg: rgba(255, 255, 255, 0.06);
+  --seg-track-edge: rgba(255, 255, 255, 0.07);
+  --seg-track-inset: inset 0 1px 3px rgba(0, 0, 0, 0.32);
+  --seg-thumb-bg: rgba(255, 255, 255, 0.19);
+  --seg-thumb-radius: 5px;
+  --seg-thumb-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 1px 3px rgba(0, 0, 0, 0.42), 0 0 0 0.5px rgba(255, 255, 255, 0.07);
   /* 深色滚动条：白只给 .16。深底上白比黑显眼，.28 已经是明显的悬浮反馈，
      再高会像一根白棍横在列表右侧。 */
   --scrollbar-thumb: rgba(255, 255, 255, 0.16);
@@ -1259,16 +1290,30 @@ body.dark #theme-toggle .i-sun {
   display: inline;
 }
 
-/* ── 设置页的三选一（浅色 / 深色 / 系统）────────────────────────────────
-   大厂那种分段控件：整块是个凹槽（--track-bg 已按主题分深浅），
-   选中项浮起来。不用单选框 —— 三选一且每一项都很短，分段更直观。 */
+/* ── 分段控件（三选一：立即 / 30 秒 / 5 分钟、浅色 / 深色 / 系统…）──────
+   形态是「凹槽 + 凸块」，这是分段控件的核心语义：
+     · 槽是**凹**的 —— 底色压淡 + 上沿内阴影，光从上方来，槽口落在阴影里；
+     · 选中块是**凸**的 —— 近白实面 + 下缘投影，看起来离地 1px。
+   两者必须形成亮度差，否则「选中」只能靠字重传达，控件会显得平、显得廉价。
+
+   ⚠ 曾经的错法（用户实机反馈「丑、low」）：槽用 8% 黑、选中块用
+   `--glass-strong`（28% 白 × mat-k，默认浓度下只有 19.6% 白）。两者亮度
+   几乎持平，于是选中项只是「略微亮一点点」，滑块滑动时也几乎看不出位移 ——
+   用户同时觉得「样式 low」和「有的分组没接动画」，其实是同一个成因。
+   分段控件的选中块是**控件级实体**，不该跟着窗口材质一起变透：控件读不清
+   属于可用性问题，优先级高于「整窗透明度一致」。 */
 .seg {
   display: inline-flex;
   gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border-control);
+  /* 3px 而不是 2px：给滑块四周留出与圆角匹配的呼吸位，2px 时内角几乎贴着
+     容器角，看起来像两块同尺寸的方块叠在一起 */
+  padding: 3px;
+  border: 1px solid var(--seg-track-edge);
   border-radius: var(--radius-sm);
-  background: var(--track-bg);
+  background: var(--seg-track-bg);
+  /* 凹槽的内阴影。边框已压到 6% 黑，边界由「内阴影 + 亮度差」表达，
+     不再靠一条实线把控件框死 —— 那正是看起来发脏的原因之一。 */
+  box-shadow: var(--seg-track-inset);
 }
 
 /* 从属选项：主开关关闭时整组置灰且不可点。
@@ -1278,20 +1323,26 @@ body.dark #theme-toggle .i-sun {
 .seg button {
   padding: 5px 14px;
   border: 0;
-  border-radius: var(--radius-xs);
+  /* 与滑块同圆角：否则挂上滑块前后，选中块的角形状会变一次 */
+  border-radius: var(--seg-thumb-radius);
   background: transparent;
   color: var(--text-dim);
   font-family: inherit;
   font-size: 12px;
   cursor: default;
+  /* 只过渡字色：背景由滑块负责。降级态（滑块未挂上）背景也要变，
+     所以 background 一并保留过渡，两条走同一时长保持同步。 */
   transition: background var(--dur-base) var(--ease-out),
     color var(--dur-base) var(--ease-out);
 }
 
+/* 降级态（JS 未挂滑块）的选中块：与滑块**同一套**令牌与阴影，
+   保证「有没有动画系统」都看得出谁被选中，不会退化成一块淡淡的灰。 */
 .seg button.on {
-  background: var(--glass-strong);
+  background: var(--seg-thumb-bg);
   color: var(--text);
   font-weight: 600;
+  box-shadow: var(--seg-thumb-shadow);
 }
 
 html:not(.hovers-off) .seg button:not(.on):hover {

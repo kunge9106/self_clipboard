@@ -44,7 +44,8 @@ export const PRESETS = {
       { opacity: 1, transform: "none" },
     ],
     dur: "--dur-base",
-    ease: "--ease-out",
+    // glide 而不是 out：out 曲线前端太陡，短位移看起来是「啪」地落位
+    ease: "--ease-glide",
   }),
 
   /** 淡入 + 轻微放大。弹层/浮层用，带一点点回弹 */
@@ -73,8 +74,10 @@ export const PRESETS = {
         { opacity: 0, transform: shift(axis, sign, px) },
         { opacity: 1, transform: "none" },
       ],
-      dur: "--dur-base",
-      ease: "--ease-out",
+      // 整块内容滑入用 slow(0.34) + glide：距离缩短到 12px 之后，
+      // 0.22s 会显得「一闪而过」。位移越小、时长越要够，才看得出是滑进去的。
+      dur: "--dur-slow",
+      ease: "--ease-glide",
     };
   },
 

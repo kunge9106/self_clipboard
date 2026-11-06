@@ -19,14 +19,19 @@
   /* 没对齐之前先藏起来：避免挂载瞬间在左上角闪一下 */
   opacity: 0;
   pointer-events: none;
-  border-radius: var(--radius-xs);
-  background: var(--glass-strong);
+  border-radius: var(--seg-thumb-radius);
+  /* 与 `.seg button.on` 共用同一套令牌 —— 滑块接管背景后，两者必须长得一样，
+     否则「有没有挂上动画」会呈现出两种不同的控件。 */
+  background: var(--seg-thumb-bg);
+  box-shadow: var(--seg-thumb-shadow);
   /* 弹性吸附的三个属性共用一个时长与缓动 —— 宽度也会变（选项不等宽），
-     所以不光要动 transform，width/height 也要跟着补间，否则会先错位再跳。 */
+     所以不光要动 transform，width/height 也要跟着补间，否则会先错位再跳。
+     缓动用 settle（1.08 轻过冲）而不是 spring（1.32）：几十像素的位移
+     配大过冲会「窜过去再弹回来」，观感急；轻过冲才是「吸住」。 */
   transition:
-    transform var(--seg-thumb-dur) var(--ease-spring),
-    width var(--seg-thumb-dur) var(--ease-spring),
-    height var(--seg-thumb-dur) var(--ease-spring),
+    transform var(--seg-thumb-dur) var(--ease-settle),
+    width var(--seg-thumb-dur) var(--ease-settle),
+    height var(--seg-thumb-dur) var(--ease-settle),
     opacity var(--dur-fast) var(--ease-out);
   will-change: transform, width, height;
 }
@@ -40,19 +45,24 @@
 
 /* ── 选中项的背景让位给滑块 ────────────────────────────────────────────────
    只在**挂载成功**（容器带 has-seg-thumb）时生效。JS 没跑或报错时，
-   选中项仍是原来的实底高亮，视觉上不会退化。 */
+   选中项仍是同一套令牌的实底高亮，视觉上不会退化。
+   阴影必须一起清掉：滑块已经带了同一份阴影，留着会叠成两层、边缘发脏。 */
 .seg.has-seg-thumb > button.on {
   background: transparent;
+  box-shadow: none;
 }
 
 .settings-tabs.has-seg-thumb > .tab.is-active {
   background-image: none;
 }
 
-/* 栏目那一档的底块：颜色与原来的选中态一致（提亮层），圆角跟随标签页 */
+/* 栏目那一档没有凹槽容器（是一排浮动标签），所以滑块只做「提亮层」，
+   不能套 .seg 那套白块 —— 白块在没有槽的情况下看着像贴了张便利贴。
+   加一层极轻的阴影，让它至少有「浮在玻璃上」的实感。 */
 .settings-tabs > .seg-thumb {
   background: var(--state-hover);
   border-radius: var(--radius-sm);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 
 /* 减少动效时不做滑动，直接归位（其余静态高亮不变） */
