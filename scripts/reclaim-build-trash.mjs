@@ -1,18 +1,27 @@
 #!/usr/bin/env node
 /**
- * 回收「构建过程塞进回收站」的空间。
+ * 手动回收「回收站里属于本仓库构建产物」的空间。
  *
- * ## 为什么需要这个脚本
+ * ## 什么会进回收站（实测结论，别再猜）
  *
- * 这台机器上，**覆盖或删除已存在的文件**都会在回收站留一份副本 —— 包括：
- *   · cargo / rustc 覆盖 `target/**\/*.o`、清理陈旧增量缓存；
- *   · vite 重建时删掉旧的 `dist/`、`node_modules/.vite/`；
- *   · 编辑器保存 `src/*.rs`（写临时文件再 rename 覆盖）。
- * 一次 debug 构建就能塞进去几个 GB，连跑几轮就是几十 GB。磁盘看着没东西，
- * 空间却回不来 —— 用户实测「回收站又攒了几十 G」就是这么来的。
+ * 在本机 D 盘做了对照实验，四种删除方式各测一遍、统计 `$I` 条目增量：
  *
- * 这不是我们 `rm` 造成的（shell `rm` 是永久删除），而是工具链的删除走了回收站，
- * 所以只能在**事后回收**，并且必须精确到本项目。
+ *   · 覆盖写入已存在文件（`> file`）        → 0
+ *   · 写临时文件后 rename 覆盖（编辑器保存） → 0
+ *   · `rm -f`（shell 永久删除）             → 0
+ *   · `node fs.rmSync`                      → 0
+ *
+ * 也就是说 cargo / vite / 编辑器的正常写盘**不会**往回收站塞东西。
+ * 曾经写在这里的「工具链覆盖 .o 时留副本」是错的：那是把「回收站里原路径在
+ * target 下」当成了「target 的写入造成的」。真正会产生条目的是走 Windows 外壳
+ * 的删除 —— 资源管理器右键删除、删除确认对话框、某些清理工具的「删除到回收站」。
+ * 17539 条 `target` 记录就是这么一次性整目录删出来的。
+ *
+ * ## 所以这个脚本的定位
+ *
+ * 不是构建流程的一环，是**事后手动兜底**：万一用资源管理器删了 `target` / `dist`，
+ * 空间被回收站吃掉，用它精确捞回来。刻意**不挂 postbuild** ——
+ * 构建不该碰回收站，而清理两万条目要按单文件 ~0.85s 串行走，会白拖慢每次打包。
  *
  * ## 安全边界
  *
@@ -21,7 +30,8 @@
  *   2. 落在 `src-tauri/target/`、`dist/`、`node_modules/.vite/` 三者之一。
  *
  * 桌面上被删的 PPT、视频，仓库里 src 的历史版本，一律不碰 —— 那些可能是
- * 用户想恢复的东西，脚本无权替他决定。
+ * 用户想恢复的东西，脚本无权替他决定。用户已明确「回收站我自己手动清」，
+ * 所以默认只预览，`--delete` 必须由人显式敲。
  *
  * ## 用法
  *
@@ -134,16 +144,31 @@ if (!doDelete) {
   process.exit(0);
 }
 
+// 并发删除：一条一条 `rmSync` 实测只有 ~2 项/秒（大头是 $R 目录里成百上千个
+// .o，逐个 unlink 受磁盘与杀软拖累），18000 项要跑两个多小时。libuv 线程池
+// 默认 4 个线程，这里开 32 路并发把等待叠起来。
+//
+// 幂等：先删 $R 再删 $I。中途被打断时残留的「$I 在、$R 不在」条目，下次运行
+// 会被 `force: true` 直接忽略数据、补删元数据 —— 不会留下打不开的僵尸条目。
+const fsp = fs.promises;
+const CONCURRENCY = 32;
+let cursor = 0;
 let freed = 0;
 let failed = 0;
-for (const t of targets) {
-  try {
-    fs.rmSync(t.dataPath, { recursive: true, force: true });
-    fs.rmSync(t.infoPath, { force: true });
-    freed++;
-  } catch {
-    failed++;
+
+async function worker() {
+  while (cursor < targets.length) {
+    const t = targets[cursor++];
+    try {
+      await fsp.rm(t.dataPath, { recursive: true, force: true });
+      await fsp.rm(t.infoPath, { force: true });
+      freed++;
+    } catch {
+      failed++;
+    }
   }
 }
+
+await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 console.log(`\n已回收 ${freed} 项（${gb(totalSize)}）${failed ? `，${failed} 项失败` : ""}`);
 void mb;

@@ -8,7 +8,6 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "postbuild": "node scripts/reclaim-build-trash.mjs --delete",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
