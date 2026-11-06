@@ -130,11 +130,11 @@
   /* 真玻璃面板（弹窗 / 迁移框）：半透明 + backdrop-filter。
      只有在**背后有内容可糊**的地方才用它 —— 浮在窗口底色上的元素用这套
      会得到「一层透明的白」，见文件顶部浮层材质那条注释。 */
-  --glass-panel: rgba(255, 255, 255, 0.76);
+  --glass-panel: rgba(255, 255, 255, 0.82);
   --glass-panel-rim: rgba(255, 255, 255, 0.5);
   /* 长文阅读面板用这一档：看得出是玻璃，但透不出会干扰阅读的内容。
      720×520 的正文区和 260px 的确认框不是一个场景 —— 后者读 12 个字，前者读 2000 个。 */
-  --glass-panel-strong: rgba(255, 255, 255, 0.94);
+  --glass-panel-strong: rgba(255, 255, 255, 0.9);
 
   /* 卡片：半透明白面 + 顶边受光 + 极淡的顶部渐隐（玻璃厚度感，2% 跨度） */
   --card-rim: rgba(255, 255, 255, 0.5);
@@ -356,9 +356,10 @@
      **内容区与窗口底同层**（与深色一致）：毛玻璃上再压一层只会发灰，
      真正的层级只有「底 → 卡片」两阶，区分由材质色的灰 + elev-1 投影共同给出。 */
   --surface-1: transparent;
-  /* .68：实测「条目卡片白色又加深了」。压到 .6 是为了层级差，但代价是卡片发灰 ——
-     层级差交给 elev-1 阴影，卡片本身要够白才像玻璃上的白片。 */
-  --surface-2: rgba(255, 255, 255, calc(0.68 * var(--mat-k)));
+  /* .82：.68 的代价就是「灰蒙蒙」—— 半透明白低于 0.75 时，壁纸色会明显渗进
+     卡片，白片变成灰片。层级差交给 elev-1 阴影去表达，卡片本身要够白才像
+     玻璃上的一块白片（用户 2026-11-06 再次反馈发灰，第二次栽在同一个数值上）。 */
+  --surface-2: rgba(255, 255, 255, calc(0.82 * var(--mat-k)));
   --surface-3: rgba(255, 255, 255, calc(0.9 * var(--mat-k)));
   --hairline: rgba(0, 0, 0, 0.06);
   /* 卡片高度：**半透明卡片必须靠阴影定界**。
@@ -411,12 +412,14 @@ body.dark {
   --glass-spec-soft: rgba(255, 255, 255, 0.1);
   --glass-rim: rgba(255, 255, 255, 0.12);
   --glass-sheen: rgba(255, 255, 255, 0.07);
-  /* 深色面板不能是「半透明白」—— 那会泛灰。用近黑底 + 中等不透明度，
-     透出来的是被 blur 压过的暗色内容。 */
-  --glass-panel: rgba(30, 30, 35, 0.8);
+  /* 深色面板不能是「半透明白」—— 那会泛灰。用**接近纯黑**的底 + 中等不透明度：
+     中灰（如 rgb(30,30,35)）叠在暗背景上，透上来的是灰、本身也是灰，
+     两层灰相加就是用户说的「灰蒙蒙」。底色压到 13,13,17 之后，透上来的暗色
+     才收得进黑调里，仅靠亮度差和顶光表达玻璃。 */
+  --glass-panel: rgba(13, 13, 17, 0.76);
   --glass-panel-rim: rgba(255, 255, 255, 0.11);
-  --glass-panel-strong: rgba(26, 26, 31, 0.95);
-  --card-rim: rgba(255, 255, 255, 0.07);
+  --glass-panel-strong: rgba(10, 10, 14, 0.9);
+  --card-rim: rgba(255, 255, 255, 0.1);
   --card-sheen: rgba(255, 255, 255, 0.06);
 
   /* 深色下反过来：tint 用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清。
@@ -523,7 +526,9 @@ body.dark {
   /* 深色同理：卡片半透明、略亮一档，不压暗内容区。
      **深色只有三阶**：窗口底与内容区同层 —— 把底色再压暗只会产生「陷进去」的错觉。 */
   --surface-1: transparent;
-  --surface-2: rgba(255, 255, 255, calc(0.07 * var(--mat-k)));
+  /* 深色卡片同理：0.07 的白叠在近黑底上只剩一层灰，看不出「亮一档」。
+     0.11 才拉得出层次，同时仍是深色而不是灰板。 */
+  --surface-2: rgba(255, 255, 255, calc(0.11 * var(--mat-k)));
   --surface-3: rgba(255, 255, 255, calc(0.13 * var(--mat-k)));
   --hairline: rgba(255, 255, 255, 0.07);
   --elev-1: 0 0 0 0.5px rgba(255, 255, 255, 0.04), 0 1px 2px rgba(0, 0, 0, 0.2);
@@ -2421,8 +2426,8 @@ html:not(.hovers-off) .statusbar-clear:hover {
      **强档面板**（0.94）而不是确认框那档 0.76：既保留玻璃的顶光与亮边，
      又不会因为背后什么都没有而变成一片发白。 */
   background: var(--glass-panel-strong);
-  backdrop-filter: blur(18px) saturate(150%);
-  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(160%) brightness(1.1);
+  -webkit-backdrop-filter: blur(18px) saturate(160%) brightness(1.1);
   border: 1px solid var(--glass-panel-rim);
   box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   color: var(--text);
@@ -2571,8 +2576,13 @@ html:not(.hovers-off) .statusbar-clear:hover {
      另加一圈亮边把轮廓从模糊背景里勾出来（浮层不加描边时，半透明会让
      边界糊进背景，看着像「没对齐的一团光」）。 */
   background: var(--glass-panel);
-  backdrop-filter: blur(30px) saturate(170%);
-  -webkit-backdrop-filter: blur(30px) saturate(170%);
+  /* ⚠ brightness 是玻璃质感的**必需品**，不是修饰。blur 只负责散射、
+     saturate 只负责保色，两者都不改变亮度 —— 透上来的内容保持原亮度，
+     再叠一层半透明白，白就被「稀释」成灰白，整块玻璃发灰（用户原话「灰蒙蒙」）。
+     真实玻璃会把光聚起来，这 15% 的提亮就是透镜效应。
+     少了它，前面所有受光设计都白做。 */
+  backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
+  -webkit-backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
   border: 1px solid var(--glass-panel-rim);
   box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   display: flex;
@@ -3398,8 +3408,8 @@ html:not(.hovers-off) .btn-danger:hover {
   /* toast 浮在列表正上方，背后确实有内容可糊 —— 用真玻璃，和弹窗同一套配方。
      它只活 1.5 秒，透出来的内容不会干扰阅读，反而让提示像「贴在玻璃上」。 */
   background: var(--glass-panel);
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(170%) brightness(1.12);
+  -webkit-backdrop-filter: blur(24px) saturate(170%) brightness(1.12);
   border: 1px solid var(--glass-panel-rim);
   box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   color: var(--text);
@@ -3439,8 +3449,13 @@ html:not(.hovers-off) .btn-danger:hover {
   border-radius: var(--radius-sm);
   /* 与确认框同一档玻璃：它也是一次「停下来等」的浮层，背后同样糊过一层 */
   background: var(--glass-panel);
-  backdrop-filter: blur(30px) saturate(170%);
-  -webkit-backdrop-filter: blur(30px) saturate(170%);
+  /* ⚠ brightness 是玻璃质感的**必需品**，不是修饰。blur 只负责散射、
+     saturate 只负责保色，两者都不改变亮度 —— 透上来的内容保持原亮度，
+     再叠一层半透明白，白就被「稀释」成灰白，整块玻璃发灰（用户原话「灰蒙蒙」）。
+     真实玻璃会把光聚起来，这 15% 的提亮就是透镜效应。
+     少了它，前面所有受光设计都白做。 */
+  backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
+  -webkit-backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
   border: 1px solid var(--glass-panel-rim);
   box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   color: var(--text);
