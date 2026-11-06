@@ -156,7 +156,7 @@ export function checkPanelCloseKey(combo, { callUpHotkey = "" } = {}) {
     return `${comboLabel(combo)} 是面板的选择 / 粘贴键，不能用作关闭键`;
   }
   if (parsed.mods.length === 0 && !BARE_CLOSE_KEYS.has(parsed.main)) {
-    return "这个键要带修饰键（Ctrl / Alt / Shift / Win），否则打字时会关掉面板";
+    return "请加上 Ctrl / Alt / Shift，避免打字时误关面板";
   }
   const callUp = parseCombo(callUpHotkey);
   if (callUp && callUp.main === parsed.main && callUp.mods.join("+") === parsed.mods.join("+")) {
