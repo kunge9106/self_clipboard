@@ -2258,7 +2258,10 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   min-height: 20px;
 }
 
-.settings input[type="number"] {
+/* 全站数字输入框（设置页「保留天数」、清理弹窗「自定义天数」）**只有这一份视觉**。
+   原先挂了 `.settings` 前缀，于是清理弹窗里那个就吃浏览器原生样式 ——
+   白底、硬黑边、无圆角，与旁边的幽灵按钮完全不是一套（用户截图反馈）。 */
+input[type="number"] {
   width: 80px;
   height: 28px;
   padding: 0 8px;
@@ -2267,6 +2270,20 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   background: var(--glass-strong);
   color: var(--text);
   font-family: var(--font);
+  /* 输入框不继承正文行高/字号，必须显式给，否则两处高度对不上 */
+  font-size: 13px;
+  /* 数字等宽：改天数时字段宽度不跟着字形跳动 */
+  font-variant-numeric: tabular-nums;
+}
+
+/* 按天数清理的预设按钮 + 自定义输入框。
+   这一块原先是裸 HTML：.age-pick 没有任何布局规则，靠 inline 自然换行，
+   按钮和输入框会掉到不同行、间距也不受控。 */
+.age-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 /* 材质浓度滑块：**自绘**。
@@ -4027,8 +4044,8 @@ body.tier-solid .hover-preview {
 /* ══ 数字输入框的原生 spinner ═══════════════════════════════════════
    Windows 上是两枚灰色三角，且只在 hover 时才显形（鼠标扫过突然冒出来），
    与整套设计语言不搭。隐藏掉 —— 键盘 ↑↓ 与滚轮仍可用，功能不丢。 */
-.settings input[type="number"]::-webkit-inner-spin-button,
-.settings input[type="number"]::-webkit-outer-spin-button {
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
   -webkit-appearance: none;
   appearance: none;
   margin: 0;
