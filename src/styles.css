@@ -195,6 +195,13 @@
 
   /* 卡片：半透明白面 + 顶边受光 + 极淡的顶部渐隐（玻璃厚度感，2% 跨度） */
   --card-rim: rgba(255, 255, 255, 0.5);
+
+  /* 输入框是「凹」的：底比面板暗一档 + 上沿内阴影 + 下沿反光，
+     与分段控件的槽同一套语言。原来搜索框用 --glass-strong（和面板**完全同色**）
+     加一条 1px 边框 —— 那是「卡片」的画法，不是「能往里填」的画法。 */
+  --search-bg: rgba(16, 28, 54, 0.055);
+  --search-inset: inset 0 1px 2px rgba(16, 28, 54, 0.08),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.6);
   --card-sheen: rgba(255, 255, 255, 0.24);
 
   /* 主按钮：**平坦面色**，不是渐变。三档只差明度，色相一律锁在强调蓝上 ——
@@ -541,6 +548,9 @@ body.dark {
   --state-ok: #4ade80;
   --state-err: #ff8a8a;
   --card-rim: rgba(255, 255, 255, 0.1);
+  --search-bg: rgba(0, 0, 0, 0.2);
+  --search-inset: inset 0 1px 3px rgba(0, 0, 0, 0.34),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.045);
   --card-sheen: rgba(255, 255, 255, 0.06);
 
   /* 深色下反过来：tint 用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清。
@@ -1417,16 +1427,19 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   gap: 8px;
   padding: 0 10px;
   border-radius: var(--radius-sm);
-  background: var(--glass-strong);
-  border: 1px solid var(--border-control);
-  transition: border-color var(--dur-fast) var(--ease-out),
-    box-shadow var(--dur-fast) var(--ease-out);
+  /* 凹：底色比面板暗一档 + 上沿内阴影 + 下沿反光（与分段控件的槽同一套语言） */
+  background: var(--search-bg);
+  /* 边框留成透明的占位：保留这 1px 空间，聚焦时不必再改盒模型 */
+  border: 1px solid transparent;
+  box-shadow: var(--search-inset);
+  transition: box-shadow var(--dur-fast) var(--ease-out);
 }
 
-/* 聚焦时描边高亮（同 V1） */
+/* 聚焦：用**外发光**而不是一条蓝线。
+   蓝线是「原生输入框」的画法；按钮的焦点已经是外发光，这里统一过去。
+   内阴影也要带上，否则聚焦瞬间输入框会从「凹」变成「平」。 */
 .search:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-ring);
+  box-shadow: var(--search-inset), 0 0 0 2px var(--accent-soft);
 }
 
 /* 批量删除模式的操作条：与搜索栏同一个位置、同样占满宽度。
@@ -2261,7 +2274,11 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
      同一套界面里两种面板强度，用户一眼就看出不一致。
      列表卡片才需要 .62（密集堆叠、每张都要分辨），面板不需要。 */
   background: var(--glass-strong);
-  box-shadow: var(--elev-1);
+  /* 与列表卡片同一套边缘语言：顶部一道 1px 内高光（模拟玻璃上沿的折射）。
+     **浅色下这条最有效** —— 面板本身是 19.6% 白压出来的浅灰（约 #eaecf0），
+     50% 白的高光线在上面看得见；深色下则是 10% 白，负责把上边缘提出来。
+     原先只有 elev-1 阴影，所以设置页和关于页的面板都是「平的一块」。 */
+  box-shadow: inset 0 1px 0 var(--card-rim), var(--elev-1);
 }
 
 .settings .block-h {
