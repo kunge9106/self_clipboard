@@ -64,7 +64,7 @@
     "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
 
   /* 玻璃叠加层（light） */
-  --glass: rgba(255, 255, 255, 0.16);
+  --glass: rgba(255, 255, 255, calc(0.16 * var(--mat-k)));
   /* 条目卡片底色。比 --glass 实得多，理由：浅色材质底（Mica 白灰）上叠 16% 白，
      卡片与背景几乎同色，整块看起来「发灰」、分不出层次（用户实测反馈）。
      --glass 还要服务侧栏与按钮，那些地方需要更透，所以这里单独一个变量。 */
@@ -76,7 +76,7 @@
      套到悬停上就是错的：毛玻璃上压暗看着像凹进去、发灰（实测「条目聚焦时还是灰色的，
      不好看不如原来的」）；提亮才像玻璃被照亮、浮起来。
      叠在 62% 白的卡片上 ≈ 79% 白：够明显，又不至于变成实心块。 */
-  --state-hover: rgba(255, 255, 255, 0.45);
+  --state-hover: rgba(255, 255, 255, calc(0.45 * var(--mat-k)));
   /* 按下：物理上「被压下去 = 遮住光」，所以比常态**暗**一档（WinUI 的
      ButtonBackgroundPressed 也是比 normal 暗）。浅色用中性黑，深色用更低的白。 */
   --state-active: rgba(0, 0, 0, 0.06);
@@ -101,22 +101,61 @@
   --accent-fill: #3560c4;
   /* 实底填充上的前景：浅色主题的填充是深蓝，所以字用白。 */
   --accent-on: #ffffff;
-  /* ── 实底主按钮的「厚度」五件套 ──────────────────────────────────
-     纯色块贴在毛玻璃上是平的，像一张色纸；这三层光影才有实体按键的质感：
-       顶部内高光（光从上方来）+ 底部内暗边（有厚度）+ 极轻外投影（离开玻璃一点）。
-     渐变两端从 --accent-fill 派生而不是另取色相 —— 色相一变，按钮就和强调色脱钩，
-     界面上会出现「两个蓝」。 */
-  --btn-fill-top: #3d6bd6; /* 比 --accent-fill(#3560c4) 亮一档 */
-  --btn-fill-bottom: #2c52ab; /* 暗一档，跨度小才不脏 */
-  --btn-edge: #24468f; /* 轮廓：比底再深一档，1px 足够，太深像描了黑边 */
-  --btn-gloss: rgba(255, 255, 255, 0.22); /* 顶部内高光 = 玻璃的受光面 */
-  --btn-shade: rgba(0, 0, 0, 0.16); /* 底部内暗边 = 厚度 */
-  --btn-lift: rgba(24, 44, 92, 0.26); /* 外投影 = 轻微浮起 */
+  /* ══ 玻璃材质（Glass material）═════════════════════════════════════
+     2026-11-06 整层重做，按钮 / 卡片 / 浮层共用同一套「受光」语言。
+
+     旧的一套是 iOS 6 时代的拟物金属配方：180° 深浅渐变 + 底部内黑边 +
+     深色描边，模拟一块「有厚度的塑料/金属键」。它在纯色背景上成立，但压在
+     毛玻璃界面上会显脏、发油 —— 用户实机反馈「不好看，不符合现代美学」，
+     判断成立，不是口味问题。
+
+     现代材质（Apple Liquid Glass 2025 / Fluent Acrylic）把质感拆成三层，
+     每层只干一件事，叠起来才不像贴纸：
+       ① **平坦面色 tint**：玻璃染色后是均匀的，没有上下渐变。
+          渐变一出就变成「立体键帽」，这是老派的直接标志。
+       ② **镜面边 spec**：光从上方来，所以只有**顶边**一道锐利白光，
+          其余三边极弱（边缘折射）。这是「一块材质」与「一个色块」的分界，
+          也是整套质感里唯一不能省的一层。
+       ③ **双档投影**：贴身的接触影（contact，1px，很紧）+ 大而柔的环境影
+          （ambient，扩散远、色偏冷）。合成一档会又糊又脏。
+     额外一层 135° 的极淡对角光泽 sheen，给大面积面板用；30px 的按钮上
+     只用一点点，多了会像塑料反光。
+
+     ⚠ 这些令牌**只表达受光**，不表达颜色。颜色仍由各主题的 tint 决定，
+     两者分开才能做到「换配色不改质感」。 */
+  --glass-spec: rgba(255, 255, 255, 0.7);
+  --glass-spec-soft: rgba(255, 255, 255, 0.5);
+  --glass-rim: rgba(255, 255, 255, 0.46);
+  --glass-sheen: rgba(255, 255, 255, 0.38);
+  /* 真玻璃面板（弹窗 / 迁移框）：半透明 + backdrop-filter。
+     只有在**背后有内容可糊**的地方才用它 —— 浮在窗口底色上的元素用这套
+     会得到「一层透明的白」，见文件顶部浮层材质那条注释。 */
+  --glass-panel: rgba(255, 255, 255, 0.82);
+  --glass-panel-rim: rgba(255, 255, 255, 0.5);
+  /* 长文阅读面板用这一档：看得出是玻璃，但透不出会干扰阅读的内容。
+     720×520 的正文区和 260px 的确认框不是一个场景 —— 后者读 12 个字，前者读 2000 个。 */
+  --glass-panel-strong: rgba(255, 255, 255, 0.9);
+
+  /* 卡片：半透明白面 + 顶边受光 + 极淡的顶部渐隐（玻璃厚度感，2% 跨度） */
+  --card-rim: rgba(255, 255, 255, 0.5);
+  --card-sheen: rgba(255, 255, 255, 0.24);
+
+  /* 主按钮：**平坦面色**，不是渐变。三档只差明度，色相一律锁在强调蓝上 ——
+     色相一动，界面里就会出现「两个蓝」。 */
+  --btn-tint: #3f66cc;
+  --btn-tint-hover: #4972da;
+  --btn-tint-active: #3557b4;
+  /* 亮边而不是暗边：暗描边是「画上去的轮廓」，亮边是「玻璃边缘折射」。 */
+  --btn-rim: rgba(255, 255, 255, 0.26);
+  --btn-spec: rgba(255, 255, 255, 0.42);
+  --btn-contact: rgba(30, 48, 96, 0.22);
+  --btn-ambient: rgba(30, 48, 96, 0.26);
+  --btn-sheen: rgba(255, 255, 255, 0.2);
   /* 禁用只有这一个强度。原来 4 处各写 .42 / .45 / .45 / .62 ——
      同一个「不可用」有四种淡法，用户看到的是「有的灰有的不灰」。 */
   --disabled-opacity: 0.45;
   --card-hover: var(--state-hover);
-  --glass-strong: rgba(255, 255, 255, 0.28);
+  --glass-strong: rgba(255, 255, 255, calc(0.28 * var(--mat-k)));
   --glass-hover: var(--state-hover);
   /* 悬浮浮层**自己的**材质，与窗口那套（--glass / --material-rgb / 设置里的
      材质浓度）完全解耦 —— 那套是给整窗调的，浮层跟着变只会越调越难对齐。
@@ -184,6 +223,13 @@
      原来这里写 0.62、实际运行是 0.50 —— 审计测的是「一个用户看不到的配置」，
      数字再漂亮也没意义。 */
   --glass-alpha: 0.5;
+  /* 表面层（窗口底以上的卡片 / 侧栏 / 控件底）随浓度收敛的系数：
+       k = min(1, 2a)  →  ≥50% 时 k=1，现在的观感一分不变；
+                          越低越薄，1% 时几乎看不见。
+     ⚠ 为什么要有它：窗口底已经全透了、卡片还压着 68% 白，
+     用户看到的就是「拉到 1 还是白花花一片，不够极端」（实测反馈）。
+     只塌低浓度段而不是整体乘 a，是为了不动 50%–90% 这段已经调好的观感。 */
+  --mat-k: min(1, calc(var(--glass-alpha) * 2));
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
@@ -310,10 +356,11 @@
      **内容区与窗口底同层**（与深色一致）：毛玻璃上再压一层只会发灰，
      真正的层级只有「底 → 卡片」两阶，区分由材质色的灰 + elev-1 投影共同给出。 */
   --surface-1: transparent;
-  /* .68：实测「条目卡片白色又加深了」。压到 .6 是为了层级差，但代价是卡片发灰 ——
-     层级差交给 elev-1 阴影，卡片本身要够白才像玻璃上的白片。 */
-  --surface-2: rgba(255, 255, 255, 0.68);
-  --surface-3: rgba(255, 255, 255, 0.9);
+  /* .82：.68 的代价就是「灰蒙蒙」—— 半透明白低于 0.75 时，壁纸色会明显渗进
+     卡片，白片变成灰片。层级差交给 elev-1 阴影去表达，卡片本身要够白才像
+     玻璃上的一块白片（用户 2026-11-06 再次反馈发灰，第二次栽在同一个数值上）。 */
+  --surface-2: rgba(255, 255, 255, calc(0.82 * var(--mat-k)));
+  --surface-3: rgba(255, 255, 255, calc(0.9 * var(--mat-k)));
   --hairline: rgba(0, 0, 0, 0.06);
   /* 卡片高度：**半透明卡片必须靠阴影定界**。
      62% 白叠在白壁纸上只有 1.03 的亮度差，肉眼看不出 —— 这是毛玻璃的物理限制
@@ -346,9 +393,9 @@ body.dark {
         5% 的量在近黑底上仍是很深的黑灰，不会泛白；
      3. hover/strong 同比例下调，保证「越上层越亮」的层次还在，
         但整体保持在黑调里。 */
-  --glass: rgba(255, 255, 255, 0.05);
+  --glass: rgba(255, 255, 255, calc(0.05 * var(--mat-k)));
   --card-bg: var(--surface-2);
-  --state-hover: rgba(255, 255, 255, 0.09);
+  --state-hover: rgba(255, 255, 255, calc(0.09 * var(--mat-k)));
   /* 深色下「压暗」在深底上看不出来，按下改为比悬停再亮一档。 */
   --state-active: rgba(255, 255, 255, 0.14);
   /* 深色下的强调淡底：实底主按钮的焦点外发光。深色实底是亮蓝，外发光要更亮一点才看得出来 */
@@ -359,16 +406,35 @@ body.dark {
   /* 深色下反过来：填充用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清 */
   --accent-fill: #6b9bff;
   --accent-on: #12121a;
-  /* 深色下的按钮厚度：亮蓝本身已经很亮，渐变跨度要更小（否则顶部过曝、底部发黑）；
-     内高光可以更强（深底上白光不刺眼），外投影加重（暗环境下浮起靠影子而不是亮边）。 */
-  --btn-fill-top: #7ca9ff;
-  --btn-fill-bottom: #5b8bf0;
-  --btn-edge: #8ab2ff;
-  --btn-gloss: rgba(255, 255, 255, 0.3);
-  --btn-shade: rgba(0, 0, 0, 0.2);
-  --btn-lift: rgba(0, 0, 0, 0.45);
+  /* 深色下的受光：底子近黑，白光可以给得更足而不刺眼；
+     环境影加重 —— 暗环境里「浮起」只能靠影子，亮边帮不上忙。 */
+  --glass-spec: rgba(255, 255, 255, 0.18);
+  --glass-spec-soft: rgba(255, 255, 255, 0.1);
+  --glass-rim: rgba(255, 255, 255, 0.12);
+  --glass-sheen: rgba(255, 255, 255, 0.07);
+  /* 深色面板不能是「半透明白」—— 那会泛灰。用**接近纯黑**的底 + 中等不透明度：
+     中灰（如 rgb(30,30,35)）叠在暗背景上，透上来的是灰、本身也是灰，
+     两层灰相加就是用户说的「灰蒙蒙」。底色压到 13,13,17 之后，透上来的暗色
+     才收得进黑调里，仅靠亮度差和顶光表达玻璃。 */
+  --glass-panel: rgba(13, 13, 17, 0.76);
+  --glass-panel-rim: rgba(255, 255, 255, 0.11);
+  --glass-panel-strong: rgba(10, 10, 14, 0.9);
+  --card-rim: rgba(255, 255, 255, 0.1);
+  --card-sheen: rgba(255, 255, 255, 0.06);
+
+  /* 深色下反过来：tint 用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清。
+     hover 提亮一档、按下压暗一档，不再用 filter: brightness —— 那会把文字
+     和边框一起拉亮，深字压在亮蓝上会糊。 */
+  --btn-tint: #6b9bff;
+  --btn-tint-hover: #7ca9ff;
+  --btn-tint-active: #5b8bf0;
+  --btn-rim: rgba(255, 255, 255, 0.24);
+  --btn-spec: rgba(255, 255, 255, 0.5);
+  --btn-contact: rgba(0, 0, 0, 0.4);
+  --btn-ambient: rgba(0, 0, 0, 0.5);
+  --btn-sheen: rgba(255, 255, 255, 0.26);
   --card-hover: var(--state-hover);
-  --glass-strong: rgba(255, 255, 255, 0.09);
+  --glass-strong: rgba(255, 255, 255, calc(0.09 * var(--mat-k)));
   --glass-hover: var(--state-hover);
   /* 深色浮层：同样不跟窗口浓度走。上端比下端亮一档才浮得起来，
      发丝边换成浅色（深底上白边才看得见），内高光压到很低否则发灰。 */
@@ -460,8 +526,10 @@ body.dark {
   /* 深色同理：卡片半透明、略亮一档，不压暗内容区。
      **深色只有三阶**：窗口底与内容区同层 —— 把底色再压暗只会产生「陷进去」的错觉。 */
   --surface-1: transparent;
-  --surface-2: rgba(255, 255, 255, 0.07);
-  --surface-3: rgba(255, 255, 255, 0.13);
+  /* 深色卡片同理：0.07 的白叠在近黑底上只剩一层灰，看不出「亮一档」。
+     0.11 才拉得出层次，同时仍是深色而不是灰板。 */
+  --surface-2: rgba(255, 255, 255, calc(0.11 * var(--mat-k)));
+  --surface-3: rgba(255, 255, 255, calc(0.13 * var(--mat-k)));
   --hairline: rgba(255, 255, 255, 0.07);
   --elev-1: 0 0 0 0.5px rgba(255, 255, 255, 0.04), 0 1px 2px rgba(0, 0, 0, 0.2);
   --elev-2: 0 12px 32px -10px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.3),
@@ -568,14 +636,13 @@ select:focus-visible {
   background-image: none;
 }
 
-/* 主按钮是强调色实底：叠灰会脏，只能提亮；而蓝环压在蓝底上看不出来，
-   所以额外加一圈同色外发光。
-   **绝不能写 background-image: none** —— 那句是纯色填充时代的遗留，现在
-   background-image 是按钮的渐变本体，写成 none 会让按钮当场变透明（踩过一次）。
+/* 主按钮是强调色实底，蓝环压在蓝底上看不出来，只能向**外**扩一圈淡色。
+   不再用 filter: brightness(1.06) —— 那会把文字和边框一起提亮（深色主题下
+   深字压亮蓝会糊）。焦点与悬停的区分改由外发光承担：hover 只是抬一点影子，
+   focus 多出一圈明确的光环。
    加 :not(.is-cta)：向导导航那档是透明底，通用蓝环就够，不要给它套外发光。 */
 .btn-primary:not(.is-cta):focus-visible {
-  filter: brightness(1.06);
-  box-shadow: var(--btn-relief), 0 0 0 2px var(--accent-soft);
+  box-shadow: var(--btn-relief), 0 0 0 3px var(--accent-soft);
 }
 
 /* 打开弹窗时的默认焦点（程序化 focus）。
@@ -623,12 +690,13 @@ button:active:not(:disabled) {
   transform: translateY(0.5px);
 }
 
-/* 实底主按钮的按下态**不能吃上面那条通用叠层** —— 那会把渐变换成一块纯色，
-   质感当场消失。改成物理上正确的表达：渐变反转（上暗下亮 = 被压扁）、
-   去掉外投影（压到玻璃上）、内阴影加深（凹进去）。 */
+/* 实底主按钮的按下态**不能吃上面那条通用叠层** —— 那会把面色换成一块灰。
+   按下在物理上是「贴回底面上」：环境影消失、接触影变成向内的一道凹痕，
+   面色压暗一档。位移只给 0.5px —— 30px 高的控件位移超过 1px 会像在跳。 */
 button:active:not(:disabled).btn-primary:not(.is-cta) {
-  background-image: linear-gradient(180deg, var(--btn-fill-bottom) 0%, var(--btn-fill-top) 100%);
-  box-shadow: inset 0 2px 5px var(--btn-shade);
+  background: var(--btn-tint-active);
+  box-shadow: inset 0 2px 4px var(--btn-contact), inset 0 1px 0 var(--btn-spec);
+  transform: translateY(0.5px);
 }
 
 /* 禁用：**一个强度**。原来 4 处各写 .42 / .45 / .45 / .62 ——
@@ -684,11 +752,20 @@ body {
   overflow: hidden;
   /* 主体材质层：浓度由 --glass-alpha 控制（设置页「材质浓度」实时调）。
      系统 blur 会从这层半透明里透出来，所以窗口既有一层可控的明暗、
-     又保留下面的模糊。 */
+     又保留下面的模糊。
+
+     ⚠ 高级材质下的 100% **不是 1.0**，封顶 0.92：全不透明会把背后的
+     系统 acrylic 与本层的 blur/saturate 一起盖死，看起来就是一块死板色块，
+     等于「拉到最厚反而没有材质了」（用户：「开到 100 也应该是高级材质」）。
+     留 8% 透光，材质感始终在，同时 92% 已经厚到内容透不出来。
+
+     160° 的明暗差（±0.05）在两端收敛到 0：1% 要真的几乎全透，
+     100% 要真的是一整块最厚材质。两个 `min(1, 2a)` 分别把靠近 0 / 靠近 1
+     的偏移压到 0，中段保持原样。 */
   background: linear-gradient(
     160deg,
-    rgb(var(--material-rgb) / calc(var(--glass-alpha) + 0.05)),
-    rgb(var(--material-rgb) / calc(var(--glass-alpha) - 0.05)) 62%
+    rgb(var(--material-rgb) / min(0.92, calc(var(--glass-alpha) * 0.92 + 0.05 * min(1, calc(var(--glass-alpha) * 2)) * min(1, calc((1 - var(--glass-alpha)) * 2))))),
+    rgb(var(--material-rgb) / max(0, calc(var(--glass-alpha) * 0.92 - 0.05 * min(1, calc(var(--glass-alpha) * 2)) * min(1, calc((1 - var(--glass-alpha)) * 2))))) 62%
   );
   /* ══ 自研「二级玻璃」——**只在高级材质下启用**（见下方 body.round）══════
      为什么不引库：window-vibrancy 用的就是同一套 DWM API（自带性能警告）；
@@ -719,13 +796,17 @@ body.round .app {
 }
 
 /* 关闭高级材质：**没有系统背景模糊**，半透明透过去就是清晰的桌面（而不是模糊底），
-   同浓度会比有模糊时更显透、更干扰，所以统一把面板加厚。
-   拉满（90%）时 clamp 到 1.0 —— 完全不透，符合「浓度拉满＝实心」的直觉。 */
+   同浓度会比有模糊时更显透、更干扰，所以比高级材质加厚（+0.32 / +0.20）。
+
+   ⚠ 加厚量必须**在低浓度时收敛到 0**：早期写成裸的 `+ 0.32`，浓度 1% 时
+   仍剩 33% 不透明，「1 = 几乎全透」直接失效（用户实测：拉到 1 还是不够透）。
+   用 `0.32 * min(1, 2a)` 让偏移在 0→50% 之间线性长到满值、之后保持，
+   于是 1% ≈ 全透、50% 以上观感与原来完全一致。 */
 body:not(.round) .app {
   background: linear-gradient(
     160deg,
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32))),
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.20))) 62%
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32 * min(1, calc(var(--glass-alpha) * 2))))),
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.20 * min(1, calc(var(--glass-alpha) * 2))))) 62%
   );
 }
 
@@ -1392,23 +1473,46 @@ html:not(.hovers-off) .btn-ghost:hover {
    「蓝边 vs 灰边」的差异在深色材质里太弱，主次得靠读才知道 —— 用真实的可用性
    换了想象中的审美问题。用户看到实机后一句「感觉不如实底填充」就把它否了。 */
 .btn-primary {
-  /* 面部与浮雕各存一份变量：hover / focus / active 都要用到或改写它们，
-     逐条重抄三行 box-shadow 必然漂移（曾经红/白/蓝三个变体就各自漂过一遍）。 */
-  --btn-face: linear-gradient(180deg, var(--btn-fill-top) 0%, var(--btn-fill-bottom) 100%);
-  --btn-relief: inset 0 1px 0 var(--btn-gloss), inset 0 -1px 0 var(--btn-shade),
-    0 1px 2px var(--btn-lift);
-  border-color: var(--btn-edge);
-  /* 底色兜底：渐变不加载或色彩空间异常时不会露出浏览器默认灰钮 */
-  background-color: var(--btn-fill-bottom);
-  background-image: var(--btn-face);
+  /* 浮雕三件套：顶边镜面光 + 贴身接触影 + 大而柔的环境影。
+     hover 必须保持**同样三层**，否则浏览器无法补间、鼠标一移上去投影会「跳」一下。 */
+  --btn-relief: inset 0 1px 0 var(--btn-spec), 0 1px 1px var(--btn-contact),
+    0 4px 12px -3px var(--btn-ambient);
+  position: relative;
+  /* isolation 是给下面那道 135° 光泽用的：伪元素必须落进自己的 z-index 上下文，
+     否则 z-index:-1 会一路跑到祖先背景底下，光泽直接消失（不是变淡，是没有）。 */
+  isolation: isolate;
+  /* 亮边，不是暗描边。暗描边读起来是「画上去的轮廓」，
+     亮边读起来是「玻璃边缘把光折回来」—— 这是整套质感的分界点。 */
+  border-color: var(--btn-rim);
+  /* **平坦面色**。这里刻意没有 background-image：上下渐变 + 下缘内暗边
+     是立体键帽的做法，是「不像现代界面」的直接原因。 */
+  background: var(--btn-tint);
   color: var(--accent-on);
   box-shadow: var(--btn-relief);
+  transition: background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+/* 135° 对角光泽：玻璃被斜光照到的那一条。**只给实底这一档** ——
+   `.is-cta` 是透明底，叠上去会是一块白斑。
+   z-index:-1 + isolation：落在背景之上、文字之下，不会把字洗白。 */
+.btn-primary:not(.is-cta)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(135deg, var(--btn-sheen) 0%, transparent 48%);
 }
 
 html:not(.hovers-off) .btn-primary:hover {
-  /* 填充底上不能叠白（会褪色），用提亮；同时把投影推远一点，像被手指抬起 */
-  filter: brightness(1.08);
-  box-shadow: var(--btn-relief), 0 2px 7px var(--btn-lift);
+  /* 不再用 filter: brightness —— 那会把文字和边框一起拉亮：深色主题下
+     深字压在亮蓝上会糊成一团。换一档 tint：色相不动，只提明度。
+     投影同时推远一点，像被手指抬起。 */
+  background: var(--btn-tint-hover);
+  box-shadow: inset 0 1px 0 var(--btn-spec), 0 2px 3px var(--btn-contact),
+    0 7px 16px -4px var(--btn-ambient);
 }
 
 /* 向导导航里的主操作（引导页「下一步」）：**幽灵形态**，与 .btn-ghost 同一套
@@ -1427,13 +1531,13 @@ html:not(.hovers-off) .btn-primary:hover {
 }
 
 html:not(.hovers-off) .btn-primary.is-cta:hover {
-  /* 必须带 html:not 前缀：`.btn-primary:hover` 的 brightness 优先级更高
-     （多一个类型选择器 html），不显式盖住它会一直赢 —— 对透明底而言那只是把
-     字和边一起提亮，看着像按钮在闪。这里与 .btn-ghost 同款：淡灰叠底。
-     box-shadow 同样要显式 none：属性不会被更具体的规则「顺带」继承，
-     但基类 hover 那条会照常生效，把投影叠到幽灵按钮上。 */
+  /* 基类 hover 现在写的是 `background:` 简写（把 background-color 设成蓝 tint），
+     这里只补 background-image 会得到「蓝底 + 灰渐变」。所以先显式清掉底色再叠灰，
+     顺序不能反 —— background 简写会连背景图一起清掉。
+     这里与 .btn-ghost 同款：淡灰叠底，不加投影。 */
   filter: none;
   box-shadow: none;
+  background: transparent;
   background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
@@ -1547,7 +1651,14 @@ html:not(.hovers-off) .btn-primary.is-cta:hover {
      1px 透明边框是**占位**：置顶与批量选中要用它画状态色，
      而临时加 border 会让卡片尺寸跳 2px。 */
   background: var(--card-bg);
-  border: 1px solid transparent;
+  /* 玻璃感的两个来源，都很克制：
+     ① 上端 14% 的极淡渐隐 —— 光从上方来，材质有厚度，纯平涂会读成一张白纸。
+        跨度再大就变成「渐变卡片」，那是另一套语言，不要。
+     ② 一圈亮边（--card-rim）：比卡片本身亮一点，模拟边缘折射。浅色下几乎
+        看不见，深色下是卡片唯一边界线索 —— 正好补上「深色只有三阶面」的短板。
+     描边宽度不变，置顶 / 批量选中仍用它画状态色，不会跳尺寸。 */
+  background-image: linear-gradient(180deg, var(--card-sheen) 0%, transparent 14%);
+  border: 1px solid var(--card-rim);
   box-shadow: var(--elev-1);
   cursor: default;
   transition: background var(--dur-fast) var(--ease-out),
@@ -1558,8 +1669,13 @@ html:not(.hovers-off) .card:hover {
   /* 悬浮＝在**卡片自己的底色上**压一层极淡中性色，而不是替换底色。
      原来 `background: var(--card-hover)` 是把「白 .94」整个换成「黑 .05」——
      在半透明窗口上等于把卡片压成深灰，和「轻微提亮」完全不是一个意思。
-     background-image 叠在 background-color 之上，正好表达「原底色 + 一层灰度」。 */
-  background-image: linear-gradient(var(--state-hover), var(--state-hover));
+     background-image 叠在 background-color 之上，正好表达「原底色 + 一层灰度」。
+
+     注意要**连顶光一起重写**：background-image 是会整条覆盖的多值属性，
+     只写悬停层会把上面那道 --card-sheen 抹掉，鼠标一移上去卡片的玻璃感
+     就没了 —— 表现为「悬停时突然变平」。第一条在最上，所以顺序是悬停层在前。 */
+  background-image: linear-gradient(var(--state-hover), var(--state-hover)),
+    linear-gradient(180deg, var(--card-sheen) 0%, transparent 14%);
 }
 
 .card.is-pinned {
@@ -1800,8 +1916,12 @@ body:not(.round) .tag {
   border-radius: var(--radius-sm);
   /* 右键菜单要贴着内容读：用高不透明底色，不吃玻璃透（需求 #8） */
   background: var(--solid-bg);
-  /* 浮层的边界靠 elev-2 的投影说明，不靠描边 —— 描边会让它看起来像嵌在页面里。 */
-  box-shadow: var(--elev-2);
+  /* 需求 #8 定的是「不吃玻璃透」，没定「不能有质感」。底色保持高不透明，
+     只在边缘补一道镜面光 + 亮边，让它和弹窗/卡片是同一套材质语言，
+     而不是列表旁边突然冒出来的一个白盒子。
+     border 不计入尺寸：全局 box-sizing: border-box，min-width 含边框。 */
+  border: 1px solid var(--glass-panel-rim);
+  box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
 }
 
 .ctx-item {
@@ -2063,12 +2183,41 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   font-family: var(--font);
 }
 
-/* 材质浓度滑块 */
+/* 材质浓度滑块：**自绘**。
+   原来是原生 input[type=range] + accent-color —— 按下/拖动时 Chromium 会给轨道
+   和滑点叠一层自带的浅色态，看起来像蒙了块白遮罩（用户实测反馈），CSS 管不住。
+   与上方开关同一个决策门：原生绘制不受控 → 自绘，语义（可 Tab、方向键、读屏）全保留。
+   已填充部分用 --fill（JS 拖动时同步百分比），空轨用 --track-bg，按下不再有神秘浅色。 */
 .settings input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
   width: 180px;
   height: 20px;
-  accent-color: var(--accent);
+  background: transparent;
   cursor: default;
+}
+
+.settings input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent-fill) var(--fill, 50%),
+    var(--track-bg) var(--fill, 50%)
+  );
+}
+
+.settings input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  /* (20 - 4) / 2 - 14 / 2 = -5：把滑点垂直居中在 4px 轨道上 */
+  margin-top: -5px;
+  border-radius: 50%;
+  background: #fff;
+  /* 与自绘开关的滑点同一套投影：1px 投影让它「浮」在轨道上 */
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .settings .hint {
@@ -2273,8 +2422,14 @@ html:not(.hovers-off) .statusbar-clear:hover {
      8×12 落在 4px 栅格上。 */
   padding: 8px 12px;
   border-radius: var(--radius-sm);
-  background: var(--solid-bg);
-  box-shadow: var(--elev-2);
+  /* 气泡常常压在卡片边缘或悬在空处，背后不一定有东西可糊 —— 所以用
+     **强档面板**（0.94）而不是确认框那档 0.76：既保留玻璃的顶光与亮边，
+     又不会因为背后什么都没有而变成一片发白。 */
+  background: var(--glass-panel-strong);
+  backdrop-filter: blur(18px) saturate(160%) brightness(1.1);
+  -webkit-backdrop-filter: blur(18px) saturate(160%) brightness(1.1);
+  border: 1px solid var(--glass-panel-rim);
+  box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   color: var(--text);
   font-family: var(--font);
   font-size: 13px;
@@ -2394,9 +2549,12 @@ html:not(.hovers-off) .statusbar-clear:hover {
   place-items: center;
   background: rgba(0, 0, 0, 0.32);
   /* 背后的界面整屏模糊：确认框是「停下来做决定」的时刻，底下列表继续清晰
-     既分散注意力，也容易让人以为还能点。 */
-  backdrop-filter: blur(6px) saturate(120%);
-  -webkit-backdrop-filter: blur(6px) saturate(120%);
+     既分散注意力，也容易让人以为还能点。
+     6px → 10px：弹窗自己现在也是半透明玻璃了，背后这一层如果糊得不够，
+     两层叠起来会变成「一块糊不干净的毛玻璃」—— 形状可辨但读不清，最难受。
+     糊到 10px 后，形状彻底化开，弹窗的顶光才有东西可反射。 */
+  backdrop-filter: blur(10px) saturate(130%);
+  -webkit-backdrop-filter: blur(10px) saturate(130%);
 }
 
 /* hidden 属性依赖 UA 的 display:none，但会被上面的 display:grid 覆盖，必须显式声明 */
@@ -2409,9 +2567,24 @@ html:not(.hovers-off) .statusbar-clear:hover {
   max-width: 320px;
   padding: 18px 20px;
   border-radius: var(--radius-sm);
-  background: var(--solid-bg);
-  /* 浮层的边界靠 elev-2 的投影说明，不靠描边 —— 描边会让它看起来像嵌在页面里。 */
-  box-shadow: var(--elev-2);
+  /* ══ 弹窗是**全项目第一个真玻璃面板** ══════════════════════════════
+     它敢吃 backdrop-filter，是因为背后确实有东西可糊：mask 已经把列表糊了
+     一遍，这一层再糊一次得到的是「隔着一块厚玻璃看内容」，而不是
+     「一层透明的白」—— 那正是浮层套玻璃最容易翻车的地方（见文件顶部注释）。
+
+     配方就是玻璃材质那三层：半透明面色 + 顶边镜面光 + 环境影，
+     另加一圈亮边把轮廓从模糊背景里勾出来（浮层不加描边时，半透明会让
+     边界糊进背景，看着像「没对齐的一团光」）。 */
+  background: var(--glass-panel);
+  /* ⚠ brightness 是玻璃质感的**必需品**，不是修饰。blur 只负责散射、
+     saturate 只负责保色，两者都不改变亮度 —— 透上来的内容保持原亮度，
+     再叠一层半透明白，白就被「稀释」成灰白，整块玻璃发灰（用户原话「灰蒙蒙」）。
+     真实玻璃会把光聚起来，这 15% 的提亮就是透镜效应。
+     少了它，前面所有受光设计都白做。 */
+  backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
+  -webkit-backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
+  border: 1px solid var(--glass-panel-rim);
+  box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -2454,21 +2627,23 @@ html:not(.hovers-off) .statusbar-clear:hover {
   padding: 22px 22px 16px;
   /* 给顶部色带和角落光斑裁个边 */
   overflow: hidden;
-  /* 比普通弹窗更透一点、更亮一点，让它看起来是「一张卡片」而不是一个对话框 */
+  /* 比普通弹窗更透一点、更亮一点，让它看起来是「一张卡片」而不是一个对话框。
+     0.99 → 0.9：这 10% 的透光正是「卡片」与「对话框」的分界，
+     再透就过头了 —— 引导页正文多，背后内容一旦可辨就会干扰阅读。 */
   background: linear-gradient(
     160deg,
-    rgba(255, 255, 255, 0.99) 0%,
-    rgba(248, 250, 254, 0.98) 55%,
-    rgba(243, 246, 252, 0.98) 100%
+    rgba(255, 255, 255, 0.93) 0%,
+    rgba(249, 251, 254, 0.9) 55%,
+    rgba(244, 247, 252, 0.9) 100%
   );
 }
 
 body.dark .modal.is-tour {
   background: linear-gradient(
     160deg,
-    rgba(46, 46, 54, 0.99) 0%,
-    rgba(38, 38, 44, 0.98) 60%,
-    rgba(33, 33, 39, 0.98) 100%
+    rgba(48, 48, 56, 0.92) 0%,
+    rgba(39, 39, 45, 0.9) 60%,
+    rgba(34, 34, 40, 0.9) 100%
   );
 }
 
@@ -2864,6 +3039,9 @@ body.dark .tour-dot.is-on {
   max-height: none;
   /* 头部 + 正文 + 按钮三段；中间由 flex:1 吃掉剩余高度 */
   overflow: hidden;
+  /* 长文阅读面板要比确认框实。确认框读 12 个字，透一点反而有层次；
+     这里读 2000 个字，背后一有可辨的形状，眼睛就会一直想「看清后面是什么」。 */
+  background: var(--glass-panel-strong);
 }
 
 /* 头部与按钮行都按内容高度，不参与伸缩 —— 只剩正文区去分配剩余空间 */
@@ -3227,9 +3405,13 @@ html:not(.hovers-off) .btn-danger:hover {
   /* 8×16：落在 4px 栅格（原来是 8×18） */
   padding: 8px 16px;
   border-radius: var(--radius-sm);
-  background: var(--solid-bg);
-  /* 浮层的边界靠 elev-2 的投影说明，不靠描边 —— 描边会让它看起来像嵌在页面里。 */
-  box-shadow: var(--elev-2);
+  /* toast 浮在列表正上方，背后确实有内容可糊 —— 用真玻璃，和弹窗同一套配方。
+     它只活 1.5 秒，透出来的内容不会干扰阅读，反而让提示像「贴在玻璃上」。 */
+  background: var(--glass-panel);
+  backdrop-filter: blur(24px) saturate(170%) brightness(1.12);
+  -webkit-backdrop-filter: blur(24px) saturate(170%) brightness(1.12);
+  border: 1px solid var(--glass-panel-rim);
+  box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   color: var(--text);
   font-size: 13px;
   opacity: 0;
@@ -3255,6 +3437,9 @@ html:not(.hovers-off) .btn-danger:hover {
   place-items: center;
   /* 遮罩浓度与 .modal-mask 一致，不再单独调 */
   background: var(--mask-bg);
+  /* 与确认框一致：迁移期间背后不该还在动，糊住它比压暗它更干净 */
+  backdrop-filter: blur(10px) saturate(130%);
+  -webkit-backdrop-filter: blur(10px) saturate(130%);
 }
 
 .move-box {
@@ -3262,9 +3447,17 @@ html:not(.hovers-off) .btn-danger:hover {
   /* 16：四边一致（原来是 16×18） */
   padding: 16px;
   border-radius: var(--radius-sm);
-  background: var(--solid-bg);
-  /* 浮层的边界靠 elev-2 的投影说明，不靠描边 —— 描边会让它看起来像嵌在页面里。 */
-  box-shadow: var(--elev-2);
+  /* 与确认框同一档玻璃：它也是一次「停下来等」的浮层，背后同样糊过一层 */
+  background: var(--glass-panel);
+  /* ⚠ brightness 是玻璃质感的**必需品**，不是修饰。blur 只负责散射、
+     saturate 只负责保色，两者都不改变亮度 —— 透上来的内容保持原亮度，
+     再叠一层半透明白，白就被「稀释」成灰白，整块玻璃发灰（用户原话「灰蒙蒙」）。
+     真实玻璃会把光聚起来，这 15% 的提亮就是透镜效应。
+     少了它，前面所有受光设计都白做。 */
+  backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
+  -webkit-backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
+  border: 1px solid var(--glass-panel-rim);
+  box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   color: var(--text);
 }
 

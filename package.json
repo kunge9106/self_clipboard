@@ -14,7 +14,10 @@
     "tauri:build": "tauri build",
     "ui:audit": "node scripts/ui-audit.mjs --write",
     "version:set": "node scripts/set-version.mjs",
-    "test:ui": "node --test \"test/*.test.mjs\""
+    "test:ui": "node --test \"test/*.test.mjs\"",
+    "dev:vite": "vite --port 5173 --strictPort",
+    "clean:trash": "node scripts/reclaim-build-trash.mjs --delete",
+    "trash:preview": "node scripts/reclaim-build-trash.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1"
