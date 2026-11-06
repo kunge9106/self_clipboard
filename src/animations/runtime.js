@@ -73,10 +73,38 @@ export function play(el, name, opts = {}) {
   const t = tokens();
   const spec = factory(opts, t);
 
-  // 同一元素上重播：先取消旧的，否则两段动画会互相拉扯（表现为抖一下）
-  running.get(el)?.cancel();
+  // 同一元素上重播：先取消旧的，否则两段动画会互相拉扯（表现为抖一下）。
+  //
+  // ⚠ 顺序有两个硬约束，任一搞错续接就静默失效（画面会「退回隐藏态再重来」）：
+  //   ① **判断是否在跑要在 cancel 之前**：cancel() 会把 playState 变成 "idle"；
+  //   ② **读 computed style 也要在 cancel 之前**：cancel 之后动画影响被移除，
+  //      元素立刻回到 CSS 静态值（opacity 1 / transform none），读到的是错的。
+  // 曾经写成「先 cancel 再 `prev.playState !== "idle"`」，条件恒为 false，
+  // 续接分支永远进不去 —— 靠逐帧采样（打断后 opacity 仍跌到 0.15）才发现。
+  const prev = running.get(el);
+  let resumeFrom = null;
+  if (prev && prev.playState !== "idle") {
+    const cs = getComputedStyle(el);
+    resumeFrom = { opacity: cs.opacity, transform: cs.transform };
+  }
+  prev?.cancel();
 
-  const anim = el.animate(spec.keyframes, {
+  // ── 打断续接（interruptible）──────────────────────────────────────────
+  // 同一元素上还有动画在跑时，**用它当前的计算值作为新动画的首帧**。
+  // 原来是 cancel 掉旧的、新动画从 preset 的 from 态（opacity 0 + 位移）重来 ——
+  // 快速连点时画面会先「退回隐藏态」再淡入，看起来就是闪一下。
+  // 改成续接后，新动画从「此刻真正显示的样子」出发，只补间余下的差别。
+  //
+  // 只覆盖 opacity / transform 两个属性，其余沿用 preset 首帧；
+  // 目前所有 preset 都是两帧，多帧 preset 需要重新审视这里的合并逻辑。
+  const frames = resumeFrom
+    ? [
+        { ...spec.keyframes[0], ...resumeFrom },
+        ...spec.keyframes.slice(1),
+      ]
+    : spec.keyframes;
+
+  const anim = el.animate(frames, {
     duration: t.ms(spec.dur),
     easing: t.ease(spec.ease),
     delay: opts.delay || 0,
