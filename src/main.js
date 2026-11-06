@@ -254,6 +254,13 @@ async function setThemeMode(mode) {
   settings = { ...(settings || {}), themeMode: mode };
   await applyThemeMode(mode);
   markThemeSeg(mode);
+  // 明确回一句。侧栏那个按钮只把文字换成「下一档」，点完看不出到底切成了什么；
+  // 深色下材质浓度还会跟着变，更需要一句「已切换」把因果讲清楚。
+  toast(
+    mode === "system"
+      ? "已跟随系统主题"
+      : `已切换到${mode === "dark" ? "深色" : "浅色"}模式`
+  );
 }
 
 /// 侧栏深浅色快捷切换：当前是深就切浅、是浅就切深。
@@ -3165,7 +3172,7 @@ function settingsAppearanceHtml(s) {
         rowCheck(
           "set-auto-dark-alpha",
           "深色自动加浓",
-          "高级材质下切至深色模式浓度自动升至 100%，支持手动调整；切回浅色模式自动恢复。推荐：浅色 35%，深色 55%",
+          "高级材质下切至深色模式浓度自动升至 100%，支持手动调整；切回浅色模式自动恢复。推荐：浅色 35%，深色 60%",
           s.autoAlphaDark
         )
     ),
@@ -4042,7 +4049,7 @@ async function aboutFeedback() {
     const a = await invoke("about_info");
     const body =
       `版本：${a.version}\n系统 build：${a.osBuild}\n` +
-      `材质档位：${a.tier}\n圆角模式：${a.roundMode ? "开" : "关"}\n\n` +
+      `材质档位：${a.tier}\n高级材质：${a.roundMode ? "开" : "关"}\n\n` +
       `问题描述：\n`;
     const url =
       "https://github.com/kunge9106/self_clipboard/issues/new?title=" +
