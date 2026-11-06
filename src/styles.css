@@ -2264,6 +2264,20 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   box-shadow: 0 0 0 2px var(--accent-ring);
 }
 
+/* 依赖前置开关的设置项（如「点选后保持打开」依赖「失焦不收起」）：
+   前置没开时**整行灰掉**，而不是让用户点了没反应 —— 桌面设置的惯例是
+   「可见但不可用」。用 :has 判断行内是否真有禁用控件，不必再给行加标记类，
+   所以任何原因导致的禁用都自动获得同样的表现。
+   行整体已经淡过一次，里面的控件不再淡第二层（0.45 × 0.45 ≈ 0.2，字会看不见）。 */
+.settings .row:has(:disabled) {
+  opacity: var(--disabled-opacity);
+}
+
+.settings .row:has(:disabled) :disabled {
+  opacity: 1;
+  cursor: not-allowed;
+}
+
 .settings .row-ctrl {
   flex: none;
   display: flex;

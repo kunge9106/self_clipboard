@@ -4222,7 +4222,11 @@ function bindSettings(view) {
   const syncPanelKeep = () => {
     if (!panelKeep) return;
     const off = !panelStay?.checked;
-    panelKeep.toggleAttribute("data-disabled", off);
+    // 用**真 disabled**，不用 data-disabled 属性标记：后者在 input 上没有对应规则，
+    // 结果就是「看着没变化、点了照样能切」，还会把 panelKeepAfterCopy=true 写进配置
+    // —— 变成一个永远不生效的开关（用户实测反馈「失焦不收起没打开也能点」）。
+    // 真 disabled 一并解决三件事：不可点、Tab 跳过、读屏朗读为「不可用」。
+    panelKeep.disabled = off;
     if (off) panelKeep.checked = false;
   };
   if (panelStay) {
