@@ -26,18 +26,20 @@ function applyLook(look) {
   document.body.classList.toggle("dark", !!look.dark);
   document.body.classList.toggle("tier-solid", !!look.solid);
 
-  // 菜单**恒为圆角外观**（用户要求）：不管主窗口开没开圆角模式，托盘菜单
-  // 都用「圆角模式」那一套材质与样式 —— CSS 圆角 + 无系统 blur（Rust 侧
-  // apply_rounded 已把系统材质关干净，四角不会残留直角）。
+  // 菜单**恒为圆角外观**（用户要求）。高级材质开时 Rust 侧会铺系统材质
+  //（DWM 自己画圆角）；关时 apply_rounded 把系统材质关干净，CSS 圆角
+  // 不会有直角残留。两种情况下这 12px 都成立。
   document.documentElement.style.setProperty("--menu-radius", "12px");
 
   if (look.solid) {
     // 兜底档：没有 acrylic，用 CSS 里的不透明底色（body.tier-solid）
     document.documentElement.style.removeProperty("--glass-alpha");
   } else {
+    // 菜单恒为 100% 浓度的 CSS 实底（Rust 侧 apply_material 已把系统材质关干净）：
+    // 不透明才压得住底下的桌面，这是 2.6.10 菜单的观感
     document.documentElement.style.setProperty(
       "--glass-alpha",
-      String(Math.max(0.1, Math.min(0.95, Number(look.alpha) || 0.62)))
+      String(Math.max(0.01, Math.min(1, Number(look.alpha) || 1)))
     );
   }
 }

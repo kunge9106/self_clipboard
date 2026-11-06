@@ -2,6 +2,16 @@ import { invoke } from "@tauri-apps/api/core";
 // 查询封装与窗口化列表：两者都不依赖 DOM 之外的全局状态，可单独 import 测（见 test/）。
 import { buildFilter, createHistoryApi } from "./history-api.js";
 import { decidePurgeAction } from "./purge-decision.js";
+// 动效统一入口：业务不写关键帧/时长/缓动，只说「播哪个效果、往哪个方向」
+import {
+  initMotion,
+  play,
+  swap,
+  captureGhost,
+  releaseGhost,
+  discardGhost,
+} from "./animations/index.js";
+import { createTip } from "./tip.js";
 import { VirtualList } from "./virtual-list.js";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
@@ -138,8 +148,84 @@ async function applyEffectInfo() {
 }
 
 function applyTheme(dark) {
+  const wasDark = document.body.classList.contains("dark");
   document.body.classList.toggle("dark", !!dark);
   syncThemeToggleLabel();
+  applyThemeDependentAlpha(wasDark, !!dark);
+}
+
+/**
+ * 把浓度同步到设置页滑块：值 + 读数 + 自绘轨道的已填充比例（--fill）。
+ * 滑块不在页面上时静默跳过 —— 深浅切换的后台路径也走这里。
+ *
+ * 之前有四处各自 `el.value = …; lab.textContent = …`，自绘轨道引入 --fill 后
+ * 每处还得再多写一行，按「同一逻辑只留一份」收拢。
+ */
+function setMaterialSlider(v) {
+  const el = document.getElementById("set-material");
+  const lab = document.getElementById("material-val");
+  if (el) {
+    el.value = String(v);
+    el.style.setProperty("--fill", `${v}%`);
+  }
+  if (lab) lab.textContent = `${v}%`;
+}
+
+/**
+ * 深色自动加浓此刻是否在「接管」浓度：
+ * 深色 + 高级材质 + 开关打开，三者齐了才接管。接管时滑条改的是
+ * `settings.darkAlpha`（深色专属值），日常浓度（浅色用）原封不动。
+ *
+ * 可传一份快照（设置页渲染时手里那份就是 `s`），不传就用模块级 `settings`。
+ */
+function darkBoostActive(s = settings) {
+  return (
+    document.body.classList.contains("dark") &&
+    !!s?.roundMode &&
+    s.autoAlphaDark !== false
+  );
+}
+
+/**
+ * 此刻**应该**生效的浓度 —— 全局唯一判定入口。
+ *
+ * 涉及三条线，各写一份必然对不上：
+ *   · `materialAlpha`：用户日常调的那一档（浅色用）；
+ *   · `darkAlpha`：深色专属值（默认 100；用户在深色下拖过滑条就是那个值）；
+ *   · `autoAlphaDark`：深色自动加浓开关。
+ * 深色 + 高级材质 + 开关打开 → 用深色值，否则用日常值。
+ */
+function effectiveAlpha(s = settings) {
+  return darkBoostActive(s)
+    ? (s?.darkAlpha ?? 100)
+    : (s?.materialAlpha ?? 35);
+}
+
+/**
+ * 把「应该生效的浓度」落到界面：CSS 变量 + 设置页滑块与读数。
+ *
+ * 开关深色加浓、切深浅色、切高级材质**三条路径都走这里**。
+ * 之前各处各写一份，结果「打开自动加浓」那条漏了应用：关掉会还原成日常值，
+ * 再打开却停在日常值不动，非得再切一次深浅色才回到深色值（用户实测）。
+ * 状态来自 `settings`，所以只要重新算一遍就必然自洽 —— 不需要再记「上一次是
+ * 哪个模式」之类的中间态。
+ */
+function syncEffectiveAlpha() {
+  const v = effectiveAlpha();
+  applyGlassAlpha(v);
+  setMaterialSlider(v);
+}
+
+/**
+ * 深浅切换时把浓度连带刷新一遍。
+ *
+ * 深色下窗口后面往往是亮壁纸，同一浓度的色层压不住 —— 所以要有一套「深色专属
+ * 浓度」（默认 100，也允许用户自己调）。这里只负责**在主题真的变了时重算一次**，
+ * 用哪一档由 `effectiveAlpha` 判定。启动时 `applyTheme` 也会被调，那时不用整。
+ */
+function applyThemeDependentAlpha(wasDark, isDark) {
+  if (wasDark === isDark) return;
+  syncEffectiveAlpha();
 }
 
 /// 侧栏那个切换按钮的文案跟着当前深浅变：深色时写「浅色」，点了就去浅色。
@@ -177,6 +263,13 @@ async function setThemeMode(mode) {
   settings = { ...(settings || {}), themeMode: mode };
   await applyThemeMode(mode);
   markThemeSeg(mode);
+  // 明确回一句。侧栏那个按钮只把文字换成「下一档」，点完看不出到底切成了什么；
+  // 深色下材质浓度还会跟着变，更需要一句「已切换」把因果讲清楚。
+  toast(
+    mode === "system"
+      ? "已跟随系统主题"
+      : `已切换到${mode === "dark" ? "深色" : "浅色"}模式`
+  );
 }
 
 /// 侧栏深浅色快捷切换：当前是深就切浅、是浅就切深。
@@ -203,6 +296,9 @@ function bindThemeToggle() {
  * 所以手动钉住时系统主题变化不会再影响界面。
  */
 async function applyThemeMode(mode) {
+  // 记录「用户点了什么」—— 材质类问题只能靠操作序列定位。
+  // 之前排查「材质不恢复」，日志里只有「材质应用完成」，看不出是谁触发的。
+  reportFrontend("INFO", "ui", `切换主题 → ${mode}`);
   if (mode === "light") return applyTheme(false);
   if (mode === "dark") return applyTheme(true);
   applyTheme((await appWindow.theme().catch(() => "light")) === "dark");
@@ -218,7 +314,12 @@ async function applyThemeMode(mode) {
 function applyGlassAlpha(pct) {
   // 兜底档（没有真材质）必须保持不透明，否则会直接看见桌面
   if (document.body.classList.contains("tier-solid")) return;
-  const a = Math.max(10, Math.min(95, Number(pct) || 0)) / 100;
+  // 与后端 ALPHA_MIN / ALPHA_MAX 一致：1–100 无极，两端都是真极端：
+  //   1%   → 窗口底只剩 ~1%（高级材质下看到的就是纯系统模糊）
+  //   100% → 关材质时完全不透；开材质时封顶 92%，留住材质感（见 styles.css）
+  // 表面层（卡片 / 侧栏 / 控件底）由 CSS 的 --mat-k 跟着一起收敛，
+  // 否则底透了、卡片还是 68% 白，「拉到 1 不够极端」。
+  const a = Math.max(1, Math.min(100, Number(pct) || 0)) / 100;
   document.documentElement.style.setProperty("--glass-alpha", String(a));
 }
 
@@ -236,7 +337,8 @@ function syncAlphaToSettings(v) {
 }
 
 /**
- * 圆角模式：**圆角 + 不用系统模糊**。
+ * 高级材质（代码里沿用历史名 `round` / `roundMode`，改字段名要迁配置，故只改文案）：
+ * **圆角 + 不用系统模糊**。
  *
  * Win10 的 acrylic 由 DWM 合成、恒为矩形，裁不掉圆角，所以「圆角 + 系统模糊」
  * 必然在四角留下一圈矩形残留。两种模式各自规避这个矛盾：
@@ -248,14 +350,29 @@ function syncAlphaToSettings(v) {
  */
 function applyRoundMode(on) {
   document.body.classList.toggle("round", !!on);
-  document.documentElement.style.setProperty("--radius", (on ? maxRadius : 0) + "px");
+  // 圆角的归属变了（语义反转后）：
+  //   · **开高级材质** → 窗口上有系统材质。Win11 的系统圆角与 backdrop 不冲突，
+  //     保留圆角；Win10 的 acrylic 恒为矩形，给它圆角会在四角露出矩形残影，
+  //     所以那一档只能用直角 —— 这是平台限制，不是取舍。
+  //   · **关** → 窗口是无材质的透明 layered，圆角完全由我们自己画，干净。
+  const acrylic = document.body.classList.contains("tier-acrylic");
+  document.documentElement.style.setProperty("--radius", (on && acrylic ? 0 : maxRadius) + "px");
 }
+
+/** 上一次的最大化状态；null = 还没同步过 */
+let lastMaxState = null;
 
 /** 最大化 ↔ 还原：图标与提示词跟随窗口状态（需求 #6） */
 async function syncMaxState() {
   const maxBtn = document.getElementById("btn-maximize");
   if (!maxBtn) return;
   const max = await appWindow.isMaximized().catch(() => false);
+  // 只在状态**真的变了**时记 —— 它在每次 Resized 都会跑，拖动窗口时会狂刷日志，
+  // 把真正有用的操作序列淹掉。
+  if (lastMaxState !== max) {
+    lastMaxState = max;
+    reportFrontend("INFO", "ui", `窗口最大化 → ${max ? "是" : "否"}`);
+  }
   maxBtn.classList.toggle("is-max", max);
   maxBtn.title = max ? "还原" : "最大化";
 }
@@ -822,6 +939,35 @@ function bindClearViewModal() {
   };
 }
 
+/// 侧栏切换的入场方向：+1 从下进来，-1 从上进来，0 表示不是导航触发的重绘。
+/// 列表渲染是异步的（`renderWindow` 里 await 取页），所以方向先记下来，
+/// 等真正画完再播 —— 直接在点击处播会在旧内容上动画。
+let navSwapDir = 0;
+
+/// 点击导航那一刻克隆的旧页面快照。渲染是异步的（await 取页），
+/// 所以捕获放在点击处、释放放到渲染完成处 —— 中间旧内容还真实地留在屏幕上，
+/// 用户不会看到「点了没反应」。
+let pendingGhost = null;
+
+/**
+ * 渲染完成后统一广播一次切换：新内容入场 + 旧页面快照离场（交叉淡出）。
+ * 非导航触发的重绘（删除/置顶/新内容到达）既没有方向也没有快照，直接跳过。
+ */
+function flushNavSwap(el) {
+  const from = navSwapDir;
+  const ghost = pendingGhost;
+  navSwapDir = 0;
+  pendingGhost = null;
+
+  // 渲染被作废（token 对不上 / 提前 return）：别把快照留在屏幕上
+  if (!el) {
+    discardGhost();
+    return;
+  }
+  if (ghost) releaseGhost(ghost, { axis: "y", from: from || 1 });
+  if (from) play(el, "slide-in", { axis: "y", from });
+}
+
 function bindNav() {
   // 监听整个侧栏：历史/收藏/图片/文件 与 底部「设置」都在 .sidebar 内
   document.querySelector(".sidebar").addEventListener("click", (e) => {
@@ -830,6 +976,12 @@ function bindNav() {
     // 于是点一下深浅色，界面就跳回了别的页面（用户实测）。
     const item = e.target.closest(".nav-item[data-view]");
     if (!item) return;
+    // 方向要在改选中态之前算：往下（后）切，新内容从下方进来
+    const navItems = [...document.querySelectorAll(".nav-item[data-view]")];
+    const prevIdx = navItems.findIndex((n) => n.classList.contains("is-active"));
+    navSwapDir = navItems.indexOf(item) >= prevIdx ? 1 : -1;
+    // 旧页面快照要在改 DOM 之前拍：等渲染完成时它已经被 innerHTML 换掉了
+    pendingGhost = captureGhost(document.querySelector(".view"));
     document
       .querySelectorAll(".nav-item")
       .forEach((n) => n.classList.remove("is-active"));
@@ -839,6 +991,117 @@ function bindNav() {
     selectMode = false;
     selectedIds.clear();
     render();
+  });
+}
+
+/**
+ * 弹窗行为统一（期 3b）。
+ *
+ * 12 个弹窗的 DOM 结构本来就一致（mask > modal > title/text/actions），
+ * 散的是**行为**：39 处零散的 `hidden = false/true`、Esc 只在 3 处单独处理、
+ * 打开时焦点还留在背后的界面上（键盘用户按 Tab 会走到底下的列表里，
+ * 而弹窗是模态的 —— 焦点跑到模态外面是明确的无障碍错误）。
+ *
+ * 刻意**不替换那 39 处调用点**：改动面太大，漏一处就是「半套行为」。
+ * 改为观察 `.modal-mask` 的 `hidden` 变化统一接管 —— DOM 已经被动过，
+ * 监听它比替换调用点可靠，而且以后新增弹窗**自动生效**，不用再记得调什么函数。
+ */
+function bindModalBehavior() {
+  /** 打开中的弹窗栈（理论上不应嵌套，但留着以防将来从弹窗里再开弹窗） */
+  const stack = [];
+
+  /**
+   * 打开时把焦点放到哪儿。
+   *
+   * **破坏性弹窗的默认焦点必须是「取消」**：这 12 个弹窗里 7 个的确认键是
+   * 「永久删除 / 清空 / 退出并清理」，焦点若落在它上面，用户只是想用键盘关掉弹窗、
+   * 或者手滑按了回车，就直接把内容删了 —— Windows 自己的删除确认框也是这么做的
+   * （默认按钮是「否」）。
+   *
+   * 所以顺序是：取消 → 普通按钮 → 危险按钮（最后才兜底）。
+   */
+  const focusTargetOf = (mask) => {
+    const actions = mask.querySelector(".modal-actions");
+    if (!actions) return mask.querySelector(".modal button:not(:disabled)");
+    return (
+      actions.querySelector('[id*="cancel" i]:not(:disabled), [id*="close" i]:not(:disabled)') ||
+      [...actions.querySelectorAll("button:not(:disabled)")].find((b) =>
+        /^(取消|关闭|知道了|暂不)/.test(b.textContent.trim())
+      ) ||
+      actions.querySelector(".btn-ghost:not(:disabled)") ||
+      actions.querySelector("button:not(:disabled)")
+    );
+  };
+
+  const observer = new MutationObserver((records) => {
+    for (const r of records) {
+      const mask = r.target;
+      if (!mask.classList || !mask.classList.contains("modal-mask")) continue;
+      const open = !mask.hidden;
+      const at = stack.findIndex((x) => x.mask === mask);
+
+      if (open && at < 0) {
+        stack.push({ mask, prev: document.activeElement });
+        // 聚焦到「取消」，并**显式标记** —— 程序化 focus() 不算「键盘交互」，
+        // 浏览器不会给它 :focus-visible，用户看不到焦点落在哪个按钮上
+        // （实测「还是按钮不在当前步骤」）。标记由下一次真实键盘/鼠标操作清除。
+        const put = () => {
+          const el = focusTargetOf(mask);
+          if (!el) return;
+          el.focus({ preventScroll: true });
+          if (document.activeElement === el) el.setAttribute("data-autofocus", "");
+        };
+        // 双保险：元素刚从 hidden 变可见时，下一帧有时还拿不到焦点
+        requestAnimationFrame(put);
+        setTimeout(put, 80);
+      } else if (!open && at >= 0) {
+        const [item] = stack.splice(at, 1);
+        mask.querySelectorAll("[data-autofocus]").forEach((n) =>
+          n.removeAttribute("data-autofocus")
+        );
+        // 焦点还给打开它的元素；它可能已经被列表重绘替换掉了（卡片删除后会重建）
+        if (item.prev && item.prev.isConnected) item.prev.focus({ preventScroll: true });
+      }
+    }
+  });
+
+  document
+    .querySelectorAll(".modal-mask")
+    .forEach((m) => observer.observe(m, { attributes: true, attributeFilter: ["hidden"] }));
+
+  // 用户一旦真的按键 / 点击，焦点样式就交回 :focus-visible ——
+  // 标记只是「刚打开时让人看见默认焦点在哪」，不该一直粘着
+  const clearAutoFocus = () =>
+    document
+      .querySelectorAll("[data-autofocus]")
+      .forEach((n) => n.removeAttribute("data-autofocus"));
+  window.addEventListener("keydown", clearAutoFocus, true);
+  document.addEventListener("mousedown", clearAutoFocus, true);
+
+  // Esc 只关**最上层**那个：底下的（例如先打开的清空确认）不该被连带关掉。
+  // 冒泡阶段监听，让已有的 Esc 处理（编辑器退出、搜索清空）先跑；
+  // 它们若已处理会 preventDefault，这里就不再抢。
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || e.defaultPrevented || stack.length === 0) return;
+    const top = stack[stack.length - 1];
+    // 可能已经被别处直接关掉了，MutationObserver 还没来得及更新栈
+    if (top.mask.hidden) return;
+
+    // ⚠ **不能直接把 hidden 设成 true**：purge / clear-view 这两个弹窗的返回值是
+    // Promise（`new Promise((r) => (purgeResolve = r))`），点取消才会 resolve。
+    // 直接隐藏会让调用方永远 await 着 —— 表现为「点了删除，界面没反应，卡片也删不掉」。
+    // 所以 Esc 等价于**点取消按钮**，走弹窗自己的关闭路径。
+    const cancel =
+      top.mask.querySelector('.modal-actions [id*="cancel" i], .modal-actions [id*="close" i]') ||
+      [...top.mask.querySelectorAll(".modal-actions button")].find((b) =>
+        /^(取消|关闭|知道了)/.test(b.textContent.trim())
+      );
+
+    if (cancel) cancel.click();
+    // 没有取消键的弹窗（引导、详情）直接关；这类不返回 Promise，关掉没有副作用
+    else top.mask.hidden = true;
+
+    e.preventDefault();
   });
 }
 
@@ -1172,6 +1435,7 @@ async function renderWindow({ keepScroll = false } = {}) {
     if (token === wlToken) {
       view.innerHTML = `<div class="empty"><div class="empty-title">列表加载失败</div>
         <div class="empty-sub">请重试，或查看日志</div></div>`;
+      flushNavSwap(view);
       if (wl) {
         wl.destroy();
         wl = null;
@@ -1193,6 +1457,7 @@ async function renderWindow({ keepScroll = false } = {}) {
       wl = null;
     }
     wlState = null;
+    flushNavSwap(view);
     // **不要在这里清 items**：它是全量轻量索引，与「当前视图/搜索是否有结果」
     // 无关。清掉之后搜 0 条再清搜索，索引就空了 → 批量勾选文件条目删除时
     // askPurgeFiles 筛不到目标 → 确认框被跳过 → 开了「同时删本地文件」也不删
@@ -1213,6 +1478,7 @@ async function renderWindow({ keepScroll = false } = {}) {
   schedulePrefetch();
   // 文件失效检测只查**已加载**的行 —— 全量查一次 10 万个 id 是旧路径的成本
   refreshMissing(wlState.items);
+  flushNavSwap(view);
 }
 
 /** 列表变了之后保持位置重绘（删除、置顶、收藏、新内容到达都走这里）。 */
@@ -1248,6 +1514,9 @@ function render({ keepScroll = false } = {}) {
     bindSettings(view);
     const nextBody = view.querySelector(".settings-body");
     if (prevBodyTop > 0 && nextBody) nextBody.scrollTop = prevBodyTop;
+    // 设置页整块是新 DOM：滑块要重新挂载（挂载是幂等的，重复调无副作用）
+    initMotion(view);
+    flushNavSwap(view);
     return;
   }
 
@@ -2538,7 +2807,7 @@ function settingsHtml() {
       return (
         `<button class="tab${t.id === settingsTab ? " is-active" : ""}` +
         `${dot ? " has-dot" : ""}" data-tab="${t.id}"` +
-        `${dot ? ` title="${esc(dotTip)}"` : ""}>${t.label}</button>`
+        `${dot ? ` data-tip="${esc(dotTip)}"` : ""}>${t.label}</button>`
       );
     }
   ).join("")}</div>`;
@@ -2631,7 +2900,7 @@ function bindHotkeyRow(view, opts) {
     if (recording) return;
     recording = true;
     btn.classList.add("is-recording");
-    btn.textContent = "请按下组合键…（Esc 取消）";
+    btn.textContent = "按下组合键…";
     btn.focus();
     try {
       await invoke("hotkey_suspend");
@@ -2657,7 +2926,7 @@ function bindHotkeyRow(view, opts) {
       if (e.altKey) pre.push("Alt");
       if (e.shiftKey) pre.push("Shift");
       if (e.metaKey) pre.push("Win");
-      btn.textContent = pre.length ? pre.join(" + ") + " + …" : "请按下组合键…（Esc 取消）";
+      btn.textContent = pre.length ? pre.join(" + ") + " + …" : "按下组合键…";
       return;
     }
     const parsed = comboFromEvent(e);
@@ -2705,7 +2974,7 @@ function bindPanelCloseKey(view) {
     if (recording) return;
     recording = true;
     btn.classList.add("is-recording");
-    btn.textContent = "请按下要用的键…（Esc 取消）";
+    btn.textContent = "按下要用的键…";
     btn.focus();
   };
   // 点到别处 = 放弃录制
@@ -2729,7 +2998,7 @@ function bindPanelCloseKey(view) {
       if (e.metaKey) pre.push("Win");
       btn.textContent = pre.length
         ? pre.join(" + ") + " + …"
-        : "请按下要用的键…（Esc 取消）";
+        : "按下要用的键…";
       return;
     }
     const parsed = comboFromEvent(e, { extended: true });
@@ -2918,6 +3187,10 @@ function settingsGeneralHtml(s) {
 }
 
 function settingsAppearanceHtml(s) {
+  // 滑条首帧显示的必须是**当前实际生效**的那个值：深色接管期间它是深色值，
+  // 否则显示日常值 —— 用户会以为「开了加浓却没生效」。
+  // 与拖动、切主题共用同一个判定（`effectiveAlpha`），不再各拼一份。
+  const shownAlpha = effectiveAlpha(s);
   return [
     block(
       "主题",
@@ -2936,13 +3209,21 @@ function settingsAppearanceHtml(s) {
       rowCtl(
         "材质浓度",
         "越高越厚实 · 越低越通透",
-        `<input type="range" id="set-material" min="10" max="90" value="${s.materialAlpha ?? 50}" /><span class="hint" id="material-val">${s.materialAlpha ?? 50}%</span>`
+        `<input type="range" id="set-material" min="1" max="100" value="${shownAlpha}" /><span class="hint" id="material-val">${shownAlpha}%</span>`
       ) +
         rowCheck(
           "set-round",
-          "圆角模式",
-          "圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感",
+          "高级材质",
+          // 原名「圆角模式」有歧义：Win11 上直角模式窗口也是圆角的（系统给的），
+          // 用户会以为关掉会变直角。它实际控制的是**用不用系统背景模糊**。
+          "开启后使用系统毛玻璃，并叠加一层自研增强（更浓的模糊与色彩）。关闭则用不透明底色，更省电、文字更稳",
           s.roundMode
+        ) +
+        rowCheck(
+          "set-auto-dark-alpha",
+          "深色自动加浓",
+          "高级材质下切至深色模式浓度自动升至 100%，支持手动调整；切回浅色模式自动恢复。推荐：浅色 35%，深色 60%",
+          s.autoAlphaDark
         )
     ),
     block(
@@ -3207,7 +3488,7 @@ function settingsAboutHtml() {
           <button class="btn-ghost" id="btn-check-update">${updateBtnLabel()}</button>
           <button class="btn-ghost" id="btn-repo">项目主页</button>
           <button class="btn-ghost" id="btn-feedback">问题反馈</button>
-          <button class="btn-ghost" id="btn-diag" title="复制版本、系统、材质、数据目录等排查信息">复制诊断信息</button>
+          <button class="btn-ghost" id="btn-diag" data-tip="复制版本、系统、材质、数据目录等排查信息">复制诊断信息</button>
         </div>
       </div>
     </div>
@@ -3231,7 +3512,7 @@ function settingsAboutHtml() {
         <span class="about-fact-v" id="ab-tier">—</span>
       </div>
       <div class="about-fact">
-        <span class="about-fact-k">圆角模式</span>
+        <span class="about-fact-k">高级材质</span>
         <span class="about-fact-v" id="ab-round">—</span>
       </div>
       <div class="about-fact">
@@ -3560,7 +3841,7 @@ function showUpdateBanner() {
   el.innerHTML =
     `<span class="ub-text">发现新版本 <b>v${esc(updateInfo.latest)}</b></span>` +
     `<button class="ub-btn" id="ub-go">查看</button>` +
-    `<button class="ub-close" id="ub-close" title="关闭">×</button>`;
+    `<button class="ub-close" id="ub-close" data-tip="关闭" aria-label="关闭">×</button>`;
   document.body.appendChild(el);
 
   el.querySelector("#ub-go").onclick = () => {
@@ -3818,7 +4099,7 @@ async function aboutFeedback() {
     const a = await invoke("about_info");
     const body =
       `版本：${a.version}\n系统 build：${a.osBuild}\n` +
-      `材质档位：${a.tier}\n圆角模式：${a.roundMode ? "开" : "关"}\n\n` +
+      `材质档位：${a.tier}\n高级材质：${a.roundMode ? "开" : "关"}\n\n` +
       `问题描述：\n`;
     const url =
       "https://github.com/kunge9106/self_clipboard/issues/new?title=" +
@@ -3863,9 +4144,19 @@ function bindSettings(view) {
     btn.onclick = () => {
       const id = btn.dataset.tab;
       if (!id || id === settingsTab) return;
+      // 方向由栏目在表里的先后决定：往后翻从右进，往前翻从左进
+      const prevIdx = SETTINGS_TABS.findIndex((t) => t.id === settingsTab);
+      const nextIdx = SETTINGS_TABS.findIndex((t) => t.id === id);
+      const dirX = nextIdx >= prevIdx ? 1 : -1;
       settingsTab = id;
+      // 换 DOM 之前拍快照，之后放它离场 —— 与新内容入场同时进行
+      const ghost = captureGhost(view);
       view.innerHTML = settingsHtml();
       bindSettings(view);
+      initMotion(view);
+      releaseGhost(ghost, { axis: "x", from: dirX });
+      const body = view.querySelector(".settings-body");
+      if (body) swap(body, { axis: "x", from: dirX });
     };
   });
 
@@ -3991,7 +4282,11 @@ function bindSettings(view) {
   const syncPanelKeep = () => {
     if (!panelKeep) return;
     const off = !panelStay?.checked;
-    panelKeep.toggleAttribute("data-disabled", off);
+    // 用**真 disabled**，不用 data-disabled 属性标记：后者在 input 上没有对应规则，
+    // 结果就是「看着没变化、点了照样能切」，还会把 panelKeepAfterCopy=true 写进配置
+    // —— 变成一个永远不生效的开关（用户实测反馈「失焦不收起没打开也能点」）。
+    // 真 disabled 一并解决三件事：不可点、Tab 跳过、读屏朗读为「不可用」。
+    panelKeep.disabled = off;
     if (off) panelKeep.checked = false;
   };
   if (panelStay) {
@@ -4215,59 +4510,85 @@ function bindSettings(view) {
 
   const material = view.querySelector("#set-material");
   if (material) {
-    const label = view.querySelector("#material-val");
+    // 首帧：HTML 的 value 只决定滑点位置，自绘轨道的 --fill 得单独给，
+    // 否则一进设置页轨道是空的（滑点在中间、轨道却显示成 0%）
+    setMaterialSlider(material.value);
     // 只显示百分比：括号里的说明与上方「越高越厚实 · 越低越通透」重复，
     // 而且拖动时文字长度跳动，视觉上像"突然冒出一串括号"（用户实测反馈）。
-    const show = (v) => {
-      if (label) label.textContent = `${v}%`;
-    };
     // 拖动中：只改观感与本地状态，不落盘（高频写 config.json 没必要）。
     // 关键是同步模块级 settings —— settingsHtml() 读的就是它，
     // 不同步的话切到别的分类再回来，滑块会显示成旧值（看起来像「恢复默认」）。
     material.addEventListener("input", () => {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
-      show(v);
+      setMaterialSlider(v);
       applyGlassAlpha(v);
-      syncAlphaToSettings(v);
+      // 深色接管期间：改的是「深色专属值」，日常浓度（浅色用）原封不动 ——
+      // 否则切回浅色就恢复不回去了
+      if (darkBoostActive()) settings.darkAlpha = v;
+      else syncAlphaToSettings(v);
     });
     // 松手才持久化
     material.addEventListener("change", () => {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
-      invoke("set_material_alpha", { value: v }).catch((e) =>
-        toast("未保存，请重试")
-      );
+      reportFrontend("INFO", "ui", `材质浓度 → ${v}%`);
+      const cmd = darkBoostActive() ? "set_dark_alpha" : "set_material_alpha";
+      invoke(cmd, { value: v }).catch((e) => toast("未保存，请重试"));
     });
   }
 
-  // 圆角模式：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启。
+  // 「深色自动加浓」：开、关**两个方向**都要立刻把当前该生效的浓度落下去。
   //
-  // **浓度不跟着动**：直角 / 圆角两个模式各记着自己那一档
-  // （后端 alpha_straight / alpha_round），切模式只是换用另一档 ——
-  // 直角调到 68 → 切圆角（用圆角那档，比如 45）→ 切回直角仍是 68。
-  // 这里把该模式记住的那一档取回来，同步到滑块 / 标签 / 观感。
+  // 曾经只处理了「关」：关掉时还原成日常值，再打开却什么都不做 —— 浓度停在
+  // 日常值，非得再切一次深浅色（那条路径会重算）才回到深色专属值。用户实测
+  // 描述得准确：「关闭自动加浓会恢复到我设的浓度，打开它还是那个值，必须开关
+  // 一次深浅色才行」。
+  //
+  // 根因是当时按「关闭才需要还原」去想，而不是按「哪一档该生效」去想。
+  // 现在两个方向都只是重算一遍，判定只有一个来源（effectiveAlpha）。
+  const autoDark = view.querySelector("#set-auto-dark-alpha");
+  if (autoDark)
+    autoDark.onchange = async () => {
+      try {
+        await invoke("set_auto_alpha_dark", { value: autoDark.checked });
+        settings = await invoke("get_settings");
+        syncEffectiveAlpha();
+        reportFrontend(
+          "INFO",
+          "ui",
+          `深色自动加浓 → ${autoDark.checked ? "开" : "关"}（生效浓度 ${effectiveAlpha()}%）`
+        );
+      } catch (e) {
+        reportFrontend("warn", "settings", e);
+        toast("设置没保存，请重试");
+        autoDark.checked = !autoDark.checked;
+      }
+    };
+
+  // 高级材质：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启。
+  //
+  // 浓度不「重置成默认」，而是换用另一档：直角 / 圆角各记着自己那一档
+  // （后端 alpha_straight / alpha_round），直角调到 68 → 切高级材质（那档 35）
+  // → 切回直角仍是 68。
+  //
+  // 顺序有讲究：先 `applyRoundMode` 再拉配置 —— `darkBoostActive()` 要读新的
+  // `roundMode`，反了会按旧模式算一遍（刚开启高级材质却用直角那档的浓度）。
   const round = view.querySelector("#set-round");
   if (round)
     round.onchange = async () => {
       try {
         await invoke("set_round_mode", { value: round.checked });
+        reportFrontend("INFO", "ui", `高级材质 → ${round.checked ? "开" : "关"}`);
         applyRoundMode(round.checked);
         // 模式变了 → 当前生效的那一档（materialAlpha）也随之改变，重新拉一次配置
         settings = await invoke("get_settings");
-        const alpha = settings.materialAlpha ?? 50;
-        applyGlassAlpha(alpha);
-        const slider = view.querySelector("#set-material");
-        if (slider) slider.value = alpha;
-        const label = view.querySelector("#material-val");
-        // 与拖动滑块那条路径保持一致：只显示百分比。
-        // 这里曾经写成 `${alpha}%（越高越厚实 · 越低越通透）`，用户切一次模式
-        // 括号就又冒出来了 —— 说明与上方「越高越厚实 · 越低越通透」重复。
-        if (label) label.textContent = `${alpha}%`;
+        syncEffectiveAlpha();
+        const alpha = effectiveAlpha();
         toast(
           round.checked
-            ? `已切换为圆角模式（无背景模糊）· 浓度 ${alpha}%`
-            : `已切换为直角模式（保留背景模糊）· 浓度 ${alpha}%`
+            ? `已开启高级材质 · 浓度 ${alpha}%`
+            : `已关闭高级材质 · 浓度 ${alpha}%`
         );
       } catch (e) {
         toast("未保存，请重试");
@@ -4388,8 +4709,12 @@ async function main() {
   bindFirstRunModals();
   bindDetailModal();
   bindNav();
+  // 首屏静态 DOM 里的分段/栏目控件挂一次；设置页每次重绘后会再挂
+  initMotion();
   bindThemeToggle();
   bindSearch();
+  createTip();
+  bindModalBehavior();
   startTimeTicker();
 
   await applyEffectInfo();
@@ -4404,8 +4729,11 @@ async function main() {
   // 配置与版本号（状态栏）
   try {
     settings = await invoke("get_settings");
-    // 应用材质浓度（CSS 层，窗口主体的不透明度）
-    applyGlassAlpha(settings.materialAlpha ?? 50);
+    // 先落一次浓度（CSS 层，窗口主体的不透明度）。此刻 body.dark 可能还没同步，
+    // 深色启动会先落浅色值、紧接着 `applyThemeMode` 再按深色值重算 —— 中间那一帧
+    // 发生在首帧绘制前后，肉眼看不到；反过来先套主题再落浓度则会把「未加载配置」
+    // 的默认值画到屏幕上。
+    applyGlassAlpha(settings.materialAlpha ?? 35);
     // 圆角模式（圆角 + 无系统模糊）
     applyRoundMode(settings.roundMode);
     // 主题三档（浅色/深色/系统）：单独 try，避免权限缺失时中断其余绑定

@@ -130,16 +130,28 @@ fn open_menu(app: &AppHandle, pos: PhysicalPosition<f64>) {
     let (x, y) = crate::popup::place(app, mw, mh, pos, true, gap);
     let _ = win.set_position(PhysicalPosition::new(x, y));
 
-    // 菜单是懒创建的，setup 时它还不存在 —— 每次弹出时按设置钉一次主题，
-    // 免得主界面深色、菜单浅色（用户手动选了浅色但系统是深色时最容易撞上）。
-    crate::effects::apply_theme_mode(&win);
+    // 失焦瞬间 Windows 会重绘非客户区，菜单四周围一圈 Win7 式边框闪一下
+    //（用户截图实锤）——挂上 WM_NCACTIVATE 拦截。菜单窗口是复用的，
+    // 函数内部按 hwnd 防重装。
+    #[cfg(windows)]
+    if let Ok(h) = win.hwnd() {
+        crate::effects::install_menu_nc_hook(h.0 as isize);
+    }
 
-    // 主窗口的材质是「显示之后」才铺得开（同 setup_effects 里的补涂），所以这里
-    // 先 show 再上材质；菜单每次弹出都重刷一次，顺带跟随系统主题变化。
+    // **不要再调 `apply_theme_mode`**：它走到 `window.set_theme()`，对
+    // `decorations=false` 的窗口没有任何可见收益（深色偏好只作用于原生装饰），
+    // 却会让 tao 重走 `set_window_flags`，把菜单窗口整个非客户区重建一次 ——
+    // 用户看到的就是「右键后菜单出来那一下闪一下」。
+    // 深浅观感由前端 `body.dark` 决定（CSS 里没有 prefers-color-scheme），
+    // 参数在窗口**隐藏时**就已经推过去了，见 `sync_menu_appearance`。
+
+    // 材质必须在 show **之前**上好：菜单窗口同样是 hide→show 复用，显示后再改
+    // 属性用户会看到「先灰、再变样」（主窗口 show_main 同一顺序）。
+    // 菜单每次弹出都重刷一次，顺带跟随系统主题与高级材质开关变化。
+    apply_material(&win);
     let _ = win.show();
     crate::popup::mark_shown(MENU_LABEL);
     let _ = win.set_focus();
-    apply_material(&win);
 
     // 菜单页是常驻的，只在加载时读一次配置的话，用户改完「材质浓度 / 圆角模式」再右键
     // 还是旧的观感。所以每次弹出都把**当前**外观参数随事件推给页面。
@@ -168,10 +180,10 @@ fn look(win: &WebviewWindow) -> MenuLook {
     MenuLook {
         solid: crate::effects::current_tier().as_str() == "solid",
         round: true,
-        // 菜单恒用**圆角模式**的样式与材质（DESIGN 7.2）：浓度固定取圆角模式的默认档 90%，
-        // 不跟随设置页里调的浓度 —— 菜单是窄条、文字密度高，需要稳定厚实的底。
-        alpha: crate::settings::ROUND_ALPHA as f64 / 100.0,
-        dark: matches!(win.theme().unwrap_or(tauri::Theme::Light), tauri::Theme::Dark),
+        // 恒为 100%：菜单是非高级材质的 CSS 实底（见 apply_material），
+        // 实底不透明才压得住底下的桌面 —— 这就是 2.6.10 菜单的观感。
+        alpha: 1.0,
+        dark: crate::effects::effective_dark(win),
     }
 }
 
@@ -182,13 +194,30 @@ pub fn tray_menu_look(app: AppHandle) -> Result<MenuLook, String> {
     Ok(look(&win))
 }
 
+/// 把当前外观参数推给菜单页 —— **窗口不必可见**。
+///
+/// 菜单是复用的常驻 WebView，只在右键时 show。若等到 show 之后再推主题，
+/// 页面会先按旧配色画出来、再闪一下换成新的（用户实测：「切换深浅色后，
+/// 托盘菜单好像是在右键后出来才切换深浅色，这个时候也会闪一下」）。
+///
+/// 所以切深浅色时就把参数推给**隐藏中**的页面，弹出那一刻已经是新配色。
+/// 与 `open_menu` 末尾那次推送同源（都走 `look`），重复推送幂等。
+pub fn sync_menu_appearance(app: &AppHandle) {
+    // 窗口没建过就什么都不做：首次创建时页面自己会拉 `tray_menu_look`
+    let Some(win) = app.get_webview_window(MENU_LABEL) else {
+        return;
+    };
+    let _ = app.emit_to(MENU_LABEL, "tray-menu-open", look(&win));
+}
+
 #[cfg(windows)]
 fn apply_material(win: &WebviewWindow) {
-    use tauri::Theme;
+    // 菜单**恒为非高级材质**（2026-11-06 用户实测拍板）：系统 backdrop 在这个
+    // 弹出式小窗口上铺不稳（实测有几率不生效），不值得为它引入第二套状态机。
+    // 先关干净系统材质，观感完全交给 CSS —— 100% 浓度实底 + CSS 圆角，
+    // 与 2.6.10 的菜单观感一致。
     if let Ok(h) = win.hwnd() {
-        let dark = matches!(win.theme().unwrap_or(Theme::Light), Theme::Dark);
-        // 菜单**固定圆角**（与主窗口的圆角模式无关），所以必须走「先关系统材质」的
-        // 路径：系统 acrylic/backdrop 是矩形，CSS 圆角配上它四角会留一圈直角残留。
+        let dark = crate::effects::effective_dark(win);
         crate::effects::apply_rounded(h.0 as isize, dark);
     }
 }
@@ -234,6 +263,80 @@ pub fn tray_quit(app: AppHandle) -> Result<(), String> {
 
 /// 把主窗口唤回前台。托盘菜单与「重复启动」都用它，
 /// 所以「补齐材质 + relayout」这一套只此一份，不会两处漂移。
+/// 「收进托盘」的驻留方式：窗口移到屏幕外，**不 hide**。
+///
+/// hide() 会让 DWM 把宿主窗口透明（blur-behind）、NC 渲染策略、backdrop
+/// 一次性全丢，唤回的第一帧必然是灰的，任何补涂都追不上 DWM 的合成节奏。
+/// 屏幕外驻留时窗口对 DWM 依然可见，材质状态一帧都不会丢 ——
+/// 唤回只是移回原位，这就是 2.6.10 式的丝滑（它靠的是「没材质所以看不出丢」，
+/// 现在直接让状态不丢）。
+///
+/// 任务栏条目用 `set_skip_taskbar` 摘掉：tao 走的是 ITaskbarList
+/// DeleteTab/AddTab，不改窗口样式、不闪、不影响可见性。
+static PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PARK_POS: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+
+/// 收进托盘：记住当前位置 → 摘掉任务栏条目 → 移出屏幕。
+/// 顺带把 z 序压到底并清掉线程焦点，别让键盘打进一个看不见的窗口。
+pub fn park_main_window(w: &tauri::WebviewWindow) {
+    use std::sync::atomic::Ordering;
+    if let Ok(p) = w.outer_position() {
+        if let Ok(mut g) = PARK_POS.lock() {
+            *g = Some((p.x, p.y));
+        }
+    }
+    let _ = w.set_skip_taskbar(true);
+    let _ = w.set_position(tauri::PhysicalPosition::new(-32000, -32000));
+    PARKED.store(true, Ordering::Relaxed);
+    #[cfg(windows)]
+    unsafe {
+        extern "system" {
+            fn SetWindowPos(
+                hwnd: isize,
+                after: isize,
+                x: i32,
+                y: i32,
+                cx: i32,
+                cy: i32,
+                flags: u32,
+            ) -> i32;
+            fn SetFocus(hwnd: isize) -> isize;
+        }
+        if let Ok(h) = w.hwnd() {
+            let hwnd = h.0 as isize;
+            const HWND_BOTTOM: isize = 1;
+            const SWP_NOMOVE: u32 = 0x2;
+            const SWP_NOSIZE: u32 = 0x1;
+            const SWP_NOACTIVATE: u32 = 0x10;
+            SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetFocus(0);
+        }
+    }
+}
+
+/// 唤回：若窗口正驻留屏幕外则移回原位，返回 true（调用方不必再做任何材质复位）。
+/// 没有驻留（最小化、刚重建等）返回 false，走常规路径。
+fn unpark_main_window(w: &tauri::WebviewWindow) -> bool {
+    use std::sync::atomic::Ordering;
+    if !PARKED.swap(false, Ordering::Relaxed) {
+        return false;
+    }
+    let pos = PARK_POS.lock().ok().and_then(|mut g| g.take());
+    let _ = w.set_skip_taskbar(false);
+    let (x, y) = pos.unwrap_or((120, 120)); // 位置没存到也必须移回来，给个保底
+    let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+    true
+}
+
+/// 窗口被销毁重建时（低占用释放后），驻留状态作废。
+fn clear_park_state() {
+    use std::sync::atomic::Ordering;
+    PARKED.store(false, Ordering::Relaxed);
+    if let Ok(mut g) = PARK_POS.lock() {
+        *g = None;
+    }
+}
+
 pub fn show_main(app: &AppHandle) {
     // 窗口要显示了：取消释放倒计时（用户正在用，不能被销毁）
     crate::idle_release::note_shown();
@@ -249,7 +352,21 @@ pub fn show_main(app: &AppHandle) {
     // 才由回调 show）。这里再 show 一次会显示一块空白区域 —— 用户看到的就是
     // 「点了没反应」或一片白。所以重建这条路直接交给回调，不在这里补。
     if just_built {
+        // 新窗口是全新建的，驻留状态作废（skipTaskbar 默认就是 false）
+        clear_park_state();
         crate::log_print!("[tray] 界面刚重建，交给页面加载完成后显示");
+        return;
+    }
+    // 驻留恢复：窗口对 DWM 从未消失，材质一帧没丢 —— 直接移回原位 + 聚焦。
+    // 这是「打开就是高级材质」的关键：任何复位都不需要，也不该做。
+    if unpark_main_window(&w) {
+        crate::log_print!("[tray] 从屏幕外驻留恢复（DWM 状态未丢，无需复位）");
+        let _ = w.set_focus();
+        // 保险：静默补涂一次（值没变时是纯 no-op，不闪）
+        #[cfg(windows)]
+        {
+            let _ = crate::effects::reapply_visuals_for(&w, "unpark");
+        }
         return;
     }
     {
@@ -257,12 +374,15 @@ pub fn show_main(app: &AppHandle) {
         // 用户会看到「先出现、再变样」的闪烁（上一版就是这么闪的）。
         #[cfg(windows)]
         {
-            use tauri::Theme;
             if let Ok(h) = w.hwnd() {
                 let hwnd = h.0 as isize;
-                // 隐藏期间 DWM 会把 accent 材质丢掉 —— 先补回来
-                let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
-                crate::effects::apply(hwnd, dark);
+                // 隐藏期间 DWM 会丢掉 backdrop —— 先整份复位。
+                // 单靠 apply_with 不够：它样式位没变就早退，不发 FRAMECHANGED。
+                // 而且 hide→show 后 DWM 还会把 NC 渲染策略重置回 USEWINDOWSTYLE，
+                // 那一项不补，backdrop 属性在也画不出来（见 restore_visuals 文档）。
+                // restore_visuals_for = DWM 层 + WebView2 内容层，
+                // 少任何一层都会变成「属性全对、画面全灰」
+                let _ = crate::effects::restore_visuals_for(&w, "tray-show");
                 // hide() 不产生 WM_SIZE，WebView2 的内容尺寸可能停在隐藏前的大小
                 // （表现为唤回来排版不对）。此刻窗口还不可见，尺寸微调看不见。
                 crate::effects::relayout(hwnd);
@@ -283,15 +403,11 @@ pub fn show_main(app: &AppHandle) {
         {
             let w2 = w.clone();
             std::thread::spawn(move || {
-                use tauri::Theme;
                 for delay in [150u64, 500] {
                     std::thread::sleep(std::time::Duration::from_millis(delay));
-                    if let Ok(h) = w2.hwnd() {
-                        let dark = matches!(w2.theme().unwrap_or(Theme::Light), Theme::Dark);
-                        crate::effects::apply(h.0 as isize, dark);
-                        crate::effects::apply_rounded_corners(h.0 as isize);
-                        crate::effects::nudge(h.0 as isize);
-                    }
+                    // 可见期间的兜底补涂走**静默**版：不拆 backdrop 重建。
+                    // 旧版不闪正是这个语义；响亮版在这里跑就是那一下闪
+                    let _ = crate::effects::reapply_visuals_for(&w2, "tray-show-delayed");
                 }
             });
         }

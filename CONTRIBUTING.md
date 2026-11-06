@@ -36,6 +36,22 @@
 
    不使用 `cargo build --release` 产出交付物。Tauri 的 `custom-protocol` feature 只由 Tauri CLI 注入，直接用 cargo 构建得到的是 dev 版，运行时会连接 `localhost:5173`。
 
+   **开发期自测认准 `src-tauri/target/debug/self-clipboard.exe`**，不要拿 `target/release/` 里那个。debug 编译走 `devUrl`，前端改动由 vite 热更新即时生效，改 CSS 不必重编；release 包内嵌 `dist`，只有跑过 `npm run tauri build` 才会更新。`target/release/self-clipboard.exe` 可能是几天前遗留的旧构建，拿它测新改动会得出完全错误的结论。
+
+   真实踩过：材质修复于 11-06 10:17 完成，而 `target/release/` 里的 exe 是 11-05 13:09 的，用它测出「材质又没应用、点一次深浅色才恢复」，排查了半天才发现是包旧了。**判断手上这份是不是新的，看文件时间最快**：
+
+   ```bash
+   ls -la src-tauri/target/debug/self-clipboard.exe src-tauri/target/release/self-clipboard.exe
+   ```
+
+   需要确认某个修复是否真的编进二进制时，搜该修复引入的字符串（比时间更可靠）：
+
+   ```bash
+   grep -ac "驻留" src-tauri/target/debug/self-clipboard.exe   # 命中数 > 0 即含该修复
+   ```
+
+   用 debug 包测时 **vite 必须常驻**（`npm run dev:vite`），它一停，窗口就是白屏。判断是否正常：`curl -o /dev/null -w "%{http_code}" http://localhost:5173/` 返回 `200`；返回 `502` 说明上游已死（那是本地代理在报「连不上」），不是页面本身出错。
+
 4. 推送分支：`git push -u origin feature/xxx`。
 
 5. 开 PR：`gh pr create --base main --head feature/xxx`，描述写明改动内容与原因。

@@ -17,14 +17,14 @@
         </div>
         <div class="titlebar-spacer"></div>
         <div class="window-controls">
-          <button class="wc-btn" id="btn-minimize" title="最小化" aria-label="最小化">
+          <button class="wc-btn" id="btn-minimize" data-tip="最小化" aria-label="最小化">
             <svg viewBox="0 0 10 10"><path d="M0 5h10" /></svg>
           </button>
-          <button class="wc-btn" id="btn-maximize" title="最大化" aria-label="最大化">
+          <button class="wc-btn" id="btn-maximize" data-tip="最大化" aria-label="最大化">
             <svg class="ic-max" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9"/></svg>
             <svg class="ic-restore" viewBox="0 0 10 10"><rect x="0.5" y="2.5" width="7" height="7"/><path d="M2.8 2.5V0.5H9.5V7.2H7.5"/></svg>
           </button>
-          <button class="wc-btn wc-close" id="btn-close" title="关闭" aria-label="关闭">
+          <button class="wc-btn wc-close" id="btn-close" data-tip="关闭" aria-label="关闭">
             <svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" /></svg>
           </button>
         </div>
@@ -60,14 +60,14 @@
             <!-- 深浅色快捷切换：只管「当前是深就切浅、是浅就切深」，
                  三档里的「系统」仍在设置 → 通用里选。图标随当前深浅切换（月亮/太阳）。 -->
             <button class="nav-item" id="theme-toggle">
-              <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+              <svg class="nav-icon" viewBox="0 0 16 16">
                 <path class="i-moon" d="M13.3 9.9A5.7 5.7 0 016.1 2.7a5.7 5.7 0 107.2 7.2z" />
                 <g class="i-sun"><circle cx="8" cy="8" r="3.1" /><path d="M8 1.3v1.7M8 13v1.7M1.3 8h1.7M13 8h1.7M3.3 3.3l1.2 1.2M11.5 11.5l1.2 1.2M12.7 3.3l-1.2 1.2M4.5 11.5l-1.2 1.2" /></g>
               </svg>
               <span id="theme-toggle-label">深色</span>
             </button>
             <button class="nav-item" data-view="settings">
-              <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.6 1.8h2.8l.42 1.85c.5.17.96.42 1.37.74l1.8-.62 1.4 2.42-1.38 1.23a5.3 5.3 0 010 1.56l1.38 1.23-1.4 2.42-1.8-.62c-.41.32-.87.57-1.37.74L9.4 14.2H6.6l-.42-1.85a5.3 5.3 0 01-1.37-.74l-1.8.62-1.4-2.42 1.38-1.23a5.3 5.3 0 010-1.56L1.61 6.19l1.4-2.42 1.8.62c.41-.32.87-.57 1.37-.74z"/><circle cx="8" cy="8" r="2.1"/></svg>
+              <svg class="nav-icon" viewBox="0 0 16 16"><path d="M6.6 1.8h2.8l.42 1.85c.5.17.96.42 1.37.74l1.8-.62 1.4 2.42-1.38 1.23a5.3 5.3 0 010 1.56l1.38 1.23-1.4 2.42-1.8-.62c-.41.32-.87.57-1.37.74L9.4 14.2H6.6l-.42-1.85a5.3 5.3 0 01-1.37-.74l-1.8.62-1.4-2.42 1.38-1.23a5.3 5.3 0 010-1.56L1.61 6.19l1.4-2.42 1.8.62c.41-.32.87-.57 1.37-.74z"/><circle cx="8" cy="8" r="2.1"/></svg>
               <span>设置</span>
             </button>
           </div>
@@ -79,7 +79,7 @@
             <div class="search">
               <svg class="search-icon" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
               <input id="search" type="text" placeholder="搜索剪贴板历史…" autocomplete="off" spellcheck="false" />
-              <button class="search-clear" id="search-clear" type="button" title="清空搜索" hidden>
+              <button class="search-clear" id="search-clear" type="button" data-tip="清空搜索" hidden>
                 <svg viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
               </button>
             </div>
@@ -105,10 +105,10 @@
             <span class="statusbar-left" id="status-count">共 0 条</span>
             <span class="statusbar-version" id="status-version"></span>
             <div class="statusbar-actions">
-              <button class="statusbar-clear" id="btn-clear-view" title="清空（搜索时只清结果；置顶/收藏除外）">
+              <button class="statusbar-clear" id="btn-clear-view" data-tip="清空（搜索时只清结果；置顶/收藏除外）">
                 <svg viewBox="0 0 16 16"><path d="M2.5 4h11M6.5 2h3M4 4l.7 9a1.5 1.5 0 001.5 1.4h3.6a1.5 1.5 0 001.5-1.4L12 4M6.7 7v4.5M9.3 7v4.5"/></svg>
               </button>
-              <button class="statusbar-clear" id="btn-clean-age" title="清理旧条目（按天数，置顶/收藏除外）">
+              <button class="statusbar-clear" id="btn-clean-age" data-tip="清理旧条目（按天数，置顶/收藏除外）">
                 <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.4 1.6"/></svg>
               </button>
             </div>
@@ -340,8 +340,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <rect x="8" y="3.5" width="8" height="3" rx="1" />
                   <path d="M16 5h1.6A1.4 1.4 0 0 1 19 6.4v13.2A1.4 1.4 0 0 1 17.6 21H6.4A1.4 1.4 0 0 1 5 19.6V6.4A1.4 1.4 0 0 1 6.4 5H8" />
                 </svg>
@@ -377,8 +376,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <rect x="9" y="9" width="11" height="11" rx="2" />
                   <path d="M5 15V6a2 2 0 0 1 2-2h9" />
                 </svg>
@@ -397,8 +395,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <path d="M7 18V6h3.6a3 3 0 0 1 0 6H7" />
                   <path d="M7 12h4a3 3 0 0 1 0 6H7" />
                   <path d="M16.5 6v12" />
@@ -423,8 +420,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <path d="M12 5.5H7A2 2 0 0 0 5 7.5v11A2 2 0 0 0 7 20.5h11a2 2 0 0 0 2-2V13" />
                   <path d="M15.4 4.6a2.1 2.1 0 0 1 3 3L11.6 14.4l-3.6.9.9-3.6z" />
                 </svg>
@@ -442,8 +438,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <path d="M12 4.2l2.38 4.83 5.32.77-3.85 3.75.91 5.3L12 16.35l-4.76 2.5.91-5.3L4.3 9.8l5.32-.77z" />
                 </svg>
               </span>
@@ -464,8 +459,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <path d="M2.2 12S5.8 6.2 12 6.2 21.8 12 21.8 12 18.2 17.8 12 17.8 2.2 12 2.2 12z" />
                   <circle cx="12" cy="12" r="2.6" />
                 </svg>
@@ -483,8 +477,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <path d="M3.5 7.2A1.7 1.7 0 0 1 5.2 5.5h3.9l2 2.4h7.7a1.7 1.7 0 0 1 1.7 1.7v7.9a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7z" />
                 </svg>
               </span>
@@ -509,8 +502,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <rect x="2.6" y="6.2" width="18.8" height="11.6" rx="2.2" />
                   <path d="M6.4 10.2h.02M9.8 10.2h.02M13.2 10.2h.02M16.6 10.2h.02" />
                   <path d="M8.2 14h7.6" />
@@ -537,8 +529,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <path d="M4 8.2V5.8A1.8 1.8 0 0 1 5.8 4H8.2" />
                   <path d="M15.8 4h2.4A1.8 1.8 0 0 1 20 5.8v2.4" />
                   <path d="M20 15.8v2.4a1.8 1.8 0 0 1-1.8 1.8h-2.4" />
@@ -561,8 +552,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <path d="M4.5 7.5h15M4.5 12h15M4.5 16.5h9" />
                   <circle cx="18" cy="16.5" r="2.2" />
                 </svg>
@@ -580,8 +570,7 @@
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <path d="M12 3.8a8.2 8.2 0 1 0 0 16.4c1.3 0 2-.9 2-2 0-1.4-1-1.7-1-2.8 0-.8.7-1.4 1.5-1.4h1.7a3.9 3.9 0 0 0 3.9-3.9c0-3.5-3.6-6.3-8.1-6.3z" />
                   <circle cx="8.4" cy="9.2" r="1.1" />
                   <circle cx="12" cy="7.4" r="1.1" />
@@ -596,21 +585,20 @@
                 侧栏底部也有一个快捷切换按钮
               </li>
               <li>
-                <b>材质浓度</b> —— 设置 → 外观 → 窗口。直角与圆角各记一档，来回切模式不互相覆盖
+                <b>材质浓度</b> —— 设置 → 外观 → 窗口。开与关各记一档，来回切不互相覆盖
               </li>
               <li>
-                <b>圆角模式</b> —— 四角真透明，边缘由界面自己画、带抗锯齿；
-                代价是没有系统背景模糊，所以浓度需要调高一些
+                <b>高级材质</b> —— 开启后用系统毛玻璃，再叠一层自研增强（更浓的模糊与色彩）；
+                关闭则用不透明底色，更省电、文字更稳
               </li>
             </ul>
-            <p class="tour-hint">直角模式保留壁纸模糊，圆角模式四角更干净。两种模式都在「外观 → 窗口」里切。</p>
+            <p class="tour-hint">开是毛玻璃，关是实底。两者都在「外观 → 窗口」里切。</p>
           </section>
 
           <section class="tour-step" data-since="3">
             <div class="tour-head">
               <span class="tour-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
+                <svg viewBox="0 0 24 24">
                   <rect x="4.8" y="10" width="14.4" height="10.2" rx="2.2" />
                   <path d="M8.2 10V7.5a3.8 3.8 0 0 1 7.6 0V10" />
                 </svg>

@@ -30,7 +30,35 @@
   /* 窗口圆角；JS 会按后端返回的档位上限覆盖它（Win10 acrylic = 20px）。
      控件圆角固定 8px：大圆角只属于窗口本体，否则按钮/卡片会变成胶囊形。 */
   --radius: 20px;
+  /* 相邻可选行（导航项、菜单项、设置里的行）的统一间距。
+     圆角块相邻时，间距小于圆角半径的一半就会「粘」成一个 —— 2px 在 8px 圆角下
+     正是这种情况。所有「一排可选行」的容器都用这个值，不再各写各的。 */
+  /* ══ 层级（z-index）════════════════════════════════════════════════
+     只由这张表决定，**禁止再写裸数字**。顺序＝浮起来的程度，不是「谁后写谁大」。
+     原来散着 40 / 998 / 999 / 1000 / 1200 / 1500 / 2000 / 3000 八个值，
+     加一个新浮层只能猜「该比谁大」，猜错就被压住。 */
+  /* 遮罩浓度：弹窗 / 移动框 / 引导共用，不再各写一个 rgba。
+     0.32 取自 .modal-mask（它出现频率最高）；原先 .move-mask 走 0.28，
+     差 4% 属于历史漂移，而它的注释偏偏写着「与 .modal-mask 一致」——
+     统一掉这一个不一致，比新增第二个遮罩令牌更符合「同一效果只留一份」。 */
+  --mask-bg: rgba(0, 0, 0, 0.32);
+  --z-banner: 40; /* 更新横幅：顶部常驻，低于所有浮层 */
+  --z-decor: 998; /* 噪点 / 光斑装饰层：在内容之上、交互浮层之下 */
+  --z-menu: 1000; /* 右键菜单 */
+  --z-tip: 1200; /* 提示气泡：必须能压住菜单（菜单项也需要提示） */
+  --z-preview: 1500; /* 悬停预览：带内容的大浮层 */
+  --z-modal: 2000; /* 弹窗与遮罩 */
+  --z-toast: 2100; /* toast：永远可见，压住弹窗 */
+  --z-grip: 3000; /* 缩放热区：贴窗口边缘，被任何浮层遮住就拖不动 */
+  --gap-row: 4px;
+  /* 密集菜单（右键菜单、下拉）行距更小：项高才 30px 上下，4px 会把菜单拉长。
+     只有这两档 —— 不允许再出现「这里写 1px、那里写 3px」的散值。 */
+  --gap-row-dense: 1px;
+  /* 圆角只有四档：4（小图标按钮）/ 8（卡片、菜单、按钮）/ 12（浮层）/ 999（胶囊）。
+     原来 2 / 3 / 5 / 6 / 10 散着，同一个「小圆角」有五种写法。 */
+  --radius-xs: 4px;
   --radius-sm: 8px;
+  --radius-lg: 12px;
 
   /* 等宽字体：代码 / Markdown 预览与详情正文共用。原本详情页里内联了一串
      ui-monospace 列表，两处各写一遍就会漂移，抽成变量。 */
@@ -39,16 +67,160 @@
     "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
 
   /* 玻璃叠加层（light） */
-  --glass: rgba(255, 255, 255, 0.16);
+  --glass: rgba(255, 255, 255, calc(0.16 * var(--mat-k)));
   /* 条目卡片底色。比 --glass 实得多，理由：浅色材质底（Mica 白灰）上叠 16% 白，
      卡片与背景几乎同色，整块看起来「发灰」、分不出层次（用户实测反馈）。
      --glass 还要服务侧栏与按钮，那些地方需要更透，所以这里单独一个变量。 */
-  --card-bg: rgba(255, 255, 255, 0.55);
+  --card-bg: var(--surface-2);
   /* 悬停态：比常态略亮。不能沿用 --glass-hover（那是 10% 的通用悬停层），
      否则鼠标一移上去，实心卡片会瞬间变透明、像被"挖"了一下。 */
-  --card-hover: rgba(255, 255, 255, 0.72);
-  --glass-strong: rgba(255, 255, 255, 0.28);
-  --glass-hover: rgba(255, 255, 255, 0.24);
+  /* 悬浮 = **提亮**，不是压暗。
+     1a 曾把它改成黑 .05，理由是「浅色面用白、压暗层用黑」—— 那条规则说的是**描边**，
+     套到悬停上就是错的：毛玻璃上压暗看着像凹进去、发灰（实测「条目聚焦时还是灰色的，
+     不好看不如原来的」）；提亮才像玻璃被照亮、浮起来。
+     叠在 62% 白的卡片上 ≈ 79% 白：够明显，又不至于变成实心块。 */
+  --state-hover: rgba(255, 255, 255, calc(0.45 * var(--mat-k)));
+  /* 按下：物理上「被压下去 = 遮住光」，所以比常态**暗**一档（WinUI 的
+     ButtonBackgroundPressed 也是比 normal 暗）。浅色用中性黑，深色用更低的白。 */
+  --state-active: rgba(0, 0, 0, 0.06);
+  /* 强调色的淡底。**当前唯一用途**：实底主按钮的焦点外发光
+     （`.btn-primary:focus-visible` 的 2px 环 —— 蓝环压蓝底看不见，只能外扩一圈淡色）。
+     曾被删过一次，理由是「主按钮不用淡底了」，但实底恢复后它又有了唯一用途。
+     新增用途前先想清楚：它不是给「淡底按钮」准备的（那种按钮已不存在）。 */
+  --accent-soft: rgba(47, 107, 255, 0.1);
+  /* 小控件（按钮 / 图标键 / 菜单项 / 导航项）的悬停与聚焦底色：**淡灰**。
+     与卡片用的 --state-hover（白 .45 提亮）刻意分开：
+       · 卡片是「内容块」，悬停要像玻璃被照亮 → 提亮；
+       · 按钮是「可点的东西」，悬停要像被按住的实体 → 压暗一点点。
+     实测原话：「取消按钮悬停时可以加一点淡淡的灰色，让人知道选中了」。 */
+  --state-hover-dim: rgba(0, 0, 0, 0.055);
+  /* 开关关闭态轨道：不能用 --track-bg（那是进度条空轨，浅到 #ececec），
+     白色滑点压上去看不见。取中性深灰，滑点才有依托。 */
+  --switch-off: rgba(0, 0, 0, 0.26);
+  /* 主按钮的**填充色**：比 --accent 深一档。
+     #2f6bff 饱和度 100%、明度很高，铺成实底在毛玻璃上刺眼；
+     Fluent 自己的强调蓝是 #005FB8 那种深沉色。这里取中间值，
+     保证白字对比 ≥4.5（实测 5.2）—— --accent 本身继续用于文字/边/焦点环，不动。 */
+  --accent-fill: #3560c4;
+  /* 实底填充上的前景：浅色主题的填充是深蓝，所以字用白。 */
+  --accent-on: #ffffff;
+  /* ══ 玻璃材质（Glass material）═════════════════════════════════════
+     2026-11-06 整层重做，按钮 / 卡片 / 浮层共用同一套「受光」语言。
+
+     旧的一套是 iOS 6 时代的拟物金属配方：180° 深浅渐变 + 底部内黑边 +
+     深色描边，模拟一块「有厚度的塑料/金属键」。它在纯色背景上成立，但压在
+     毛玻璃界面上会显脏、发油 —— 用户实机反馈「不好看，不符合现代美学」，
+     判断成立，不是口味问题。
+
+     现代材质（Apple Liquid Glass 2025 / Fluent Acrylic）把质感拆成三层，
+     每层只干一件事，叠起来才不像贴纸：
+       ① **平坦面色 tint**：玻璃染色后是均匀的，没有上下渐变。
+          渐变一出就变成「立体键帽」，这是老派的直接标志。
+       ② **镜面边 spec**：光从上方来，所以只有**顶边**一道锐利白光，
+          其余三边极弱（边缘折射）。这是「一块材质」与「一个色块」的分界，
+          也是整套质感里唯一不能省的一层。
+       ③ **双档投影**：贴身的接触影（contact，1px，很紧）+ 大而柔的环境影
+          （ambient，扩散远、色偏冷）。合成一档会又糊又脏。
+     额外一层 135° 的极淡对角光泽 sheen，给大面积面板用；30px 的按钮上
+     只用一点点，多了会像塑料反光。
+
+     ⚠ 这些令牌**只表达受光**，不表达颜色。颜色仍由各主题的 tint 决定，
+     两者分开才能做到「换配色不改质感」。 */
+  --glass-spec: rgba(255, 255, 255, 0.7);
+  --glass-spec-soft: rgba(255, 255, 255, 0.5);
+  --glass-rim: rgba(255, 255, 255, 0.46);
+  --glass-sheen: rgba(255, 255, 255, 0.38);
+  /* 真玻璃面板（弹窗 / 迁移框）：半透明 + backdrop-filter。
+     只有在**背后有内容可糊**的地方才用它 —— 浮在窗口底色上的元素用这套
+     会得到「一层透明的白」，见文件顶部浮层材质那条注释。 */
+  --glass-panel: rgba(255, 255, 255, 0.82);
+  --glass-panel-rim: rgba(255, 255, 255, 0.5);
+  /* 长文阅读面板用这一档：看得出是玻璃，但透不出会干扰阅读的内容。
+     720×520 的正文区和 260px 的确认框不是一个场景 —— 后者读 12 个字，前者读 2000 个。 */
+  --glass-panel-strong: rgba(255, 255, 255, 0.9);
+
+  /* ══ 玻璃质感层（.app::after）══════════════════════════════════════
+     原来是「浅色 5 个裸色值 + body.dark 再抄 5 个」= 10 处硬编码 + 一条
+     组件级覆盖。改主题时只要漏掉一处，光泽就会跟主题打架。
+     现在规则体里一个色值都没有，深浅差异全部收进这两组变量。 */
+  --app-gloss-linear: rgba(255, 255, 255, 0.1);
+  --app-gloss-radial: rgba(255, 255, 255, 0.1);
+  --app-rim: rgba(255, 255, 255, 0.3);
+  --app-top-light: rgba(255, 255, 255, 0.36);
+  --app-bottom-shade: rgba(0, 0, 0, 0.05);
+
+  /* 文本选区：原来吃浏览器默认的亮蓝，在深色玻璃上刺眼、也与强调色不是一套。
+     只设背景不设字色 —— 字色保持原样一定可读，设了反而要在深浅两处各调一次。 */
+  --selection-bg: rgba(47, 107, 255, 0.24);
+
+  /* 无系统模糊档的「窗口面料」：主窗口与托盘菜单共用一份。
+     原先托盘菜单自己抄了一版简化公式（无低浓度收敛项），于是同样拉到 1% 时
+     托盘比主窗口厚 0.32，拖低浓度会看到两处不一致。收敛到同一份。 */
+  --surface-material: linear-gradient(
+    160deg,
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32 * min(1, calc(var(--glass-alpha) * 2))))),
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.2 * min(1, calc(var(--glass-alpha) * 2))))) 62%
+  );
+
+  /* ══ 引导页装饰色 ══════════════════════════════════════════════════
+     原来规则体里散着 21 处裸色值 + 4 条 body.dark 覆盖，改主题必漏。
+     存成 **rgb 三元组**，透明度仍写在用它的地方 —— 因为「用多浓」属于
+     那一处的构图，「用什么色」才属于主题，两者本来就不该绑在一起。
+     深色只覆盖色相三元组与卡片渐变，其余组合自动跟着变。 */
+  --tour-blue: 47 107 255;
+  --tour-purple: 124 58 237;
+  --tour-teal: 13 148 136;
+  --tour-rose: 219 39 119;
+  --tour-grad-top: rgba(255, 255, 255, 0.93);
+  --tour-grad-mid: rgba(249, 251, 254, 0.9);
+  --tour-grad-bottom: rgba(244, 247, 252, 0.9);
+  --tour-glow-blue: rgb(var(--tour-blue) / 0.16);
+  --tour-glow-teal: rgb(var(--tour-teal) / 0.13);
+  --tour-dot-glow: rgb(var(--tour-blue) / 0.16);
+
+  /* ── 控件与状态的散色 ────────────────────────────────────────────
+     原先这些值直接写在规则体里，浅色看着没事、深色就漏。
+     尤其三处 `#fff` 压在 `--accent` 亮蓝底上：深色主题 `--accent` 变亮蓝后
+     白字对比度不足 —— 改用现成的 `--accent-on`（浅白 / 深深字）既收了色值，
+     又顺手修了这个真实的可读性问题，浅色观感一字不变。 */
+  --badge-dot: #e5484d;
+  --accent-ring: rgba(47, 107, 255, 0.22);
+  /* 滑条与自绘开关的滑点原本**两处各写一遍**完全相同的值 —— 收成一组，
+     以后调滑点只改一处（禁止重复造轮子）。 */
+  --ctrl-thumb: #ffffff;
+  --ctrl-thumb-shadow: rgba(0, 0, 0, 0.25);
+  --detail-bg: rgba(0, 0, 0, 0.04);
+  --state-ok: #3fa860;
+  --state-err: #d9534f;
+
+  /* 卡片：半透明白面 + 顶边受光 + 极淡的顶部渐隐（玻璃厚度感，2% 跨度） */
+  --card-rim: rgba(255, 255, 255, 0.5);
+
+  /* 输入框是「凹」的：底比面板暗一档 + 上沿内阴影 + 下沿反光，
+     与分段控件的槽同一套语言。原来搜索框用 --glass-strong（和面板**完全同色**）
+     加一条 1px 边框 —— 那是「卡片」的画法，不是「能往里填」的画法。 */
+  --search-bg: rgba(16, 28, 54, 0.055);
+  --search-inset: inset 0 1px 2px rgba(16, 28, 54, 0.08),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.6);
+  --card-sheen: rgba(255, 255, 255, 0.24);
+
+  /* 主按钮：**平坦面色**，不是渐变。三档只差明度，色相一律锁在强调蓝上 ——
+     色相一动，界面里就会出现「两个蓝」。 */
+  --btn-tint: #3f66cc;
+  --btn-tint-hover: #4972da;
+  --btn-tint-active: #3557b4;
+  /* 亮边而不是暗边：暗描边是「画上去的轮廓」，亮边是「玻璃边缘折射」。 */
+  --btn-rim: rgba(255, 255, 255, 0.26);
+  --btn-spec: rgba(255, 255, 255, 0.42);
+  --btn-contact: rgba(30, 48, 96, 0.22);
+  --btn-ambient: rgba(30, 48, 96, 0.26);
+  --btn-sheen: rgba(255, 255, 255, 0.2);
+  /* 禁用只有这一个强度。原来 4 处各写 .42 / .45 / .45 / .62 ——
+     同一个「不可用」有四种淡法，用户看到的是「有的灰有的不灰」。 */
+  --disabled-opacity: 0.45;
+  --card-hover: var(--state-hover);
+  --glass-strong: rgba(255, 255, 255, calc(0.28 * var(--mat-k)));
+  --glass-hover: var(--state-hover);
   /* 悬浮浮层**自己的**材质，与窗口那套（--glass / --material-rgb / 设置里的
      材质浓度）完全解耦 —— 那套是给整窗调的，浮层跟着变只会越调越难对齐。
 
@@ -70,14 +242,95 @@
   --hp-border: rgba(0, 0, 0, 0.08);
   --hp-rim: rgba(255, 255, 255, 0.95);
   --hp-shadow: 0 12px 30px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
+  /* 线条回到 2.6.10 的**白色高光**系（实测要求：「线条就用 2.6.10 版本那种白色的」）。
+     黑色描边不论多淡都会在浅色面上留下「线框感」；白色只是在玻璃上的一道高光，
+     存在感低得多 —— Fluent 材质里的 hairline 也是白色系。
+     ⚠ 它**不表达层级**：层级由底色差 + elev-1 承担，线条只做亚像素高光。 */
   --stroke: rgba(255, 255, 255, 0.35);
+  /* 控件边界：搜索框 / 数字输入 / 路径输入 / 分段控件。
+     这些地方线条**承担信息**（「这里能输入」「这是一组」），所以要比层级线更实；
+     但它只属于控件，不该扩散到卡片和区块上去。 */
+  --border-control: rgba(0, 0, 0, 0.19);
   /* 进度条空轨：玻璃白在浅色底上等于隐形，必须用「比底深一点」的中性色 */
   --track-bg: rgba(0, 0, 0, 0.08);
+
+  /* ── 分段控件（.seg）──────────────────────────────────────────────
+     原来是「8% 黑的槽 + 28% 白×mat-k 的选中块」，默认浓度下选中块只有
+     19.6% 白 —— 与槽的亮度几乎持平，看着既没有浮起感，滑动时也看不出
+     在动（用户反馈「丑、low」，同时觉得「有的分组没接动画」其实是同一件事）。
+     分段控件的选中块必须是**控件级实体**：近白、带下缘阴影，用凸起表达
+     「选中」。它不该跟着窗口材质一起变透 —— 控件读不清是可用性问题，
+     不是观感问题。 */
+  /* 槽：**冷色调**的半透明灰，不是中性灰。中性灰压在偏冷的玻璃上会发脏；
+     带一点蓝（18,30,58）才像「玻璃被压下去的地方」。
+
+     ⚠ **α 必须比深色档大得多，这不是对称的**。实测取色（用户截图）：
+     卡片 #e4e5e6（亮度 229）、槽 #d8dadd（218）—— 只差 11，控件连轮廓都
+     看不出来，白键像浮在空气里。深色档 20% 黑压在亮度 76 的卡片上能降 15，
+     视觉上就很明确；而亮背景下人眼对绝对差更不敏感（韦伯定律），
+     要降 20 左右才等效。所以浅色用 9%，不是把深色的 20% 等比缩放。
+
+     上沿吃阴影（光从上方来）+ 下沿一道反光（槽底的玻璃厚度），
+     一内一外两道才是「凹」；再加 0.5px 内描边**只定轮廓**（不是实线边框，
+     它细到看不见线，只让边界不糊在背景里）。 */
+  --seg-track-bg: rgba(18, 30, 58, 0.09);
+  --seg-track-inset: inset 0 1px 2px rgba(16, 28, 54, 0.1),
+    inset 0 0 0 0.5px rgba(16, 28, 54, 0.045),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.9);
+  /* 键：纯白实体，与「玻璃」相反的逻辑 —— 它要看起来是**放上去的**，
+     不是透出来的。所以不透明、带自己的光和影。 */
+  --seg-thumb-bg: #ffffff;
+  /* 圆角 = 容器 8 − 内距 2 = 6（无边框，故不再减 1）。内嵌块与容器角必须
+     同心，差 1px 在 200% 缩放下就能看出内角偏方。 */
+  --seg-thumb-radius: 6px;
+  /* **双层投影**是「打磨感」的关键：近处一层 1px 硬影定轮廓，
+     远处一层 5px 柔影给离地感。只有一层时，不是像贴纸就是像糊了一圈灰。 */
+  /* 发丝边（0.5px）+ 近硬影 + 远柔影：白键在浅底上必须有边界，
+     否则它和卡片同为白色，只剩一圈若有若无的影（实测截图就是这样）。 */
+  --seg-thumb-shadow: inset 0 1px 0 #ffffff,
+    inset 0 -1px 0 rgba(16, 28, 54, 0.045), 0 0 0 0.5px rgba(16, 28, 54, 0.07),
+    0 1px 2px rgba(16, 28, 54, 0.12), 0 2px 6px rgba(16, 28, 54, 0.08);
+  /* 滚动条滑块：只是「你在哪儿」的辅助指示，不承担信息、不参与层级 ——
+     所以是半透明中性色。原来四条规则各写一份裸 rgba（浅 .16/.28、深 .16/.28），
+     想调一次色得同时想起另外三条，且深色那两条必须排在浅色之后才生效。 */
+  --scrollbar-thumb: rgba(0, 0, 0, 0.16);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.28);
+  /* ── 图标描边 ─────────────────────────────────────────────────────────
+     `stroke-width` 是**视图单位**，视觉粗细 = 值 × 渲染尺寸 ÷ 视图尺寸，
+     所以同一个数字不能跨尺寸复用：1.1 在 10px 上只剩 0.69px（糊成一团），
+     1.3 在 18px 的 24 视图上只剩 0.98px（发虚）。
+     历史上散着 1.1 / 1.3 / 1.4 / 1.6 / 1.8 五个值，其实都在 1.14–1.22px 附近 ——
+     规则是隐形的，唯一的例外是窗口按钮那 0.69px。
+     现在按「物理 1.0–1.35px」显式分三档，新图标只挑档、不写数值。 */
+  --icon-stroke-tiny: 1.55; /* 10–12px：窗口控制、搜索清除 → 0.97 / 1.16px */
+  --icon-stroke: 1.3; /* 13–15px：导航、右键菜单、托盘、状态栏 → 1.14–1.30px */
+  --icon-stroke-lg: 1.8; /* 18px + 24 视图：引导页插图 → 1.35px */
   /* 材质主体：系统 acrylic 只负责「模糊」（tint 已压到 8%，因为 SetWindowRgn
      管不住 acrylic，四角切不掉），窗口的明暗与浓淡由这一层负责。
      好处：四角的矩形残留淡到看不见，材质浓度也能在设置页实时调。 */
-  --material-rgb: 255 255 255;
-  --glass-alpha: 0.62;
+  /* ⚠ 不能是纯白。这是「卡片与背景分不清」的总根因：
+     窗口材质色为 255/255/255 时，叠在白壁纸上仍是白，白卡片压在白窗上永远没有差 ——
+     再怎么调 card 的透明度都是白对白。
+     Windows 11 的 Mica 浅色本身也是中性浅灰（约 #f3f4f6），不是白：
+     它把壁纸去饱和后压到中性色，**灰落在底上**（衬托卡片），而不是落在卡片上。 */
+  /* 底色取中性浅灰而不是白：白卡压白窗永远没有差（详见 §17 审计）。
+     **不要为了补层级差把它压暗** —— 压到 218 时实测「整个画面灰扑扑」：
+     alpha 0.5 下有一半壁纸色混进来，材质色再暗就成了灰窗。
+     232 在 alpha 0.5 下正好合成 **#f3f4f5** —— 这就是 Windows 11 Mica 浅色的实测值，
+     不是我们调出来的偏色。再亮（236+）就逼近白、卡片拉不开；再暗（218）就是灰窗。
+     层级差不足由卡片白度 + elev-1 阴影补，不靠压低窗口底。 */
+  --material-rgb: 232 234 239;
+  /* ⚠ 必须与 `STRAIGHT_ALPHA`（settings.rs，默认 50）一致。
+     原来这里写 0.62、实际运行是 0.50 —— 审计测的是「一个用户看不到的配置」，
+     数字再漂亮也没意义。 */
+  --glass-alpha: 0.5;
+  /* 表面层（窗口底以上的卡片 / 侧栏 / 控件底）随浓度收敛的系数：
+       k = min(1, 2a)  →  ≥50% 时 k=1，现在的观感一分不变；
+                          越低越薄，1% 时几乎看不见。
+     ⚠ 为什么要有它：窗口底已经全透了、卡片还压着 68% 白，
+     用户看到的就是「拉到 1 还是白花花一片，不够极端」（实测反馈）。
+     只塌低浓度段而不是整体乘 a，是为了不动 50%–90% 这段已经调好的观感。 */
+  --mat-k: min(1, calc(var(--glass-alpha) * 2));
   --text: #1b1b1f;
   --text-dim: rgba(27, 27, 31, 0.62);
   --accent: #2f6bff;
@@ -155,7 +408,9 @@
      与 --stroke 不是重复 —— --stroke 在浅色下是**白色高光边**（毛玻璃卡片的
      边缘反光），压在浅底上做分组边界根本看不见；这里要的是「深一点的分隔」。
      一个变量管两处（边框 + 分隔线），不再各造一个。 */
-  --line: rgba(0, 0, 0, 0.09);
+  /* 与 --stroke 语义相同，合一：原来两套表达，卡片用 --line、其余用 --stroke，
+     结果同一屏上出现两种深浅的边。 */
+  --line: var(--hairline);
   /* 代码着色：四类 token + Markdown 标记。
      只做「一眼分得出是代码」，不做主题级配色；色相与徽章错开，
      避免正文里的紫色和图片徽章的紫色混为一谈。 */
@@ -179,11 +434,46 @@
   /* 截图：粉。与图片的紫差 65°，与失效的红差 30°（两者不会同时出现）。 */
   --tag-shot-fg: var(--tag-pink);
   --tag-shot-bg: var(--tag-pink-bg);
-  --shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
-  /* 卡片阴影：材质浓度拉高时（窗口接近不透明）卡片底色与窗口几乎同色，
-     1px 描边会糊在里面看不见，靠这层阴影把卡片「托起来」以便识别。 */
-  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.06),
-    0 2px 8px -2px rgba(0, 0, 0, 0.14);
+
+  /* ══ 层级系统（Layering + Elevation）══════════════════════════════════
+     参照 Microsoft Fluent 的官方分层模型与 Linear / Notion 的实现，两条轴分开：
+       · **Layering（层叠）**：靠「面的亮度」区分层级，用于常驻内容（窗口底 → 卡片）；
+       · **Elevation（高度）**：靠阴影区分层级，只用于瞬时浮层（菜单 / 弹窗 / toast）。
+     混用这两条轴，就会得到「每张卡片既有边又有阴影」—— 也就是「到处都是线条」。
+     本项目原来正是混用：卡片同时有 1px 描边 + 两层阴影，而描边还在和底色抢存在感。
+
+     三阶面的语义（值在下方主题块里给，solid 档再覆盖）：
+       基底层 surface-base  —— 窗口底，材质在这里透出去
+       内容层 surface-1     —— 卡片、区块，**不靠线条，靠比底亮/暗**
+       浮层   surface-2     —— 菜单 / 弹窗 / toast，再加 elev-2 阴影
+
+     细线只有一种（hairline），且**默认不作为层级表达手段**：
+     只在「必须有明确边界才能操作」的地方出现（输入框、表格行、菜单分隔）。 */
+  --surface-base: var(--glass);
+  /* ⚠ 卡片必须**半透明**：这是毛玻璃应用，卡片一旦做实色就把材质整个盖住了 ——
+     实测反馈「聚焦时灰扑扑，与整体毛玻璃界面不符」。
+     Windows 官方的 CardBackgroundFillColorDefault 是 70% 白（不是纯白），
+     这里取 62%：比官方再透一点，材质感更明显。
+     **内容区与窗口底同层**（与深色一致）：毛玻璃上再压一层只会发灰，
+     真正的层级只有「底 → 卡片」两阶，区分由材质色的灰 + elev-1 投影共同给出。 */
+  --surface-1: transparent;
+  /* .82：.68 的代价就是「灰蒙蒙」—— 半透明白低于 0.75 时，壁纸色会明显渗进
+     卡片，白片变成灰片。层级差交给 elev-1 阴影去表达，卡片本身要够白才像
+     玻璃上的一块白片（用户 2026-11-06 再次反馈发灰，第二次栽在同一个数值上）。 */
+  --surface-2: rgba(255, 255, 255, calc(0.82 * var(--mat-k)));
+  --surface-3: rgba(255, 255, 255, calc(0.9 * var(--mat-k)));
+  --hairline: rgba(0, 0, 0, 0.06);
+  /* 卡片高度：**半透明卡片必须靠阴影定界**。
+     62% 白叠在白壁纸上只有 1.03 的亮度差，肉眼看不出 —— 这是毛玻璃的物理限制
+     （底色由壁纸决定，不可控）。阴影是浅色下唯一稳定可见的线索：
+     0.5px 亚像素给锐利边缘，1px 给「贴着」的接触感，4px 扩散给柔和过渡。
+     三层都极淡，叠起来刚好够分辨，不会变成「一圈灰边」。 */
+  --elev-1: 0 0 0 0.5px rgba(0, 0, 0, 0.07), 0 1px 3px rgba(0, 0, 0, 0.08),
+    0 4px 12px -4px rgba(0, 0, 0, 0.07);
+  --elev-2: 0 8px 28px -8px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.06),
+    0 0 0 0.5px rgba(0, 0, 0, 0.05);
+  /* 卡片不再自己叠阴影：层级由 surface-1 的亮度 + elev-1 的极轻投影共同给出 */
+  --card-shadow: var(--elev-1);
 
   /* ── 危险色（删除 / 退出 / 失效）───────────────────────────────────────
      三个一组：**字色 / 淡底 / 实心底上的字色**。深浅各一档，
@@ -204,11 +494,79 @@ body.dark {
         5% 的量在近黑底上仍是很深的黑灰，不会泛白；
      3. hover/strong 同比例下调，保证「越上层越亮」的层次还在，
         但整体保持在黑调里。 */
-  --glass: rgba(255, 255, 255, 0.05);
-  --card-bg: rgba(255, 255, 255, 0.05);
-  --card-hover: rgba(255, 255, 255, 0.09);
-  --glass-strong: rgba(255, 255, 255, 0.09);
-  --glass-hover: rgba(255, 255, 255, 0.07);
+  --glass: rgba(255, 255, 255, calc(0.05 * var(--mat-k)));
+  --card-bg: var(--surface-2);
+  --state-hover: rgba(255, 255, 255, calc(0.09 * var(--mat-k)));
+  /* 深色下「压暗」在深底上看不出来，按下改为比悬停再亮一档。 */
+  --state-active: rgba(255, 255, 255, 0.14);
+  /* 深色下的强调淡底：实底主按钮的焦点外发光。深色实底是亮蓝，外发光要更亮一点才看得出来 */
+  --accent-soft: rgba(91, 140, 255, 0.16);
+  /* 深色下「压暗」看不出来，小控件改为亮一档 */
+  --state-hover-dim: rgba(255, 255, 255, 0.1);
+  --switch-off: rgba(255, 255, 255, 0.26);
+  /* 深色下反过来：填充用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清 */
+  --accent-fill: #6b9bff;
+  --accent-on: #12121a;
+  /* 深色下的受光：底子近黑，白光可以给得更足而不刺眼；
+     环境影加重 —— 暗环境里「浮起」只能靠影子，亮边帮不上忙。 */
+  --glass-spec: rgba(255, 255, 255, 0.18);
+  --glass-spec-soft: rgba(255, 255, 255, 0.1);
+  --glass-rim: rgba(255, 255, 255, 0.12);
+  --glass-sheen: rgba(255, 255, 255, 0.07);
+  /* 深色面板不能是「半透明白」—— 那会泛灰。用**接近纯黑**的底 + 中等不透明度：
+     中灰（如 rgb(30,30,35)）叠在暗背景上，透上来的是灰、本身也是灰，
+     两层灰相加就是用户说的「灰蒙蒙」。底色压到 13,13,17 之后，透上来的暗色
+     才收得进黑调里，仅靠亮度差和顶光表达玻璃。 */
+  --glass-panel: rgba(13, 13, 17, 0.76);
+  --glass-panel-rim: rgba(255, 255, 255, 0.11);
+  --glass-panel-strong: rgba(10, 10, 14, 0.9);
+  /* 深色光泽要更弱：暗底上一点点白就很扎眼；底部暗角反而要更重，
+     否则整块玻璃像浮在黑纸上没有厚度。 */
+  --app-gloss-linear: rgba(255, 255, 255, 0.05);
+  --app-gloss-radial: rgba(255, 255, 255, 0.045);
+  --app-rim: rgba(255, 255, 255, 0.1);
+  --app-top-light: rgba(255, 255, 255, 0.12);
+  --app-bottom-shade: rgba(0, 0, 0, 0.16);
+  /* 深色选区要更亮一档：24% 的蓝压在近黑上几乎看不出来 */
+  --selection-bg: rgba(91, 140, 255, 0.32);
+  /* 引导页深色：主色换亮蓝（与 --accent 同步），卡片渐变压进黑调；
+     两团光斑在深底上要略强一点才看得见，圆点光晕同理。 */
+  --tour-blue: 91 140 255;
+  --tour-grad-top: rgba(48, 48, 56, 0.92);
+  --tour-grad-mid: rgba(39, 39, 45, 0.9);
+  --tour-grad-bottom: rgba(34, 34, 40, 0.9);
+  --tour-glow-blue: rgb(var(--tour-blue) / 0.18);
+  --tour-glow-teal: rgb(var(--tour-teal) / 0.12);
+  --tour-dot-glow: rgb(var(--tour-blue) / 0.22);
+  /* 上述散色的深色档：暗底上环要更亮才看得见、滑点投影要更重才浮得起来，
+     状态色统一提到与 --tag-* 深色色板同档的亮度。 */
+  --badge-dot: #ff8a8a;
+  --accent-ring: rgba(91, 140, 255, 0.26);
+  --ctrl-thumb: #ffffff;
+  --ctrl-thumb-shadow: rgba(0, 0, 0, 0.4);
+  --detail-bg: rgba(255, 255, 255, 0.05);
+  --state-ok: #4ade80;
+  --state-err: #ff8a8a;
+  --card-rim: rgba(255, 255, 255, 0.1);
+  --search-bg: rgba(0, 0, 0, 0.2);
+  --search-inset: inset 0 1px 3px rgba(0, 0, 0, 0.34),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.045);
+  --card-sheen: rgba(255, 255, 255, 0.06);
+
+  /* 深色下反过来：tint 用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清。
+     hover 提亮一档、按下压暗一档，不再用 filter: brightness —— 那会把文字
+     和边框一起拉亮，深字压在亮蓝上会糊。 */
+  --btn-tint: #6b9bff;
+  --btn-tint-hover: #7ca9ff;
+  --btn-tint-active: #5b8bf0;
+  --btn-rim: rgba(255, 255, 255, 0.24);
+  --btn-spec: rgba(255, 255, 255, 0.5);
+  --btn-contact: rgba(0, 0, 0, 0.4);
+  --btn-ambient: rgba(0, 0, 0, 0.5);
+  --btn-sheen: rgba(255, 255, 255, 0.26);
+  --card-hover: var(--state-hover);
+  --glass-strong: rgba(255, 255, 255, calc(0.09 * var(--mat-k)));
+  --glass-hover: var(--state-hover);
   /* 深色浮层：同样不跟窗口浓度走。上端比下端亮一档才浮得起来，
      发丝边换成浅色（深底上白边才看得见），内高光压到很低否则发灰。 */
   /* 悬浮预览浮层：也要压进黑调（原来 #4a4a52 在近黑窗口上像一块灰板），
@@ -219,13 +577,34 @@ body.dark {
   --hp-border: rgba(255, 255, 255, 0.13);
   --hp-rim: rgba(255, 255, 255, 0.13);
   --hp-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.28);
+  /* 深色同 2.6.10：白 .12。不用更高 —— 深底上同样的白会更扎眼。 */
   --stroke: rgba(255, 255, 255, 0.12);
+  --border-control: rgba(255, 255, 255, 0.15);
   --track-bg: rgba(255, 255, 255, 0.14);
-  /* 浓度给到 0.96：主体层是「渐变两端 = alpha ±0.05」，
-     也就是顶端 1.0（完全不透）、下端 0.91 —— 下端最多只透 9% 的桌面/系统材质，
-     深色因此站得住，不会被亮壁纸冲成灰。 */
+
+  /* 深色：槽比原来更暗（0.14 的浅槽在暗底上发灰），滑块是半透白 + 顶部高光。
+     ⚠ 原实现里滑块 rgba(255,255,255,.09) 压在槽 .14 上 —— **滑块比槽还暗**，
+     深色下选中项完全看不出来。这是本次重做要修的实际缺陷。 */
+  /* 深色下「凹」必须靠**压暗**而不是提亮：槽比卡片更暗才读得出下沉。
+     原实现是滑块 9% 白压在槽 14% 白上 —— 滑块比槽还暗，选中项完全不可见。 */
+  --seg-track-bg: rgba(0, 0, 0, 0.2);
+  --seg-track-inset: inset 0 1px 3px rgba(0, 0, 0, 0.38),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+  --seg-thumb-bg: rgba(255, 255, 255, 0.2);
+  --seg-thumb-radius: 6px;
+  --seg-thumb-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2), 0 1px 1px rgba(0, 0, 0, 0.38),
+    0 2px 5px rgba(0, 0, 0, 0.3);
+  /* 深色滚动条：白只给 .16。深底上白比黑显眼，.28 已经是明显的悬浮反馈，
+     再高会像一根白棍横在列表右侧。 */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.16);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.28);
+  /* ⚠ **不要在这里写死 --glass-alpha**。
+     曾经写 0.96（怕亮壁纸把深色冲成灰），代价是深色只透 4% —— 等于没有毛玻璃；
+     更糟的是它声明在 `body.dark` 上，**比 `html` 上由滑块写入的变量更近**，
+     于是「材质浓度」滑块在深色下完全失效（拖了没反应）。
+     深色要保持够深，靠的是更暗的色（--material-rgb: 10 10 12），不是更高的 alpha。 */
   --material-rgb: 10 10 12;
-  --glass-alpha: 0.96;
   --text: #f2f2f5;
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
@@ -270,7 +649,7 @@ body.dark {
   --tag-link-bg: var(--tag-sky-bg);
   --tag-code-fg: var(--tag-cyan);
   --tag-code-bg: var(--tag-cyan-bg);
-  --line: rgba(255, 255, 255, 0.09);
+  --line: var(--hairline);
   --solid-bg: rgba(40, 40, 44, 0.96);
   --tok-kw: #c4b5fd;
   --tok-str: #86efac;
@@ -284,9 +663,23 @@ body.dark {
   --tag-edited-bg: var(--tag-green-bg);
   --tag-shot-fg: var(--tag-pink);
   --tag-shot-bg: var(--tag-pink-bg);
-  --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
-  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3),
-    0 2px 8px -2px rgba(0, 0, 0, 0.36);
+
+  /* 深色侧同一条规则：**阴影在深底上会消失，深度只能靠面更亮**。
+     Linear 的四阶是 10% / 14% / 18% / 22% 亮度，这里取对应比例。
+     深色下 elev 只保留极轻的一层，用于「贴住」而不是「浮起」。 */
+  --surface-base: var(--glass);
+  /* 深色同理：卡片半透明、略亮一档，不压暗内容区。
+     **深色只有三阶**：窗口底与内容区同层 —— 把底色再压暗只会产生「陷进去」的错觉。 */
+  --surface-1: transparent;
+  /* 深色卡片同理：0.07 的白叠在近黑底上只剩一层灰，看不出「亮一档」。
+     0.11 才拉得出层次，同时仍是深色而不是灰板。 */
+  --surface-2: rgba(255, 255, 255, calc(0.11 * var(--mat-k)));
+  --surface-3: rgba(255, 255, 255, calc(0.13 * var(--mat-k)));
+  --hairline: rgba(255, 255, 255, 0.07);
+  --elev-1: 0 0 0 0.5px rgba(255, 255, 255, 0.04), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --elev-2: 0 12px 32px -10px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.3),
+    0 0 0 0.5px rgba(255, 255, 255, 0.05);
+  --card-shadow: var(--elev-1);
 
   /* 压在深底上的红必须提亮，否则「退出」「删除」「已失效」读不清。
      实心红底随之变浅，配深字而不是白字（白字压在浅红上同样看不清）。 */
@@ -297,24 +690,34 @@ body.dark {
 
 /* 兜底档：没有真材质时不透明，观感不能崩 */
 body.tier-solid {
-  --glass: rgba(246, 247, 249, 0.97);
-  --card-bg: rgba(255, 255, 255, 0.98);
-  --card-hover: #ffffff;
-  --glass-strong: rgba(255, 255, 255, 0.98);
-  --glass-hover: rgba(0, 0, 0, 0.05);
-  --stroke: rgba(0, 0, 0, 0.08);
+  /* 没有真材质时面要实：基底压一层极淡的灰，卡片才白得出来。
+     原来 base 是 #f6f7f9、卡片是 .98 白 —— 差不到 3%，所以「底色与背景一模一样」。 */
+  --glass: #f4f5f7;
+  /* 兜底档没有毛玻璃，**「提亮」在这里等于没变化**（浅灰底上叠白仍是白）。
+     悬停/选中改为极轻压暗，这是实底界面表达「活着的行」的标准做法。 */
+  --state-hover: rgba(0, 0, 0, 0.045);
+  /* 兜底档没有材质可透，此时实色才是对的（否则卡片与窗口同色）。 */
+  --surface-1: #eceef1;
+  --surface-2: #ffffff;
+  --surface-3: #ffffff;
+  --card-bg: var(--surface-2);
+  --glass-strong: #ffffff;
+  /* 描边与悬浮不再在这里单独给值：它们由主题决定（浅色黑系/深色白系），
+     这里只管「没有真材质时面要实」。原先各写一套，正是两个源头的由来。 */
   /* 兜底档没有 acrylic，直接给近不透明实色 */
   --material-rgb: 248 249 251;
   --glass-alpha: 0.99;
 }
 body.dark.tier-solid {
   /* 兜底档没有 acrylic，本就是实色 —— 与真材质档对齐到同一档黑 */
-  --glass: rgba(255, 255, 255, 0.05);
-  --card-bg: rgba(255, 255, 255, 0.05);
-  --card-hover: rgba(255, 255, 255, 0.09);
+  --glass: #1c1d20;
+  /* 深色实底：提亮本来就有用，保持白系，只是略微加一点强度。 */
+  --state-hover: rgba(255, 255, 255, 0.1);
+  --surface-1: #202124;
+  --surface-2: #2a2b30;
+  --surface-3: #323338;
+  --card-bg: var(--surface-2);
   --glass-strong: rgba(255, 255, 255, 0.09);
-  --glass-hover: rgba(255, 255, 255, 0.07);
-  --stroke: rgba(255, 255, 255, 0.08);
   --material-rgb: 14 14 16;
   --glass-alpha: 0.99;
 }
@@ -325,17 +728,135 @@ body.dark.tier-solid {
   padding: 0;
 }
 
-/* 焦点环：屏蔽各平台默认焦点环（Windows 下会渲染成突兀的彩色/红色描边），
-   统一改成设计语言内的强调色柔环，且仅在键盘聚焦时出现 */
-button:focus,
-input:focus,
-textarea:focus {
-  outline: none;
+/* 焦点环：**全项目只有这一处定义**。
+   原来只有 button:focus-visible 一条，且环色写死 rgba(47,107,255,.4)（等于浅色 accent 的
+   40%），暗色主题下完全不对；input / textarea 被上方 outline:none 干掉后**从未补过**，
+   键盘 Tab 进输入框看不见任何焦点 —— 这是无障碍硬伤，不是审美问题。
+
+   用 outline 而不是 box-shadow：卡片、浮层、按钮本来就带着 box-shadow，
+   用阴影画环要逐处合并（漏一处就被覆盖），outline 与阴影互不干扰。
+   配合 outline-offset 还能让环与元素之间留出呼吸，不糊在边框上。 */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  /* **Tab 聚焦只要蓝环，不填任何底色**（实测原话）。
+     之前的做法是「环 + 淡灰底」，两者叠在一起＝同一个状态给了两条线索，
+     而底色又和悬停撞色，反而分不清「这是鼠标在上面还是键盘焦点在这」。
+     现在分工干净：
+       · 悬停       → 只有淡灰底，无环
+       · Tab 聚焦   → 只有蓝环，无底色
+       · 程序化聚焦 → 只有淡灰底，无环（见 [data-autofocus]）
+     offset 取 -2px：环落在元素边界内，不外扩 —— 小按钮上外扩会顶到容器边。 */
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background-image: none;
 }
-button:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.4);
+
+/* 两个例外：`a` 没有容器（底色无处可落），`.detail-body` 是大块滚动区
+   （整块变灰太怪）。它们用强调色的细边 —— 1px，不是环。 */
+a:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
+
+.detail-body:focus-visible {
+  outline: none;
+  /* inset 不占布局，避免聚焦时内容被挤动 1px */
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* 输入类没有「按钮底色」可借用，改为边框变强调色 —— 它本来就有 1px 边，
+   把那条边变色比在框外再画一圈自然得多。 */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  border-color: var(--accent);
+}
+
+/* 主按钮本身是强调色实底，叠白会褪色；改为提亮，保持色相 */
+.btn-danger:focus-visible {
+  /* 危险按钮不叠色：Tab 聚焦只加环，红色语义交给边框和文字 */
+  background-image: none;
+}
+
+/* 主按钮是强调色实底，蓝环压在蓝底上看不出来，只能向**外**扩一圈淡色。
+   不再用 filter: brightness(1.06) —— 那会把文字和边框一起提亮（深色主题下
+   深字压亮蓝会糊）。焦点与悬停的区分改由外发光承担：hover 只是抬一点影子，
+   focus 多出一圈明确的光环。
+   加 :not(.is-cta)：向导导航那档是透明底，通用蓝环就够，不要给它套外发光。 */
+.btn-primary:not(.is-cta):focus-visible {
+  box-shadow: var(--btn-relief), 0 0 0 3px var(--accent-soft);
+}
+
+/* 打开弹窗时的默认焦点（程序化 focus）。
+   浏览器不把程序化聚焦算作「键盘交互」，于是不给 :focus-visible ——
+   焦点其实已经在按钮上，但屏幕上看不出任何标记（实测「还是按钮不在当前步骤」）。
+   用 [data-autofocus] 补同一套样式，用户一按 Tab / 点鼠标就移除、交回 :focus-visible。 */
+[data-autofocus]:focus {
+  /* 程序化聚焦（打开弹窗时的默认焦点）**不做任何视觉标记**。
+     曾经给它加过一圈环、后来改成淡灰底，两次都错在同一个地方：
+     那是「系统替你选的焦点」，不是「你自己选的」。
+     一打开就看到取消按钮带底色，用户会以为已经选好了，要等点一下别处才「恢复」
+     （实测原话：「弹窗出来，取消按钮默认就是悬停状态的灰色」）。
+
+     Windows 自己的对话框也是这么处理的：默认按钮不带悬停外观。
+     焦点仍然真的在按钮上（回车＝取消、Tab 从这里继续），只是不画出来。
+
+     保留 outline: none 是必要的：Chromium 对程序化聚焦虽不给 :focus-visible，
+     个别路径下仍会画默认环。 */
+  outline: none;
+  background-image: none;
+}
+
+/* 强调色实底的主按钮：程序化聚焦不画标记，但**浮雕必须留着** ——
+   基类的 box-shadow 会被这条规则整条覆盖，不带上就等于按钮一聚焦就变平。
+   同样不能写 background-image: none（会抹掉渐变）。 */
+.btn-primary:not(.is-cta)[data-autofocus]:focus {
+  outline: none;
+  box-shadow: var(--btn-relief);
+}
+
+/* 按下态：原来全项目 **0 处** :active —— 点下去没有任何反馈，用户只能靠「松手后
+   发生了什么」判断有没有点上。毛玻璃上纯色变化在按下瞬间不够快，配 0.5px 下沉
+   给一个即时反馈；**刻意不加 transition**，按下要立刻响应，过渡会拖慢它。
+   深色下用更亮的白（深底压暗看不见），浅色下用中性黑（物理上被压住 = 遮光）。 */
+button:active:not(:disabled),
+.nav-item:active,
+.ctx-item:active:not(:disabled),
+.settings-tabs .tab:active,
+.card:active,
+.p-row:active {
+  background-image: linear-gradient(var(--state-active), var(--state-active));
+}
+
+button:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+
+/* 实底主按钮的按下态**不能吃上面那条通用叠层** —— 那会把面色换成一块灰。
+   按下在物理上是「贴回底面上」：环境影消失、接触影变成向内的一道凹痕，
+   面色压暗一档。位移只给 0.5px —— 30px 高的控件位移超过 1px 会像在跳。 */
+button:active:not(:disabled).btn-primary:not(.is-cta) {
+  background: var(--btn-tint-active);
+  box-shadow: inset 0 2px 4px var(--btn-contact), inset 0 1px 0 var(--btn-spec);
+  transform: translateY(0.5px);
+}
+
+/* 禁用：**一个强度**。原来 4 处各写 .42 / .45 / .45 / .62 ——
+   同一个「不可用」四种淡法，用户看到的是「有的暗有的不暗」。 */
+:where(button, input, select, textarea):disabled,
+.seg[data-disabled],
+.row[data-disabled] {
+  opacity: var(--disabled-opacity);
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+/* 说明：这里原先有一张「哪些元素要内缩 outline」的清单。
+   现在控件与可聚焦块统一用底色表达焦点、不再画环，清单自然消失 ——
+   少一份需要同步的名单，也就少一处会忘。 */
 
 /* 悬浮态开关（html.hovers-off）。
    Chromium 的 :hover 是「引擎内部状态」，只在收到真实鼠标移动时才重算。
@@ -356,7 +877,7 @@ body {
   background: transparent;
   color: var(--text);
   font-family: var(--font);
-  font-size: 14px;
+  font-size: 13px;
   -webkit-font-smoothing: antialiased;
   user-select: none;
   cursor: default;
@@ -376,42 +897,76 @@ body {
   overflow: hidden;
   /* 主体材质层：浓度由 --glass-alpha 控制（设置页「材质浓度」实时调）。
      系统 blur 会从这层半透明里透出来，所以窗口既有一层可控的明暗、
-     又保留下面的模糊。 */
+     又保留下面的模糊。
+
+     ⚠ 高级材质下的 100% **不是 1.0**，封顶 0.92：全不透明会把背后的
+     系统 acrylic 与本层的 blur/saturate 一起盖死，看起来就是一块死板色块，
+     等于「拉到最厚反而没有材质了」（用户：「开到 100 也应该是高级材质」）。
+     留 8% 透光，材质感始终在，同时 92% 已经厚到内容透不出来。
+
+     160° 的明暗差（±0.05）在两端收敛到 0：1% 要真的几乎全透，
+     100% 要真的是一整块最厚材质。两个 `min(1, 2a)` 分别把靠近 0 / 靠近 1
+     的偏移压到 0，中段保持原样。 */
   background: linear-gradient(
     160deg,
-    rgb(var(--material-rgb) / calc(var(--glass-alpha) + 0.05)),
-    rgb(var(--material-rgb) / calc(var(--glass-alpha) - 0.05)) 62%
+    rgb(var(--material-rgb) / min(0.92, calc(var(--glass-alpha) * 0.92 + 0.05 * min(1, calc(var(--glass-alpha) * 2)) * min(1, calc((1 - var(--glass-alpha)) * 2))))),
+    rgb(var(--material-rgb) / max(0, calc(var(--glass-alpha) * 0.92 - 0.05 * min(1, calc(var(--glass-alpha) * 2)) * min(1, calc((1 - var(--glass-alpha)) * 2))))) 62%
   );
+  /* ══ 自研「二级玻璃」——**只在高级材质下启用**（见下方 body.round）══════
+     为什么不引库：window-vibrancy 用的就是同一套 DWM API（自带性能警告）；
+     WinRT Composition 自建配方要重做 WebView2 层级，而且自己跑 blur pass 更耗。
+     但 WebView2 本身就是 Chromium —— `backdrop-filter` 是现成的 GPU 合成通道，
+     零依赖、零额外进程，这就是本项目该走的「自研」路线。
+
+     它补上系统 Acrylic 做不到的两件事：
+       1. **饱和增强**：DWM 的 acrylic 是去饱和的，看起来发灰；
+          saturate(150%) 把透上来的壁纸色拉回来 —— 「灰扑扑」的直接解药；
+       2. **模糊叠加**：在系统模糊之上再糊一层，玻璃更有厚度。
+
+     ⚠ 关闭高级材质时窗口后没有系统材质，采样到的就是清晰桌面 ——
+     那时再糊一层只是白烧 GPU，所以它挂在 `body.round` 上。 */
 }
 
 /* 深色下主体色由 --material-rgb / --glass-alpha 一并切换，无需额外覆盖 */
 
-/* 圆角模式：这一档没有系统背景模糊，半透明透过去就是**清晰的桌面**（而不是
-   模糊底），同浓度会比直角模式更显透、更干扰，所以统一把面板加厚。
-   拉满（90%）时 clamp 到 1.0 —— 完全不透，符合「浓度拉满＝实心」的直觉。 */
+/* 高级材质：窗口后是系统材质（Acrylic / Mica），**在这里加自研增强**。
+   之所以敢用两层模糊叠加，是因为系统的 acrylic 本身已经很糊，
+   再叠 18px 只会让「玻璃厚度」更明显，不会糊成一片色块。
+
+   饱和增强是重点：DWM 的 acrylic 是**去饱和**的（这是微软为了文字可读性做的），
+   所以画面发灰。saturate(150%) 把透上来的颜色拉回来 —— 这是「灰扑扑」的直接解药。 */
 body.round .app {
-  background: linear-gradient(
-    160deg,
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32))),
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.20))) 62%
-  );
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+}
+
+/* 关闭高级材质：**没有系统背景模糊**，半透明透过去就是清晰的桌面（而不是模糊底），
+   同浓度会比有模糊时更显透、更干扰，所以比高级材质加厚（+0.32 / +0.20）。
+
+   ⚠ 加厚量必须**在低浓度时收敛到 0**：早期写成裸的 `+ 0.32`，浓度 1% 时
+   仍剩 33% 不透明，「1 = 几乎全透」直接失效（用户实测：拉到 1 还是不够透）。
+   用 `0.32 * min(1, 2a)` 让偏移在 0→50% 之间线性长到满值、之后保持，
+   于是 1% ≈ 全透、50% 以上观感与原来完全一致。 */
+body:not(.round) .app {
+  /* 面料配方抽到 --surface-material，与托盘菜单共用一份（见 :root 注释） */
+  background: var(--surface-material);
 }
 
 /* 圆角模式（窗口接近实心）下，不止历史卡片，侧栏选中项与设置页的
    缓存卡片同样会与窗口底面糊在一起——用同一套阴影把边界立起来。
    常态的 .nav-item 是透明背景，加阴影会变成「无底的浮影」，故只给有底色的状态。 */
-body.round .nav-item.is-active,
-html:not(.hovers-off) body.round .nav-item:hover {
+body:not(.round) .nav-item.is-active,
+html:not(.hovers-off) body:not(.round) .nav-item:hover {
   box-shadow: var(--card-shadow);
 }
 
-body.round .cache-box {
+body:not(.round) .cache-box {
   box-shadow: var(--card-shadow);
 }
 
 /* 圆角模式下没有背景模糊，面板靠阴影立层次 —— 与关于页的 hero/facts/log 同一套。
    设置页的区块是「面板」，理应与它们一致；内层元素（如缓存块）由下面那条规则清阴影。 */
-body.round .settings .block {
+body:not(.round) .settings .block {
   box-shadow: var(--card-shadow);
 }
 
@@ -422,7 +977,7 @@ body.round .settings .block {
   content: "";
   position: absolute;
   inset: 0;
-  z-index: 998;
+  z-index: var(--z-decor);
   pointer-events: none;
   border-radius: inherit;
   opacity: 0.028;
@@ -436,27 +991,18 @@ body.round .settings .block {
   content: "";
   position: absolute;
   inset: 0;
-  z-index: 999;
+  z-index: var(--z-decor);
   pointer-events: none;
   border-radius: inherit;
   background:
-    linear-gradient(155deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0) 34%),
-    radial-gradient(130% 52% at 50% -8%, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0) 58%);
-  /* Apple 毛玻璃最关键的细节就是这圈 1px 内描边（30%~50% 白）：
-     它模拟玻璃边缘的折光，也是「高级」与「塑料感」的分界线。
-     底部再补一点极淡暗角表示厚度，但压得很轻，避免画面发闷。 */
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3),
-    inset 0 1px 0 rgba(255, 255, 255, 0.36),
-    inset 0 -24px 40px -32px rgba(0, 0, 0, 0.05);
-}
-
-body.dark .app::after {
-  background:
-    linear-gradient(155deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 34%),
-    radial-gradient(130% 52% at 50% -8%, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0) 58%);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    inset 0 -24px 40px -32px rgba(0, 0, 0, 0.16);
+    linear-gradient(155deg, var(--app-gloss-linear), transparent 34%),
+    radial-gradient(130% 52% at 50% -8%, var(--app-gloss-radial), transparent 58%);
+  /* 这圈 1px 内描边模拟玻璃边缘折光，是「高级」与「塑料感」的分界线；
+     底部再补一点极淡暗角表示厚度。深浅强度全在 :root / body.dark 里，
+     所以下面那条 body.dark .app::after 覆盖已可删除。 */
+  box-shadow: inset 0 0 0 1px var(--app-rim),
+    inset 0 1px 0 var(--app-top-light),
+    inset 0 -24px 40px -32px var(--app-bottom-shade);
 }
 
 /* 顶部条 */
@@ -479,7 +1025,7 @@ body.dark .app::after {
 .brand-logo {
   width: 20px;
   height: 20px;
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   display: block;
 }
 
@@ -519,11 +1065,14 @@ body.dark .app::after {
   height: 10px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.1;
+  /* 10px 上必须用 tiny 档：写 1.3 折算下来只有 0.81px，三条线会糊成灰点 */
+  stroke-width: var(--icon-stroke-tiny);
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 html:not(.hovers-off) .wc-btn:hover {
-  background: var(--glass-hover);
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 html:not(.hovers-off) .wc-close:hover {
@@ -553,11 +1102,35 @@ html:not(.hovers-off) .wc-close:hover {
 .nav {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--gap-row);
 }
 
+/* 底部两个入口（深浅色 / 设置）原来没设 gap、也没 flex —— 两个按钮直接堆叠。
+   平时只有 hover 一个有底色，看不出来；一旦「设置」是选中态、鼠标又停在
+   「深色」上，两块底色就相切成一个整体（实测反馈「两个底色都粘在一块了」）。
+   这里不做特例，直接复用 --gap-row：**相邻可选行的间距只有一个来源**。 */
 .sidebar-footer {
   margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-row);
+}
+
+/* ══ 行状态（整行可点项）══════════════════════════════════════════════
+   侧栏导航、设置页标签 —— 同一个交互角色：一列等高可选项，当前有一个是「活的」。
+   **底色只在这里定义一次**，hover 与 is-active 共用。
+
+   曾经 hover 与 is-active 各写一份（hover 用 --state-hover-dim、is-active 用
+   --state-hover），一次批量替换只改到其中一条，就变成「悬浮是灰、选中是白」的
+   分裂（实测截图：文件 vs 收藏）。写成一条规则后，物理上不可能再漂移。
+
+   为什么用**提亮**而不是压暗：整行面积压在毛玻璃上，压暗会透出壁纸色、显脏；
+   提亮像玻璃被照亮，和卡片悬停是同一套语言。小图标按钮才压暗（--state-hover-dim）。 */
+html:not(.hovers-off) .nav-item:hover,
+.nav-item.is-active,
+html:not(.hovers-off) .settings-tabs .tab:hover,
+.settings-tabs .tab.is-active {
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
 }
 
 .nav-item {
@@ -581,16 +1154,17 @@ html:not(.hovers-off) .wc-close:hover {
     box-shadow var(--dur-fast) var(--ease-out);
 }
 
-html:not(.hovers-off) .nav-item:hover {
-  background: var(--glass-hover);
-  color: var(--text);
+/* 侧栏导航与设置页标签：**同一角色** —— 一列等高可选项，其中有一个是活的。
+   底色只由上方「行状态」那条规则给，这里不再写 background-image。
+   加粗是「选中」独有的语义（悬停不该加粗），所以单独一条。 */
+.nav-item.is-active,
+.settings-tabs .tab.is-active {
+  font-weight: 700;
 }
 
+html:not(.hovers-off) .nav-item:hover,
 .nav-item.is-active {
-  background: var(--glass-strong);
   color: var(--text);
-  /* 常态与选中态同为黑色，靠加粗（中文会落到 Bold）明确区分 */
-  font-weight: 700;
 }
 
 /* 「有新版本」的小红点：挂在侧栏「设置」与设置页「关于」标签上。
@@ -609,7 +1183,7 @@ html:not(.hovers-off) .nav-item:hover {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #e5484d;
+  background: var(--badge-dot);
   pointer-events: none;
 }
 
@@ -651,7 +1225,7 @@ html:not(.hovers-off) .nav-item:hover {
 }
 
 .btn-ghost.is-downloading .dl-label-on {
-  color: #fff;
+  color: var(--accent-on);
   clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0);
   transition: clip-path var(--dur-base) var(--ease-out);
 }
@@ -662,14 +1236,15 @@ html:not(.hovers-off) .nav-item:hover {
   top: calc(var(--titlebar-h) + 8px);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 40;
+  z-index: var(--z-banner);
   display: flex;
   align-items: center;
   gap: 10px;
   max-width: calc(100% - 24px);
-  padding: 7px 8px 7px 14px;
-  border: 1px solid var(--stroke);
-  border-radius: 10px;
+  /* 8×16：左侧给文字留出呼吸，右侧 8 让关闭按钮贴边不悬空（原 7×14 是档外值） */
+  padding: 8px 8px 8px 16px;
+  /* 浮层的边界靠 elev-2 的投影说明，不靠描边 —— 描边会让它看起来像嵌在页面里。 */
+  border-radius: var(--radius-lg);
   background: var(--glass-strong);
   box-shadow: var(--card-shadow);
   font-family: var(--font);
@@ -690,9 +1265,9 @@ html:not(.hovers-off) .nav-item:hover {
   height: 24px;
   padding: 0 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-on);
   font-family: var(--font);
   font-size: 12px;
   cursor: default;
@@ -702,7 +1277,7 @@ html:not(.hovers-off) .nav-item:hover {
   width: 22px;
   height: 22px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-dim);
   font-size: 15px;
@@ -715,7 +1290,7 @@ html:not(.hovers-off) #update-banner .ub-btn:hover {
 }
 
 html:not(.hovers-off) #update-banner .ub-close:hover {
-  background: var(--glass-hover);
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 .nav-icon {
@@ -724,7 +1299,7 @@ html:not(.hovers-off) #update-banner .ub-close:hover {
   flex: 0 0 auto;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.3;
+  stroke-width: var(--icon-stroke);
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -745,45 +1320,79 @@ body.dark #theme-toggle .i-sun {
   display: inline;
 }
 
-/* ── 设置页的三选一（浅色 / 深色 / 系统）────────────────────────────────
-   大厂那种分段控件：整块是个凹槽（--track-bg 已按主题分深浅），
-   选中项浮起来。不用单选框 —— 三选一且每一项都很短，分段更直观。 */
+/* ── 分段控件（三选一：立即 / 30 秒 / 5 分钟、浅色 / 深色 / 系统…）──────
+   三条约束，缺一条就退回「原生控件」的观感：
+
+   ① **等宽（grid 1fr）**。选项文字长短不一（立即 52px / 5 分钟 63px）时，
+      等宽让它们成为同样宽的格子，滑动就变成**纯位移**；不等宽则滑块要一边
+      走一边伸缩，看着像被拉扯。macOS 的分段控件也是等宽的。
+   ② **不画边框**。玻璃的边界靠亮度差 + 内阴影表达。一条实线会把它拉回
+      「输入框」观感 —— 那正是「未经打磨」的来源。
+   ③ **高度 30px**，与 `.btn` 完全一致。原先靠内距撑出 33px，比同一行的按钮、
+      开关都「胖」3px，用户看到的「与右侧控件缺乏对齐」主要就是它。
+
+   ⚠ 前两版为什么都不行（用户两次否掉）：
+   · 第一版：槽 8% 黑 + 选中块 `--glass-strong`（28% 白 × mat-k，默认浓度下
+     仅 19.6% 白）—— 亮度持平，选中项看不出来；深色更糟，滑块 9% 白压在
+     14% 白的槽上，**滑块比槽还暗**。
+   · 第二版：只改深浅与圆角 —— 但范式还是「两块不透明色块叠在玻璃上」，
+     所以怎么调都像原生控件。
+   结论：**槽与键要用相反的材质逻辑** —— 槽走「玻璃被压下去」，键走「实体
+   浮在上面」，靠两套不同的光影语言拉开层次，而不是同一套灰阶的两个深浅。 */
 .seg {
-  display: inline-flex;
+  /* inline-grid：每个选项自动等宽（1fr），不必给按钮写 width */
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  align-items: center;
   gap: 2px;
   padding: 2px;
-  border: 1px solid var(--stroke);
+  /* 容器 30 = 键 24 + 上下内距 4（无边框，故不再减 2） */
+  height: 30px;
   border-radius: var(--radius-sm);
-  background: var(--track-bg);
+  background: var(--seg-track-bg);
+  box-shadow: var(--seg-track-inset);
 }
 
 /* 从属选项：主开关关闭时整组置灰且不可点。
    只做视觉禁用而没有 pointer-events 的话，点下去仍会触发命令，
    用户会看到「明明灰着却改成功了」这种自相矛盾的行为。
    `.row` 版用于整行是从属项的情况（例如「截图时右键取消」只对系统截图有意义）。 */
-.seg[data-disabled],
-.row[data-disabled] {
-  opacity: 0.45;
-  pointer-events: none;
-}
-
 .seg button {
-  padding: 5px 14px;
+  /* 与 .btn 的 `height: 30px` 对齐：容器 30 − 上下内距 4 = 24。
+     水平方向**不靠 padding 定宽**（等宽由 grid 的 1fr 决定），只留最小内距
+     防止文字贴边；文字在格子里居中（justify-content: center）。 */
+  height: 24px;
+  padding: 0 8px;
+  justify-content: center;
   border: 0;
-  border-radius: 6px;
+  /* 与滑块同圆角：否则挂上滑块前后，选中块的角形状会变一次 */
+  border-radius: var(--seg-thumb-radius);
   background: transparent;
   color: var(--text-dim);
   font-family: inherit;
   font-size: 12px;
+  line-height: 1;
+  /* 文字在 24px 高的按钮里垂直居中，与 .btn 用同一套做法 */
+  display: inline-flex;
+  align-items: center;
+  /* 容器已是固定高度，文字一旦折行就会溢出 —— 「5 分钟」这类文案在窄行里
+     必须保持单行，与 .btn 的 nowrap 一致 */
+  white-space: nowrap;
   cursor: default;
+  /* 只过渡字色：背景由滑块负责。降级态（滑块未挂上）背景也要变，
+     所以 background 一并保留过渡，两条走同一时长保持同步。 */
   transition: background var(--dur-base) var(--ease-out),
     color var(--dur-base) var(--ease-out);
 }
 
+/* 降级态（JS 未挂滑块）的选中块：与滑块**同一套**令牌与阴影，
+   保证「有没有动画系统」都看得出谁被选中，不会退化成一块淡淡的灰。 */
 .seg button.on {
-  background: var(--glass-strong);
+  background: var(--seg-thumb-bg);
   color: var(--text);
   font-weight: 600;
+  box-shadow: var(--seg-thumb-shadow);
 }
 
 html:not(.hovers-off) .seg button:not(.on):hover {
@@ -818,16 +1427,19 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   gap: 8px;
   padding: 0 10px;
   border-radius: var(--radius-sm);
-  background: var(--glass-strong);
-  border: 1px solid var(--stroke);
-  transition: border-color var(--dur-fast) var(--ease-out),
-    box-shadow var(--dur-fast) var(--ease-out);
+  /* 凹：底色比面板暗一档 + 上沿内阴影 + 下沿反光（与分段控件的槽同一套语言） */
+  background: var(--search-bg);
+  /* 边框留成透明的占位：保留这 1px 空间，聚焦时不必再改盒模型 */
+  border: 1px solid transparent;
+  box-shadow: var(--search-inset);
+  transition: box-shadow var(--dur-fast) var(--ease-out);
 }
 
-/* 聚焦时描边高亮（同 V1） */
+/* 聚焦：用**外发光**而不是一条蓝线。
+   蓝线是「原生输入框」的画法；按钮的焦点已经是外发光，这里统一过去。
+   内阴影也要带上，否则聚焦瞬间输入框会从「凹」变成「平」。 */
 .search:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(47, 107, 255, 0.25);
+  box-shadow: var(--search-inset), 0 0 0 2px var(--accent-soft);
 }
 
 /* 批量删除模式的操作条：与搜索栏同一个位置、同样占满宽度。
@@ -894,18 +1506,13 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   color: var(--text);
 }
 
-.selectbar-actions .btn-danger:disabled {
-  opacity: 0.62;
-  cursor: not-allowed;
-}
-
 .search-icon {
   width: 14px;
   height: 14px;
   flex: 0 0 auto;
   fill: none;
   stroke: var(--text-dim);
-  stroke-width: 1.4;
+  stroke-width: var(--icon-stroke);
   stroke-linecap: round;
 }
 
@@ -913,6 +1520,8 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   flex: 1;
   min-width: 0;
   border: 0;
+  /* 有意不留自己的焦点环：焦点由外层 .search:focus-within 整框高亮表达。
+     输入框宽度撑满容器，再画一圈内环只会和容器边框重叠成双线。 */
   outline: 0;
   background: transparent;
   color: var(--text);
@@ -948,7 +1557,7 @@ html:not(.hovers-off) .seg button:not(.on):hover {
   height: 12px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.6;
+  stroke-width: var(--icon-stroke-tiny);
   stroke-linecap: round;
 }
 
@@ -958,7 +1567,7 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 }
 
 html:not(.hovers-off) .search-clear:hover {
-  background: var(--glass-hover);
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
   color: var(--text);
 }
 
@@ -968,44 +1577,153 @@ html:not(.hovers-off) .search-clear:hover {
   gap: 8px;
 }
 
-.btn-ghost {
-  height: 30px;
-  padding: 0 12px;
-  border: 1px solid var(--stroke);
-  border-radius: var(--radius-sm);
-  background: var(--glass);
-  color: var(--text-dim);
-  font-family: var(--font);
-  font-size: 12px;
-  cursor: default;
-}
+/* ══ 按钮基类 ═══════════════════════════════════════════════════════
+   几何与排版**只有一个来源**，变体只负责颜色。
 
-html:not(.hovers-off) .btn-ghost:hover {
-  background: var(--glass-hover);
-}
+   原来三个变体各自写一遍 height / padding / font-size，且已经漂移：
+   danger 是 32px / 0 14px / 13px，另两个是 30 / 0 12 / 12px ——
+   同一排按钮并排放着，高度差 2px、字号差 1px，肉眼能看出「不齐」。
 
-/* 主操作按钮（首次运行引导的「开启自启」「后台运行」这类推荐项）：
-   跟 btn-ghost 同一尺寸，但用强调色实底，让「推荐的那个」一眼可辨。 */
-.btn-primary {
+   刻意同时接受 `.btn` 与三个旧类名：老 HTML 写的是 `class="btn-ghost"`，
+   为了不逐个改模板（改漏一处就回到旧几何），让两者指向同一组几何；
+   新代码写 `class="btn btn-xxx"` 即可。 */
+.btn,
+.btn-ghost,
+.btn-primary,
+.btn-danger {
   height: 30px;
   padding: 0 12px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: #fff;
   font-family: var(--font);
   font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
   cursor: default;
 }
 
+/* 三个变体统一为**幽灵按钮**：透明底 + 1px 边，语义只由「边色 + 字色」区分。
+   实心填充（蓝/白/红）在毛玻璃界面上是一块不透明的板子，与材质语言冲突 ——
+   实测要求：「所有的按钮其实都可以用幽灵按钮」。
+   层级不靠填充表达，靠颜色强弱：次要＝灰边灰字，主＝强调边强调字，危险＝红边红字。 */
+.btn-ghost {
+  border-color: var(--border-control);
+  color: var(--text-dim);
+  background: transparent;
+}
+
+/* 分段控件：原来 hover / active 一条都没有 —— 鼠标移上去毫无反馈，
+   用户不知道「这两个选项是可点的」。按下由通用 button:active 覆盖，这里只补 hover。 */
+html:not(.hovers-off) .seg:not([data-disabled]) button:not(.on):hover {
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
+  color: var(--text);
+}
+
+html:not(.hovers-off) .btn-ghost:hover {
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
+}
+
+/* 主操作按钮（首次运行引导的「开启自启」「后台运行」、编辑态的「保存」等推荐项）。
+   **幽灵形态，不填充** —— 与 .btn-ghost 同一套几何与字色，只把边色换成强调色。 */
+/* ══ 主按钮分两档，按**语义**分，不是按「统一」分 ═══════════════════
+
+   这里来回改过三次，结论是「统一」这个动作本身就是错的 —— 争议的两类按钮
+   承担的不是同一种职责：
+
+   ① 确认类（保存/取消编辑、开启自启/暂不开启、后台运行/直接退出、迁移后重启）：
+      主操作是流程的终点，旁边永远有一个「取消」作对照。实底填充是 Fluent 的
+      标准表达，用户有既有期待，且**不需要读**就能看出点哪个。
+   ② 向导导航（跳过 / 上一步 / 下一步）：同一排的同类动作，属于同一条流转动线。
+      其中任何一个变实底，都会显得像「另一套东西」（用户原话：「跟其他按钮
+      风格不一致」）。这一档用边色表达主次。
+
+   所以 `.btn-primary` 保持**实底**，向导导航另用 `.btn-primary.is-cta`（幽灵）。
+
+   曾经把 ② 的结论推到 ① 上，理由是「实心蓝会截断材质」。那个判断错在放大：
+   大面积填充（整条工具栏、整块卡片）确实像玻璃上贴了板子，但 80×30 的小控件
+   只是玻璃上一张贴纸，材质损失几乎察觉不到；而换成幽灵后，30px 高的小按钮上
+   「蓝边 vs 灰边」的差异在深色材质里太弱，主次得靠读才知道 —— 用真实的可用性
+   换了想象中的审美问题。用户看到实机后一句「感觉不如实底填充」就把它否了。 */
+.btn-primary {
+  /* 浮雕三件套：顶边镜面光 + 贴身接触影 + 大而柔的环境影。
+     hover 必须保持**同样三层**，否则浏览器无法补间、鼠标一移上去投影会「跳」一下。 */
+  --btn-relief: inset 0 1px 0 var(--btn-spec), 0 1px 1px var(--btn-contact),
+    0 4px 12px -3px var(--btn-ambient);
+  position: relative;
+  /* isolation 是给下面那道 135° 光泽用的：伪元素必须落进自己的 z-index 上下文，
+     否则 z-index:-1 会一路跑到祖先背景底下，光泽直接消失（不是变淡，是没有）。 */
+  isolation: isolate;
+  /* 亮边，不是暗描边。暗描边读起来是「画上去的轮廓」，
+     亮边读起来是「玻璃边缘把光折回来」—— 这是整套质感的分界点。 */
+  border-color: var(--btn-rim);
+  /* **平坦面色**。这里刻意没有 background-image：上下渐变 + 下缘内暗边
+     是立体键帽的做法，是「不像现代界面」的直接原因。 */
+  background: var(--btn-tint);
+  color: var(--accent-on);
+  box-shadow: var(--btn-relief);
+  transition: background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+/* 135° 对角光泽：玻璃被斜光照到的那一条。**只给实底这一档** ——
+   `.is-cta` 是透明底，叠上去会是一块白斑。
+   z-index:-1 + isolation：落在背景之上、文字之下，不会把字洗白。 */
+.btn-primary:not(.is-cta)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(135deg, var(--btn-sheen) 0%, transparent 48%);
+}
+
 html:not(.hovers-off) .btn-primary:hover {
-  filter: brightness(1.08);
+  /* 不再用 filter: brightness —— 那会把文字和边框一起拉亮：深色主题下
+     深字压在亮蓝上会糊成一团。换一档 tint：色相不动，只提明度。
+     投影同时推远一点，像被手指抬起。 */
+  background: var(--btn-tint-hover);
+  box-shadow: inset 0 1px 0 var(--btn-spec), 0 2px 3px var(--btn-contact),
+    0 7px 16px -4px var(--btn-ambient);
+}
+
+/* 向导导航里的主操作（引导页「下一步」）：**幽灵形态**，与 .btn-ghost 同一套
+   几何与字色，只把边色换成强调色。理由见上方 ② 那一档。
+   名字沿用 is-cta（call to action），语义是「流程里往前一步」，不是「确认」。 */
+.btn-primary.is-cta {
+  border-color: var(--accent);
+  /* 简写会连 background-image 一起清掉，正好抵掉基类的渐变 */
+  background: transparent;
+  /* 字色必须与同排的 .btn-ghost 完全同档。曾用 --text（正文色，近黑），
+     用户一眼看出「比其他更黑，其他像灰色」—— 一排按钮里字色分级会被当成 bug。 */
+  color: var(--text-dim);
+  /* 必须显式清掉基类的浮雕：内高光/内暗边是给实底做的，套在透明底上会画出
+     一条顶部白线 + 一条底部黑线，像整块按钮没对齐。 */
+  box-shadow: none;
+}
+
+html:not(.hovers-off) .btn-primary.is-cta:hover {
+  /* 基类 hover 现在写的是 `background:` 简写（把 background-color 设成蓝 tint），
+     这里只补 background-image 会得到「蓝底 + 灰渐变」。所以先显式清掉底色再叠灰，
+     顺序不能反 —— background 简写会连背景图一起清掉。
+     这里与 .btn-ghost 同款：淡灰叠底，不加投影。 */
+  filter: none;
+  box-shadow: none;
+  background: transparent;
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 /* 内容区 */
 .view {
   flex: 1;
   min-height: 0;
+  /* 内容区＝第二阶面：它把窗口底和卡片隔开一层。
+     没有这一层时，白窗上的白卡片只能靠描边找边界 —— 也就是「到处都是线条」的由来。 */
+  background: var(--surface-1);
   /* 右侧 12px：与 .history 的 padding-right 相等 → 滚动条在卡片与窗口右缘之间居中 */
   padding: 0 12px 16px;
   overflow: hidden;
@@ -1103,19 +1821,37 @@ html:not(.hovers-off) .btn-primary:hover {
   gap: 10px;
   padding: 10px;
   border-radius: var(--radius-sm);
+  /* 卡片＝内容层：靠「比窗口底亮一档」立起来，不靠描边。
+     这是 Fluent 的 Card pattern 与 Linear / Notion 的共同做法 ——
+     线条只留给「真的承担信息」的地方（输入框边界、选中态、置顶）。
+     1px 透明边框是**占位**：置顶与批量选中要用它画状态色，
+     而临时加 border 会让卡片尺寸跳 2px。 */
   background: var(--card-bg);
-  /* 用中性线而不是 --stroke：浅色下 --stroke 是白色高光边，压在白卡片上等于隐形，
-     卡片的轮廓就只剩阴影一条线索 —— 这正是「看着发灰、没有边界」的来源。 */
-  border: 1px solid var(--line);
-  /* 高浓度下描边会与窗口底色糊在一起，靠阴影保证卡片可识别 */
-  box-shadow: var(--card-shadow);
+  /* 玻璃感的两个来源，都很克制：
+     ① 上端 14% 的极淡渐隐 —— 光从上方来，材质有厚度，纯平涂会读成一张白纸。
+        跨度再大就变成「渐变卡片」，那是另一套语言，不要。
+     ② 一圈亮边（--card-rim）：比卡片本身亮一点，模拟边缘折射。浅色下几乎
+        看不见，深色下是卡片唯一边界线索 —— 正好补上「深色只有三阶面」的短板。
+     描边宽度不变，置顶 / 批量选中仍用它画状态色，不会跳尺寸。 */
+  background-image: linear-gradient(180deg, var(--card-sheen) 0%, transparent 14%);
+  border: 1px solid var(--card-rim);
+  box-shadow: var(--elev-1);
   cursor: default;
   transition: background var(--dur-fast) var(--ease-out),
     transform var(--dur-fast) var(--ease-out);
 }
 
 html:not(.hovers-off) .card:hover {
-  background: var(--card-hover);
+  /* 悬浮＝在**卡片自己的底色上**压一层极淡中性色，而不是替换底色。
+     原来 `background: var(--card-hover)` 是把「白 .94」整个换成「黑 .05」——
+     在半透明窗口上等于把卡片压成深灰，和「轻微提亮」完全不是一个意思。
+     background-image 叠在 background-color 之上，正好表达「原底色 + 一层灰度」。
+
+     注意要**连顶光一起重写**：background-image 是会整条覆盖的多值属性，
+     只写悬停层会把上面那道 --card-sheen 抹掉，鼠标一移上去卡片的玻璃感
+     就没了 —— 表现为「悬停时突然变平」。第一条在最上，所以顺序是悬停层在前。 */
+  background-image: linear-gradient(var(--state-hover), var(--state-hover)),
+    linear-gradient(180deg, var(--card-sheen) 0%, transparent 14%);
 }
 
 .card.is-pinned {
@@ -1129,7 +1865,7 @@ html:not(.hovers-off) .card:hover {
    遮住一半」，右边因为有 12px 留白反而看不出来）。 */
 .card.is-selected {
   border-color: var(--select);
-  box-shadow: inset 0 0 0 1px var(--select), var(--card-shadow);
+  box-shadow: inset 0 0 0 1px var(--select), var(--elev-1);
 }
 
 /* 文件条目的原路径已失效（被移动 / 改名 / 删除）——整条压暗 + 标「已失效」 */
@@ -1172,7 +1908,7 @@ html:not(.hovers-off) .card:hover {
 .card-preview code.md-inline,
 .detail-body.is-rich code.md-inline {
   padding: 0 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--glass-strong);
   font-family: var(--font-mono);
   font-size: 0.92em;
@@ -1206,7 +1942,7 @@ html:not(.hovers-off) .card:hover {
    —— 类型=中性、置顶=accent 蓝、收藏=琥珀、失效=红。 */
 .tag {
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .tag-missing {
@@ -1289,7 +2025,7 @@ html:not(.hovers-off) .card:hover {
    看起来就跟纯文字一样 → 提高字重，让人一眼看出是徽章。
    原先这里还会把中性徽章刷成「加实底色 + 正文色文字」，那是为了救**灰色**徽章的
    辨识度；现在三个类型各有色相，再刷成正文色等于把刚分开的类型又抹平，所以去掉。 */
-body.round .tag {
+body:not(.round) .tag {
   font-weight: 500;
 }
 
@@ -1324,7 +2060,7 @@ body.round .tag {
   width: auto;
   height: auto;
   object-fit: contain;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   border: 1px solid var(--stroke);
   margin-top: 2px;
   /* .card-body 是 flex 列，默认 align-items:stretch 会把图拉到整行宽 → 改为按比例左对齐 */
@@ -1344,19 +2080,24 @@ body.round .tag {
 /* 右键上下文菜单 */
 .ctx-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--z-menu);
   min-width: 132px;
-  /* 内边距 + 1px 行距：条目之间留一丝缝，悬浮高亮块才不会彼此贴死成一整块。
-     改动前没有 gap，相邻两项的高亮圆角直接相接，看起来「间距很奇怪」。 */
-  padding: 5px;
-  gap: 1px;
+  /* 内边距 + 行距：条目之间留一丝缝，悬浮高亮块才不会彼此贴死成一整块。
+     走 --gap-row-dense（密集菜单档），与侧栏的 --gap-row 同属一套间距系统。
+     内距 4px 落在 4px 栅格上（原来是 5）。 */
+  padding: 4px;
+  gap: var(--gap-row-dense);
   display: flex;
   flex-direction: column;
   border-radius: var(--radius-sm);
   /* 右键菜单要贴着内容读：用高不透明底色，不吃玻璃透（需求 #8） */
   background: var(--solid-bg);
-  border: 1px solid var(--stroke);
-  box-shadow: var(--shadow);
+  /* 需求 #8 定的是「不吃玻璃透」，没定「不能有质感」。底色保持高不透明，
+     只在边缘补一道镜面光 + 亮边，让它和弹窗/卡片是同一套材质语言，
+     而不是列表旁边突然冒出来的一个白盒子。
+     border 不计入尺寸：全局 box-sizing: border-box，min-width 含边框。 */
+  border: 1px solid var(--glass-panel-rim);
+  box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
 }
 
 .ctx-item {
@@ -1372,7 +2113,7 @@ body.round .tag {
   gap: 9px;
   text-align: left;
   padding: 7px 12px;
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   cursor: default;
   transition: background var(--dur-fast) var(--ease-out);
 }
@@ -1394,7 +2135,7 @@ body.round .tag {
   height: 14px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.3;
+  stroke-width: var(--icon-stroke);
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -1405,7 +2146,21 @@ body.round .tag {
 }
 
 html:not(.hovers-off) .ctx-item:hover {
-  background: var(--glass-hover);
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
+}
+
+/* 菜单项不可用：与全站同一个禁用强度，不做第二套淡法 */
+.ctx-item:disabled,
+.ctx-item[data-disabled] {
+  opacity: var(--disabled-opacity);
+  pointer-events: none;
+}
+
+/* 菜单以鼠标为主，但键盘也能走到（支持 ↑↓），聚焦必须可见。
+   offset 取负：菜单左右内距只有 4px，外扩会被圆角裁掉。 */
+.ctx-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .ctx-item.danger {
@@ -1417,23 +2172,19 @@ html:not(.hovers-off) .ctx-item.danger:hover {
   color: var(--danger-on);
 }
 
-/* 不可用项（例如「清理 N 天前」但确实没有旧内容） */
-.ctx-item:disabled {
-  opacity: 0.42;
-  pointer-events: none;
-}
-
 /* 菜单分组分隔线。
    ⚠️ 必须用 --track-bg（「比底色深一点的中性色」），不能用 --stroke：
    --stroke 是给**玻璃面**用的白色描边，而菜单底色接近不透明浅色，
    白线在上面等于隐形 —— 于是用户只看到一段莫名的空白，反馈「间距看着很奇怪」。
    --track-bg 在明/暗两套主题下都有定义，语义也正是「必须看得见的分隔」。 */
 .ctx-sep {
+  /* 分隔线走 --stroke（层级线），原来借用 --track-bg（进度条空轨）——
+     两个语义不同的东西共用一个值，调其中一个就会误伤另一个。 */
   height: 1px;
   /* 左右 12px = .ctx-item 的水平内边距，让分隔线两端与条目文字对齐，
      不会比文字多凸出去一截（原来 8px，线与文字错开，看着别扭）。 */
   margin: 4px 12px;
-  background: var(--track-bg);
+  background: var(--stroke);
 }
 
 /* 设置页 */
@@ -1450,7 +2201,7 @@ html:not(.hovers-off) .ctx-item.danger:hover {
 }
 
 .settings h2 {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
 }
 
@@ -1476,22 +2227,15 @@ html:not(.hovers-off) .ctx-item.danger:hover {
     box-shadow var(--dur-fast) var(--ease-out);
 }
 
-/* hover 必须带 hovers-off 门控：窗口隐藏/最小化再回来时 Chromium 不会重算 :hover，
-   不加门控会让光标下的标签一直留着底色（与侧栏同一套规则）。 */
-html:not(.hovers-off) .settings-tabs .tab:hover {
-  background: var(--glass-hover);
-}
-
-.settings-tabs .tab.is-active {
-  background: var(--glass-strong);
-  /* 常态与选中态都是正文色，靠加粗（中文会落到 Bold）区分 */
-  font-weight: 700;
-}
+/* 设置页标签的底色同样走「行状态」那条规则，这里不再重复定义。
+   hover 的 hovers-off 门控也在那条规则里 ——
+   窗口隐藏/最小化再回来时 Chromium 不会重算 :hover，不加门控会让光标下的标签
+   一直留着底色。 */
 
 /* 圆角模式下没有背景模糊，有底色的元素才需要阴影撑出层次；
    常态 .tab 是透明底，加阴影会变成「无底的浮影」，故只给有底色的状态。 */
-body.round .settings-tabs .tab.is-active,
-html:not(.hovers-off) body.round .settings-tabs .tab:hover {
+body:not(.round) .settings-tabs .tab.is-active,
+html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   box-shadow: var(--card-shadow);
 }
 
@@ -1524,11 +2268,17 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
    没有区块时，十几行平铺、视觉权重全一样，用户找不到重点（上一版就是这样）。 */
 .settings .block {
   padding: 4px 16px 8px;
-  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  /* 底色复用 --glass-strong：关于页、缓存块、右键菜单都是它。
-     面板的透明度只有这一个来源，改一处全局一致，不再各页各调。 */
+  /* 区块＝**面板层**，与关于页的 hero / facts / privacy / log 用同一个令牌。
+     曾经写成 surface-2（卡片那档，白 .62），结果设置页比关于页白一大截 ——
+     同一套界面里两种面板强度，用户一眼就看出不一致。
+     列表卡片才需要 .62（密集堆叠、每张都要分辨），面板不需要。 */
   background: var(--glass-strong);
+  /* 与列表卡片同一套边缘语言：顶部一道 1px 内高光（模拟玻璃上沿的折射）。
+     **浅色下这条最有效** —— 面板本身是 19.6% 白压出来的浅灰（约 #eaecf0），
+     50% 白的高光线在上面看得见；深色下则是 10% 白，负责把上边缘提出来。
+     原先只有 elev-1 阴影，所以设置页和关于页的面板都是「平的一块」。 */
+  box-shadow: inset 0 1px 0 var(--card-rim), var(--elev-1);
 }
 
 .settings .block-h {
@@ -1584,6 +2334,15 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   display: block;
   line-height: 1.5;
   cursor: default;
+  /* ⚠ **必须收成内容宽度**，不能让它撑满 .row-text。
+     这一行是 `<label for="控件id">`，Chromium 会把 label 的 hover 传给关联控件、
+     点击也会转发过去。而 `display: block` 让 label 占满整条左栏（实测 380px，
+     控件在 428~560），于是「鼠标在行左半边任何位置」都会点亮右侧那个按钮，
+     点一下还能直接触发 —— 用户反馈「鼠标没在框内但悬浮背景亮了，也能点」。
+     收成 fit-content 后命中区只剩标题文字本身，仍保留「点标题 = 点控件」的
+     无障碍语义（这是 label 该有的行为，只是不该覆盖整行）。 */
+  width: fit-content;
+  max-width: 100%;
 }
 
 .settings .row-desc {
@@ -1594,9 +2353,15 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 }
 
 /* 快捷键录制按钮：平时与普通 ghost 按钮一样，录制中换成强调色。
-   宽度固定，免得「Ctrl + Alt + V」和「请按下组合键…」之间来回跳。 */
+   宽度固定，免得「Ctrl + Alt + V」和录制提示之间来回跳。
+
+   **132 而不是 176**：176 是按「请按下组合键…（Esc 取消）」留的，但那段提示
+   把「按 Esc 取消」又写了一遍 —— 行说明里已经有。文案缩短后最长的组合
+   （Ctrl + Alt + Shift + V）约 120px，132 刚好够，按钮不再占掉行宽的三分之一。
+   用户反馈「鼠标滑到行上这个框就亮」：hover 命中范围本身是对的（实测只覆盖
+   按钮盒），问题就是盒子太宽、贴着行右缘，鼠标从右边进来几乎立刻落进去。 */
 .settings .hotkey-btn {
-  min-width: 176px;
+  min-width: 132px;
   justify-content: center;
   font-variant-numeric: tabular-nums;
 }
@@ -1604,11 +2369,20 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 .settings .hotkey-btn.is-recording {
   border-color: var(--accent);
   color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.18);
+  box-shadow: 0 0 0 2px var(--accent-ring);
 }
 
-.settings .hotkey-btn:disabled {
-  opacity: 0.45;
+/* 依赖前置开关的设置项（如「点选后保持打开」依赖「失焦不收起」）：
+   前置没开时**整行灰掉**，而不是让用户点了没反应 —— 桌面设置的惯例是
+   「可见但不可用」。用 :has 判断行内是否真有禁用控件，不必再给行加标记类，
+   所以任何原因导致的禁用都自动获得同样的表现。
+   行整体已经淡过一次，里面的控件不再淡第二层（0.45 × 0.45 ≈ 0.2，字会看不见）。 */
+.settings .row:has(:disabled) {
+  opacity: var(--disabled-opacity);
+}
+
+.settings .row:has(:disabled) :disabled {
+  opacity: 1;
   cursor: not-allowed;
 }
 
@@ -1621,23 +2395,69 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   min-height: 20px;
 }
 
-.settings input[type="number"] {
+/* 全站数字输入框（设置页「保留天数」、清理弹窗「自定义天数」）**只有这一份视觉**。
+   原先挂了 `.settings` 前缀，于是清理弹窗里那个就吃浏览器原生样式 ——
+   白底、硬黑边、无圆角，与旁边的幽灵按钮完全不是一套（用户截图反馈）。 */
+input[type="number"] {
   width: 80px;
   height: 28px;
   padding: 0 8px;
-  border-radius: 6px;
-  border: 1px solid var(--stroke);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-control);
   background: var(--glass-strong);
   color: var(--text);
   font-family: var(--font);
+  /* 输入框不继承正文行高/字号，必须显式给，否则两处高度对不上 */
+  font-size: 13px;
+  /* 数字等宽：改天数时字段宽度不跟着字形跳动 */
+  font-variant-numeric: tabular-nums;
 }
 
-/* 材质浓度滑块 */
+/* 按天数清理的预设按钮 + 自定义输入框。
+   这一块原先是裸 HTML：.age-pick 没有任何布局规则，靠 inline 自然换行，
+   按钮和输入框会掉到不同行、间距也不受控。 */
+.age-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 材质浓度滑块：**自绘**。
+   原来是原生 input[type=range] + accent-color —— 按下/拖动时 Chromium 会给轨道
+   和滑点叠一层自带的浅色态，看起来像蒙了块白遮罩（用户实测反馈），CSS 管不住。
+   与上方开关同一个决策门：原生绘制不受控 → 自绘，语义（可 Tab、方向键、读屏）全保留。
+   已填充部分用 --fill（JS 拖动时同步百分比），空轨用 --track-bg，按下不再有神秘浅色。 */
 .settings input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
   width: 180px;
   height: 20px;
-  accent-color: var(--accent);
+  background: transparent;
   cursor: default;
+}
+
+.settings input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent-fill) var(--fill, 50%),
+    var(--track-bg) var(--fill, 50%)
+  );
+}
+
+.settings input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  /* (20 - 4) / 2 - 14 / 2 = -5：把滑点垂直居中在 4px 轨道上 */
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--ctrl-thumb);
+  /* 与自绘开关的滑点同一套投影：1px 投影让它「浮」在轨道上 */
+  box-shadow: 0 1px 2px var(--ctrl-thumb-shadow);
 }
 
 .settings .hint {
@@ -1646,16 +2466,54 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   white-space: nowrap;
 }
 
+/* 设置页的开关：**自绘**。
+   原来是原生 checkbox（16×16 方块 + accent-color），系统绘制，不受圆角 / 阴影 /
+   材质影响，在高 DPI 下还会发虚 —— 全项目最不「有质感」的一处。
+   方案里的开关决策门是「轨道对比 < 3:1 就自绘」，原生那条边框约 1.3:1，正是该自绘。
+
+   appearance: none 之后仍保留原生语义：可 Tab、空格切换、读屏可读 ——
+   只是外观换成胶囊轨道 + 圆形滑点。 */
 .settings input[type="checkbox"] {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--switch-off);
+  cursor: default;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+/* 滑点：白色圆片 + 极轻投影，让它「浮」在轨道上而不是画在轨道里 */
+.settings input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
   width: 16px;
   height: 16px;
-  accent-color: var(--accent);
-  cursor: default;
+  border-radius: 50%;
+  background: var(--ctrl-thumb);
+  box-shadow: 0 1px 2px var(--ctrl-thumb-shadow);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.settings input[type="checkbox"]:checked {
+  background: var(--accent-fill);
+}
+
+.settings input[type="checkbox"]:checked::after {
+  transform: translateX(16px);
+}
+
+.settings input[type="checkbox"]:disabled {
+  opacity: var(--disabled-opacity);
 }
 
 /* 缓存块嵌在「存储位置」区块里，去掉它自己的外框、底色与阴影 ——
    否则区块里又浮出一张卡片，看着是「框里有框」（用户截图反馈，只在圆角模式出现：
-   因为 `body.round .cache-box` 会给它加 --card-shadow，而原先这里只清了边框与底色）。 */
+   因为 `body:not(.round) .cache-box` 会给它加 --card-shadow，而原先这里只清了边框与底色）。 */
 .settings .block .cache-box {
   padding: 4px 0 0;
   border: 0;
@@ -1667,7 +2525,7 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 /* 缓存目录块（迁移自 v1 缓存信息区） */
 .cache-box {
   padding: 12px 14px;
-  border: 1px solid var(--stroke);
+  /* 面板不画框：边界由底色差 + 极轻投影说明（与设置区块同一套）。 */
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
   display: flex;
@@ -1722,7 +2580,9 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
   height: 28px;
-  padding: 0 8px 0 12px;
+  /* 左右都 12：原来右侧只有 8，右下角两个图标按钮的白底几乎贴住窗口边缘
+     （实测「聚焦环还是贴着边了」）。 */
+  padding: 0 12px;
   border-top: 1px solid var(--stroke);
   font-size: 11px;
   color: var(--text-dim);
@@ -1735,7 +2595,8 @@ html:not(.hovers-off) body.round .settings-tabs .tab:hover {
 body.is-selecting .sidebar,
 body.is-selecting .statusbar {
   pointer-events: none;
-  opacity: 0.45;
+  /* 「不可用」只有一个强度令牌，与禁用按钮同源 */
+  opacity: var(--disabled-opacity);
   transition: opacity var(--dur-fast) var(--ease-out);
 }
 
@@ -1756,7 +2617,8 @@ body.is-selecting .statusbar {
   width: 24px;
   height: 22px;
   border: 0;
-  border-radius: 5px;
+  /* 22px 高的图标按钮用 4px：8px 会圆得像胶囊，5px 是系统外的散值 */
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-dim);
   display: grid;
@@ -1771,13 +2633,13 @@ body.is-selecting .statusbar {
   height: 13px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.4;
+  stroke-width: var(--icon-stroke);
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
 html:not(.hovers-off) .statusbar-clear:hover {
-  background: var(--glass-hover);
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
   color: var(--text);
 }
 
@@ -1786,9 +2648,54 @@ html:not(.hovers-off) .statusbar-clear:hover {
 
    材质见文件顶部 --hp-* 变量的注释：奶白渐变 + 发丝边 + 顶部内高光 + 大阴影，
    一套固定配方，不随窗口浓度 / 材质档位变化。 */
+/* ══ 提示气泡（tooltip）═════════════════════════════════════════════
+   与右键菜单 / toast **同一族**：`--solid-bg` + `--elev-2`。
+   刻意不复用 `.hover-preview`（那套 18 个 `--hp-*` 是奶白渐变的「实体预览」语言，
+   给单行文字套渐变会显脏），也不另造令牌 —— 浮层外观只有一套。
+
+   定位由 `tip.js` 计算（fixed + 视口夹取 + 越界翻转），这里只管外观。 */
+.tip {
+  position: fixed;
+  z-index: var(--z-tip);
+  max-width: 280px;
+  /* 内距与字号**对齐 toast**（同为一次性的短提示），不与卡片/菜单各调一套；
+     8×12 落在 4px 栅格上。 */
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  /* 气泡常常压在卡片边缘或悬在空处，背后不一定有东西可糊 —— 所以用
+     **强档面板**（0.94）而不是确认框那档 0.76：既保留玻璃的顶光与亮边，
+     又不会因为背后什么都没有而变成一片发白。 */
+  background: var(--glass-panel-strong);
+  backdrop-filter: blur(18px) saturate(160%) brightness(1.1);
+  -webkit-backdrop-filter: blur(18px) saturate(160%) brightness(1.1);
+  border: 1px solid var(--glass-panel-rim);
+  box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.5;
+  /* 长路径 / 长句要能断，不能顶出 max-width */
+  word-break: break-word;
+  /* 气泡永不接收鼠标：它是提示，不该挡住下面元素，也不该把自己的 mouseout 触发掉 */
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.tip.is-on {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.tip[hidden] {
+  display: none;
+}
+
 .hover-preview {
   position: fixed;
-  z-index: 1500;
+  z-index: var(--z-preview);
   /* 与 .card 相同的 10px 内边距：浮层是从卡片里「长出来」的一块，留白要接得上 */
   padding: 10px;
   border-radius: var(--radius-sm);
@@ -1802,6 +2709,8 @@ html:not(.hovers-off) .statusbar-clear:hover {
   backdrop-filter: blur(18px) saturate(140%);
   -webkit-backdrop-filter: blur(18px) saturate(140%);
   border: 1px solid var(--hp-border);
+  /* 实底档没有材质可透，奶白渐变会与白底连成一片 —— 由文件末尾的
+     body.tier-solid 规则补一圈实线把它勾出来。半透明档不加。 */
   box-shadow: var(--hp-shadow), inset 0 1px 0 var(--hp-rim);
   max-width: 460px;
   color: var(--text);
@@ -1822,7 +2731,7 @@ html:not(.hovers-off) .statusbar-clear:hover {
   max-width: 340px;
   max-height: 260px;
   /* 内圆角比外框小一档，避免「内框圆角顶到外框」的错位感 */
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 /* 文本：保留换行与缩进，长单词 / 长 URL 强制断行。
@@ -1877,14 +2786,17 @@ html:not(.hovers-off) .statusbar-clear:hover {
 .modal-mask {
   position: fixed;
   inset: 0;
-  z-index: 2000;
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--mask-bg);
   /* 背后的界面整屏模糊：确认框是「停下来做决定」的时刻，底下列表继续清晰
-     既分散注意力，也容易让人以为还能点。 */
-  backdrop-filter: blur(6px) saturate(120%);
-  -webkit-backdrop-filter: blur(6px) saturate(120%);
+     既分散注意力，也容易让人以为还能点。
+     6px → 10px：弹窗自己现在也是半透明玻璃了，背后这一层如果糊得不够，
+     两层叠起来会变成「一块糊不干净的毛玻璃」—— 形状可辨但读不清，最难受。
+     糊到 10px 后，形状彻底化开，弹窗的顶光才有东西可反射。 */
+  backdrop-filter: blur(10px) saturate(130%);
+  -webkit-backdrop-filter: blur(10px) saturate(130%);
 }
 
 /* hidden 属性依赖 UA 的 display:none，但会被上面的 display:grid 覆盖，必须显式声明 */
@@ -1897,16 +2809,31 @@ html:not(.hovers-off) .statusbar-clear:hover {
   max-width: 320px;
   padding: 18px 20px;
   border-radius: var(--radius-sm);
-  background: var(--solid-bg);
-  border: 1px solid var(--stroke);
-  box-shadow: var(--shadow);
+  /* ══ 弹窗是**全项目第一个真玻璃面板** ══════════════════════════════
+     它敢吃 backdrop-filter，是因为背后确实有东西可糊：mask 已经把列表糊了
+     一遍，这一层再糊一次得到的是「隔着一块厚玻璃看内容」，而不是
+     「一层透明的白」—— 那正是浮层套玻璃最容易翻车的地方（见文件顶部注释）。
+
+     配方就是玻璃材质那三层：半透明面色 + 顶边镜面光 + 环境影，
+     另加一圈亮边把轮廓从模糊背景里勾出来（浮层不加描边时，半透明会让
+     边界糊进背景，看着像「没对齐的一团光」）。 */
+  background: var(--glass-panel);
+  /* ⚠ brightness 是玻璃质感的**必需品**，不是修饰。blur 只负责散射、
+     saturate 只负责保色，两者都不改变亮度 —— 透上来的内容保持原亮度，
+     再叠一层半透明白，白就被「稀释」成灰白，整块玻璃发灰（用户原话「灰蒙蒙」）。
+     真实玻璃会把光聚起来，这 15% 的提亮就是透镜效应。
+     少了它，前面所有受光设计都白做。 */
+  backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
+  -webkit-backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
+  border: 1px solid var(--glass-panel-rim);
+  box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
 .modal-title {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text);
 }
@@ -1942,21 +2869,15 @@ html:not(.hovers-off) .statusbar-clear:hover {
   padding: 22px 22px 16px;
   /* 给顶部色带和角落光斑裁个边 */
   overflow: hidden;
-  /* 比普通弹窗更透一点、更亮一点，让它看起来是「一张卡片」而不是一个对话框 */
+  /* 比普通弹窗更透一点、更亮一点，让它看起来是「一张卡片」而不是一个对话框。
+     0.99 → 0.9：这 10% 的透光正是「卡片」与「对话框」的分界，
+     再透就过头了 —— 引导页正文多，背后内容一旦可辨就会干扰阅读。
+     三段渐变收进 --tour-grad-*，深浅各定义一次，下面不再有 body.dark 覆盖。 */
   background: linear-gradient(
     160deg,
-    rgba(255, 255, 255, 0.99) 0%,
-    rgba(248, 250, 254, 0.98) 55%,
-    rgba(243, 246, 252, 0.98) 100%
-  );
-}
-
-body.dark .modal.is-tour {
-  background: linear-gradient(
-    160deg,
-    rgba(46, 46, 54, 0.99) 0%,
-    rgba(38, 38, 44, 0.98) 60%,
-    rgba(33, 33, 39, 0.98) 100%
+    var(--tour-grad-top) 0%,
+    var(--tour-grad-mid) 55%,
+    var(--tour-grad-bottom) 100%
   );
 }
 
@@ -1976,21 +2897,13 @@ body.dark .modal.is-tour {
 .modal.is-tour::before {
   top: -120px;
   right: -80px;
-  background: rgba(47, 107, 255, 0.16);
+  background: var(--tour-glow-blue);
 }
 
 .modal.is-tour::after {
   left: -110px;
   bottom: -140px;
-  background: rgba(13, 148, 136, 0.13);
-}
-
-body.dark .modal.is-tour::before {
-  background: rgba(91, 140, 255, 0.18);
-}
-
-body.dark .modal.is-tour::after {
-  background: rgba(13, 148, 136, 0.12);
+  background: var(--tour-glow-teal);
 }
 
 /* 顶部进度条：3px 的暗轨 + 一条随步骤变长的填充。
@@ -2009,7 +2922,7 @@ body.dark .modal.is-tour::after {
   /* 第 1 步就有进度，不是从 0 开始 —— 一上来空着会让人以为条没生效 */
   width: 0;
   border-radius: 0 2px 2px 0;
-  background: linear-gradient(90deg, #2f6bff, #7c3aed);
+  background: linear-gradient(90deg, rgb(var(--tour-blue)), rgb(var(--tour-purple)));
   transition: width var(--dur-slow) var(--ease-out);
 }
 
@@ -2058,33 +2971,41 @@ body.dark .modal.is-tour::after {
   height: 32px;
   display: grid;
   place-items: center;
-  border-radius: 10px;
-  color: var(--accent);
-  background: linear-gradient(135deg, rgba(47, 107, 255, 0.2), rgba(124, 58, 237, 0.12));
-  box-shadow: inset 0 0 0 1px rgba(47, 107, 255, 0.14);
+  border-radius: var(--radius-lg);
+  color: rgb(var(--tour-blue));
+  background: linear-gradient(135deg, rgb(var(--tour-blue) / 0.2), rgb(var(--tour-purple) / 0.12));
+  box-shadow: inset 0 0 0 1px rgb(var(--tour-blue) / 0.14);
 }
 
 /* 7 步轮换三色相：一路看下来颜色有变化，不会像 7 张一模一样的幻灯片。
    用 nth-child 而不是给每步加 data 属性 —— 步骤顺序变了自己就跟着变。 */
 .tour-body .tour-step:nth-child(3n + 2) .tour-icon {
-  color: #7c3aed;
-  background: linear-gradient(135deg, rgba(124, 58, 237, 0.2), rgba(219, 39, 119, 0.1));
-  box-shadow: inset 0 0 0 1px rgba(124, 58, 237, 0.14);
+  color: rgb(var(--tour-purple));
+  background: linear-gradient(135deg, rgb(var(--tour-purple) / 0.2), rgb(var(--tour-rose) / 0.1));
+  box-shadow: inset 0 0 0 1px rgb(var(--tour-purple) / 0.14);
 }
 
 .tour-body .tour-step:nth-child(3n) .tour-icon {
-  color: #0d9488;
-  background: linear-gradient(135deg, rgba(13, 148, 136, 0.2), rgba(47, 107, 255, 0.1));
-  box-shadow: inset 0 0 0 1px rgba(13, 148, 136, 0.16);
+  color: rgb(var(--tour-teal));
+  background: linear-gradient(135deg, rgb(var(--tour-teal) / 0.2), rgb(var(--tour-blue) / 0.1));
+  box-shadow: inset 0 0 0 1px rgb(var(--tour-teal) / 0.16);
 }
 
+/* 12 张引导插图原本每张都在 HTML 里写一遍
+   fill / stroke / stroke-width / linecap / linejoin，改一次线宽要改 12 处。
+   描边属性收到这里，HTML 只留 viewBox 与路径（形状才是内容，描边是样式）。 */
 .tour-icon svg {
   width: 18px;
   height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: var(--icon-stroke-lg);
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .tour-title {
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 700;
   line-height: 1.3;
   letter-spacing: 0.2px;
@@ -2112,7 +3033,7 @@ body.dark .modal.is-tour::after {
   gap: 3px;
   padding: 9px 10px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--stroke);
+  /* 浮层的边界靠 elev-2 的投影说明，不靠描边 —— 描边会让它看起来像嵌在页面里。 */
   background: var(--track-bg);
 }
 
@@ -2123,7 +3044,7 @@ body.dark .modal.is-tour::after {
 }
 
 .tour-card-v {
-  font-size: 11.5px;
+  font-size: 11px;
   line-height: 1.4;
   color: var(--text-dim);
 }
@@ -2204,7 +3125,7 @@ body.dark .modal.is-tour::after {
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   font-size: 12px;
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: var(--track-bg);
 }
 
@@ -2236,7 +3157,7 @@ body.dark .modal.is-tour::after {
 }
 
 .tour-cell-v {
-  font-size: 11.5px;
+  font-size: 11px;
   line-height: 1.45;
   color: var(--text-dim);
 }
@@ -2249,7 +3170,7 @@ body.dark .modal.is-tour::after {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  font-size: 11.5px;
+  font-size: 11px;
   line-height: 1.45;
   color: var(--text-dim);
 }
@@ -2294,7 +3215,7 @@ body.dark .modal.is-tour::after {
 .tour-dot {
   width: 6px;
   height: 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: var(--track-bg);
   transition: width var(--dur-base) var(--ease-out),
     background var(--dur-base) var(--ease-out),
@@ -2305,11 +3226,7 @@ body.dark .modal.is-tour::after {
 .tour-dot.is-on {
   width: 20px;
   background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.16);
-}
-
-body.dark .tour-dot.is-on {
-  box-shadow: 0 0 0 3px rgba(91, 140, 255, 0.22);
+  box-shadow: 0 0 0 3px var(--tour-dot-glow);
 }
 
 /* 底部按钮行也要压住角落光斑 */
@@ -2322,18 +3239,9 @@ body.dark .tour-dot.is-on {
   flex: 1 1 auto;
 }
 
-/* 主按钮：渐变 + 光晕 + 悬停抬起，作为整条流程的终点该有的分量 */
-.btn-primary.is-cta {
-  background: linear-gradient(135deg, #2f6bff, #6a45e0);
-  box-shadow: 0 4px 14px rgba(47, 107, 255, 0.32);
-  transition: transform var(--dur-fast) var(--ease-out),
-    box-shadow var(--dur-fast) var(--ease-out);
-}
-
-.btn-primary.is-cta:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(47, 107, 255, 0.38);
-}
+/* 引导页「下一步」用 `.btn-primary.is-cta`：向导导航那一档，幽灵底 + 强调边。
+   规则本身已挪到按钮基类附近（与 `.btn-primary` 放在一起对照着看，避免两条
+   互相矛盾的规则隔着两千行各写一份注释）。 */
 
 /* ---------------------------------------------------------------------------
    全文详情弹窗
@@ -2353,6 +3261,9 @@ body.dark .tour-dot.is-on {
   max-height: none;
   /* 头部 + 正文 + 按钮三段；中间由 flex:1 吃掉剩余高度 */
   overflow: hidden;
+  /* 长文阅读面板要比确认框实。确认框读 12 个字，透一点反而有层次；
+     这里读 2000 个字，背后一有可辨的形状，眼睛就会一直想「看清后面是什么」。 */
+  background: var(--glass-panel-strong);
 }
 
 /* 头部与按钮行都按内容高度，不参与伸缩 —— 只剩正文区去分配剩余空间 */
@@ -2386,8 +3297,9 @@ body.dark .tour-dot.is-on {
   padding: 10px 12px;
   border: 1px solid var(--stroke);
   border-radius: var(--radius-sm);
-  /* 比窗口底稍深一点，让正文区看起来是「一块内容」而不是浮在玻璃上 */
-  background: rgba(0, 0, 0, 0.04);
+  /* 比窗口底稍深一点，让正文区看起来是「一块内容」而不是浮在玻璃上。
+     浅深两档收进 --detail-bg，下面那条 body.dark .detail-body 覆盖已可删除。 */
+  background: var(--detail-bg);
   font-family: var(--font-mono);
   /* 15px：比列表正文（13px）明显大一档，长文本连读不费眼。
      查看态与编辑态共用这个类，所以两边字号永远一致。 */
@@ -2439,7 +3351,7 @@ body.dark .tour-dot.is-on {
   font-size: 20px;
 }
 .detail-body.is-rich h2 {
-  font-size: 17px;
+  font-size: 15px;
 }
 .detail-body.is-rich h3 {
   font-size: 15px;
@@ -2447,7 +3359,7 @@ body.dark .tour-dot.is-on {
 .detail-body.is-rich h4,
 .detail-body.is-rich h5,
 .detail-body.is-rich h6 {
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .detail-body.is-rich ul,
@@ -2477,7 +3389,7 @@ body.dark .tour-dot.is-on {
   height: 12px;
   margin-right: 7px;
   border: 1.5px solid var(--line);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   vertical-align: -1px;
 }
 
@@ -2494,7 +3406,7 @@ body.dark .tour-dot.is-on {
   top: 0;
   width: 4px;
   height: 7px;
-  border: solid #fff;
+  border: solid var(--accent-on);
   border-width: 0 1.5px 1.5px 0;
   transform: rotate(45deg);
 }
@@ -2530,7 +3442,7 @@ body.dark .tour-dot.is-on {
   max-width: 100%;
   height: auto;
   margin: 8px 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 /* 任务项不需要额外的列表符号间距 */
@@ -2562,7 +3474,7 @@ body.dark .tour-dot.is-on {
 .detail-body.is-rich code,
 .detail-body.is-rich .md-inline {
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--glass-strong);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -2610,15 +3522,6 @@ body.dark .tour-dot.is-on {
   display: none;
 }
 
-.detail-body:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-body.dark .detail-body {
-  background: rgba(255, 255, 255, 0.05);
-}
-
 /* 编辑态用 <textarea> 承载正文。它同时挂着 .detail-body，所以内边距、边框、
    底色、等宽字体全部复用 —— 查看态切到编辑态时视觉不跳动。
    这里只补 textarea 自己的默认值覆盖。 */
@@ -2656,11 +3559,38 @@ body.dark .detail-body {
   cursor: default;
 }
 
+/* 弹窗里的多选框：与设置页开关同一套语言（自绘、走令牌），但形态是方块 + 勾 ——
+   多选有「选中若干」的含义，胶囊开关表达的是「开/关」二态，两者不该混用。 */
 .modal-check input[type="checkbox"] {
+  appearance: none;
+  position: relative;
+  flex: none;
   width: 16px;
   height: 16px;
-  accent-color: var(--accent);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-control);
+  background: transparent;
   cursor: default;
+  transition: background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.modal-check input[type="checkbox"]:checked {
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
+}
+
+/* 勾用两条边画，不用图标 —— 尺寸只有 16px，SVG 在这个尺寸下反而糊 */
+.modal-check input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--accent-on);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
 }
 
 /* 同理 .modal-mask[hidden]：这两个都是 display:flex，会盖掉 hidden 属性自带的
@@ -2671,21 +3601,18 @@ body.dark .detail-body {
 }
 
 .btn-danger {
+  /* 布局归属，不属于几何 */
   align-self: flex-start;
-  height: 32px;
-  padding: 0 14px;
-  border: 1px solid var(--danger);
-  border-radius: var(--radius-sm);
+  border-color: var(--danger);
   background: transparent;
   color: var(--danger);
-  font-family: var(--font);
-  font-size: 13px;
-  cursor: default;
 }
 
 html:not(.hovers-off) .btn-danger:hover {
-  background: var(--danger);
-  color: var(--danger-on);
+  /* 原来悬停变实心红 —— 与「全幽灵」冲突，且红块在毛玻璃上过于抢眼。
+     改为淡红底 + 保持红字，危险语义靠颜色不靠面积。 */
+  background: var(--danger-soft-bg);
+  color: var(--danger);
 }
 
 /* 复制反馈 toast：与整体玻璃风格一致 */
@@ -2694,11 +3621,16 @@ html:not(.hovers-off) .btn-danger:hover {
   left: 50%;
   bottom: 20px;
   transform: translateX(-50%) translateY(10px);
-  padding: 8px 18px;
+  /* 8×16：落在 4px 栅格（原来是 8×18） */
+  padding: 8px 16px;
   border-radius: var(--radius-sm);
-  background: var(--solid-bg);
-  border: 1px solid var(--stroke);
-  box-shadow: var(--shadow);
+  /* toast 浮在列表正上方，背后确实有内容可糊 —— 用真玻璃，和弹窗同一套配方。
+     它只活 1.5 秒，透出来的内容不会干扰阅读，反而让提示像「贴在玻璃上」。 */
+  background: var(--glass-panel);
+  backdrop-filter: blur(24px) saturate(170%) brightness(1.12);
+  -webkit-backdrop-filter: blur(24px) saturate(170%) brightness(1.12);
+  border: 1px solid var(--glass-panel-rim);
+  box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   color: var(--text);
   font-size: 13px;
   opacity: 0;
@@ -2717,19 +3649,34 @@ html:not(.hovers-off) .btn-danger:hover {
 .move-mask {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  /* 它是一层遮罩，与 .modal-mask 同级。原来写 60 —— 比右键菜单（1000）还低，
+     移动框开着时点出菜单会盖在它上面，属于层级表之外的漏网值。 */
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.28);
+  /* 遮罩浓度与 .modal-mask 一致，不再单独调 */
+  background: var(--mask-bg);
+  /* 与确认框一致：迁移期间背后不该还在动，糊住它比压暗它更干净 */
+  backdrop-filter: blur(10px) saturate(130%);
+  -webkit-backdrop-filter: blur(10px) saturate(130%);
 }
 
 .move-box {
   width: 260px;
-  padding: 16px 18px;
+  /* 16：四边一致（原来是 16×18） */
+  padding: 16px;
   border-radius: var(--radius-sm);
-  background: var(--solid-bg);
-  border: 1px solid var(--stroke);
-  box-shadow: var(--shadow);
+  /* 与确认框同一档玻璃：它也是一次「停下来等」的浮层，背后同样糊过一层 */
+  background: var(--glass-panel);
+  /* ⚠ brightness 是玻璃质感的**必需品**，不是修饰。blur 只负责散射、
+     saturate 只负责保色，两者都不改变亮度 —— 透上来的内容保持原亮度，
+     再叠一层半透明白，白就被「稀释」成灰白，整块玻璃发灰（用户原话「灰蒙蒙」）。
+     真实玻璃会把光聚起来，这 15% 的提亮就是透镜效应。
+     少了它，前面所有受光设计都白做。 */
+  backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
+  -webkit-backdrop-filter: blur(30px) saturate(180%) brightness(1.15);
+  border: 1px solid var(--glass-panel-rim);
+  box-shadow: inset 0 1px 0 var(--glass-spec), var(--elev-2);
   color: var(--text);
 }
 
@@ -2741,7 +3688,7 @@ html:not(.hovers-off) .btn-danger:hover {
 .move-bar {
   margin-top: 12px;
   height: 4px;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   background: var(--stroke);
   overflow: hidden;
 }
@@ -2763,9 +3710,9 @@ html:not(.hovers-off) .btn-danger:hover {
 .move-path {
   margin-top: 10px;
   padding: 7px 9px;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   background: var(--glass);
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--border-control);
   color: var(--text);
   font-size: 12px;
   word-break: break-all;
@@ -2784,7 +3731,9 @@ html:not(.hovers-off) .btn-danger:hover {
   justify-content: flex-end;
 }
 
-/* 滚动条：细圆角半透明，融入玻璃风格 */
+/* 滚动条：细圆角半透明，融入玻璃风格。
+   滑块颜色只来自 --scrollbar-thumb / -hover 两个令牌，
+   深浅各在变量表里定一档 —— 不再按 body.dark 各写一条规则。 */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -2795,20 +3744,12 @@ html:not(.hovers-off) .btn-danger:hover {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.16);
+  background: var(--scrollbar-thumb);
   border-radius: 999px;
 }
 
 html:not(.hovers-off) ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.28);
-}
-
-body.dark ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.16);
-}
-
-html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.28);
+  background: var(--scrollbar-thumb-hover);
 }
 
 /* 最大化 ↔ 还原：图标随窗口状态切换 */
@@ -2834,7 +3775,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 .rz-layer {
   position: fixed;
   inset: 0;
-  z-index: 3000;
+  z-index: var(--z-grip);
   pointer-events: none;
 }
 
@@ -2927,7 +3868,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   justify-content: space-between;
   gap: 32px;
   padding: 20px 24px;
-  border: 1px solid var(--line);
+  /* 面板不画框：边界由底色差 + 极轻投影说明（与设置区块同一套）。 */
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
@@ -2937,7 +3878,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 }
 
 .about-name {
-  font-size: 26px;
+  font-size: 20px;
   font-weight: 600;
   line-height: 1.15;
   letter-spacing: 0.5px;
@@ -2998,7 +3939,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 
 .about-state.is-ok::before {
   content: "✓ ";
-  color: #3fa860;
+  color: var(--state-ok);
 }
 
 .about-state.is-new {
@@ -3011,7 +3952,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 }
 
 .about-state.is-err {
-  color: #d9534f;
+  color: var(--state-err);
 }
 
 /* ── 事实表：列排（标签在左、值在右），对齐 Windows 设置的「属性表」 ── */
@@ -3025,7 +3966,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 
 .about-privacy-i {
   padding: 3px 10px;
-  border: 1px solid var(--line);
+  /* 面板不画框：边界由底色差 + 极轻投影说明（与设置区块同一套）。 */
   border-radius: 999px;
   font-size: 12px;
   color: var(--text-dim);
@@ -3036,7 +3977,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   display: flex;
   flex-direction: column;
   padding: 4px 0;
-  border: 1px solid var(--line);
+  /* 面板不画框：边界由底色差 + 极轻投影说明（与设置区块同一套）。 */
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
@@ -3079,7 +4020,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
   flex-direction: column;
   gap: 10px;
   padding: 16px 20px 18px;
-  border: 1px solid var(--line);
+  /* 面板不画框：边界由底色差 + 极轻投影说明（与设置区块同一套）。 */
   border-radius: var(--radius-sm);
   background: var(--glass-strong);
 }
@@ -3092,7 +4033,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 
 .about-log-t {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -3155,7 +4096,7 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 
 .about-notes code {
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--glass);
   font-family: Consolas, "Cascadia Mono", monospace;
   font-size: 12px;
@@ -3183,10 +4124,10 @@ html:not(.hovers-off) body.dark ::-webkit-scrollbar-thumb:hover {
 }
 
 /* 圆角模式下没有背景模糊，有底色的块需要阴影撑层次 */
-body.round .about-log,
-body.round .about-hero,
-body.round .about-notes pre,
-body.round .about-notes code {
+body:not(.round) .about-log,
+body:not(.round) .about-hero,
+body:not(.round) .about-notes pre,
+body:not(.round) .about-notes code {
   box-shadow: var(--card-shadow);
 }
 
@@ -3222,4 +4163,70 @@ body.round .about-notes code {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+/* ══ 文本选区 ═══════════════════════════════════════════════════════
+   原来吃浏览器默认的亮蓝。只设背景不设字色：字色保持原样一定可读。 */
+::selection {
+  background: var(--selection-bg);
+}
+
+/* ══ 无系统模糊档的浮层边界 ═════════════════════════════════════════
+   实底档没有材质可透，悬浮预览的奶白渐变会与白/浅灰底连成一片，
+   补一圈实线把它勾出来（半透明档不加，那里发丝边已经够）。 */
+body.tier-solid .hover-preview {
+  border-color: var(--stroke);
+}
+
+/* ══ 数字输入框的原生 spinner ═══════════════════════════════════════
+   Windows 上是两枚灰色三角，且只在 hover 时才显形（鼠标扫过突然冒出来），
+   与整套设计语言不搭。隐藏掉 —— 键盘 ↑↓ 与滚轮仍可用，功能不丢。 */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+
+/* ══ 高对比度模式兜底（forced-colors）═══════════════════════════════
+   开启 Windows 对比度主题后系统会强制覆盖颜色：我们赖以分层的
+   「半透明白 + 大阴影」全部塌掉，卡片 / 按钮 / 浮层的边界直接消失。
+   这里给每个靠材质分层的元素补一条系统边框色，并把阴影清掉 ——
+   强制配色下阴影不表达任何信息，残留的半透明阴影会变成脏块。 */
+@media (forced-colors: active) {
+  .card,
+  .modal,
+  .toast,
+  .tip,
+  .ctx-menu,
+  .tray-menu,
+  .block,
+  .cache-box,
+  .search,
+  .nav-item,
+  .settings-tabs .tab,
+  .btn,
+  .btn-ghost,
+  .btn-primary,
+  .btn-danger {
+    border: 1px solid ButtonBorder;
+  }
+
+  /* 选中 / 置顶在强制配色下必须还有非颜色线索，边框是唯一能用的通道 */
+  .card.is-pinned,
+  .card.is-selected,
+  .nav-item.is-active,
+  .settings-tabs .tab.is-active {
+    border-color: Highlight;
+  }
+
+  .card,
+  .modal,
+  .toast,
+  .tip,
+  .ctx-menu,
+  .tray-menu,
+  .btn-primary {
+    box-shadow: none;
+  }
 }

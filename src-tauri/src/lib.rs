@@ -73,7 +73,10 @@ fn set_round_mode(app: tauri::AppHandle, value: bool) -> Result<(), String> {
         use tauri::Manager;
         if let Some(w) = app.get_webview_window("main") {
             if let Ok(h) = w.hwnd() {
-                let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
+                // 用 effective_dark，不用 `w.theme()`：手动钉了深浅色之后
+                // `theme()` 返回的仍是**系统**主题，拿它算 dark 会把 tint 算反
+                // （比如手动选深色、系统是浅色 → 下发浅色 tint，整窗发灰）
+                let dark = effects::effective_dark(&w);
                 effects::apply_round_mode(h.0 as isize, dark);
             }
         }
@@ -94,7 +97,7 @@ fn set_material_alpha(app: tauri::AppHandle, value: u32) -> Result<(), String> {
         use tauri::Manager;
         if let Some(w) = app.get_webview_window("main") {
             if let Ok(h) = w.hwnd() {
-                let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
+                let dark = effects::effective_dark(&w);
                 effects::reapply_material(h.0 as isize, dark);
             }
         }
@@ -151,8 +154,6 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
         }
     };
 
-    let dark = matches!(window.theme().unwrap_or(Theme::Light), Theme::Dark);
-
     // —— 诊断：窗口运行时状态 ——
     crate::log_print!(
         "[debug] runtime: decorated={} resizable={} visible={} title={:?}",
@@ -162,8 +163,9 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
         window.title().unwrap_or_default(),
     );
 
-    effects::apply(hwnd, dark);
-    effects::apply_rounded_corners(hwnd);
+    // 启动即走完整配方（DWM 层 + WebView2 内容层）：透明是两层的事，
+    // 只补 DWM 那层，webview 一旦不透明就会把 backdrop 整块盖住
+    let _ = effects::restore_visuals_for(&window, "startup");
     // 失焦/聚焦时 Windows 会发 WM_NCACTIVATE 重绘原生标题栏，必须拦截
     effects::install_focus_hook(hwnd, app);
 
@@ -173,52 +175,65 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
         match event {
             tauri::WindowEvent::ThemeChanged(theme) => {
                 crate::log_print!("[effects] 系统主题切换 → {:?}", theme);
-                effects::refresh_theme(hwnd, matches!(theme, Theme::Dark));
+                // 只有「跟随系统」时才响应。手动钉了浅色/深色后，系统怎么切都与
+                // 本窗口无关 —— 照旧重刷会把 tint 改成系统那套（手动选深色、
+                // 系统切浅色 → 窗口发灰），前端 body.dark 却没变，两边对不上。
+                if settings::get().theme_mode == "system" {
+                    effects::refresh_theme(hwnd, matches!(theme, Theme::Dark));
+                    // 菜单页的配色靠 JS 里的 `body.dark`，不会自己跟随系统事件 ——
+                    // 隐藏时就推过去，右键弹出那一刻才是对的颜色。
+                    crate::tray::sync_menu_appearance(&app_for_events);
+                }
             }
             // SetWindowRgn 的区域不会随窗口缩放自动跟随，必须重设。
             // 但逐帧重建区域会让缩放卡顿 → 改为缩放中清区域、停止后恢复。
             tauri::WindowEvent::Resized(_) => {
-                effects::begin_resize(hwnd);
+                let dark = effects::effective_dark(&window_for_events);
+                effects::begin_resize(hwnd, dark);
+                // 最小化 → 恢复：DWM 在最小化时会把 SYSTEMBACKDROP_TYPE 丢掉，
+                // 恢复后窗口变成不透明纯色（「还是灰扑扑的，不是毛玻璃」）。
+                // Resized 在最小化和恢复时都会触发，函数内部靠 IsIconic 翻转判断。
+                effects::reapply_after_restore(&window_for_events);
             }
-            // 焦点切换会触发 frame 重算，把裁剪区域冲掉（实测：聚焦后圆角消失）。
+            // 焦点切换不再裁区域：所有档位 region_radius() 都是 0，
+            // `apply_rounded_corners` 是空操作，留着只会让人误以为这里有作用。
             tauri::WindowEvent::Focused(_active) => {
-                effects::apply_rounded_corners(hwnd);
                 // 实测（Win10/Win11 都有）：失焦/聚焦偶发把材质与 NC 渲染一起丢掉，
                 // 四周围上一圈 Win7 式边框，而托盘唤回路径的补涂管不到这里。
                 // 同步重刷会肉眼可见地闪（聚焦是高频动作），所以延迟 150ms 在后台
                 // 补一次；apply 幂等，连续触发也只是多跑几遍。
+                // 最小化恢复后通常紧跟一次聚焦，这条路径要兜住
+                // （Focused 可能早于 DWM 完成恢复，所以内部有 350/900ms 二次补）。
+                effects::reapply_after_restore(&window_for_events);
                 let w2 = window_for_events.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(150));
                     #[cfg(windows)]
                     {
-                        use tauri::Theme;
-                        if let Ok(h) = w2.hwnd() {
-                            let dark =
-                                matches!(w2.theme().unwrap_or(Theme::Light), Theme::Dark);
-                            effects::apply(h.0 as isize, dark);
-                            effects::apply_rounded_corners(h.0 as isize);
-                            effects::nudge(h.0 as isize);
-                        }
+                        // 静默双层补涂：焦点切换时窗口可见，响亮版会把材质拆了重建（闪）
+                        let _ = effects::reapply_visuals_for(&w2, "focus-refresh");
                     }
                     #[cfg(not(windows))]
                     drop(w2);
                 });
             }
-            // 跨屏拖动 DPI 变化后，半径要按新 DPI 重新换算；
-            // 同时窗口可能已经超出新显示器的工作区（缩放变了、可用逻辑分辨率也变了），
-            // 一并夹一次，否则底部会被切掉。
+            // 跨屏拖动 DPI 变化后窗口可能超出新显示器的工作区
+            //（缩放变了、可用逻辑分辨率也变了），夹一次，否则底部会被切掉。
             tauri::WindowEvent::ScaleFactorChanged { .. } => {
                 effects::apply_dpi_policy(&window_for_events);
-                effects::apply_rounded_corners(hwnd);
             }
             // 「关闭时后台运行」：隐藏到托盘而不是退出（迁移自 v1 trayOnClose）
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if settings::get().tray_on_close {
                     api.prevent_close();
-                    let _ = window_for_events.hide();
+                    // 「收进托盘」不再 hide()：hide 会让 DWM 把宿主窗口透明、
+                    // NC 渲染策略、backdrop 一次性全丢，唤回后的第一帧必然是灰的，
+                    // 补涂再快也追不上 DWM 的合成节奏（2.6.10 之所以丝滑，是因为
+                    // 那时没有系统材质，丢了也看不出来）。改为移到屏幕外驻留：
+                    // 窗口对 DWM 始终可见，材质永不丢，唤回 = 移回原位。
+                    tray::park_main_window(&window_for_events);
                     tray::create_tray(&app_for_events);
-                    crate::log_print!("[tray] 窗口已隐藏到托盘");
+                    crate::log_print!("[tray] 窗口已驻留屏幕外（托盘模式）");
                     // 低占用模式：闲置够久就把 WebView 一起释放
                     idle_release::note_hidden(app_for_events.clone());
                 }
@@ -233,9 +248,8 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     std::thread::spawn(move || {
         for delay in [200u64, 600, 1200] {
             std::thread::sleep(std::time::Duration::from_millis(delay));
-            effects::apply(hwnd, dark);
-            effects::apply_rounded_corners(hwnd);
-            effects::nudge(hwnd);
+            // 窗口已可见：静默补涂，别把刚铺好的材质拆了重建
+            let _ = effects::reapply_visuals_for(&window, "startup-delayed");
         }
         crate::log_print!("[effects] 补涂流程结束，最终档位：{}", effects::current_tier().as_str());
     });
@@ -326,6 +340,8 @@ pub fn run() {
             clipboard::confirm_cache_move,
             settings::set_panel_keep_after_copy,
             settings::set_panel_close_key,
+            settings::set_auto_alpha_dark,
+            settings::set_dark_alpha,
             settings::set_clean_on_close,
             settings::set_clean_include_pinned,
             settings::set_prune_include_pinned,

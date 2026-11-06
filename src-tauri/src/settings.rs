@@ -157,6 +157,34 @@ pub struct Config {
     ///     同样没有任何残留。
     #[serde(default)]
     pub round_mode: bool,
+    /// 高级材质（`round_mode`）下，切到深色时是否自动把浓度拉到 90%。
+    ///
+    /// 为什么需要这个开关：高级材质**没有系统背景模糊**，窗口后面就是清晰的桌面。
+    /// 深色在这种状态下必须接近实心才压得住亮壁纸，否则一片惨白；而浅色不怕亮壁纸，
+    /// 应该回到用户自己调的值。这个「深色更浓」是**模式派生的合理默认**，不是铁律 ——
+    /// 有人就想要深色也通透，所以做成可关。
+    ///
+    /// 默认开：不开的话，深色 + 高级材质 + 亮壁纸 = 几乎不能用。
+    #[serde(default = "default_true")]
+    pub auto_alpha_dark: bool,
+    /// 深色自动加浓用的**深色专属浓度**，默认 100。
+    ///
+    /// 用户在深色 + 自动加浓状态下亲手拖浓度滑条时，改的是这个值 ——
+    /// 自动加浓从「写死 100」升级为「100 或用户指定的值」。它与日常浓度
+    /// （alpha_straight / alpha_round）分开记：切回浅色恢复浅色值，
+    /// 切回深色用深色值，两条线互不踩。
+    #[serde(default = "default_dark_alpha")]
+    pub dark_alpha: u32,
+    /// 浓度语义迁移标记（2026-11-05）。
+    ///
+    /// 早先 `round_mode = 开` 表示「**关掉**系统模糊、要更实」，两档默认是
+    /// 直角 50 / 圆角 90。语义反转后变成「开 = 高级材质 = **有**模糊」，默认 90 / 45。
+    /// 老配置里这两档是按旧语义调的，直接沿用会「一开就几乎不透」。
+    ///
+    /// 新用户走 `Default`（这里设 true，不交换）；老配置文件没有这个字段，
+    /// 反序列化得到 false → 交换一次并写回 true。
+    #[serde(default)]
+    pub alpha_inverted: bool,
     /// 文件复制：是否记录「资源管理器里复制的文件」（CF_HDROP）。
     ///
     /// **默认关闭**——这是用户明确要求的默认值：文件复制涉及真实文件路径，
@@ -430,8 +458,20 @@ fn default_screenshot_mode() -> String {
 /// 直角 / 圆角模式各自的**默认**浓度。
 ///
 /// 圆角模式没有背景模糊，同样浓度会显得更透，所以默认档更高。
-pub const STRAIGHT_ALPHA: u32 = 50;
-pub const ROUND_ALPHA: u32 = 90;
+/// 关闭高级材质时的默认浓度：**没有系统模糊**，窗口后面是清晰桌面，
+/// 必须接近实心才不刺眼。
+pub const STRAIGHT_ALPHA: u32 = 90;
+/// 高级材质（有系统模糊）的默认浓度。
+///
+/// 35 是实测观感的最佳点：系统 backdrop 自带模糊 + 饱和增强，35% 的色层
+/// 在浅色下文字对比度仍然稳、毛玻璃又明显可见 ——
+/// 45 偏闷（模糊被盖住一半），30 以下亮壁纸读字吃力。
+/// 90 会让模糊只剩 10%，等于白开（早期默认，已被推翻）。
+///
+/// 这个值与设置页说明里的「推荐：浅色 35%」必须一致：文案写 35、实际默认 40，
+/// 用户一开就会觉得哪里不对。深色那档的 60% 是**关掉自动加浓**时的建议值，
+/// 打开自动加浓仍然升到 100（`default_dark_alpha`）。
+pub const ROUND_ALPHA: u32 = 35;
 
 fn default_alpha_straight() -> u32 {
     STRAIGHT_ALPHA
@@ -441,9 +481,16 @@ fn default_alpha_round() -> u32 {
     ROUND_ALPHA
 }
 
+fn default_dark_alpha() -> u32 {
+    100
+}
+
 /// 浓度的合法区间（前端滑块 10–90，后端一律夹到这个范围）
-pub const ALPHA_MIN: u32 = 10;
-pub const ALPHA_MAX: u32 = 90;
+/// 浓度是**无极调节**，两端就是两个极端：1 = 几乎全透，100 = 完全不透。
+/// 早先卡在 10–90，用户实测「滑条不够极端」—— 想调到底却发现还差一截，
+/// 那不叫安全边距，叫不给选。
+pub const ALPHA_MIN: u32 = 1;
+pub const ALPHA_MAX: u32 = 100;
 
 impl Config {
     /// 当前模式生效的浓度。
@@ -470,13 +517,21 @@ impl Config {
     /// 返回是否发生了迁移（调用方据此决定要不要立刻回写文件）。
     /// 归到哪个模式取决于**当时**的 `round_mode`——那个值就是用户当时正在用的模式。
     fn migrate(&mut self) -> bool {
-        match self.legacy_alpha.take() {
-            Some(v) => {
-                self.set_alpha(v);
-                true
-            }
-            None => false,
+        let mut changed = false;
+        if let Some(v) = self.legacy_alpha.take() {
+            self.set_alpha(v);
+            changed = true;
         }
+        // 浓度语义反转前，两档是按「开＝无模糊、更实」调的（直角 50 / 圆角 90）。
+        // 新语义下正好相反，交换一次即可让用户原来的观感延续：
+        //   原来「圆角 90（实）」→ 现在是「关闭 90（实）」
+        //   原来「直角 50（透）」→ 现在是「高级材质 50（透 + 有模糊）」
+        if !self.alpha_inverted {
+            std::mem::swap(&mut self.alpha_straight, &mut self.alpha_round);
+            self.alpha_inverted = true;
+            changed = true;
+        }
+        changed
     }
 }
 
@@ -488,6 +543,8 @@ impl Default for Config {
             clean_include_pinned: false,
             clean_confirm_exit: false,
             retention_days: default_retention(),
+            // 深色自动加浓的指定值：默认 100（见 dark_alpha 字段注释）
+            dark_alpha: default_dark_alpha(),
             // 相同内容 60 秒内合并并置顶（见 default_dedup_mode 的说明）
             dedup_mode: default_dedup_mode(),
             // 置顶/收藏默认不受保留期影响
@@ -511,6 +568,9 @@ impl Default for Config {
             asked_autostart: false,
             asked_tray_on_close: false,
             round_mode: false,
+            auto_alpha_dark: true,
+            // 新配置直接就是新语义，不需要交换
+            alpha_inverted: true,
             file_copy: false, // 默认关闭：不记录文件复制
             // 默认关闭：删条目只删记录，不碰磁盘上的真实文件
             delete_files_with_item: false,
@@ -738,6 +798,8 @@ pub fn get_settings() -> serde_json::Value {
         "alphaStraight": cfg.alpha_straight,
         "alphaRound": cfg.alpha_round,
         "roundMode": cfg.round_mode,
+        "autoAlphaDark": cfg.auto_alpha_dark,
+        "darkAlpha": cfg.dark_alpha,
         "fileCopy": cfg.file_copy,
         "deleteFilesWithItem": cfg.delete_files_with_item,
         "deleteFilesPermanent": cfg.delete_files_permanent,
@@ -781,6 +843,21 @@ pub fn dismiss_onboarding(kind: String) -> Result<(), String> {
         }
         other => return Err(format!("未知的引导项：{other}")),
     }
+    Ok(())
+}
+
+/// 高级材质下「深色自动加浓」开关（设置页，默认开）
+#[tauri::command]
+pub fn set_auto_alpha_dark(value: bool) -> Result<(), String> {
+    update(|c| c.auto_alpha_dark = value);
+    Ok(())
+}
+
+/// 深色自动加浓的「指定值」：用户在深色 + 自动加浓状态下拖浓度滑条时落盘到这里。
+/// 与 `set_material_alpha`（日常浓度）分开 —— 两条线互不踩（见 `dark_alpha` 字段注释）。
+#[tauri::command]
+pub fn set_dark_alpha(value: u32) -> Result<(), String> {
+    update(|c| c.dark_alpha = value.clamp(ALPHA_MIN, ALPHA_MAX));
     Ok(())
 }
 
@@ -854,6 +931,10 @@ pub fn set_theme_mode(app: tauri::AppHandle, value: String) -> Result<(), String
             crate::effects::refresh_after_theme_switch(&w);
         }
     }
+    // 菜单的配色是页面里的 `body.dark` 类（CSS 无 prefers-color-scheme），
+    // 只能在窗口**隐藏时**推过去 —— 等到右键 show 之后再推，用户看到的就是
+    // 「菜单先按旧配色出来，再闪一下变色」。
+    crate::tray::sync_menu_appearance(&app);
     Ok(())
 }
 

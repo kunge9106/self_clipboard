@@ -1,28 +1,24 @@
 /* ===========================================================================
-   动效系统
+   动效系统 · 入口
    ---------------------------------------------------------------------------
-   全项目唯一的动画定义处。业务代码只加具名效果的 class（.fx-*），
-   不写裸 @keyframes、不硬编码时长与缓动 —— 否则同一种「淡入」会在十个地方
-   各写一遍，改一次要翻十个文件。
+   三层结构，本文件只做聚合与「纯声明式」效果：
 
-   用法：
+     L1  src/animations/tokens.css     数值唯一来源（时长/缓动/距离）
+     L2  src/animations/presets.js     具名效果（程序化播放用）
+         src/animations/segmented.css  滑轨组件样式
+     L3  src/animations/index.js       业务唯一入口（play / swap / initMotion）
+
+   本文件保留 `.fx-*` —— 给**不需要方向、不需要重播**的静态场景：
      <div class="fx-fade-up">…</div>
-     需要重播 → 先 classList.remove，强制回流后再 add（见 main.js 的 replayFx）。
+   需要方向、串联、中途取消时用 JS 的 play()，别在 HTML 里堆 class。
+
+   铁律：不写裸 @keyframes（要写就进 presets.js），不硬编码时长与缓动。
    =========================================================================== */
 
-:root {
-  /* 时长：三档够用。fast 给微交互（hover），base 给内容进场，slow 给容器出现 */
-  --dur-fast: 0.12s;
-  --dur-base: 0.22s;
-  --dur-slow: 0.34s;
 
-  /* 缓动：out 用于「进场后停住」，spring 带一点回弹（只给缩放用） */
-  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
-  --ease-spring: cubic-bezier(0.34, 1.32, 0.64, 1);
+@import "./animations/tokens.css";
+@import "./animations/segmented.css";
 
-  /* 逐条错开的间隔：列表类内容一条一条浮上来，比整体一起淡入有层次 */
-  --fx-step: 45ms;
-}
 
 @keyframes fx-fade-in {
   from {
@@ -62,7 +58,9 @@
 }
 
 .fx-fade-up {
-  animation: fx-fade-up var(--dur-base) var(--ease-out) both;
+  /* 与 presets.js 的 "fade-up" 用同一个曲线 —— 同一个效果不能有两套参数，
+     否则「HTML 里写 class」和「JS 里 play()」出来的手感会不一样。 */
+  animation: fx-fade-up var(--dur-base) var(--ease-glide) both;
 }
 
 .fx-pop-in {
