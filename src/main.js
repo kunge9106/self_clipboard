@@ -3610,9 +3610,9 @@ function renderUpdatePanels() {
     tip.className = "about-state is-err";
     tip.textContent = "下载失败，请检查网络";
   } else if (has && info?.downloadedPath) {
-    // 有新版，且包已经下好了（用户上次在安装器上取消了）→ 提示直接装
+    // 已就绪：包装好了但不自动装。提前说清「安装时会退出」，让用户自己决定何时点。
     tip.className = "about-state is-new";
-    tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，已下载，点击「立即安装」`;
+    tip.innerHTML = `新版本 <b>v${esc(info.latest)}</b> 已下载，安装时轻贴会退出`;
   } else if (has) {
     tip.className = "about-state is-new";
     tip.innerHTML = `发现新版本 <b>v${esc(info.latest)}</b>，当前 v${esc(cur)}`;
@@ -3699,8 +3699,7 @@ function setDownloadDone(text) {
 
 /// 下载态按钮只有 142px 宽且 `overflow:hidden`，白字层 `white-space:nowrap`。
 /// 超过约 10 个中文字就会两端被裁 —— 原「下载完成，正在启动安装程序…」实测
-/// 只剩中间那段（用户截图「载完成，正在启动安装程序」）。文案上限写在这里，
-/// 两处共用，避免以后又塞长句子进去。
+/// 只剩中间那段。现在只在用户主动点「立即安装」时短暂显示这句。
 const INSTALL_START_LABEL = "正在启动安装…";
 
 /**
@@ -3725,25 +3724,20 @@ async function startDownload() {
   if (dlState.running) return;
   dlState = { running: true, percent: 0, error: "" };
   renderUpdatePanels();
-  let downloaded = "";
   try {
-    downloaded = await invoke("download_update");
-    setDownloadDone(INSTALL_START_LABEL);
-    // Rust 会先用 runas 拉起安装器（触发 UAC），再退出自己 ——
-    // 安装器要覆盖 exe，本进程正锁着它。
-    await invoke("install_downloaded", { path: downloaded });
+    await invoke("download_update");
+    // **下载完成不等于立刻安装**。旧实现下载一结束就 runas 拉起安装器，
+    // 用户还没决定就被弹 UAC；点「否」还会被归到 dlState.error，报成
+    // 「下载失败，请检查网络」。大厂做法是进入「已就绪」，由用户点「立即安装」。
+    await refreshUpdateState();
+    dlState = { running: false, percent: 0, error: "" };
+    renderUpdatePanels();
+    toast("下载完成，点「立即安装」开始更新");
   } catch (e) {
-    // 分开报：下载失败和「下载好了但安装器起不来」是两回事
-    dlState = {
-      running: false,
-      percent: 0,
-      error: downloaded ? `启动安装程序失败（${e}）` : String(e),
-    };
-    // 包可能已下好但拉起失败，也可能中途被删：都要从后端重算一遍状态，
-    // 否则按钮会停在「正在启动安装…」或「立即安装」不再变化。
+    dlState = { running: false, percent: 0, error: String(e) };
     await refreshUpdateState();
     renderUpdatePanels();
-    toast(downloaded ? "无法启动安装，请重新下载" : "下载失败，请检查网络");
+    toast("下载失败，请检查网络");
   }
 }
 
@@ -3754,17 +3748,23 @@ async function startDownload() {
 async function installDownloaded() {
   const path = updateInfo?.downloadedPath;
   if (!path) return;
+  toast("安装时轻贴会退出，取消安装后重新打开即可");
   setDownloadDone(INSTALL_START_LABEL);
   try {
-    await invoke("install_downloaded", { path });
+    const r = await invoke("install_downloaded", { path });
+    if (r?.launched) {
+      // 后端确认安装器已启动（UAC 已通过）后才退出自己，前端无需再做任何事
+      toast("正在安装，轻贴即将退出");
+      return;
+    }
+    // 用户在 UAC 点「否」：不是错误、不是下载失败，**包还在、按钮保持可重试**
+    toast(r?.cancelled ? "已取消安装，可点「立即安装」重试" : "安装程序未启动，请重试");
   } catch (e) {
-    // 失败原因可能是 UAC 点否，也可能是**包已被用户手动删除**。两者都要刷新
-    // 状态：前者按钮回到「立即安装」，后者要回到「下载最新版」——
-    // 只重绘不刷新，前端缓存里的 downloadedPath 还在，按钮就永远是「立即安装」。
-    await refreshUpdateState();
+    // 包被删 / 校验失败：重读状态，按钮回到可下载或可安装
     toast("无法启动安装，请重新下载");
-    renderUpdatePanels();
   }
+  await refreshUpdateState();
+  renderUpdatePanels();
 }
 
 async function loadAbout() {
