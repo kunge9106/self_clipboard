@@ -281,7 +281,9 @@ extern "system" {
     fn PostMessageW(hwnd: isize, msg: u32, w: usize, l: isize) -> i32;
     fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32)
         -> i32;
-    fn InvalidateRect(hwnd: isize, rect: *const WinRect, erase: i32) -> i32;
+    // 与 effects.rs 里那份签名一致（*const c_void）：extern 符号按 crate 全局去重，
+    // 签名不同会告警。两处调用都只传 null，c_void 通用。
+    fn InvalidateRect(hwnd: isize, rect: *const core::ffi::c_void, erase: i32) -> i32;
     fn SetCapture(hwnd: isize) -> isize;
     fn ReleaseCapture() -> i32;
     fn GetCursorPos(pt: *mut crate::effects::Rect) -> i32;
