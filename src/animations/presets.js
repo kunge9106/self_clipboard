@@ -82,6 +82,30 @@ export const PRESETS = {
   },
 
   /**
+   * 页面切换的**离场**：旧内容淡出并向切换的反方向退开。
+   *
+   * 与 `slide-in` 成对使用，时长同为 `--swap-dur`，两边同时开始同时结束 ——
+   * 这才是「交叉」淡出；串行（先淡出再淡入）总时长会翻倍，桌面点击会觉得粘。
+   *
+   * 为什么退开而不是缩小（scale）：新内容是用位移进场的，旧内容也用位移退场，
+   * 两边的「运动语言」才一致。一边缩放一边平移会像两个不同维度的动画叠在一起。
+   */
+  "ghost-out": (opts, t) => {
+    const axis = opts.axis === "y" ? "y" : "x";
+    // 与入场方向相反：新内容从右边进来，旧内容就往左边退
+    const sign = -dir(opts.from);
+    const px = t.px("--fx-shift-near");
+    return {
+      keyframes: [
+        { opacity: 1, transform: "none" },
+        { opacity: 0, transform: shift(axis, sign, px) },
+      ],
+      dur: "--swap-dur",
+      ease: "--ease-out",
+    };
+  },
+
+  /**
    * 离场：方向与入场相反、时长更短。
    * 目前只有弹层关闭用得到；保留它是因为「进场 base / 离场 fast」是通例，
    * 等到别处需要时不必再想一遍用哪档。

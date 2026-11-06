@@ -3,7 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { buildFilter, createHistoryApi } from "./history-api.js";
 import { decidePurgeAction } from "./purge-decision.js";
 // 动效统一入口：业务不写关键帧/时长/缓动，只说「播哪个效果、往哪个方向」
-import { initMotion, play, swap } from "./animations/index.js";
+import {
+  initMotion,
+  play,
+  swap,
+  captureGhost,
+  releaseGhost,
+  discardGhost,
+} from "./animations/index.js";
 import { createTip } from "./tip.js";
 import { VirtualList } from "./virtual-list.js";
 import { listen } from "@tauri-apps/api/event";
@@ -937,12 +944,28 @@ function bindClearViewModal() {
 /// 等真正画完再播 —— 直接在点击处播会在旧内容上动画。
 let navSwapDir = 0;
 
-/** 渲染完成后统一广播一次切换入场。非导航触发的重绘（删除/置顶/新内容）直接跳过 */
+/// 点击导航那一刻克隆的旧页面快照。渲染是异步的（await 取页），
+/// 所以捕获放在点击处、释放放到渲染完成处 —— 中间旧内容还真实地留在屏幕上，
+/// 用户不会看到「点了没反应」。
+let pendingGhost = null;
+
+/**
+ * 渲染完成后统一广播一次切换：新内容入场 + 旧页面快照离场（交叉淡出）。
+ * 非导航触发的重绘（删除/置顶/新内容到达）既没有方向也没有快照，直接跳过。
+ */
 function flushNavSwap(el) {
-  if (!navSwapDir || !el) return;
   const from = navSwapDir;
+  const ghost = pendingGhost;
   navSwapDir = 0;
-  play(el, "slide-in", { axis: "y", from });
+  pendingGhost = null;
+
+  // 渲染被作废（token 对不上 / 提前 return）：别把快照留在屏幕上
+  if (!el) {
+    discardGhost();
+    return;
+  }
+  if (ghost) releaseGhost(ghost, { axis: "y", from: from || 1 });
+  if (from) play(el, "slide-in", { axis: "y", from });
 }
 
 function bindNav() {
@@ -957,6 +980,8 @@ function bindNav() {
     const navItems = [...document.querySelectorAll(".nav-item[data-view]")];
     const prevIdx = navItems.findIndex((n) => n.classList.contains("is-active"));
     navSwapDir = navItems.indexOf(item) >= prevIdx ? 1 : -1;
+    // 旧页面快照要在改 DOM 之前拍：等渲染完成时它已经被 innerHTML 换掉了
+    pendingGhost = captureGhost(document.querySelector(".view"));
     document
       .querySelectorAll(".nav-item")
       .forEach((n) => n.classList.remove("is-active"));
@@ -4122,12 +4147,16 @@ function bindSettings(view) {
       // 方向由栏目在表里的先后决定：往后翻从右进，往前翻从左进
       const prevIdx = SETTINGS_TABS.findIndex((t) => t.id === settingsTab);
       const nextIdx = SETTINGS_TABS.findIndex((t) => t.id === id);
+      const dirX = nextIdx >= prevIdx ? 1 : -1;
       settingsTab = id;
+      // 换 DOM 之前拍快照，之后放它离场 —— 与新内容入场同时进行
+      const ghost = captureGhost(view);
       view.innerHTML = settingsHtml();
       bindSettings(view);
       initMotion(view);
+      releaseGhost(ghost, { axis: "x", from: dirX });
       const body = view.querySelector(".settings-body");
-      if (body) swap(body, { axis: "x", from: nextIdx >= prevIdx ? 1 : -1 });
+      if (body) swap(body, { axis: "x", from: dirX });
     };
   });
 

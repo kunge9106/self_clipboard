@@ -25,6 +25,11 @@
    =========================================================================== */
 
 import { mountSegmented } from "./controllers/segmented.js";
+import {
+  captureGhost,
+  releaseGhost,
+  discardGhost,
+} from "./controllers/pageGhost.js";
 import { play, swap, shouldAnimate, tokens, resetSwap } from "./runtime.js";
 
 /** 需要滑动指示块的容器：加新控件类型时在这里补选择器即可 */
@@ -47,4 +52,15 @@ export function initMotion(root = document) {
   return n;
 }
 
-export { play, swap, shouldAnimate, tokens, resetSwap, mountSegmented };
+export {
+  play,
+  swap,
+  shouldAnimate,
+  tokens,
+  resetSwap,
+  mountSegmented,
+  // 页面切换的交叉淡出：capture 在替换 DOM **之前**，release 在之后
+  captureGhost,
+  releaseGhost,
+  discardGhost,
+};
