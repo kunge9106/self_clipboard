@@ -73,7 +73,10 @@ fn set_round_mode(app: tauri::AppHandle, value: bool) -> Result<(), String> {
         use tauri::Manager;
         if let Some(w) = app.get_webview_window("main") {
             if let Ok(h) = w.hwnd() {
-                let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
+                // 用 effective_dark，不用 `w.theme()`：手动钉了深浅色之后
+                // `theme()` 返回的仍是**系统**主题，拿它算 dark 会把 tint 算反
+                // （比如手动选深色、系统是浅色 → 下发浅色 tint，整窗发灰）
+                let dark = effects::effective_dark(&w);
                 effects::apply_round_mode(h.0 as isize, dark);
             }
         }
@@ -94,7 +97,7 @@ fn set_material_alpha(app: tauri::AppHandle, value: u32) -> Result<(), String> {
         use tauri::Manager;
         if let Some(w) = app.get_webview_window("main") {
             if let Ok(h) = w.hwnd() {
-                let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
+                let dark = effects::effective_dark(&w);
                 effects::reapply_material(h.0 as isize, dark);
             }
         }
@@ -172,7 +175,15 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
         match event {
             tauri::WindowEvent::ThemeChanged(theme) => {
                 crate::log_print!("[effects] 系统主题切换 → {:?}", theme);
-                effects::refresh_theme(hwnd, matches!(theme, Theme::Dark));
+                // 只有「跟随系统」时才响应。手动钉了浅色/深色后，系统怎么切都与
+                // 本窗口无关 —— 照旧重刷会把 tint 改成系统那套（手动选深色、
+                // 系统切浅色 → 窗口发灰），前端 body.dark 却没变，两边对不上。
+                if settings::get().theme_mode == "system" {
+                    effects::refresh_theme(hwnd, matches!(theme, Theme::Dark));
+                    // 菜单页的配色靠 JS 里的 `body.dark`，不会自己跟随系统事件 ——
+                    // 隐藏时就推过去，右键弹出那一刻才是对的颜色。
+                    crate::tray::sync_menu_appearance(&app_for_events);
+                }
             }
             // SetWindowRgn 的区域不会随窗口缩放自动跟随，必须重设。
             // 但逐帧重建区域会让缩放卡顿 → 改为缩放中清区域、停止后恢复。

@@ -706,6 +706,14 @@ pub fn restore_visuals(hwnd: isize, dark: bool, reason: &str) -> Tier {
     reassert_transparency(hwnd);
     let tier = apply_with(hwnd, dark, reason);
     nudge(hwnd);
+    // **材质就位之后**才强制重绘。
+    //
+    // 这一步原先写在 `reassert_transparency` 里，顺序上是「backdrop 刚被清成
+    // NONE、目标值还没设回」——`InvalidateRect` 的立即失效会逼 DWM 当场合成
+    // 这一帧中间态：窗口本体全透明 + 没有 backdrop = 桌面直接透出来。
+    // 用户看到的就是「切深浅色时闪一下，直接透明出背景」。
+    // 同步序列写完再失效，DWM 按 vsync 只看到最终状态。
+    force_redraw(hwnd);
     log_backdrop_state(hwnd, reason);
     tier
 }
@@ -715,13 +723,17 @@ pub fn restore_visuals(hwnd: isize, dark: bool, reason: &str) -> Tier {
 /// `DwmEnableBlurBehindWindow` + 空区域（`CreateRectRgn(0,0,-1,-1)`）是 tao 创建
 /// 透明窗口时用的原始配方；重放它等于恢复「窗口本体不画任何东西」的状态。
 /// 单独清 backdrop 不够 —— 那是**材质**层，而透明是**窗口**层，两层得分别管。
+///
+/// ⚠ 这里**只重放属性，不催重绘**。催重绘（`InvalidateRect`）会立即合成一帧，
+/// 而调用点上 backdrop 往往还处在「已清成 NONE、尚未设回」的中间态 —— 那一帧
+/// 就是「整窗透明、桌面透出来」。需要重绘时由调用方在材质就位之后显式调
+/// [`force_redraw`]。
 fn reassert_transparency(hwnd: isize) {
     unsafe {
         extern "system" {
             fn DwmEnableBlurBehindWindow(hwnd: isize, bb: *const BlurBehind) -> i32;
             fn CreateRectRgn(x1: i32, y1: i32, x2: i32, y2: i32) -> isize;
             fn DeleteObject(obj: isize) -> i32;
-            fn InvalidateRect(hwnd: isize, rect: *const c_void, erase: i32) -> i32;
         }
         #[repr(C)]
         struct BlurBehind {
@@ -747,7 +759,18 @@ fn reassert_transparency(hwnd: isize) {
                 crate::log_warn!("[effects] 重新断言窗口透明失败 hr=0x{:08X}", hr as u32);
             }
         }
-        // 立即失效一次，让 DWM 用新的透明状态重画
+    }
+}
+
+/// 立即失效整窗，逼 DWM 用当前状态重画一次。
+///
+/// 只在**材质已经下发到位**之后调用。提前调会把中间态（无 backdrop + 全透明）
+/// 合成到屏幕上 —— 见 [`reassert_transparency`] 的注释。
+fn force_redraw(hwnd: isize) {
+    unsafe {
+        extern "system" {
+            fn InvalidateRect(hwnd: isize, rect: *const c_void, erase: i32) -> i32;
+        }
         InvalidateRect(hwnd, std::ptr::null(), 0);
     }
 }
@@ -1103,13 +1126,22 @@ pub fn refresh_after_theme_switch(window: &tauri::WebviewWindow) {
 }
 
 /// 主题视觉的实际刷新。`pass` 只用于日志。
+///
+/// **走静默补涂，不走响亮复位**：这是窗口**可见期间**的唯一一条材质路径。
+/// `restore_visuals` 会先把 backdrop 清成 NONE 再设回（为了强制 DWM 重建），
+/// 在屏幕上就是「先拆掉材质、再装回去」；配上清屏的时机不稳，用户看到的是
+/// 「切深浅色时有几率闪一下，直接透明出背景」。
+///
+/// 而切主题这里其实没丢东西：`set_theme_mode` 已经不再调 `window.set_theme()`
+/// （见那里的注释），tao 不会重建非客户区，DWM 也不需要整份复位 ——
+/// 只有 `DWMWA_USE_IMMERSIVE_DARK_MODE` 的值真的变了，DWM 自己会重算 backdrop。
 fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
-    let dark = effective_dark(window);
-    let Ok(h) = window.hwnd() else {
-        return;
-    };
-    restore_visuals(h.0 as isize, dark, "theme-refresh");
-    crate::log_print!("[effects] 主题视觉重刷完成（第 {pass} 遍，dark={dark}）");
+    let tier = reapply_visuals_for(window, "theme-refresh");
+    crate::log_print!(
+        "[effects] 主题视觉重刷完成（第 {pass} 遍，dark={}，tier={}）",
+        effective_dark(window),
+        tier.map(|t| t.as_str()).unwrap_or("unknown")
+    );
 }
 
 // ---------------------------------------------------------------------------

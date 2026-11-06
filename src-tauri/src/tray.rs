@@ -138,9 +138,12 @@ fn open_menu(app: &AppHandle, pos: PhysicalPosition<f64>) {
         crate::effects::install_menu_nc_hook(h.0 as isize);
     }
 
-    // 菜单是懒创建的，setup 时它还不存在 —— 每次弹出时按设置钉一次主题，
-    // 免得主界面深色、菜单浅色（用户手动选了浅色但系统是深色时最容易撞上）。
-    crate::effects::apply_theme_mode(&win);
+    // **不要再调 `apply_theme_mode`**：它走到 `window.set_theme()`，对
+    // `decorations=false` 的窗口没有任何可见收益（深色偏好只作用于原生装饰），
+    // 却会让 tao 重走 `set_window_flags`，把菜单窗口整个非客户区重建一次 ——
+    // 用户看到的就是「右键后菜单出来那一下闪一下」。
+    // 深浅观感由前端 `body.dark` 决定（CSS 里没有 prefers-color-scheme），
+    // 参数在窗口**隐藏时**就已经推过去了，见 `sync_menu_appearance`。
 
     // 材质必须在 show **之前**上好：菜单窗口同样是 hide→show 复用，显示后再改
     // 属性用户会看到「先灰、再变样」（主窗口 show_main 同一顺序）。
@@ -189,6 +192,22 @@ fn look(win: &WebviewWindow) -> MenuLook {
 pub fn tray_menu_look(app: AppHandle) -> Result<MenuLook, String> {
     let win = app.get_webview_window(MENU_LABEL).ok_or("菜单窗口不存在")?;
     Ok(look(&win))
+}
+
+/// 把当前外观参数推给菜单页 —— **窗口不必可见**。
+///
+/// 菜单是复用的常驻 WebView，只在右键时 show。若等到 show 之后再推主题，
+/// 页面会先按旧配色画出来、再闪一下换成新的（用户实测：「切换深浅色后，
+/// 托盘菜单好像是在右键后出来才切换深浅色，这个时候也会闪一下」）。
+///
+/// 所以切深浅色时就把参数推给**隐藏中**的页面，弹出那一刻已经是新配色。
+/// 与 `open_menu` 末尾那次推送同源（都走 `look`），重复推送幂等。
+pub fn sync_menu_appearance(app: &AppHandle) {
+    // 窗口没建过就什么都不做：首次创建时页面自己会拉 `tray_menu_look`
+    let Some(win) = app.get_webview_window(MENU_LABEL) else {
+        return;
+    };
+    let _ = app.emit_to(MENU_LABEL, "tray-menu-open", look(&win));
 }
 
 #[cfg(windows)]

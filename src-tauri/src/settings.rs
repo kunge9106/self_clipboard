@@ -463,11 +463,15 @@ fn default_screenshot_mode() -> String {
 pub const STRAIGHT_ALPHA: u32 = 90;
 /// 高级材质（有系统模糊）的默认浓度。
 ///
-/// 40 是实测观感的最佳点：系统 backdrop 自带模糊 + 饱和增强，40% 的色层
-/// 在深浅两种主题下文字对比度都稳、毛玻璃又明显可见 ——
+/// 35 是实测观感的最佳点：系统 backdrop 自带模糊 + 饱和增强，35% 的色层
+/// 在浅色下文字对比度仍然稳、毛玻璃又明显可见 ——
 /// 45 偏闷（模糊被盖住一半），30 以下亮壁纸读字吃力。
 /// 90 会让模糊只剩 10%，等于白开（早期默认，已被推翻）。
-pub const ROUND_ALPHA: u32 = 40;
+///
+/// 这个值与设置页说明里的「推荐：浅色 35%」必须一致：文案写 35、实际默认 40，
+/// 用户一开就会觉得哪里不对。深色那档的 55% 是**关掉自动加浓**时的建议值，
+/// 打开自动加浓仍然升到 100（`default_dark_alpha`）。
+pub const ROUND_ALPHA: u32 = 35;
 
 fn default_alpha_straight() -> u32 {
     STRAIGHT_ALPHA
@@ -927,6 +931,10 @@ pub fn set_theme_mode(app: tauri::AppHandle, value: String) -> Result<(), String
             crate::effects::refresh_after_theme_switch(&w);
         }
     }
+    // 菜单的配色是页面里的 `body.dark` 类（CSS 无 prefers-color-scheme），
+    // 只能在窗口**隐藏时**推过去 —— 等到右键 show 之后再推，用户看到的就是
+    // 「菜单先按旧配色出来，再闪一下变色」。
+    crate::tray::sync_menu_appearance(&app);
     Ok(())
 }
 

@@ -146,18 +146,6 @@ function applyTheme(dark) {
 }
 
 /**
- * 高级材质（round 模式）下，深浅切换要连带调整材质浓度。
- *
- * 它没有系统背景模糊，窗口后面就是清晰的桌面。这种状态下：
- *   · 深色必须拉满（100，完全不透）才压得住亮壁纸，否则一片惨白；
- *   · 浅色则要恢复用户自己调的那个值 —— 浅色本来就不怕亮壁纸。
- *
- * 所以只在**主题真的变了**时动作（启动时 `applyTheme` 也会被调，那时不该覆盖用户设置）。
- * 刻意**不写回 settings**：100 是「深色下的派生值」，不是用户的选择；
- * 若写回去，切回浅色就恢复不回原值了（这正是之前把 0.96 写死在 CSS 里犯的错，
- * 只是换了个位置）。
- */
-/**
  * 把浓度同步到设置页滑块：值 + 读数 + 自绘轨道的已填充比例（--fill）。
  * 滑块不在页面上时静默跳过 —— 深浅切换的后台路径也走这里。
  *
@@ -178,24 +166,57 @@ function setMaterialSlider(v) {
  * 深色自动加浓此刻是否在「接管」浓度：
  * 深色 + 高级材质 + 开关打开，三者齐了才接管。接管时滑条改的是
  * `settings.darkAlpha`（深色专属值），日常浓度（浅色用）原封不动。
+ *
+ * 可传一份快照（设置页渲染时手里那份就是 `s`），不传就用模块级 `settings`。
  */
-function darkBoostActive() {
+function darkBoostActive(s = settings) {
   return (
     document.body.classList.contains("dark") &&
-    !!settings?.roundMode &&
-    settings.autoAlphaDark !== false
+    !!s?.roundMode &&
+    s.autoAlphaDark !== false
   );
 }
 
-function applyThemeDependentAlpha(wasDark, isDark) {
-  // 三个条件缺一不可：模式是高级材质、用户没关掉这个行为、主题真的变了
-  if (!settings?.roundMode || settings.autoAlphaDark === false || wasDark === isDark) return;
-  // 深色用「深色专属值」（默认 100；用户在深色下拖过滑条就是他调的值），
-  // 浅色恢复日常浓度。两条线分开记，互不踩。
-  const v = isDark ? (settings.darkAlpha ?? 100) : (settings.materialAlpha ?? 90);
+/**
+ * 此刻**应该**生效的浓度 —— 全局唯一判定入口。
+ *
+ * 涉及三条线，各写一份必然对不上：
+ *   · `materialAlpha`：用户日常调的那一档（浅色用）；
+ *   · `darkAlpha`：深色专属值（默认 100；用户在深色下拖过滑条就是那个值）；
+ *   · `autoAlphaDark`：深色自动加浓开关。
+ * 深色 + 高级材质 + 开关打开 → 用深色值，否则用日常值。
+ */
+function effectiveAlpha(s = settings) {
+  return darkBoostActive(s)
+    ? (s?.darkAlpha ?? 100)
+    : (s?.materialAlpha ?? 35);
+}
+
+/**
+ * 把「应该生效的浓度」落到界面：CSS 变量 + 设置页滑块与读数。
+ *
+ * 开关深色加浓、切深浅色、切高级材质**三条路径都走这里**。
+ * 之前各处各写一份，结果「打开自动加浓」那条漏了应用：关掉会还原成日常值，
+ * 再打开却停在日常值不动，非得再切一次深浅色才回到深色值（用户实测）。
+ * 状态来自 `settings`，所以只要重新算一遍就必然自洽 —— 不需要再记「上一次是
+ * 哪个模式」之类的中间态。
+ */
+function syncEffectiveAlpha() {
+  const v = effectiveAlpha();
   applyGlassAlpha(v);
-  // 滑块在设置页可见时同步读数，否则界面显示 60、实际 90
   setMaterialSlider(v);
+}
+
+/**
+ * 深浅切换时把浓度连带刷新一遍。
+ *
+ * 深色下窗口后面往往是亮壁纸，同一浓度的色层压不住 —— 所以要有一套「深色专属
+ * 浓度」（默认 100，也允许用户自己调）。这里只负责**在主题真的变了时重算一次**，
+ * 用哪一档由 `effectiveAlpha` 判定。启动时 `applyTheme` 也会被调，那时不用整。
+ */
+function applyThemeDependentAlpha(wasDark, isDark) {
+  if (wasDark === isDark) return;
+  syncEffectiveAlpha();
 }
 
 /// 侧栏那个切换按钮的文案跟着当前深浅变：深色时写「浅色」，点了就去浅色。
@@ -3109,6 +3130,10 @@ function settingsGeneralHtml(s) {
 }
 
 function settingsAppearanceHtml(s) {
+  // 滑条首帧显示的必须是**当前实际生效**的那个值：深色接管期间它是深色值，
+  // 否则显示日常值 —— 用户会以为「开了加浓却没生效」。
+  // 与拖动、切主题共用同一个判定（`effectiveAlpha`），不再各拼一份。
+  const shownAlpha = effectiveAlpha(s);
   return [
     block(
       "主题",
@@ -3127,12 +3152,7 @@ function settingsAppearanceHtml(s) {
       rowCtl(
         "材质浓度",
         "越高越厚实 · 越低越通透",
-        `<input type="range" id="set-material" min="1" max="100" value="${
-          // 深色接管期间滑条代表的是「深色值」—— 显示日常值会让人以为没生效
-          darkBoostActive() ? s.darkAlpha ?? 100 : s.materialAlpha ?? 50
-        }" /><span class="hint" id="material-val">${
-          darkBoostActive() ? s.darkAlpha ?? 100 : s.materialAlpha ?? 50
-        }%</span>`
+        `<input type="range" id="set-material" min="1" max="100" value="${shownAlpha}" /><span class="hint" id="material-val">${shownAlpha}%</span>`
       ) +
         rowCheck(
           "set-round",
@@ -3145,7 +3165,7 @@ function settingsAppearanceHtml(s) {
         rowCheck(
           "set-auto-dark-alpha",
           "深色自动加浓",
-          "高级材质下切到深色时，浓度自动升到 100%（你在深色下调过的话就用你调的值）；切回浅色恢复你设的值",
+          "高级材质下切至深色模式浓度自动升至 100%，支持手动调整；切回浅色模式自动恢复。推荐：浅色 35%，深色 55%",
           s.autoAlphaDark
         )
     ),
@@ -4447,29 +4467,42 @@ function bindSettings(view) {
     });
   }
 
-  // 圆角模式：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启。
+  // 「深色自动加浓」：开、关**两个方向**都要立刻把当前该生效的浓度落下去。
   //
-  // **浓度不跟着动**：直角 / 圆角两个模式各记着自己那一档
-  // （后端 alpha_straight / alpha_round），切模式只是换用另一档 ——
-  // 直角调到 68 → 切圆角（用圆角那档，比如 45）→ 切回直角仍是 68。
-  // 这里把该模式记住的那一档取回来，同步到滑块 / 标签 / 观感。
+  // 曾经只处理了「关」：关掉时还原成日常值，再打开却什么都不做 —— 浓度停在
+  // 日常值，非得再切一次深浅色（那条路径会重算）才回到深色专属值。用户实测
+  // 描述得准确：「关闭自动加浓会恢复到我设的浓度，打开它还是那个值，必须开关
+  // 一次深浅色才行」。
+  //
+  // 根因是当时按「关闭才需要还原」去想，而不是按「哪一档该生效」去想。
+  // 现在两个方向都只是重算一遍，判定只有一个来源（effectiveAlpha）。
   const autoDark = view.querySelector("#set-auto-dark-alpha");
   if (autoDark)
     autoDark.onchange = async () => {
       try {
         await invoke("set_auto_alpha_dark", { value: autoDark.checked });
         settings = await invoke("get_settings");
-        // 关掉时若正处在深色 + 高级材质，要把浓度还原成用户设的值，否则会停在 100
-        if (!autoDark.checked) {
-          applyGlassAlpha(settings.materialAlpha ?? 90);
-          setMaterialSlider(settings.materialAlpha ?? 90);
-        }
+        syncEffectiveAlpha();
+        reportFrontend(
+          "INFO",
+          "ui",
+          `深色自动加浓 → ${autoDark.checked ? "开" : "关"}（生效浓度 ${effectiveAlpha()}%）`
+        );
       } catch (e) {
         reportFrontend("warn", "settings", e);
         toast("设置没保存，请重试");
+        autoDark.checked = !autoDark.checked;
       }
     };
 
+  // 高级材质：切换后立即改动窗口材质（Rust）+ CSS 层观感，无需重启。
+  //
+  // 浓度不「重置成默认」，而是换用另一档：直角 / 圆角各记着自己那一档
+  // （后端 alpha_straight / alpha_round），直角调到 68 → 切高级材质（那档 35）
+  // → 切回直角仍是 68。
+  //
+  // 顺序有讲究：先 `applyRoundMode` 再拉配置 —— `darkBoostActive()` 要读新的
+  // `roundMode`，反了会按旧模式算一遍（刚开启高级材质却用直角那档的浓度）。
   const round = view.querySelector("#set-round");
   if (round)
     round.onchange = async () => {
@@ -4479,16 +4512,12 @@ function bindSettings(view) {
         applyRoundMode(round.checked);
         // 模式变了 → 当前生效的那一档（materialAlpha）也随之改变，重新拉一次配置
         settings = await invoke("get_settings");
-        const alpha = settings.materialAlpha ?? 50;
-        applyGlassAlpha(alpha);
-        // 与拖动滑块那条路径保持一致：只显示百分比。
-        // 这里曾经写成 `${alpha}%（越高越厚实 · 越低越通透）`，用户切一次模式
-        // 括号就又冒出来了 —— 说明与上方「越高越厚实 · 越低越通透」重复。
-        setMaterialSlider(alpha);
+        syncEffectiveAlpha();
+        const alpha = effectiveAlpha();
         toast(
           round.checked
-            ? `已切换为圆角模式（无背景模糊）· 浓度 ${alpha}%`
-            : `已切换为直角模式（保留背景模糊）· 浓度 ${alpha}%`
+            ? `已开启高级材质 · 浓度 ${alpha}%`
+            : `已关闭高级材质 · 浓度 ${alpha}%`
         );
       } catch (e) {
         toast("未保存，请重试");
@@ -4627,8 +4656,11 @@ async function main() {
   // 配置与版本号（状态栏）
   try {
     settings = await invoke("get_settings");
-    // 应用材质浓度（CSS 层，窗口主体的不透明度）
-    applyGlassAlpha(settings.materialAlpha ?? 50);
+    // 先落一次浓度（CSS 层，窗口主体的不透明度）。此刻 body.dark 可能还没同步，
+    // 深色启动会先落浅色值、紧接着 `applyThemeMode` 再按深色值重算 —— 中间那一帧
+    // 发生在首帧绘制前后，肉眼看不到；反过来先套主题再落浓度则会把「未加载配置」
+    // 的默认值画到屏幕上。
+    applyGlassAlpha(settings.materialAlpha ?? 35);
     // 圆角模式（圆角 + 无系统模糊）
     applyRoundMode(settings.roundMode);
     // 主题三档（浅色/深色/系统）：单独 try，避免权限缺失时中断其余绑定
