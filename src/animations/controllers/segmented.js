@@ -25,6 +25,15 @@ const mounted = new WeakSet();
 export function mountSegmented(container) {
   if (!container || mounted.has(container)) return null;
 
+  // **重复挂载防护**：容器里若已有一块（可能是热更新前那版模块挂的），先清掉。
+  // `mounted` 是模块级 WeakSet，模块被重新执行时它是全新的、记不住旧挂载 ——
+  // 于是同一容器会被挂第二次，叠出两个 thumb：旧那个还跑着旧代码、还连着旧
+  // 的 MutationObserver，表现就是「点击后先闪一下再跳到位」。
+  // 用 :scope > 限定直接子元素，避免误删按钮内部的无关节点。
+  container
+    .querySelectorAll(":scope > .seg-thumb")
+    .forEach((old) => old.remove());
+
   const isTabs = container.classList.contains("settings-tabs");
   // 选中类：栏目用 is-active，分段用 on。以后新增同类控件只在这里加一条。
   const activeSel = isTabs ? ".is-active" : ".on";
