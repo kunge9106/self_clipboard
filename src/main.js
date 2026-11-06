@@ -3697,6 +3697,29 @@ function setDownloadDone(text) {
   setDownloadLabel(text);
 }
 
+/// 下载态按钮只有 142px 宽且 `overflow:hidden`，白字层 `white-space:nowrap`。
+/// 超过约 10 个中文字就会两端被裁 —— 原「下载完成，正在启动安装程序…」实测
+/// 只剩中间那段（用户截图「载完成，正在启动安装程序」）。文案上限写在这里，
+/// 两处共用，避免以后又塞长句子进去。
+const INSTALL_START_LABEL = "正在启动安装…";
+
+/**
+ * 从后端重读一次更新状态。`update_state` 只读本地缓存、不联网。
+ *
+ * **安装失败后必须调**：`updateInfo.downloadedPath` 是前端缓存，而后端每次
+ * 生成 payload 时会用 `p.is_file()` 重算「本地包是否还在」。用户手动删掉安装包
+ * 后再点「立即安装」会失败，此时若不刷新，前端仍以为包在，按钮停在「立即安装」——
+ * 提示让用户「重新下载」，界面上却没有这个按钮。
+ */
+async function refreshUpdateState() {
+  try {
+    updateInfo = await invoke("update_state");
+  } catch (_) {
+    // 拿不到后端状态时也要把按钮改对，不能留着一个点不动的「立即安装」
+    if (updateInfo) updateInfo = { ...updateInfo, downloadedPath: "" };
+  }
+}
+
 /** 点「下载最新版」：Rust 下到缓存目录 update/，完成后自动拉起安装器并退出本进程。 */
 async function startDownload() {
   if (dlState.running) return;
@@ -3705,7 +3728,7 @@ async function startDownload() {
   let downloaded = "";
   try {
     downloaded = await invoke("download_update");
-    setDownloadDone("下载完成，正在启动安装程序…");
+    setDownloadDone(INSTALL_START_LABEL);
     // Rust 会先用 runas 拉起安装器（触发 UAC），再退出自己 ——
     // 安装器要覆盖 exe，本进程正锁着它。
     await invoke("install_downloaded", { path: downloaded });
@@ -3716,6 +3739,9 @@ async function startDownload() {
       percent: 0,
       error: downloaded ? `启动安装程序失败（${e}）` : String(e),
     };
+    // 包可能已下好但拉起失败，也可能中途被删：都要从后端重算一遍状态，
+    // 否则按钮会停在「正在启动安装…」或「立即安装」不再变化。
+    await refreshUpdateState();
     renderUpdatePanels();
     toast(downloaded ? "无法启动安装，请重新下载" : "下载失败，请检查网络");
   }
@@ -3728,11 +3754,14 @@ async function startDownload() {
 async function installDownloaded() {
   const path = updateInfo?.downloadedPath;
   if (!path) return;
-  setDownloadDone("正在启动安装程序…");
+  setDownloadDone(INSTALL_START_LABEL);
   try {
     await invoke("install_downloaded", { path });
   } catch (e) {
-    // UAC 点否 / 安装器起不来：文件还在，按钮保持「重新安装」
+    // 失败原因可能是 UAC 点否，也可能是**包已被用户手动删除**。两者都要刷新
+    // 状态：前者按钮回到「立即安装」，后者要回到「下载最新版」——
+    // 只重绘不刷新，前端缓存里的 downloadedPath 还在，按钮就永远是「立即安装」。
+    await refreshUpdateState();
     toast("无法启动安装，请重新下载");
     renderUpdatePanels();
   }
