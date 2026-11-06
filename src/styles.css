@@ -149,6 +149,19 @@
   --app-top-light: rgba(255, 255, 255, 0.36);
   --app-bottom-shade: rgba(0, 0, 0, 0.05);
 
+  /* 文本选区：原来吃浏览器默认的亮蓝，在深色玻璃上刺眼、也与强调色不是一套。
+     只设背景不设字色 —— 字色保持原样一定可读，设了反而要在深浅两处各调一次。 */
+  --selection-bg: rgba(47, 107, 255, 0.24);
+
+  /* 无系统模糊档的「窗口面料」：主窗口与托盘菜单共用一份。
+     原先托盘菜单自己抄了一版简化公式（无低浓度收敛项），于是同样拉到 1% 时
+     托盘比主窗口厚 0.32，拖低浓度会看到两处不一致。收敛到同一份。 */
+  --surface-material: linear-gradient(
+    160deg,
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32 * min(1, calc(var(--glass-alpha) * 2))))),
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.2 * min(1, calc(var(--glass-alpha) * 2))))) 62%
+  );
+
   /* ══ 引导页装饰色 ══════════════════════════════════════════════════
      原来规则体里散着 21 处裸色值 + 4 条 body.dark 覆盖，改主题必漏。
      存成 **rgb 三元组**，透明度仍写在用它的地方 —— 因为「用多浓」属于
@@ -233,6 +246,43 @@
   --border-control: rgba(0, 0, 0, 0.19);
   /* 进度条空轨：玻璃白在浅色底上等于隐形，必须用「比底深一点」的中性色 */
   --track-bg: rgba(0, 0, 0, 0.08);
+
+  /* ── 分段控件（.seg）──────────────────────────────────────────────
+     原来是「8% 黑的槽 + 28% 白×mat-k 的选中块」，默认浓度下选中块只有
+     19.6% 白 —— 与槽的亮度几乎持平，看着既没有浮起感，滑动时也看不出
+     在动（用户反馈「丑、low」，同时觉得「有的分组没接动画」其实是同一件事）。
+     分段控件的选中块必须是**控件级实体**：近白、带下缘阴影，用凸起表达
+     「选中」。它不该跟着窗口材质一起变透 —— 控件读不清是可用性问题，
+     不是观感问题。 */
+  /* 槽：**冷色调**的半透明灰，不是中性灰。中性灰压在偏冷的玻璃上会发脏；
+     带一点蓝（18,30,58）才像「玻璃被压下去的地方」。
+
+     ⚠ **α 必须比深色档大得多，这不是对称的**。实测取色（用户截图）：
+     卡片 #e4e5e6（亮度 229）、槽 #d8dadd（218）—— 只差 11，控件连轮廓都
+     看不出来，白键像浮在空气里。深色档 20% 黑压在亮度 76 的卡片上能降 15，
+     视觉上就很明确；而亮背景下人眼对绝对差更不敏感（韦伯定律），
+     要降 20 左右才等效。所以浅色用 9%，不是把深色的 20% 等比缩放。
+
+     上沿吃阴影（光从上方来）+ 下沿一道反光（槽底的玻璃厚度），
+     一内一外两道才是「凹」；再加 0.5px 内描边**只定轮廓**（不是实线边框，
+     它细到看不见线，只让边界不糊在背景里）。 */
+  --seg-track-bg: rgba(18, 30, 58, 0.09);
+  --seg-track-inset: inset 0 1px 2px rgba(16, 28, 54, 0.1),
+    inset 0 0 0 0.5px rgba(16, 28, 54, 0.045),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.9);
+  /* 键：纯白实体，与「玻璃」相反的逻辑 —— 它要看起来是**放上去的**，
+     不是透出来的。所以不透明、带自己的光和影。 */
+  --seg-thumb-bg: #ffffff;
+  /* 圆角 = 容器 8 − 内距 2 = 6（无边框，故不再减 1）。内嵌块与容器角必须
+     同心，差 1px 在 200% 缩放下就能看出内角偏方。 */
+  --seg-thumb-radius: 6px;
+  /* **双层投影**是「打磨感」的关键：近处一层 1px 硬影定轮廓，
+     远处一层 5px 柔影给离地感。只有一层时，不是像贴纸就是像糊了一圈灰。 */
+  /* 发丝边（0.5px）+ 近硬影 + 远柔影：白键在浅底上必须有边界，
+     否则它和卡片同为白色，只剩一圈若有若无的影（实测截图就是这样）。 */
+  --seg-thumb-shadow: inset 0 1px 0 #ffffff,
+    inset 0 -1px 0 rgba(16, 28, 54, 0.045), 0 0 0 0.5px rgba(16, 28, 54, 0.07),
+    0 1px 2px rgba(16, 28, 54, 0.12), 0 2px 6px rgba(16, 28, 54, 0.08);
   /* 滚动条滑块：只是「你在哪儿」的辅助指示，不承担信息、不参与层级 ——
      所以是半透明中性色。原来四条规则各写一份裸 rgba（浅 .16/.28、深 .16/.28），
      想调一次色得同时想起另外三条，且深色那两条必须排在浅色之后才生效。 */
@@ -470,6 +520,8 @@ body.dark {
   --app-rim: rgba(255, 255, 255, 0.1);
   --app-top-light: rgba(255, 255, 255, 0.12);
   --app-bottom-shade: rgba(0, 0, 0, 0.16);
+  /* 深色选区要更亮一档：24% 的蓝压在近黑上几乎看不出来 */
+  --selection-bg: rgba(91, 140, 255, 0.32);
   /* 引导页深色：主色换亮蓝（与 --accent 同步），卡片渐变压进黑调；
      两团光斑在深底上要略强一点才看得见，圆点光晕同理。 */
   --tour-blue: 91 140 255;
@@ -519,6 +571,20 @@ body.dark {
   --stroke: rgba(255, 255, 255, 0.12);
   --border-control: rgba(255, 255, 255, 0.15);
   --track-bg: rgba(255, 255, 255, 0.14);
+
+  /* 深色：槽比原来更暗（0.14 的浅槽在暗底上发灰），滑块是半透白 + 顶部高光。
+     ⚠ 原实现里滑块 rgba(255,255,255,.09) 压在槽 .14 上 —— **滑块比槽还暗**，
+     深色下选中项完全看不出来。这是本次重做要修的实际缺陷。 */
+  /* 深色下「凹」必须靠**压暗**而不是提亮：槽比卡片更暗才读得出下沉。
+     原实现是滑块 9% 白压在槽 14% 白上 —— 滑块比槽还暗，选中项完全不可见。 */
+  --seg-track-bg: rgba(0, 0, 0, 0.2);
+  --seg-track-inset: inset 0 1px 3px rgba(0, 0, 0, 0.38),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+  --seg-thumb-bg: rgba(255, 255, 255, 0.2);
+  --seg-thumb-radius: 6px;
+  --seg-thumb-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2), 0 1px 1px rgba(0, 0, 0, 0.38),
+    0 2px 5px rgba(0, 0, 0, 0.3);
   /* 深色滚动条：白只给 .16。深底上白比黑显眼，.28 已经是明显的悬浮反馈，
      再高会像一根白棍横在列表右侧。 */
   --scrollbar-thumb: rgba(255, 255, 255, 0.16);
@@ -872,11 +938,8 @@ body.round .app {
    用 `0.32 * min(1, 2a)` 让偏移在 0→50% 之间线性长到满值、之后保持，
    于是 1% ≈ 全透、50% 以上观感与原来完全一致。 */
 body:not(.round) .app {
-  background: linear-gradient(
-    160deg,
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32 * min(1, calc(var(--glass-alpha) * 2))))),
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.20 * min(1, calc(var(--glass-alpha) * 2))))) 62%
-  );
+  /* 面料配方抽到 --surface-material，与托盘菜单共用一份（见 :root 注释） */
+  background: var(--surface-material);
 }
 
 /* 圆角模式（窗口接近实心）下，不止历史卡片，侧栏选中项与设置页的
@@ -1247,16 +1310,38 @@ body.dark #theme-toggle .i-sun {
   display: inline;
 }
 
-/* ── 设置页的三选一（浅色 / 深色 / 系统）────────────────────────────────
-   大厂那种分段控件：整块是个凹槽（--track-bg 已按主题分深浅），
-   选中项浮起来。不用单选框 —— 三选一且每一项都很短，分段更直观。 */
+/* ── 分段控件（三选一：立即 / 30 秒 / 5 分钟、浅色 / 深色 / 系统…）──────
+   三条约束，缺一条就退回「原生控件」的观感：
+
+   ① **等宽（grid 1fr）**。选项文字长短不一（立即 52px / 5 分钟 63px）时，
+      等宽让它们成为同样宽的格子，滑动就变成**纯位移**；不等宽则滑块要一边
+      走一边伸缩，看着像被拉扯。macOS 的分段控件也是等宽的。
+   ② **不画边框**。玻璃的边界靠亮度差 + 内阴影表达。一条实线会把它拉回
+      「输入框」观感 —— 那正是「未经打磨」的来源。
+   ③ **高度 30px**，与 `.btn` 完全一致。原先靠内距撑出 33px，比同一行的按钮、
+      开关都「胖」3px，用户看到的「与右侧控件缺乏对齐」主要就是它。
+
+   ⚠ 前两版为什么都不行（用户两次否掉）：
+   · 第一版：槽 8% 黑 + 选中块 `--glass-strong`（28% 白 × mat-k，默认浓度下
+     仅 19.6% 白）—— 亮度持平，选中项看不出来；深色更糟，滑块 9% 白压在
+     14% 白的槽上，**滑块比槽还暗**。
+   · 第二版：只改深浅与圆角 —— 但范式还是「两块不透明色块叠在玻璃上」，
+     所以怎么调都像原生控件。
+   结论：**槽与键要用相反的材质逻辑** —— 槽走「玻璃被压下去」，键走「实体
+   浮在上面」，靠两套不同的光影语言拉开层次，而不是同一套灰阶的两个深浅。 */
 .seg {
-  display: inline-flex;
+  /* inline-grid：每个选项自动等宽（1fr），不必给按钮写 width */
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  align-items: center;
   gap: 2px;
   padding: 2px;
-  border: 1px solid var(--border-control);
+  /* 容器 30 = 键 24 + 上下内距 4（无边框，故不再减 2） */
+  height: 30px;
   border-radius: var(--radius-sm);
-  background: var(--track-bg);
+  background: var(--seg-track-bg);
+  box-shadow: var(--seg-track-inset);
 }
 
 /* 从属选项：主开关关闭时整组置灰且不可点。
@@ -1264,22 +1349,40 @@ body.dark #theme-toggle .i-sun {
    用户会看到「明明灰着却改成功了」这种自相矛盾的行为。
    `.row` 版用于整行是从属项的情况（例如「截图时右键取消」只对系统截图有意义）。 */
 .seg button {
-  padding: 5px 14px;
+  /* 与 .btn 的 `height: 30px` 对齐：容器 30 − 上下内距 4 = 24。
+     水平方向**不靠 padding 定宽**（等宽由 grid 的 1fr 决定），只留最小内距
+     防止文字贴边；文字在格子里居中（justify-content: center）。 */
+  height: 24px;
+  padding: 0 8px;
+  justify-content: center;
   border: 0;
-  border-radius: var(--radius-xs);
+  /* 与滑块同圆角：否则挂上滑块前后，选中块的角形状会变一次 */
+  border-radius: var(--seg-thumb-radius);
   background: transparent;
   color: var(--text-dim);
   font-family: inherit;
   font-size: 12px;
+  line-height: 1;
+  /* 文字在 24px 高的按钮里垂直居中，与 .btn 用同一套做法 */
+  display: inline-flex;
+  align-items: center;
+  /* 容器已是固定高度，文字一旦折行就会溢出 —— 「5 分钟」这类文案在窄行里
+     必须保持单行，与 .btn 的 nowrap 一致 */
+  white-space: nowrap;
   cursor: default;
+  /* 只过渡字色：背景由滑块负责。降级态（滑块未挂上）背景也要变，
+     所以 background 一并保留过渡，两条走同一时长保持同步。 */
   transition: background var(--dur-base) var(--ease-out),
     color var(--dur-base) var(--ease-out);
 }
 
+/* 降级态（JS 未挂滑块）的选中块：与滑块**同一套**令牌与阴影，
+   保证「有没有动画系统」都看得出谁被选中，不会退化成一块淡淡的灰。 */
 .seg button.on {
-  background: var(--glass-strong);
+  background: var(--seg-thumb-bg);
   color: var(--text);
   font-weight: 600;
+  box-shadow: var(--seg-thumb-shadow);
 }
 
 html:not(.hovers-off) .seg button:not(.on):hover {
@@ -1502,7 +1605,7 @@ html:not(.hovers-off) .search-clear:hover {
 
 /* 分段控件：原来 hover / active 一条都没有 —— 鼠标移上去毫无反馈，
    用户不知道「这两个选项是可点的」。按下由通用 button:active 覆盖，这里只补 hover。 */
-html:not(.hovers-off) .seg:not([data-disabled]) button:hover {
+html:not(.hovers-off) .seg:not([data-disabled]) button:not(.on):hover {
   background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
   color: var(--text);
 }
@@ -2033,6 +2136,20 @@ html:not(.hovers-off) .ctx-item:hover {
   background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
+/* 菜单项不可用：与全站同一个禁用强度，不做第二套淡法 */
+.ctx-item:disabled,
+.ctx-item[data-disabled] {
+  opacity: var(--disabled-opacity);
+  pointer-events: none;
+}
+
+/* 菜单以鼠标为主，但键盘也能走到（支持 ↑↓），聚焦必须可见。
+   offset 取负：菜单左右内距只有 4px，外扩会被圆角裁掉。 */
+.ctx-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .ctx-item.danger {
   color: var(--danger);
 }
@@ -2200,6 +2317,15 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   display: block;
   line-height: 1.5;
   cursor: default;
+  /* ⚠ **必须收成内容宽度**，不能让它撑满 .row-text。
+     这一行是 `<label for="控件id">`，Chromium 会把 label 的 hover 传给关联控件、
+     点击也会转发过去。而 `display: block` 让 label 占满整条左栏（实测 380px，
+     控件在 428~560），于是「鼠标在行左半边任何位置」都会点亮右侧那个按钮，
+     点一下还能直接触发 —— 用户反馈「鼠标没在框内但悬浮背景亮了，也能点」。
+     收成 fit-content 后命中区只剩标题文字本身，仍保留「点标题 = 点控件」的
+     无障碍语义（这是 label 该有的行为，只是不该覆盖整行）。 */
+  width: fit-content;
+  max-width: 100%;
 }
 
 .settings .row-desc {
@@ -2210,9 +2336,15 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
 }
 
 /* 快捷键录制按钮：平时与普通 ghost 按钮一样，录制中换成强调色。
-   宽度固定，免得「Ctrl + Alt + V」和「请按下组合键…」之间来回跳。 */
+   宽度固定，免得「Ctrl + Alt + V」和录制提示之间来回跳。
+
+   **132 而不是 176**：176 是按「请按下组合键…（Esc 取消）」留的，但那段提示
+   把「按 Esc 取消」又写了一遍 —— 行说明里已经有。文案缩短后最长的组合
+   （Ctrl + Alt + Shift + V）约 120px，132 刚好够，按钮不再占掉行宽的三分之一。
+   用户反馈「鼠标滑到行上这个框就亮」：hover 命中范围本身是对的（实测只覆盖
+   按钮盒），问题就是盒子太宽、贴着行右缘，鼠标从右边进来几乎立刻落进去。 */
 .settings .hotkey-btn {
-  min-width: 176px;
+  min-width: 132px;
   justify-content: center;
   font-variant-numeric: tabular-nums;
 }
@@ -2221,6 +2353,20 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   border-color: var(--accent);
   color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+/* 依赖前置开关的设置项（如「点选后保持打开」依赖「失焦不收起」）：
+   前置没开时**整行灰掉**，而不是让用户点了没反应 —— 桌面设置的惯例是
+   「可见但不可用」。用 :has 判断行内是否真有禁用控件，不必再给行加标记类，
+   所以任何原因导致的禁用都自动获得同样的表现。
+   行整体已经淡过一次，里面的控件不再淡第二层（0.45 × 0.45 ≈ 0.2，字会看不见）。 */
+.settings .row:has(:disabled) {
+  opacity: var(--disabled-opacity);
+}
+
+.settings .row:has(:disabled) :disabled {
+  opacity: 1;
+  cursor: not-allowed;
 }
 
 .settings .row-ctrl {
@@ -2232,7 +2378,10 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   min-height: 20px;
 }
 
-.settings input[type="number"] {
+/* 全站数字输入框（设置页「保留天数」、清理弹窗「自定义天数」）**只有这一份视觉**。
+   原先挂了 `.settings` 前缀，于是清理弹窗里那个就吃浏览器原生样式 ——
+   白底、硬黑边、无圆角，与旁边的幽灵按钮完全不是一套（用户截图反馈）。 */
+input[type="number"] {
   width: 80px;
   height: 28px;
   padding: 0 8px;
@@ -2241,6 +2390,20 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   background: var(--glass-strong);
   color: var(--text);
   font-family: var(--font);
+  /* 输入框不继承正文行高/字号，必须显式给，否则两处高度对不上 */
+  font-size: 13px;
+  /* 数字等宽：改天数时字段宽度不跟着字形跳动 */
+  font-variant-numeric: tabular-nums;
+}
+
+/* 按天数清理的预设按钮 + 自定义输入框。
+   这一块原先是裸 HTML：.age-pick 没有任何布局规则，靠 inline 自然换行，
+   按钮和输入框会掉到不同行、间距也不受控。 */
+.age-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 /* 材质浓度滑块：**自绘**。
@@ -2529,6 +2692,8 @@ html:not(.hovers-off) .statusbar-clear:hover {
   backdrop-filter: blur(18px) saturate(140%);
   -webkit-backdrop-filter: blur(18px) saturate(140%);
   border: 1px solid var(--hp-border);
+  /* 实底档没有材质可透，奶白渐变会与白底连成一片 —— 由文件末尾的
+     body.tier-solid 规则补一圈实线把它勾出来。半透明档不加。 */
   box-shadow: var(--hp-shadow), inset 0 1px 0 var(--hp-rim);
   max-width: 460px;
   color: var(--text);
@@ -3981,4 +4146,70 @@ body:not(.round) .about-notes code {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+/* ══ 文本选区 ═══════════════════════════════════════════════════════
+   原来吃浏览器默认的亮蓝。只设背景不设字色：字色保持原样一定可读。 */
+::selection {
+  background: var(--selection-bg);
+}
+
+/* ══ 无系统模糊档的浮层边界 ═════════════════════════════════════════
+   实底档没有材质可透，悬浮预览的奶白渐变会与白/浅灰底连成一片，
+   补一圈实线把它勾出来（半透明档不加，那里发丝边已经够）。 */
+body.tier-solid .hover-preview {
+  border-color: var(--stroke);
+}
+
+/* ══ 数字输入框的原生 spinner ═══════════════════════════════════════
+   Windows 上是两枚灰色三角，且只在 hover 时才显形（鼠标扫过突然冒出来），
+   与整套设计语言不搭。隐藏掉 —— 键盘 ↑↓ 与滚轮仍可用，功能不丢。 */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+
+/* ══ 高对比度模式兜底（forced-colors）═══════════════════════════════
+   开启 Windows 对比度主题后系统会强制覆盖颜色：我们赖以分层的
+   「半透明白 + 大阴影」全部塌掉，卡片 / 按钮 / 浮层的边界直接消失。
+   这里给每个靠材质分层的元素补一条系统边框色，并把阴影清掉 ——
+   强制配色下阴影不表达任何信息，残留的半透明阴影会变成脏块。 */
+@media (forced-colors: active) {
+  .card,
+  .modal,
+  .toast,
+  .tip,
+  .ctx-menu,
+  .tray-menu,
+  .block,
+  .cache-box,
+  .search,
+  .nav-item,
+  .settings-tabs .tab,
+  .btn,
+  .btn-ghost,
+  .btn-primary,
+  .btn-danger {
+    border: 1px solid ButtonBorder;
+  }
+
+  /* 选中 / 置顶在强制配色下必须还有非颜色线索，边框是唯一能用的通道 */
+  .card.is-pinned,
+  .card.is-selected,
+  .nav-item.is-active,
+  .settings-tabs .tab.is-active {
+    border-color: Highlight;
+  }
+
+  .card,
+  .modal,
+  .toast,
+  .tip,
+  .ctx-menu,
+  .tray-menu,
+  .btn-primary {
+    box-shadow: none;
+  }
 }

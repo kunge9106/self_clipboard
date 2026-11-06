@@ -2,6 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 // 查询封装与窗口化列表：两者都不依赖 DOM 之外的全局状态，可单独 import 测（见 test/）。
 import { buildFilter, createHistoryApi } from "./history-api.js";
 import { decidePurgeAction } from "./purge-decision.js";
+// 动效统一入口：业务不写关键帧/时长/缓动，只说「播哪个效果、往哪个方向」
+import {
+  initMotion,
+  play,
+  swap,
+  captureGhost,
+  releaseGhost,
+  discardGhost,
+} from "./animations/index.js";
 import { createTip } from "./tip.js";
 import { VirtualList } from "./virtual-list.js";
 import { listen } from "@tauri-apps/api/event";
@@ -930,6 +939,35 @@ function bindClearViewModal() {
   };
 }
 
+/// 侧栏切换的入场方向：+1 从下进来，-1 从上进来，0 表示不是导航触发的重绘。
+/// 列表渲染是异步的（`renderWindow` 里 await 取页），所以方向先记下来，
+/// 等真正画完再播 —— 直接在点击处播会在旧内容上动画。
+let navSwapDir = 0;
+
+/// 点击导航那一刻克隆的旧页面快照。渲染是异步的（await 取页），
+/// 所以捕获放在点击处、释放放到渲染完成处 —— 中间旧内容还真实地留在屏幕上，
+/// 用户不会看到「点了没反应」。
+let pendingGhost = null;
+
+/**
+ * 渲染完成后统一广播一次切换：新内容入场 + 旧页面快照离场（交叉淡出）。
+ * 非导航触发的重绘（删除/置顶/新内容到达）既没有方向也没有快照，直接跳过。
+ */
+function flushNavSwap(el) {
+  const from = navSwapDir;
+  const ghost = pendingGhost;
+  navSwapDir = 0;
+  pendingGhost = null;
+
+  // 渲染被作废（token 对不上 / 提前 return）：别把快照留在屏幕上
+  if (!el) {
+    discardGhost();
+    return;
+  }
+  if (ghost) releaseGhost(ghost, { axis: "y", from: from || 1 });
+  if (from) play(el, "slide-in", { axis: "y", from });
+}
+
 function bindNav() {
   // 监听整个侧栏：历史/收藏/图片/文件 与 底部「设置」都在 .sidebar 内
   document.querySelector(".sidebar").addEventListener("click", (e) => {
@@ -938,6 +976,12 @@ function bindNav() {
     // 于是点一下深浅色，界面就跳回了别的页面（用户实测）。
     const item = e.target.closest(".nav-item[data-view]");
     if (!item) return;
+    // 方向要在改选中态之前算：往下（后）切，新内容从下方进来
+    const navItems = [...document.querySelectorAll(".nav-item[data-view]")];
+    const prevIdx = navItems.findIndex((n) => n.classList.contains("is-active"));
+    navSwapDir = navItems.indexOf(item) >= prevIdx ? 1 : -1;
+    // 旧页面快照要在改 DOM 之前拍：等渲染完成时它已经被 innerHTML 换掉了
+    pendingGhost = captureGhost(document.querySelector(".view"));
     document
       .querySelectorAll(".nav-item")
       .forEach((n) => n.classList.remove("is-active"));
@@ -1391,6 +1435,7 @@ async function renderWindow({ keepScroll = false } = {}) {
     if (token === wlToken) {
       view.innerHTML = `<div class="empty"><div class="empty-title">列表加载失败</div>
         <div class="empty-sub">请重试，或查看日志</div></div>`;
+      flushNavSwap(view);
       if (wl) {
         wl.destroy();
         wl = null;
@@ -1412,6 +1457,7 @@ async function renderWindow({ keepScroll = false } = {}) {
       wl = null;
     }
     wlState = null;
+    flushNavSwap(view);
     // **不要在这里清 items**：它是全量轻量索引，与「当前视图/搜索是否有结果」
     // 无关。清掉之后搜 0 条再清搜索，索引就空了 → 批量勾选文件条目删除时
     // askPurgeFiles 筛不到目标 → 确认框被跳过 → 开了「同时删本地文件」也不删
@@ -1432,6 +1478,7 @@ async function renderWindow({ keepScroll = false } = {}) {
   schedulePrefetch();
   // 文件失效检测只查**已加载**的行 —— 全量查一次 10 万个 id 是旧路径的成本
   refreshMissing(wlState.items);
+  flushNavSwap(view);
 }
 
 /** 列表变了之后保持位置重绘（删除、置顶、收藏、新内容到达都走这里）。 */
@@ -1467,6 +1514,9 @@ function render({ keepScroll = false } = {}) {
     bindSettings(view);
     const nextBody = view.querySelector(".settings-body");
     if (prevBodyTop > 0 && nextBody) nextBody.scrollTop = prevBodyTop;
+    // 设置页整块是新 DOM：滑块要重新挂载（挂载是幂等的，重复调无副作用）
+    initMotion(view);
+    flushNavSwap(view);
     return;
   }
 
@@ -2850,7 +2900,7 @@ function bindHotkeyRow(view, opts) {
     if (recording) return;
     recording = true;
     btn.classList.add("is-recording");
-    btn.textContent = "请按下组合键…（Esc 取消）";
+    btn.textContent = "按下组合键…";
     btn.focus();
     try {
       await invoke("hotkey_suspend");
@@ -2876,7 +2926,7 @@ function bindHotkeyRow(view, opts) {
       if (e.altKey) pre.push("Alt");
       if (e.shiftKey) pre.push("Shift");
       if (e.metaKey) pre.push("Win");
-      btn.textContent = pre.length ? pre.join(" + ") + " + …" : "请按下组合键…（Esc 取消）";
+      btn.textContent = pre.length ? pre.join(" + ") + " + …" : "按下组合键…";
       return;
     }
     const parsed = comboFromEvent(e);
@@ -2924,7 +2974,7 @@ function bindPanelCloseKey(view) {
     if (recording) return;
     recording = true;
     btn.classList.add("is-recording");
-    btn.textContent = "请按下要用的键…（Esc 取消）";
+    btn.textContent = "按下要用的键…";
     btn.focus();
   };
   // 点到别处 = 放弃录制
@@ -2948,7 +2998,7 @@ function bindPanelCloseKey(view) {
       if (e.metaKey) pre.push("Win");
       btn.textContent = pre.length
         ? pre.join(" + ") + " + …"
-        : "请按下要用的键…（Esc 取消）";
+        : "按下要用的键…";
       return;
     }
     const parsed = comboFromEvent(e, { extended: true });
@@ -4094,9 +4144,19 @@ function bindSettings(view) {
     btn.onclick = () => {
       const id = btn.dataset.tab;
       if (!id || id === settingsTab) return;
+      // 方向由栏目在表里的先后决定：往后翻从右进，往前翻从左进
+      const prevIdx = SETTINGS_TABS.findIndex((t) => t.id === settingsTab);
+      const nextIdx = SETTINGS_TABS.findIndex((t) => t.id === id);
+      const dirX = nextIdx >= prevIdx ? 1 : -1;
       settingsTab = id;
+      // 换 DOM 之前拍快照，之后放它离场 —— 与新内容入场同时进行
+      const ghost = captureGhost(view);
       view.innerHTML = settingsHtml();
       bindSettings(view);
+      initMotion(view);
+      releaseGhost(ghost, { axis: "x", from: dirX });
+      const body = view.querySelector(".settings-body");
+      if (body) swap(body, { axis: "x", from: dirX });
     };
   });
 
@@ -4222,7 +4282,11 @@ function bindSettings(view) {
   const syncPanelKeep = () => {
     if (!panelKeep) return;
     const off = !panelStay?.checked;
-    panelKeep.toggleAttribute("data-disabled", off);
+    // 用**真 disabled**，不用 data-disabled 属性标记：后者在 input 上没有对应规则，
+    // 结果就是「看着没变化、点了照样能切」，还会把 panelKeepAfterCopy=true 写进配置
+    // —— 变成一个永远不生效的开关（用户实测反馈「失焦不收起没打开也能点」）。
+    // 真 disabled 一并解决三件事：不可点、Tab 跳过、读屏朗读为「不可用」。
+    panelKeep.disabled = off;
     if (off) panelKeep.checked = false;
   };
   if (panelStay) {
@@ -4645,6 +4709,8 @@ async function main() {
   bindFirstRunModals();
   bindDetailModal();
   bindNav();
+  // 首屏静态 DOM 里的分段/栏目控件挂一次；设置页每次重绘后会再挂
+  initMotion();
   bindThemeToggle();
   bindSearch();
   createTip();
