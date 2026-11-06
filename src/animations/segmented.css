@@ -1,0 +1,63 @@
+/* ===========================================================================
+   动效系统 · 组件样式：滑动指示块（seg-thumb）
+   ---------------------------------------------------------------------------
+   由 controllers/segmented.js 注入并驱动。这里只管「长什么样」，
+   位置与尺寸全部由 JS 写内联样式 —— 因为选项宽度不可预知（文案本地化后会变）。
+   =========================================================================== */
+
+/* 两种容器都要成为绝对定位的参照系 */
+.seg,
+.settings-tabs {
+  position: relative;
+}
+
+.seg-thumb {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  /* 没对齐之前先藏起来：避免挂载瞬间在左上角闪一下 */
+  opacity: 0;
+  pointer-events: none;
+  border-radius: var(--radius-xs);
+  background: var(--glass-strong);
+  /* 弹性吸附的三个属性共用一个时长与缓动 —— 宽度也会变（选项不等宽），
+     所以不光要动 transform，width/height 也要跟着补间，否则会先错位再跳。 */
+  transition:
+    transform var(--seg-thumb-dur) var(--ease-spring),
+    width var(--seg-thumb-dur) var(--ease-spring),
+    height var(--seg-thumb-dur) var(--ease-spring),
+    opacity var(--dur-fast) var(--ease-out);
+  will-change: transform, width, height;
+}
+
+/* 选项要压在滑轨之上，否则底块会盖住文字 */
+.seg.has-seg-thumb > button,
+.settings-tabs.has-seg-thumb > .tab {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── 选中项的背景让位给滑块 ────────────────────────────────────────────────
+   只在**挂载成功**（容器带 has-seg-thumb）时生效。JS 没跑或报错时，
+   选中项仍是原来的实底高亮，视觉上不会退化。 */
+.seg.has-seg-thumb > button.on {
+  background: transparent;
+}
+
+.settings-tabs.has-seg-thumb > .tab.is-active {
+  background-image: none;
+}
+
+/* 栏目那一档的底块：颜色与原来的选中态一致（提亮层），圆角跟随标签页 */
+.settings-tabs > .seg-thumb {
+  background: var(--state-hover);
+  border-radius: var(--radius-sm);
+}
+
+/* 减少动效时不做滑动，直接归位（其余静态高亮不变） */
+@media (prefers-reduced-motion: reduce) {
+  .seg-thumb {
+    transition: none;
+  }
+}
