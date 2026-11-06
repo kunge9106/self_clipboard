@@ -1165,6 +1165,53 @@ extern "system" {
         cwd: *const u16,
         show: i32,
     ) -> isize;
+
+    /// 安装器走这个而不是 ShellExecuteW：它会**等 UAC 弹窗出结果**再返回，
+    /// 失败时 GetLastError 能给出 1223（用户点「否」）。ShellExecuteW 只返回
+    /// 一个 <=32 的模糊码，区分不了「取消」与「真的启动失败」，而且可能在
+    /// UAC 还没点时就返回 —— 旧实现拿到返回值就定时 1.5s 退出自己，用户
+    /// 还没决定，主程序先没了。
+    fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetLastError() -> u32;
+    fn CloseHandle(h: isize) -> i32;
+}
+
+/// SHELLEXECUTEINFOW 的手写 FFI 定义（项目不引 windows crate，见 Cargo.toml）。
+/// repr(C) 会自动处理 64 位下 n_show 之后的对齐填充。
+#[repr(C)]
+struct ShellExecuteInfoW {
+    cb_size: u32,
+    f_mask: u32,
+    hwnd: isize,
+    lp_verb: *const u16,
+    lp_file: *const u16,
+    lp_parameters: *const u16,
+    lp_directory: *const u16,
+    n_show: i32,
+    h_inst_app: isize,
+    lp_id_list: *mut std::ffi::c_void,
+    lp_class: *const u16,
+    hkey_class: isize,
+    dw_hot_key: u32,
+    h_icon_or_monitor: isize,
+    h_process: isize,
+}
+
+const SEE_MASK_NOCLOSEPROCESS: u32 = 0x0000_0040;
+/// UAC 上点「否」时 ShellExecuteEx 失败并给出这个码。
+const ERROR_CANCELLED: u32 = 1223;
+
+/// 安装器拉起的结果。前端据此决定提示文案与按钮状态 —— 不能再用一个
+/// `dlState.error` 把「下载失败」和「用户取消安装」混成同一句话。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallOutcome {
+    pub launched: bool,
+    pub cancelled: bool,
 }
 
 /// 运行已下载的安装包，然后退出自身。
@@ -1174,7 +1221,10 @@ extern "system" {
 /// `CheckIfAppIsRunning` 也会因此拦下来。安装器是独立进程，
 /// 父进程退出不影响它继续跑。
 #[tauri::command]
-pub fn install_downloaded(app: tauri::AppHandle, path: String) -> Result<(), String> {
+pub fn install_downloaded(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<InstallOutcome, String> {
     // 只允许运行我们自己下载目录里的文件：这个路径来自前端，
     // 不校验就等于开了一条「执行任意程序」的通道。
     let dir = crate::clipboard::cache_dir().join("update");
@@ -1220,28 +1270,42 @@ pub fn install_downloaded(app: tauri::AppHandle, path: String) -> Result<(), Str
             .chain(std::iter::once(0))
             .collect()
     };
-    let rc = unsafe {
-        ShellExecuteW(
-            0,
-            op.as_ptr(),
-            file.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1,
-        )
-    };
-    // 返回值 > 32 才算成功（<= 32 全是错误码，含用户在 UAC 上点了「否」）
-    if rc <= 32 {
-        return Err(format!("无法启动安装程序（错误码 {rc}）"));
+    let mut info: ShellExecuteInfoW = unsafe { std::mem::zeroed() };
+    info.cb_size = std::mem::size_of::<ShellExecuteInfoW>() as u32;
+    info.f_mask = SEE_MASK_NOCLOSEPROCESS;
+    info.lp_verb = op.as_ptr();
+    info.lp_file = file.as_ptr();
+    info.n_show = 1; // SW_SHOWNORMAL
+
+    // **同步等 UAC 结果**：返回 FALSE 时用户可能只是点了「否」，这不是错误，
+    // 更不能让前端报「下载失败」。主程序此时必须原样活着，供用户重试。
+    let ok = unsafe { ShellExecuteExW(&mut info) };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        let cancelled = err == ERROR_CANCELLED;
+        crate::log_err!("update", "安装器未启动：GetLastError={err} cancelled={cancelled}");
+        return Ok(InstallOutcome {
+            launched: false,
+            cancelled,
+        });
+    }
+    if info.h_process != 0 {
+        unsafe {
+            CloseHandle(info.h_process);
+        }
     }
 
+    // 只有确认安装器**已经启动**（UAC 已通过）才退出自己。安装器是独立进程，
+    // 父进程退出不影响它；这 800ms 是给它完成初始化的窗口。
     std::thread::spawn(move || {
-        // 给安装器一点时间完成初始化再退出，免得它刚起来就判定「轻贴正在运行」
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        std::thread::sleep(std::time::Duration::from_millis(800));
         crate::idle_release::note_exiting();
         app.exit(0);
     });
-    Ok(())
+    Ok(InstallOutcome {
+        launched: true,
+        cancelled: false,
+    })
 }
 
 #[cfg(test)]

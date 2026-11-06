@@ -43,6 +43,24 @@ pub const INDEX_NOKEY: &str = "index.nokey.bin";
 /// 旧索引读不出来时的现场（沿用旧文件名，方便用户认得）。
 const LEGACY_CORRUPT: &str = "index.json.corrupt";
 
+/// 现场文件（损坏备份、无密钥快照、旧格式留存）统一落到这个子目录。
+///
+/// 它们只在排障时有用，混在缓存根目录里会和 `index.bin` / `key.bin` 这些
+/// **必须就地在根** 的核心文件抢位置，用户打开缓存目录一眼看不出哪些能删。
+/// 只归类这几类副产品，核心索引与内容目录（data/files/images/log/update）不动。
+pub const ARCHIVE_DIR: &str = "archive";
+
+/// 现场文件的落盘路径。目录不存在就建，失败时退回根目录 —— 宁可留乱，
+/// 也不能因为建目录失败把现场文件丢掉（那是唯一的排障线索）。
+fn side_path(dir: &Path, name: &str) -> PathBuf {
+    let a = dir.join(ARCHIVE_DIR);
+    if fs::create_dir_all(&a).is_ok() {
+        a.join(name)
+    } else {
+        dir.join(name)
+    }
+}
+
 /// 索引存储格式版本，写进 `settings.storage_version`。
 pub const STORAGE_VERSION: u32 = 2;
 
@@ -485,7 +503,7 @@ fn finish_migration(dir: &Path, count: usize, write_seq: u64) {
         }
         return;
     }
-    let kept = dir.join(INDEX_LEGACY_KEPT);
+    let kept = side_path(dir, INDEX_LEGACY_KEPT);
     // 只留一份旧索引：上一份 `index.v1.json` 与当前 `index.json` 是同一次迁移的
     // 两个世代，后者才是「迁移前那一刻」，前者已经是过期副本。
     if kept.exists() {
@@ -797,11 +815,13 @@ fn pin_migrate(mut items: Vec<HistoryItem>) -> Vec<HistoryItem> {
 /// 为什么必须留：不清空、不覆盖，事后才查得出是截断、解密失败还是解析失败。
 /// 用户实测那次「列表只剩 4 条」就是靠现场文件才定位的。
 fn keep(dir: &Path, from: &str, raw: &[u8], why: &str, to: &str) {
-    let dst = dir.join(to);
+    // 全部 4 类现场文件（bin/json/wal 的 corrupt、nokey）都从这里落盘，
+    // 改这一处即可让新产生的副产品直接进 archive/。
+    let dst = side_path(dir, to);
     match fs::write(&dst, raw) {
         Ok(()) => crate::log_err!(
             "store",
-            "{from} {why}；损坏文件 {} 字节已另存为 {to}",
+            "{from} {why}；损坏文件 {} 字节已另存为 {ARCHIVE_DIR}/{to}",
             raw.len()
         ),
         Err(e) => crate::log_err!("store", "{from} {why}，且备份失败：{e}"),
@@ -1608,7 +1628,7 @@ mod tests {
         // 落盘：写 v2 快照 + 旧文件改名保留
         persist(dir.path(), &first.items).expect("迁移应能落盘");
         assert!(dir.path().join(INDEX_BIN).is_file());
-        assert!(dir.path().join(INDEX_LEGACY_KEPT).is_file());
+        assert!(dir.path().join("archive").join(INDEX_LEGACY_KEPT).is_file());
         assert!(!dir.path().join(INDEX_LEGACY).exists(), "旧索引应被改名");
 
         // 第二、三次：直接读 v2，不再迁移，内容逐字段一致
@@ -1659,7 +1679,7 @@ mod tests {
         let again = load_index(dir.path());
         assert_eq!(again.status, LoadStatus::V2);
         assert_eq!(again.items.len(), 3);
-        assert!(dir.path().join(INDEX_LEGACY_KEPT).is_file());
+        assert!(dir.path().join("archive").join(INDEX_LEGACY_KEPT).is_file());
     }
 
     /// 迁移中途被强杀：旧文件还在、新快照只写了一半 → 下次启动仍能成功迁移。
@@ -1684,7 +1704,7 @@ mod tests {
         );
         persist(dir.path(), &first.items).unwrap();
         assert!(dir.path().join(INDEX_BIN).is_file());
-        assert!(dir.path().join(INDEX_LEGACY_KEPT).is_file());
+        assert!(dir.path().join("archive").join(INDEX_LEGACY_KEPT).is_file());
 
         // ② 更糟的形态：rename 之后被系统丢了半截数据，index.bin 存在但读不出来，
         //    同时旧索引还没来得及改名 → 必须回退到旧索引重迁，而不是重建
@@ -1711,7 +1731,7 @@ mod tests {
             "v2 读不出来且旧索引还在时应回退重迁"
         );
         assert_eq!(fallback.items.len(), 3);
-        assert!(dir2.path().join(INDEX_CORRUPT).is_file(), "坏文件要留现场");
+        assert!(dir2.path().join("archive").join(INDEX_CORRUPT).is_file(), "坏文件要留现场");
         persist(dir2.path(), &fallback.items).unwrap();
         assert_eq!(load_index(dir2.path()).status, LoadStatus::V2);
     }
@@ -1733,7 +1753,7 @@ mod tests {
         let loaded = load_index(dir.path());
         assert_eq!(loaded.status, LoadStatus::NeedsRebuild);
         assert!(loaded.items.is_empty());
-        assert!(dir.path().join(INDEX_NOKEY).is_file(), "旧快照应改名保留");
+        assert!(dir.path().join("archive").join(INDEX_NOKEY).is_file(), "旧快照应改名保留");
         assert!(crypto::key_path(dir.path()).is_file(), "应生成新密钥");
 
         let new_key = key_for(dir.path()).expect("新密钥应可用");
@@ -1759,7 +1779,7 @@ mod tests {
         let loaded = load_index(dir.path());
         assert_eq!(loaded.status, LoadStatus::NeedsRebuild);
         assert!(loaded.items.is_empty(), "坏索引不能交出去半截数据");
-        let kept = fs::read(dir.path().join(INDEX_CORRUPT)).expect("现场文件应存在");
+        let kept = fs::read(dir.path().join("archive").join(INDEX_CORRUPT)).expect("现场文件应存在");
         assert_eq!(kept, raw, "现场文件必须是原样字节");
     }
 
@@ -2083,11 +2103,11 @@ mod tests {
 
         let loaded = load_index(dir.path());
         assert!(
-            dir.path().join(WAL_CORRUPT).is_file(),
+            dir.path().join("archive").join(WAL_CORRUPT).is_file(),
             "中间帧坏了必须留现场"
         );
         assert_eq!(
-            fs::read(dir.path().join(WAL_CORRUPT)).unwrap(),
+            fs::read(dir.path().join("archive").join(WAL_CORRUPT)).unwrap(),
             raw,
             "现场文件必须是原样字节"
         );
