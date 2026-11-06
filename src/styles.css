@@ -80,9 +80,9 @@
   /* 按下：物理上「被压下去 = 遮住光」，所以比常态**暗**一档（WinUI 的
      ButtonBackgroundPressed 也是比 normal 暗）。浅色用中性黑，深色用更低的白。 */
   --state-active: rgba(0, 0, 0, 0.06);
-  /* 强调色的淡底：引导页「下一步」这类主按钮的常态底，也用于焦点环。
-     实心蓝在毛玻璃上像贴了块塑料板，与材质语言冲突；但主操作又必须比次操作醒目，
-     所以用「淡色底 + 强调边 + 正文色字」（字色见 --accent-on-soft）。 */
+  /* 强调色的淡底：焦点环、以及强调色系的淡背景块。
+     **不再是「下一步」这类主按钮的常态底** —— 主按钮已收进幽灵体系（透明底 + 强调边），
+     这条留着给「需要一层极淡强调色」的场景用（焦点环、选中态高亮）。 */
   --accent-soft: rgba(47, 107, 255, 0.1);
   /* 小控件（按钮 / 图标键 / 菜单项 / 导航项）的悬停与聚焦底色：**淡灰**。
      与卡片用的 --state-hover（白 .45 提亮）刻意分开：
@@ -100,11 +100,6 @@
   --accent-fill: #3560c4;
   /* 实底填充上的前景：浅色主题的填充是深蓝，所以字用白。 */
   --accent-on: #ffffff;
-  /* 淡底主按钮（`.btn-primary.is-cta`）的前景。
-     **不能复用 --accent-on**：它表达的是「实底填充上的对立色」，浅色白、深色近黑；
-     套到 rgba(47,107,255,.1) 的淡底上恰好反过来 —— 浅色下白字看不见，深色下黑字看不见。
-     淡底本身很浅，前景取正文色对比最高（浅色 #1b1b1f / 深色 #ffffff）。 */
-  --accent-on-soft: #1b1b1f;
   /* 禁用只有这一个强度。原来 4 处各写 .42 / .45 / .45 / .62 ——
      同一个「不可用」有四种淡法，用户看到的是「有的灰有的不灰」。 */
   --disabled-opacity: 0.45;
@@ -351,8 +346,6 @@ body.dark {
   /* 深色下反过来：填充用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清 */
   --accent-fill: #6b9bff;
   --accent-on: #12121a;
-  /* 深色下淡底主按钮用白字：淡底是半透明亮蓝压在深背景上，仍是深底，白字才读得清。 */
-  --accent-on-soft: #ffffff;
   --card-hover: var(--state-hover);
   --glass-strong: rgba(255, 255, 255, 0.09);
   --glass-hover: var(--state-hover);
@@ -2766,25 +2759,28 @@ body.dark .tour-dot.is-on {
   flex: 1 1 auto;
 }
 
-/* 主按钮：渐变 + 光晕 + 悬停抬起，作为整条流程的终点该有的分量 */
+/* 引导页「下一步」：主操作。与全站按钮同一套幽灵几何，只靠边色表达主次
+   （规划里原本写的「渐变 + 光晕 + 悬停抬起」已被实测推翻，见规则内注释）。 */
 .btn-primary.is-cta {
-  /* 与全站按钮一致：**不铺实心渐变**。原来这行写死了 #2f6bff → #6a45e0 和
-     rgba(47,107,255,.32) 的投影 —— 既不在令牌体系内，也和「全幽灵」冲突。
-     改用强调色淡底 + 加粗，仍比普通按钮醒目，但不破坏材质。 */
+  /* 与「跳过 / 上一步」**同一套幽灵几何**：透明底 + 1px 边，主次只靠边色区分。
+     曾经这里铺的是强调色淡底（--accent-soft）+ 600 加粗 + 悬停抬起 + 蓝投影，
+     在一排无底按钮里它是唯一有填充的，怎么看都像另一套东西 ——
+     用户实测：「这块也没必要填充，就正常显示就行」。
+     去掉填充后与全站按钮同构，仍比次要按钮醒目（强调色边），但不额外造一层板子。 */
   border-color: var(--accent);
-  background: var(--accent-soft);
-  /* 换了底就必须同时换字：底色从 --accent-fill（实底）变成 --accent-soft（淡底）后，
-     继承来的 --accent-on 会变成「淡底上的对立色」，也就是深浅两头都读不清
-     （浅色白字压淡蓝、深色黑字压深底）。这是「只覆盖背景不覆盖前景」的典型后果。 */
-  color: var(--accent-on-soft);
-  font-weight: 600;
-  transition: transform var(--dur-fast) var(--ease-out),
-    box-shadow var(--dur-fast) var(--ease-out);
+  background: transparent;
+  /* 字色直接用正文色：与「跳过 / 上一步」同一族（浅色近黑、深色近白），
+     深浅两头都读得清。不能继承 .btn-primary 的 --accent-on —— 那是**实底填充**
+     上的对立色（浅白 / 深黑），套在透明底上正好反过来。 */
+  color: var(--text);
 }
 
-.btn-primary.is-cta:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(47, 107, 255, 0.38);
+html:not(.hovers-off) .btn-primary.is-cta:hover {
+  /* 必须带 html:not 前缀：`.btn-primary:hover` 的 brightness(1.1) 优先级更高（多一个
+     类型选择器 html），不显式盖住它会一直赢 —— 对透明底而言那只是把字和边一起提亮，
+     看着像按钮在闪。这里与 .btn-ghost 用同款 hover：淡灰叠底。 */
+  filter: none;
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 /* ---------------------------------------------------------------------------
