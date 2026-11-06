@@ -80,10 +80,11 @@
   /* 按下：物理上「被压下去 = 遮住光」，所以比常态**暗**一档（WinUI 的
      ButtonBackgroundPressed 也是比 normal 暗）。浅色用中性黑，深色用更低的白。 */
   --state-active: rgba(0, 0, 0, 0.06);
-  /* 强调色的淡底：焦点环、以及强调色系的淡背景块。
-     **不再是「下一步」这类主按钮的常态底** —— 主按钮已收进幽灵体系（透明底 + 强调边），
-     这条留着给「需要一层极淡强调色」的场景用（焦点环、选中态高亮）。 */
-  --accent-soft: rgba(47, 107, 255, 0.1);
+  /* 这里原有 `--accent-soft`（强调色 10% 淡底）。它的两个用途先后都消失了：
+     ① 主按钮常态底 —— 已收进幽灵体系（透明底 + 强调边）；
+     ② 主按钮焦点外发光 —— 实底上蓝环看不见才需要，改幽灵后通用蓝环足够。
+     0 引用即删，不留「看起来能用」的令牌：留着会让下一个人以为主按钮还有淡底这条路。
+     需要极淡强调色时用 `color-mix` 或直接写 rgba，别复活这个语义模糊的名字。 */
   /* 小控件（按钮 / 图标键 / 菜单项 / 导航项）的悬停与聚焦底色：**淡灰**。
      与卡片用的 --state-hover（白 .45 提亮）刻意分开：
        · 卡片是「内容块」，悬停要像玻璃被照亮 → 提亮；
@@ -339,7 +340,7 @@ body.dark {
   --state-hover: rgba(255, 255, 255, 0.09);
   /* 深色下「压暗」在深底上看不出来，按下改为比悬停再亮一档。 */
   --state-active: rgba(255, 255, 255, 0.14);
-  --accent-soft: rgba(91, 140, 255, 0.16);
+  /* 深色下的 `--accent-soft` 同步删除，理由见浅色变量表里的说明。 */
   /* 深色下「压暗」看不出来，小控件改为亮一档 */
   --state-hover-dim: rgba(255, 255, 255, 0.1);
   --switch-off: rgba(255, 255, 255, 0.26);
@@ -547,12 +548,11 @@ select:focus-visible {
   background-image: none;
 }
 
-.btn-primary:focus-visible {
-  /* 填充底上不叠灰（会脏），靠提亮 + 一圈同色外发光表示选中 */
-  background-image: none;
-  filter: brightness(1.1);
-  box-shadow: 0 0 0 2px var(--accent-soft);
-}
+/* 这里原有 `.btn-primary:focus-visible` 一条（提亮 + 2px 淡色外发光），
+   是为「强调色实底」写的：实底上叠灰会脏，只能提亮，而蓝环压在蓝底上又看不出来，
+   所以额外加一圈同色外发光。主按钮改成幽灵后这两条理由同时消失 ——
+   通用 `button:focus-visible` 的 2px 蓝环落在透明底上本来就清楚，
+   留着只是给同一个状态画第二圈环。同理删掉了 `.btn-primary[data-autofocus]:focus`。 */
 
 /* 打开弹窗时的默认焦点（程序化 focus）。
    浏览器不把程序化聚焦算作「键盘交互」，于是不给 :focus-visible ——
@@ -572,14 +572,6 @@ select:focus-visible {
      个别路径下仍会画默认环。 */
   outline: none;
   background-image: none;
-}
-
-/* 强调色实底的主按钮：同上，不叠白、改提亮 */
-.btn-primary[data-autofocus]:focus {
-  outline: none;
-  background-image: none;
-  filter: brightness(1.1);
-  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 /* 按下态：原来全项目 **0 处** :active —— 点下去没有任何反馈，用户只能靠「松手后
@@ -1338,20 +1330,28 @@ html:not(.hovers-off) .btn-ghost:hover {
   background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
-/* 主操作按钮（首次运行引导的「开启自启」「后台运行」这类推荐项）：
-   跟 btn-ghost 同一尺寸，但用强调色实底，让「推荐的那个」一眼可辨。 */
-/* 主按钮 = **填充**（Fluent 的 Primary、Material 的 Filled 都是填充）。
-   全幽灵会让「确认」和「取消」权重一样，用户要多看一眼才知道点哪个 ——
-   大厂不做这个取舍，理由就在这里。层次由「填充 vs 透明」一步拉开。 */
+/* 主操作按钮（首次运行引导的「开启自启」「后台运行」、编辑态的「保存」等推荐项）。
+   **幽灵形态，不填充** —— 与 .btn-ghost 同一套几何与字色，只把边色换成强调色。 */
+/* 这里曾经写着「主按钮 = 填充，Fluent 的 Primary、Material 的 Filled 都是填充，
+   全幽灵会让确认和取消权重一样」。那段推理本身没错，但它默认了一个前提：
+   界面是没有背景的纯色面。**毛玻璃背景上不成立** —— 一块实心蓝是一块不透明的板子，
+   贴在玻璃上把材质截断，视觉上比「权重分不清」更刺眼。
+   实测顺序也是这么走的：先把引导页「下一步」的淡底 + 600 + 投影 + 悬停抬起全部推翻
+   （「这块也没必要填充，就正常显示就行」），再看那 4 处实底时才发现它们和引导页
+   是同一类问题 —— 变成「同一个应用里两种主按钮规则并存」，比任何一方的权重问题都更明显。
+   所以现在全站统一：**层级只由边色表达**（强调蓝 vs 中性灰 vs 红）。 */
 .btn-primary {
-  border-color: transparent;
-  background: var(--accent-fill);
-  color: var(--accent-on);
+  border-color: var(--accent);
+  background: transparent;
+  /* 字色与 .btn-ghost 同档。同一排里主按钮字比副按钮更黑会被读成不一致而不是层级
+     （引导页实测原话：「下一步按钮字体颜色比其他更黑是怎么回事，其他像是灰色」）。 */
+  color: var(--text-dim);
 }
 
 html:not(.hovers-off) .btn-primary:hover {
-  /* 填充底上不能叠白（会褪色），用提亮 */
-  filter: brightness(1.1);
+  /* 透明底不能再用 brightness 提亮 —— 那会把字和边一起提亮，看着像按钮在闪。
+     与 .btn-ghost 同款：淡灰叠底。 */
+  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
 }
 
 /* 内容区 */
@@ -2759,29 +2759,11 @@ body.dark .tour-dot.is-on {
   flex: 1 1 auto;
 }
 
-/* 引导页「下一步」：主操作。与全站按钮同一套幽灵几何，只靠边色表达主次
-   （规划里原本写的「渐变 + 光晕 + 悬停抬起」已被实测推翻，见规则内注释）。 */
-.btn-primary.is-cta {
-  /* 与「跳过 / 上一步」**同一套幽灵几何**：透明底 + 1px 边，主次只靠边色区分。
-     曾经这里铺的是强调色淡底（--accent-soft）+ 600 加粗 + 悬停抬起 + 蓝投影，
-     在一排无底按钮里它是唯一有填充的，怎么看都像另一套东西 ——
-     用户实测：「这块也没必要填充，就正常显示就行」。
-     去掉填充后与全站按钮同构，仍比次要按钮醒目（强调色边），但不额外造一层板子。 */
-  border-color: var(--accent);
-  background: transparent;
-  /* 字色与「跳过 / 上一步」完全同档（--text-dim）。
-     曾用 --text（正文色，近黑），用户一眼看出「比其他更黑，其他像灰色」——
-     同一排按钮里字色分级会被当成 bug 而不是层级，主次交给边色表达就够了。 */
-  color: var(--text-dim);
-}
-
-html:not(.hovers-off) .btn-primary.is-cta:hover {
-  /* 必须带 html:not 前缀：`.btn-primary:hover` 的 brightness(1.1) 优先级更高（多一个
-     类型选择器 html），不显式盖住它会一直赢 —— 对透明底而言那只是把字和边一起提亮，
-     看着像按钮在闪。这里与 .btn-ghost 用同款 hover：淡灰叠底。 */
-  filter: none;
-  background-image: linear-gradient(var(--state-hover-dim), var(--state-hover-dim));
-}
+/* 引导页「下一步」原有单独一条 `.btn-primary.is-cta`（透明底 + 强调边 + --text-dim 字），
+   因为当时只有它被推翻成幽灵，而 `.btn-primary` 还是实底。现在 `.btn-primary` 全站
+   统一为幽灵，那条规则的三条声明与基类逐字相同 —— 留着等于同一效果两份实现，
+   改动基类时会漂移。HTML 里的 `is-cta` 类名一并去掉，避免留下「这里还有特殊处理」
+   的错觉（规划文档里「渐变 + 光晕 + 悬停抬起」的描述也已作废）。 */
 
 /* ---------------------------------------------------------------------------
    全文详情弹窗
