@@ -37,8 +37,11 @@
      只由这张表决定，**禁止再写裸数字**。顺序＝浮起来的程度，不是「谁后写谁大」。
      原来散着 40 / 998 / 999 / 1000 / 1200 / 1500 / 2000 / 3000 八个值，
      加一个新浮层只能猜「该比谁大」，猜错就被压住。 */
-  /* 遮罩浓度：弹窗 / 移动框 / 引导共用，不再各写一个 rgba */
-  --mask-bg: rgba(0, 0, 0, 0.28);
+  /* 遮罩浓度：弹窗 / 移动框 / 引导共用，不再各写一个 rgba。
+     0.32 取自 .modal-mask（它出现频率最高）；原先 .move-mask 走 0.28，
+     差 4% 属于历史漂移，而它的注释偏偏写着「与 .modal-mask 一致」——
+     统一掉这一个不一致，比新增第二个遮罩令牌更符合「同一效果只留一份」。 */
+  --mask-bg: rgba(0, 0, 0, 0.32);
   --z-banner: 40; /* 更新横幅：顶部常驻，低于所有浮层 */
   --z-decor: 998; /* 噪点 / 光斑装饰层：在内容之上、交互浮层之下 */
   --z-menu: 1000; /* 右键菜单 */
@@ -135,6 +138,47 @@
   /* 长文阅读面板用这一档：看得出是玻璃，但透不出会干扰阅读的内容。
      720×520 的正文区和 260px 的确认框不是一个场景 —— 后者读 12 个字，前者读 2000 个。 */
   --glass-panel-strong: rgba(255, 255, 255, 0.9);
+
+  /* ══ 玻璃质感层（.app::after）══════════════════════════════════════
+     原来是「浅色 5 个裸色值 + body.dark 再抄 5 个」= 10 处硬编码 + 一条
+     组件级覆盖。改主题时只要漏掉一处，光泽就会跟主题打架。
+     现在规则体里一个色值都没有，深浅差异全部收进这两组变量。 */
+  --app-gloss-linear: rgba(255, 255, 255, 0.1);
+  --app-gloss-radial: rgba(255, 255, 255, 0.1);
+  --app-rim: rgba(255, 255, 255, 0.3);
+  --app-top-light: rgba(255, 255, 255, 0.36);
+  --app-bottom-shade: rgba(0, 0, 0, 0.05);
+
+  /* ══ 引导页装饰色 ══════════════════════════════════════════════════
+     原来规则体里散着 21 处裸色值 + 4 条 body.dark 覆盖，改主题必漏。
+     存成 **rgb 三元组**，透明度仍写在用它的地方 —— 因为「用多浓」属于
+     那一处的构图，「用什么色」才属于主题，两者本来就不该绑在一起。
+     深色只覆盖色相三元组与卡片渐变，其余组合自动跟着变。 */
+  --tour-blue: 47 107 255;
+  --tour-purple: 124 58 237;
+  --tour-teal: 13 148 136;
+  --tour-rose: 219 39 119;
+  --tour-grad-top: rgba(255, 255, 255, 0.93);
+  --tour-grad-mid: rgba(249, 251, 254, 0.9);
+  --tour-grad-bottom: rgba(244, 247, 252, 0.9);
+  --tour-glow-blue: rgb(var(--tour-blue) / 0.16);
+  --tour-glow-teal: rgb(var(--tour-teal) / 0.13);
+  --tour-dot-glow: rgb(var(--tour-blue) / 0.16);
+
+  /* ── 控件与状态的散色 ────────────────────────────────────────────
+     原先这些值直接写在规则体里，浅色看着没事、深色就漏。
+     尤其三处 `#fff` 压在 `--accent` 亮蓝底上：深色主题 `--accent` 变亮蓝后
+     白字对比度不足 —— 改用现成的 `--accent-on`（浅白 / 深深字）既收了色值，
+     又顺手修了这个真实的可读性问题，浅色观感一字不变。 */
+  --badge-dot: #e5484d;
+  --accent-ring: rgba(47, 107, 255, 0.22);
+  /* 滑条与自绘开关的滑点原本**两处各写一遍**完全相同的值 —— 收成一组，
+     以后调滑点只改一处（禁止重复造轮子）。 */
+  --ctrl-thumb: #ffffff;
+  --ctrl-thumb-shadow: rgba(0, 0, 0, 0.25);
+  --detail-bg: rgba(0, 0, 0, 0.04);
+  --state-ok: #3fa860;
+  --state-err: #d9534f;
 
   /* 卡片：半透明白面 + 顶边受光 + 极淡的顶部渐隐（玻璃厚度感，2% 跨度） */
   --card-rim: rgba(255, 255, 255, 0.5);
@@ -419,6 +463,31 @@ body.dark {
   --glass-panel: rgba(13, 13, 17, 0.76);
   --glass-panel-rim: rgba(255, 255, 255, 0.11);
   --glass-panel-strong: rgba(10, 10, 14, 0.9);
+  /* 深色光泽要更弱：暗底上一点点白就很扎眼；底部暗角反而要更重，
+     否则整块玻璃像浮在黑纸上没有厚度。 */
+  --app-gloss-linear: rgba(255, 255, 255, 0.05);
+  --app-gloss-radial: rgba(255, 255, 255, 0.045);
+  --app-rim: rgba(255, 255, 255, 0.1);
+  --app-top-light: rgba(255, 255, 255, 0.12);
+  --app-bottom-shade: rgba(0, 0, 0, 0.16);
+  /* 引导页深色：主色换亮蓝（与 --accent 同步），卡片渐变压进黑调；
+     两团光斑在深底上要略强一点才看得见，圆点光晕同理。 */
+  --tour-blue: 91 140 255;
+  --tour-grad-top: rgba(48, 48, 56, 0.92);
+  --tour-grad-mid: rgba(39, 39, 45, 0.9);
+  --tour-grad-bottom: rgba(34, 34, 40, 0.9);
+  --tour-glow-blue: rgb(var(--tour-blue) / 0.18);
+  --tour-glow-teal: rgb(var(--tour-teal) / 0.12);
+  --tour-dot-glow: rgb(var(--tour-blue) / 0.22);
+  /* 上述散色的深色档：暗底上环要更亮才看得见、滑点投影要更重才浮得起来，
+     状态色统一提到与 --tag-* 深色色板同档的亮度。 */
+  --badge-dot: #ff8a8a;
+  --accent-ring: rgba(91, 140, 255, 0.26);
+  --ctrl-thumb: #ffffff;
+  --ctrl-thumb-shadow: rgba(0, 0, 0, 0.4);
+  --detail-bg: rgba(255, 255, 255, 0.05);
+  --state-ok: #4ade80;
+  --state-err: #ff8a8a;
   --card-rim: rgba(255, 255, 255, 0.1);
   --card-sheen: rgba(255, 255, 255, 0.06);
 
@@ -853,23 +922,14 @@ body:not(.round) .settings .block {
   pointer-events: none;
   border-radius: inherit;
   background:
-    linear-gradient(155deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0) 34%),
-    radial-gradient(130% 52% at 50% -8%, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0) 58%);
-  /* Apple 毛玻璃最关键的细节就是这圈 1px 内描边（30%~50% 白）：
-     它模拟玻璃边缘的折光，也是「高级」与「塑料感」的分界线。
-     底部再补一点极淡暗角表示厚度，但压得很轻，避免画面发闷。 */
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3),
-    inset 0 1px 0 rgba(255, 255, 255, 0.36),
-    inset 0 -24px 40px -32px rgba(0, 0, 0, 0.05);
-}
-
-body.dark .app::after {
-  background:
-    linear-gradient(155deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 34%),
-    radial-gradient(130% 52% at 50% -8%, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0) 58%);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    inset 0 -24px 40px -32px rgba(0, 0, 0, 0.16);
+    linear-gradient(155deg, var(--app-gloss-linear), transparent 34%),
+    radial-gradient(130% 52% at 50% -8%, var(--app-gloss-radial), transparent 58%);
+  /* 这圈 1px 内描边模拟玻璃边缘折光，是「高级」与「塑料感」的分界线；
+     底部再补一点极淡暗角表示厚度。深浅强度全在 :root / body.dark 里，
+     所以下面那条 body.dark .app::after 覆盖已可删除。 */
+  box-shadow: inset 0 0 0 1px var(--app-rim),
+    inset 0 1px 0 var(--app-top-light),
+    inset 0 -24px 40px -32px var(--app-bottom-shade);
 }
 
 /* 顶部条 */
@@ -1050,7 +1110,7 @@ html:not(.hovers-off) .nav-item:hover,
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #e5484d;
+  background: var(--badge-dot);
   pointer-events: none;
 }
 
@@ -1092,7 +1152,7 @@ html:not(.hovers-off) .nav-item:hover,
 }
 
 .btn-ghost.is-downloading .dl-label-on {
-  color: #fff;
+  color: var(--accent-on);
   clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0);
   transition: clip-path var(--dur-base) var(--ease-out);
 }
@@ -1134,7 +1194,7 @@ html:not(.hovers-off) .nav-item:hover,
   border: 0;
   border-radius: var(--radius-xs);
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-on);
   font-family: var(--font);
   font-size: 12px;
   cursor: default;
@@ -1263,7 +1323,7 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 /* 聚焦时描边高亮（同 V1） */
 .search:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(47, 107, 255, 0.25);
+  box-shadow: 0 0 0 1px var(--accent-ring);
 }
 
 /* 批量删除模式的操作条：与搜索栏同一个位置、同样占满宽度。
@@ -2160,7 +2220,7 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
 .settings .hotkey-btn.is-recording {
   border-color: var(--accent);
   color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.18);
+  box-shadow: 0 0 0 2px var(--accent-ring);
 }
 
 .settings .row-ctrl {
@@ -2215,9 +2275,9 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   /* (20 - 4) / 2 - 14 / 2 = -5：把滑点垂直居中在 4px 轨道上 */
   margin-top: -5px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--ctrl-thumb);
   /* 与自绘开关的滑点同一套投影：1px 投影让它「浮」在轨道上 */
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 1px 2px var(--ctrl-thumb-shadow);
 }
 
 .settings .hint {
@@ -2254,8 +2314,8 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  background: var(--ctrl-thumb);
+  box-shadow: 0 1px 2px var(--ctrl-thumb-shadow);
   transition: transform var(--dur-fast) var(--ease-out);
 }
 
@@ -2547,7 +2607,7 @@ html:not(.hovers-off) .statusbar-clear:hover {
   z-index: var(--z-modal);
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--mask-bg);
   /* 背后的界面整屏模糊：确认框是「停下来做决定」的时刻，底下列表继续清晰
      既分散注意力，也容易让人以为还能点。
      6px → 10px：弹窗自己现在也是半透明玻璃了，背后这一层如果糊得不够，
@@ -2629,21 +2689,13 @@ html:not(.hovers-off) .statusbar-clear:hover {
   overflow: hidden;
   /* 比普通弹窗更透一点、更亮一点，让它看起来是「一张卡片」而不是一个对话框。
      0.99 → 0.9：这 10% 的透光正是「卡片」与「对话框」的分界，
-     再透就过头了 —— 引导页正文多，背后内容一旦可辨就会干扰阅读。 */
+     再透就过头了 —— 引导页正文多，背后内容一旦可辨就会干扰阅读。
+     三段渐变收进 --tour-grad-*，深浅各定义一次，下面不再有 body.dark 覆盖。 */
   background: linear-gradient(
     160deg,
-    rgba(255, 255, 255, 0.93) 0%,
-    rgba(249, 251, 254, 0.9) 55%,
-    rgba(244, 247, 252, 0.9) 100%
-  );
-}
-
-body.dark .modal.is-tour {
-  background: linear-gradient(
-    160deg,
-    rgba(48, 48, 56, 0.92) 0%,
-    rgba(39, 39, 45, 0.9) 60%,
-    rgba(34, 34, 40, 0.9) 100%
+    var(--tour-grad-top) 0%,
+    var(--tour-grad-mid) 55%,
+    var(--tour-grad-bottom) 100%
   );
 }
 
@@ -2663,21 +2715,13 @@ body.dark .modal.is-tour {
 .modal.is-tour::before {
   top: -120px;
   right: -80px;
-  background: rgba(47, 107, 255, 0.16);
+  background: var(--tour-glow-blue);
 }
 
 .modal.is-tour::after {
   left: -110px;
   bottom: -140px;
-  background: rgba(13, 148, 136, 0.13);
-}
-
-body.dark .modal.is-tour::before {
-  background: rgba(91, 140, 255, 0.18);
-}
-
-body.dark .modal.is-tour::after {
-  background: rgba(13, 148, 136, 0.12);
+  background: var(--tour-glow-teal);
 }
 
 /* 顶部进度条：3px 的暗轨 + 一条随步骤变长的填充。
@@ -2696,7 +2740,7 @@ body.dark .modal.is-tour::after {
   /* 第 1 步就有进度，不是从 0 开始 —— 一上来空着会让人以为条没生效 */
   width: 0;
   border-radius: 0 2px 2px 0;
-  background: linear-gradient(90deg, #2f6bff, #7c3aed);
+  background: linear-gradient(90deg, rgb(var(--tour-blue)), rgb(var(--tour-purple)));
   transition: width var(--dur-slow) var(--ease-out);
 }
 
@@ -2746,23 +2790,23 @@ body.dark .modal.is-tour::after {
   display: grid;
   place-items: center;
   border-radius: var(--radius-lg);
-  color: var(--accent);
-  background: linear-gradient(135deg, rgba(47, 107, 255, 0.2), rgba(124, 58, 237, 0.12));
-  box-shadow: inset 0 0 0 1px rgba(47, 107, 255, 0.14);
+  color: rgb(var(--tour-blue));
+  background: linear-gradient(135deg, rgb(var(--tour-blue) / 0.2), rgb(var(--tour-purple) / 0.12));
+  box-shadow: inset 0 0 0 1px rgb(var(--tour-blue) / 0.14);
 }
 
 /* 7 步轮换三色相：一路看下来颜色有变化，不会像 7 张一模一样的幻灯片。
    用 nth-child 而不是给每步加 data 属性 —— 步骤顺序变了自己就跟着变。 */
 .tour-body .tour-step:nth-child(3n + 2) .tour-icon {
-  color: #7c3aed;
-  background: linear-gradient(135deg, rgba(124, 58, 237, 0.2), rgba(219, 39, 119, 0.1));
-  box-shadow: inset 0 0 0 1px rgba(124, 58, 237, 0.14);
+  color: rgb(var(--tour-purple));
+  background: linear-gradient(135deg, rgb(var(--tour-purple) / 0.2), rgb(var(--tour-rose) / 0.1));
+  box-shadow: inset 0 0 0 1px rgb(var(--tour-purple) / 0.14);
 }
 
 .tour-body .tour-step:nth-child(3n) .tour-icon {
-  color: #0d9488;
-  background: linear-gradient(135deg, rgba(13, 148, 136, 0.2), rgba(47, 107, 255, 0.1));
-  box-shadow: inset 0 0 0 1px rgba(13, 148, 136, 0.16);
+  color: rgb(var(--tour-teal));
+  background: linear-gradient(135deg, rgb(var(--tour-teal) / 0.2), rgb(var(--tour-blue) / 0.1));
+  box-shadow: inset 0 0 0 1px rgb(var(--tour-teal) / 0.16);
 }
 
 /* 12 张引导插图原本每张都在 HTML 里写一遍
@@ -3000,11 +3044,7 @@ body.dark .modal.is-tour::after {
 .tour-dot.is-on {
   width: 20px;
   background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.16);
-}
-
-body.dark .tour-dot.is-on {
-  box-shadow: 0 0 0 3px rgba(91, 140, 255, 0.22);
+  box-shadow: 0 0 0 3px var(--tour-dot-glow);
 }
 
 /* 底部按钮行也要压住角落光斑 */
@@ -3075,8 +3115,9 @@ body.dark .tour-dot.is-on {
   padding: 10px 12px;
   border: 1px solid var(--stroke);
   border-radius: var(--radius-sm);
-  /* 比窗口底稍深一点，让正文区看起来是「一块内容」而不是浮在玻璃上 */
-  background: rgba(0, 0, 0, 0.04);
+  /* 比窗口底稍深一点，让正文区看起来是「一块内容」而不是浮在玻璃上。
+     浅深两档收进 --detail-bg，下面那条 body.dark .detail-body 覆盖已可删除。 */
+  background: var(--detail-bg);
   font-family: var(--font-mono);
   /* 15px：比列表正文（13px）明显大一档，长文本连读不费眼。
      查看态与编辑态共用这个类，所以两边字号永远一致。 */
@@ -3183,7 +3224,7 @@ body.dark .tour-dot.is-on {
   top: 0;
   width: 4px;
   height: 7px;
-  border: solid #fff;
+  border: solid var(--accent-on);
   border-width: 0 1.5px 1.5px 0;
   transform: rotate(45deg);
 }
@@ -3297,10 +3338,6 @@ body.dark .tour-dot.is-on {
    这里保留一条占位提示，让人知道原文里有图而不是内容缺失。 */
 .detail-body.is-rich img {
   display: none;
-}
-
-body.dark .detail-body {
-  background: rgba(255, 255, 255, 0.05);
 }
 
 /* 编辑态用 <textarea> 承载正文。它同时挂着 .detail-body，所以内边距、边框、
@@ -3720,7 +3757,7 @@ html:not(.hovers-off) ::-webkit-scrollbar-thumb:hover {
 
 .about-state.is-ok::before {
   content: "✓ ";
-  color: #3fa860;
+  color: var(--state-ok);
 }
 
 .about-state.is-new {
@@ -3733,7 +3770,7 @@ html:not(.hovers-off) ::-webkit-scrollbar-thumb:hover {
 }
 
 .about-state.is-err {
-  color: #d9534f;
+  color: var(--state-err);
 }
 
 /* ── 事实表：列排（标签在左、值在右），对齐 Windows 设置的「属性表」 ── */
