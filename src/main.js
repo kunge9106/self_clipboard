@@ -2850,7 +2850,7 @@ function bindHotkeyRow(view, opts) {
     if (recording) return;
     recording = true;
     btn.classList.add("is-recording");
-    btn.textContent = "请按下组合键…（Esc 取消）";
+    btn.textContent = "按下组合键…";
     btn.focus();
     try {
       await invoke("hotkey_suspend");
@@ -2876,7 +2876,7 @@ function bindHotkeyRow(view, opts) {
       if (e.altKey) pre.push("Alt");
       if (e.shiftKey) pre.push("Shift");
       if (e.metaKey) pre.push("Win");
-      btn.textContent = pre.length ? pre.join(" + ") + " + …" : "请按下组合键…（Esc 取消）";
+      btn.textContent = pre.length ? pre.join(" + ") + " + …" : "按下组合键…";
       return;
     }
     const parsed = comboFromEvent(e);
@@ -2924,7 +2924,7 @@ function bindPanelCloseKey(view) {
     if (recording) return;
     recording = true;
     btn.classList.add("is-recording");
-    btn.textContent = "请按下要用的键…（Esc 取消）";
+    btn.textContent = "按下要用的键…";
     btn.focus();
   };
   // 点到别处 = 放弃录制
@@ -2948,7 +2948,7 @@ function bindPanelCloseKey(view) {
       if (e.metaKey) pre.push("Win");
       btn.textContent = pre.length
         ? pre.join(" + ") + " + …"
-        : "请按下要用的键…（Esc 取消）";
+        : "按下要用的键…";
       return;
     }
     const parsed = comboFromEvent(e, { extended: true });

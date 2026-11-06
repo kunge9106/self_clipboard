@@ -2236,9 +2236,15 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
 }
 
 /* 快捷键录制按钮：平时与普通 ghost 按钮一样，录制中换成强调色。
-   宽度固定，免得「Ctrl + Alt + V」和「请按下组合键…」之间来回跳。 */
+   宽度固定，免得「Ctrl + Alt + V」和录制提示之间来回跳。
+
+   **132 而不是 176**：176 是按「请按下组合键…（Esc 取消）」留的，但那段提示
+   把「按 Esc 取消」又写了一遍 —— 行说明里已经有。文案缩短后最长的组合
+   （Ctrl + Alt + Shift + V）约 120px，132 刚好够，按钮不再占掉行宽的三分之一。
+   用户反馈「鼠标滑到行上这个框就亮」：hover 命中范围本身是对的（实测只覆盖
+   按钮盒），问题就是盒子太宽、贴着行右缘，鼠标从右边进来几乎立刻落进去。 */
 .settings .hotkey-btn {
-  min-width: 176px;
+  min-width: 132px;
   justify-content: center;
   font-variant-numeric: tabular-nums;
 }
