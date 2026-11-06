@@ -50,6 +50,14 @@ export function captureGhost(view, opts = {}) {
   const rect = view.getBoundingClientRect();
   if (rect.width < 1 || rect.height < 1) return null;
 
+  // 按设备像素对齐：`getBoundingClientRect()` 会返回分数像素（如 15.9997），
+  // 幽灵层是 fixed 覆盖层，分数坐标在 125% / 150% 缩放下可能落到物理像素边界外，
+  // 表现为边缘一条发虚的缝。量化到 1/DPR 的整数倍即可，代价是 4 次乘法。
+  // 说明：幽灵层与新内容用的是同一份 rect，理论上本来就重合，这里是**防御性**
+  // 处理，实际收益在常规缩放下几乎看不到。
+  const dpr = window.devicePixelRatio || 1;
+  const snap = (v) => Math.round(v * dpr) / dpr;
+
   const ghost = view.cloneNode(true);
   ghost.classList.add(GHOST_CLASS);
   // 纯装饰：读屏不该把同一份内容读两遍
@@ -57,10 +65,10 @@ export function captureGhost(view, opts = {}) {
 
   ghost.style.cssText = [
     "position: fixed",
-    `left:${rect.left}px`,
-    `top:${rect.top}px`,
-    `width:${rect.width}px`,
-    `height:${rect.height}px`,
+    `left:${snap(rect.left)}px`,
+    `top:${snap(rect.top)}px`,
+    `width:${snap(rect.width)}px`,
+    `height:${snap(rect.height)}px`,
     "z-index:5",
     "pointer-events:none",
   ].join(";");
