@@ -384,6 +384,10 @@ pub fn run() {
         }
         settings::init(app.handle());
         clipboard::init(app.handle());
+        // 老用户升级后把散落在缓存根的排障副产品收进 archive/（幂等：
+        // 没有待归档文件时零动作，新安装等于什么都不做）。必须在 init 之后 ——
+        // 路径要等缓存目录确定。
+        clipboard::organize_cache_once();
         log_startup_banner();
         // 自愈：旧版本把自启值按 UTF-8 写进宽字符 API，注册表里是乱码路径，
         // 开机启动失败。这里每次启动比对一次，内容不符就重写。

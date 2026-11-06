@@ -5894,6 +5894,91 @@ pub fn cache_dir() -> PathBuf {
     DIR.get().cloned().unwrap_or_default()
 }
 
+/// 把根目录里的排障副产品收进 `archive/`。
+///
+/// **只碰白名单**：损坏备份、无密钥快照、v1 旧索引留存、历史救援副本。
+/// 绝不移动 `index.bin` / `index.wal` / `key.bin`（启动即读的核心状态，必须
+/// 就地在根），也不碰 `data` / `files` / `images` / `log` / `update`（它们本身
+/// 就是按用途分的目录）。
+///
+/// 幂等：根目录没有待归档文件时零动作，所以每次启动调用都安全。新安装的用户
+/// 本来就没有这些文件，等于什么都不做；老用户升级到本版后第一次启动自动整理一次。
+pub fn organize_cache_once() {
+    if let Some(dir) = DIR.get().cloned() {
+        organize_cache_at(&dir);
+    }
+}
+
+/// 归档主体。接目录参数是为了能在测试里用临时目录直接验证，
+/// 全局入口见 `organize_cache_once`。
+fn organize_cache_at(dir: &std::path::Path) -> usize {
+    let archive = dir.join(crate::store::ARCHIVE_DIR);
+    let mut moved = 0usize;
+
+    /// 移动一个；同名已存在时加时间戳保留两份 —— 这些是唯一的排障线索，不覆盖。
+    fn take(dir: &std::path::Path, archive: &std::path::Path, name: &str) -> bool {
+        let from = dir.join(name);
+        if !from.is_file() {
+            return false;
+        }
+        if std::fs::create_dir_all(archive).is_err() {
+            crate::log_err!("store", "缓存归档失败：无法创建 archive/，{name} 保留原位");
+            return false;
+        }
+        let mut dst = archive.join(name);
+        if dst.exists() {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            dst = archive.join(format!("{name}.{stamp}"));
+        }
+        match std::fs::rename(&from, &dst) {
+            Ok(()) => true,
+            Err(e) => {
+                crate::log_err!("store", "缓存归档失败（{name}）：{e}");
+                false
+            }
+        }
+    }
+
+    for name in [
+        crate::store::INDEX_LEGACY_KEPT,
+        crate::store::INDEX_CORRUPT,
+        crate::store::INDEX_NOKEY,
+        crate::store::WAL_CORRUPT,
+        "index.json.corrupt",
+        "index-plain.json",
+        "index-plain.tmp",
+    ] {
+        if take(dir, &archive, name) {
+            moved += 1;
+        }
+    }
+
+    // 历史版本留下的救援副本：indexjson.rescue-YYYYMMDD
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        let names: Vec<String> = rd
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("indexjson.rescue-"))
+            .collect();
+        for n in names {
+            if take(dir, &archive, &n) {
+                moved += 1;
+            }
+        }
+    }
+
+    if moved > 0 {
+        crate::log_print!(
+            "[store] 缓存目录已归档 {moved} 个现场文件到 {}/",
+            crate::store::ARCHIVE_DIR
+        );
+    }
+    moved
+}
+
 #[tauri::command]
 pub fn cache_info() -> CacheInfo {
     let dir = DIR.get().cloned().unwrap_or_default();
@@ -6739,6 +6824,37 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 缓存归档：只搬排障副产品，核心状态与内容目录原地不动，且可重复调用。
+    ///
+    /// 这条防的是「整理时误伤」：`index.bin` / `key.bin` 被搬走等于丢历史，
+    /// `data` 被搬走等于丢文件实体 —— 都比目录乱严重得多。
+    #[test]
+    fn organize_moves_side_files_only() {
+        let d = std::env::temp_dir().join(format!("qcv-org-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("data")).unwrap();
+        fs::write(d.join("index.bin"), b"core").unwrap();
+        fs::write(d.join("key.bin"), b"key").unwrap();
+        fs::write(d.join("index.bin.corrupt"), b"bad").unwrap();
+        fs::write(d.join("index.v1.json"), b"old").unwrap();
+        fs::write(d.join("indexjson.rescue-20260101"), b"rescue").unwrap();
+        fs::write(d.join("data").join("x"), b"content").unwrap();
+
+        let moved = organize_cache_at(&d);
+        assert!(moved >= 3, "应搬走 3 个副产品，实际 {moved}");
+
+        let a = d.join(crate::store::ARCHIVE_DIR);
+        assert!(a.join("index.bin.corrupt").is_file());
+        assert!(a.join("index.v1.json").is_file());
+        assert!(a.join("indexjson.rescue-20260101").is_file());
+        assert!(d.join("index.bin").is_file(), "核心索引不能动");
+        assert!(d.join("key.bin").is_file(), "密钥不能动");
+        assert!(d.join("data").join("x").is_file(), "内容目录不能动");
+
+        assert_eq!(organize_cache_at(&d), 0, "重复调用应无事可做（幂等）");
+        let _ = fs::remove_dir_all(&d);
+    }
 
     /// 实体清单读不出来时**必须**回退到常驻 `files`，不能返回空。
     ///

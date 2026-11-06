@@ -697,17 +697,10 @@ Section Install
     DetailPrint "正在安装轻贴 ${VERSION}..."
   ${EndIf}
 
-  ; 安装前先结束运行中的轻贴。
-  ;
-  ; 用户更新时常常只是把窗口关了 —— 设置里默认「关闭时收进托盘，继续在后台记录」，
-  ; 进程其实还在，于是下一步的检测会弹「请先关闭应用」，得回头去托盘找退出，很挫败。
-  ; 强杀是安全的：索引已经是原子写（tmp + rename），不会留下半截文件。
-  ; debug 版 exe 与正式版同名，会被一并结束 —— 这正是想要的（两个实例写同一份索引）。
-  DetailPrint "正在关闭运行中的轻贴..."
-  nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM "${MAINBINARYNAME}.exe"'
-  Pop $0
-  Sleep 800
-
+  ; **不再强杀运行中的轻贴**。主程序只在用户主动点「立即安装」、且确认安装器
+  ; 已启动（UAC 通过）之后才优雅退出自己；这里再 taskkill /F 会让 UAC 刚通过、
+  ; 用户还没决定是否继续时应用就被杀掉（用户实测反馈「取消安装都不行」）。
+  ; 兜底保留：从外部直接运行安装包且主程序还在时，宏会提示先关闭。
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; Copy main executable
