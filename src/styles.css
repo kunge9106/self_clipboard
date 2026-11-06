@@ -2769,10 +2769,10 @@ body.dark .tour-dot.is-on {
      去掉填充后与全站按钮同构，仍比次要按钮醒目（强调色边），但不额外造一层板子。 */
   border-color: var(--accent);
   background: transparent;
-  /* 字色直接用正文色：与「跳过 / 上一步」同一族（浅色近黑、深色近白），
-     深浅两头都读得清。不能继承 .btn-primary 的 --accent-on —— 那是**实底填充**
-     上的对立色（浅白 / 深黑），套在透明底上正好反过来。 */
-  color: var(--text);
+  /* 字色与「跳过 / 上一步」完全同档（--text-dim）。
+     曾用 --text（正文色，近黑），用户一眼看出「比其他更黑，其他像灰色」——
+     同一排按钮里字色分级会被当成 bug 而不是层级，主次交给边色表达就够了。 */
+  color: var(--text-dim);
 }
 
 html:not(.hovers-off) .btn-primary.is-cta:hover {
