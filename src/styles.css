@@ -2226,6 +2226,15 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
   display: block;
   line-height: 1.5;
   cursor: default;
+  /* ⚠ **必须收成内容宽度**，不能让它撑满 .row-text。
+     这一行是 `<label for="控件id">`，Chromium 会把 label 的 hover 传给关联控件、
+     点击也会转发过去。而 `display: block` 让 label 占满整条左栏（实测 380px，
+     控件在 428~560），于是「鼠标在行左半边任何位置」都会点亮右侧那个按钮，
+     点一下还能直接触发 —— 用户反馈「鼠标没在框内但悬浮背景亮了，也能点」。
+     收成 fit-content 后命中区只剩标题文字本身，仍保留「点标题 = 点控件」的
+     无障碍语义（这是 label 该有的行为，只是不该覆盖整行）。 */
+  width: fit-content;
+  max-width: 100%;
 }
 
 .settings .row-desc {
