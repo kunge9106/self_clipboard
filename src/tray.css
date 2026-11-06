@@ -74,7 +74,7 @@ html:not(.hovers-off) .tray-item.danger:hover {
   flex: 0 0 auto;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.3;
+  stroke-width: var(--icon-stroke);
   stroke-linecap: round;
   stroke-linejoin: round;
 }

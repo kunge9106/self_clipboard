@@ -262,7 +262,7 @@ pub fn show_main(app: &AppHandle) {
                 let hwnd = h.0 as isize;
                 // 隐藏期间 DWM 会把 accent 材质丢掉 —— 先补回来
                 let dark = matches!(w.theme().unwrap_or(Theme::Light), Theme::Dark);
-                crate::effects::apply(hwnd, dark);
+                crate::effects::apply_with(hwnd, dark, "tray-show");
                 // hide() 不产生 WM_SIZE，WebView2 的内容尺寸可能停在隐藏前的大小
                 // （表现为唤回来排版不对）。此刻窗口还不可见，尺寸微调看不见。
                 crate::effects::relayout(hwnd);
@@ -288,8 +288,7 @@ pub fn show_main(app: &AppHandle) {
                     std::thread::sleep(std::time::Duration::from_millis(delay));
                     if let Ok(h) = w2.hwnd() {
                         let dark = matches!(w2.theme().unwrap_or(Theme::Light), Theme::Dark);
-                        crate::effects::apply(h.0 as isize, dark);
-                        crate::effects::apply_rounded_corners(h.0 as isize);
+                        crate::effects::apply_with(h.0 as isize, dark, "tray-show-delayed");
                         crate::effects::nudge(h.0 as isize);
                     }
                 }

@@ -21,6 +21,11 @@ use std::sync::OnceLock;
 const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
 const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
 const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+/// Win11 22000+：让非 UWP 窗口使用 host backdrop brush 语义。
+/// 与 `SYSTEMBACKDROP_TYPE` 搭配时，backdrop 改从**窗口后方**采样并绘制到重定向表面，
+/// 而不是从视觉后方采样 —— 表现是最大化/还原动画、以及被其他窗口遮挡时材质不再失效
+/// （原生 Acrylic 在动画期间会短暂退回实色，这是 DWM 的既有行为）。
+const DWMWA_USE_HOSTBACKDROPBRUSH: u32 = 17;
 const DWMWA_MICA_EFFECT: u32 = 1029;
 
 // DWM_SYSTEMBACKDROP_TYPE
@@ -255,19 +260,22 @@ fn classify(build: u32) -> Tier {
 // 施加材质
 // ---------------------------------------------------------------------------
 
-/// 对窗口施加材质，返回**实际使用**的档位。
+/// 应用窗口材质。
 ///
-/// `hwnd` 为原生窗口句柄的原始值（isize）。
-pub fn apply(hwnd: isize, dark: bool) -> Tier {
+/// `reason` 只用于日志：材质失效这类问题**只能靠「谁在什么时候动了它」定位** ——
+/// 之前排查「最小化后不恢复」时，日志只有「材质应用完成」，根本看不出是谁触发的，
+/// 只能靠猜。现在每条都带来源（startup / theme-refresh / toggle-advanced / restore / …）。
+pub fn apply_with(hwnd: isize, dark: bool, reason: &str) -> Tier {
     let build = detect_build();
     let tier = classify(build);
     let _ = BUILD.set(build);
     let _ = TIER.set(tier);
 
     crate::log_print!(
-        "[effects] windows build={} → tier={} (radius≤{}px)",
+        "[effects] 应用材质（来源={reason}）build={} tier={} 高级材质={} (radius≤{}px)",
         build,
         tier.as_str(),
+        if is_round() { "开" } else { "关" },
         match tier.max_radius() {
             u32::MAX => 0,
             r => r,
@@ -298,16 +306,28 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
     // 关掉 DWM 的非客户区渲染（双保险；部分系统上该属性已不再支持）
     disable_nc_rendering(hwnd);
 
-    let result = match tier {
-        Tier::SystemBackdrop => apply_system_backdrop(hwnd),
-        Tier::Mica => apply_mica(hwnd),
-        Tier::Acrylic => apply_acrylic(hwnd, dark),
-        Tier::Solid => Ok(()),
+    // ⚠ **语义已反转**（2026-11-05，用户实测要求「高级材质打开才应该是毛玻璃」）：
+    //   开（round_mode = true）→ **施加**系统材质，这才是毛玻璃；
+    //   关                    → 清掉所有系统材质，窗口退化为透明 layered，
+    //                           由 CSS 用更高浓度的实底兜住。
+    // 早先是反的（开＝关掉模糊换干净四角），名字还叫「圆角模式」，两头都不对：
+    // 用户以为开了是高级效果，实际得到的是"没有模糊"。
+    let result = if is_round() {
+        match tier {
+            Tier::SystemBackdrop => apply_system_backdrop(hwnd),
+            Tier::Mica => apply_mica(hwnd),
+            Tier::Acrylic => apply_acrylic(hwnd, dark),
+            Tier::Solid => Ok(()),
+        }
+    } else {
+        clear_system_material(hwnd, tier);
+        clear_accent(hwnd);
+        Ok(())
     };
 
     match result {
         Ok(()) => {
-            crate::log_print!("[effects] 材质应用完成：{}", tier.as_str());
+            crate::log_print!("[effects] 材质应用完成：{}（来源={reason}）", tier.as_str());
             tier
         }
         Err(code) => {
@@ -320,6 +340,41 @@ pub fn apply(hwnd: isize, dark: bool) -> Tier {
             let _ = TIER.set(Tier::Solid);
             Tier::Solid
         }
+    }
+}
+
+/// 最小化 → 恢复时补一次材质（**这是「最小化再打开变成灰扑扑纯色」的修复**）。
+///
+/// Windows 在窗口最小化时会把 `DWMWA_SYSTEMBACKDROP_TYPE` 丢掉（DWM 不再为不可见
+/// 窗口维护 backdrop）。恢复后窗口是激活的、内容正常，但材质永远回不来 ——
+/// 用户看到的就是「还是那种灰扑扑的材质，不是毛玻璃」。
+///
+/// 为什么不能只补一次：恢复动画期间 DWM 会**忽略**该属性（返回 S_OK 但没生效），
+/// 而不同的机器/壁纸下动画时长不一样。所以补两次（0.35s / 0.9s）。
+/// `apply` 是幂等的（重复设同一个值无副作用），多补一次的成本可以忽略。
+///
+/// 判断方式是 `IsIconic` 的状态翻转：Resized 在最小化与恢复时都会触发，
+/// 靠「上一次是不是最小化」区分到底是哪一个。
+pub fn reapply_after_restore(hwnd: isize, dark: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WAS_ICONIC: AtomicBool = AtomicBool::new(false);
+    unsafe {
+        extern "system" {
+            fn IsIconic(hwnd: isize) -> i32;
+        }
+        let iconic = IsIconic(hwnd) != 0;
+        let was = WAS_ICONIC.swap(iconic, Ordering::Relaxed);
+        // 正在最小化 → 只记状态；本来就没最小化 → 只是普通缩放，不补
+        if iconic || !was {
+            return;
+        }
+    }
+    crate::log_print!("[effects] 从最小化恢复 → 补材质（DWM 会丢 backdrop）");
+    for delay in [350u64, 900] {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            apply_with(hwnd, dark, "restore");
+        });
     }
 }
 
@@ -406,6 +461,13 @@ pub fn relayout(hwnd: isize) {
 /// - 半径按当前 DPI 从逻辑 px 换算成物理 px
 /// - 窗口尺寸变化后 region **不会**自动跟随，必须在 Resized 事件里重设
 /// - SystemBackdrop 档跳过（系统已经给了圆角）
+/// ⚠ **当前所有档位的 `region_radius()` 都是 0，本函数是空操作。**
+///
+/// 留着是因为 ADR-004 记录了「若 Win10 支持系统级圆角，可用区域裁剪兜底」；
+/// 但**不要再新增调用点**——真正会执行的只有下面那句 `if radius == 0 { return }`。
+/// 曾经的 `begin_resize` 在调用它之前先无条件 `SetWindowRgn(hwnd, 0, 1)`，
+/// 结果变成「只会破坏材质、从不会恢复材质」，是「材质消失、点一下深浅色才回来」
+/// 的真凶（见 `begin_resize` 的注释）。
 pub fn apply_rounded_corners(hwnd: isize) {
     let radius = current_tier().region_radius();
     if radius == 0 {
@@ -469,20 +531,32 @@ static RESIZE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 ///
 /// 逐帧 SetWindowRgn 对窗口本体做区域裁剪非常贵（大窗口尤甚），
 /// 会让缩放明显卡顿。这里改成「缩放中不裁剪、缩放后补一次」。
-pub fn begin_resize(hwnd: isize) {
-    unsafe {
-        extern "system" {
-            fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
-        }
-        // rgn=0 → 移除区域裁剪（直角）
-        SetWindowRgn(hwnd, 0, 1);
-    }
+/// 窗口尺寸变化后收尾。
+///
+/// ⚠ **这里是「材质莫名其妙丢失、点一下深浅色就恢复」的真正原因**。
+///
+/// 原来无条件在 120ms 后 `apply_rounded_corners`（= `SetWindowRgn`）。而在有系统
+/// 材质的档位上（Acrylic / Mica / SystemBackdrop），材质是 DWM **按窗口矩形**画的：
+/// 一旦用 `SetWindowRgn` 把窗口区域改成圆角矩形，DWM 对这块表面的 backdrop 就废了 ——
+/// 窗口还在、内容还在，但毛玻璃没了，退成实色。
+///
+/// 而切深浅色会走 `reapply_theme_visual` → 重新下发材质 → 「点一下就好了」。
+/// 这就是用户看到的现象。
+///
+/// 所以两条路分开：
+///   · 有系统材质（高级材质开）：**不裁区域**，改为重新下发一次材质 ——
+///     拖动/缩放本身也会让 DWM 重建表面，顺手补一次最稳；
+///   · 无系统材质（高级材质关）：照旧用区域裁剪画圆角。
+pub fn begin_resize(hwnd: isize, dark: bool) {
     let gen = RESIZE_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(120));
-        if RESIZE_GEN.load(std::sync::atomic::Ordering::Relaxed) == gen {
-            apply_rounded_corners(hwnd);
+        if RESIZE_GEN.load(std::sync::atomic::Ordering::Relaxed) != gen {
+            return; // 还在拖，等最后一次
         }
+        // 圆角由 CSS（`--radius` + overflow）或系统给，不裁区域 ——
+        // 裁区域会破坏 DWM 的 backdrop（见本函数文档）。
+        let _ = apply_with(hwnd, dark, "resize-end");
     });
 }
 
@@ -604,6 +678,18 @@ fn set_immersive_dark(hwnd: isize, dark: bool) {
 /// Win11 22H2+：系统级 backdrop + 系统圆角
 fn apply_system_backdrop(hwnd: isize) -> Result<(), i32> {
     unsafe {
+        // 先声明「本窗口使用 host backdrop 采样」，再设 backdrop 类型。
+        // 顺序有讲究：这个 flag 影响 DWM 为窗口选择的重定向目标，
+        // 后设 backdrop 才能作用在正确的那块表面上。
+        // 失败不算错 —— 老版本（<22000）本来就返回失败，我们只当它不存在。
+        let on: i32 = 1;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_HOSTBACKDROPBRUSH,
+            &on as *const _ as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+
         let v: u32 = DWMSBT_TRANSIENTWINDOW;
         let hr = DwmSetWindowAttribute(
             hwnd,
@@ -657,31 +743,20 @@ fn clear_accent(hwnd: isize) {
 
 /// Win10 1809–22H2：真·acrylic（tint 透明度取自「材质浓度」配置）
 fn apply_acrylic(hwnd: isize, dark: bool) -> Result<(), i32> {
-    if is_round() {
-        // 圆角模式：不施加任何系统 blur
-        clear_accent(hwnd);
-        return Ok(());
-    }
-    // 直角模式才会走到这里（圆角模式在上面的分支直接 clear_accent 返回），
-    // 所以 alpha() 取到的就是「直角档」那个值。
+    // 是否施加由 `apply` 统一判断（关闭高级材质时根本走不到这里）。
+    // tint 恒为 8%：明暗由 CSS 层负责，系统只提供「模糊」这一件事。
     let alpha = crate::settings::get().alpha();
     set_accent_state(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, tint_for(dark, alpha))
 }
 
-/// 切换「圆角模式」后立即生效（无需重启）
+/// 切换「高级材质」后立即生效（无需重启）。
 ///
-/// ⚠️ 不能无脑 `apply_acrylic`：Win11 走 **SystemBackdrop(Mica)** 档，正常材质是 Mica 而非 acrylic。
-/// - **开启圆角**：必须关掉**所有**系统材质（Mica/SystemBackdrop 的 backdrop + accent 都要清），
-///   否则系统材质的矩形 blur 仍在，圆角外会留直角残留；
-/// - **关闭圆角**：必须按当前档位**完整恢复**（SystemBackdrop→Mica、Acrylic→acrylic），
-///   只施加 acrylic 恢复不了 Mica，表现为「关了圆角材质还是圆角模式的样子」。
+/// 直接重跑 `apply` 即可 —— 施加还是清除，由 `apply` 里那一个分支统一决定。
+/// 早先这里手写了「开就清、关就恢复」两段逻辑，与 `apply` 各判断一次，
+/// 语义一改就要改两处（本次正是踩到：改完 `apply` 忘了这里，切开关毫无反应）。
+/// **一处判断胜过两处同步**。
 pub fn apply_round_mode(hwnd: isize, dark: bool) {
-    if is_round() {
-        clear_system_material(hwnd, current_tier());
-        clear_accent(hwnd);
-    } else {
-        let _ = apply(hwnd, dark);
-    }
+    let _ = apply_with(hwnd, dark, "toggle-advanced");
 }
 
 // ---------------------------------------------------------------------------
@@ -836,30 +911,17 @@ fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
     // 否则原生标题栏会重新出现
     strip_window_frame(hwnd, true);
     disable_nc_rendering(hwnd);
-    if is_round() {
-        // 圆角模式：系统材质已关，只重设区域。这里**不能**开 acrylic ——
-        // 矩形材质会把圆角外重新填上
-        apply_rounded_corners(hwnd);
-    } else {
-        // 非圆角：按**当前档位**重新应用材质。
-        //
-        // 原来这里只处理 Acrylic 一档，SystemBackdrop / Mica 两档什么都不做 ——
-        // DWM 在主题切换时会重建材质上下文，不重设就退成深灰实心（用户实测：
-        // 「切深浅色后材质没切回来，是小概率」）。重新下发一次是幂等的，
-        // 成本只有几个 DWM 调用。
-        match current_tier() {
-            Tier::SystemBackdrop => {
-                let _ = apply_system_backdrop(hwnd);
-            }
-            Tier::Mica => {
-                let _ = apply_mica(hwnd);
-            }
-            Tier::Acrylic => {
-                let _ = apply_acrylic(hwnd, dark);
-            }
-            Tier::Solid => {}
-        }
-    }
+    // ⚠ **这一段曾是「材质不恢复」的真正原因**。
+    //
+    // 它手写了旧语义的分支：`is_round()` 为真时（旧语义＝圆角模式＝**没有材质**）
+    // 只重设区域、不重发材质。语义反转后 `is_round()` 变成「高级材质＝有材质」，
+    // 于是打开高级材质之后，**一切主题就把材质清掉且不再补回来** ——
+    // 用户看到的就是「又出现材质不恢复了」。
+    //
+    // 修法不是把 if/else 反过来（那只是把 bug 挪到另一边），而是**复用 `apply`**：
+    // 施加还是清除，只有 `apply` 里那一个分支说了算。这里再加一份判断，
+    // 就是又给自己留了一个「改一处忘一处」的机会。
+    let _ = apply_with(hwnd, dark, "theme-refresh");
     nudge(hwnd);
     crate::log_print!("[effects] 主题视觉重刷完成（第 {pass} 遍，dark={dark}）");
 }

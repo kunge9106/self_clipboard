@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 // 查询封装与窗口化列表：两者都不依赖 DOM 之外的全局状态，可单独 import 测（见 test/）。
 import { buildFilter, createHistoryApi } from "./history-api.js";
 import { decidePurgeAction } from "./purge-decision.js";
+import { createTip } from "./tip.js";
 import { VirtualList } from "./virtual-list.js";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
@@ -138,8 +139,34 @@ async function applyEffectInfo() {
 }
 
 function applyTheme(dark) {
+  const wasDark = document.body.classList.contains("dark");
   document.body.classList.toggle("dark", !!dark);
   syncThemeToggleLabel();
+  applyThemeDependentAlpha(wasDark, !!dark);
+}
+
+/**
+ * 高级材质（round 模式）下，深浅切换要连带调整材质浓度。
+ *
+ * 它没有系统背景模糊，窗口后面就是清晰的桌面。这种状态下：
+ *   · 深色必须接近实心（90）才压得住亮壁纸，否则一片惨白；
+ *   · 浅色则要恢复用户自己调的那个值 —— 浅色本来就不怕亮壁纸。
+ *
+ * 所以只在**主题真的变了**时动作（启动时 `applyTheme` 也会被调，那时不该覆盖用户设置）。
+ * 刻意**不写回 settings**：90 是「深色下的派生值」，不是用户的选择；
+ * 若写回去，切回浅色就恢复不回原值了（这正是之前把 0.96 写死在 CSS 里犯的错，
+ * 只是换了个位置）。
+ */
+function applyThemeDependentAlpha(wasDark, isDark) {
+  // 三个条件缺一不可：模式是高级材质、用户没关掉这个行为、主题真的变了
+  if (!settings?.roundMode || settings.autoAlphaDark === false || wasDark === isDark) return;
+  const v = isDark ? 90 : (settings.materialAlpha ?? 90);
+  applyGlassAlpha(v);
+  // 滑块在设置页可见时同步读数，否则界面显示 60、实际 90
+  const el = document.getElementById("set-material");
+  const lab = document.getElementById("material-val");
+  if (el) el.value = String(v);
+  if (lab) lab.textContent = `${v}%`;
 }
 
 /// 侧栏那个切换按钮的文案跟着当前深浅变：深色时写「浅色」，点了就去浅色。
@@ -203,6 +230,9 @@ function bindThemeToggle() {
  * 所以手动钉住时系统主题变化不会再影响界面。
  */
 async function applyThemeMode(mode) {
+  // 记录「用户点了什么」—— 材质类问题只能靠操作序列定位。
+  // 之前排查「材质不恢复」，日志里只有「材质应用完成」，看不出是谁触发的。
+  reportFrontend("INFO", "ui", `切换主题 → ${mode}`);
   if (mode === "light") return applyTheme(false);
   if (mode === "dark") return applyTheme(true);
   applyTheme((await appWindow.theme().catch(() => "light")) === "dark");
@@ -218,7 +248,9 @@ async function applyThemeMode(mode) {
 function applyGlassAlpha(pct) {
   // 兜底档（没有真材质）必须保持不透明，否则会直接看见桌面
   if (document.body.classList.contains("tier-solid")) return;
-  const a = Math.max(10, Math.min(95, Number(pct) || 0)) / 100;
+  // 与后端 ALPHA_MIN / ALPHA_MAX 一致：1–100 无极。上限放到 100（完全不透）——
+  // 原来卡在 95 是为了避开 1.0，但 calc 里已经 min(1, …) 夹过，没必要留这 5 的空档。
+  const a = Math.max(1, Math.min(100, Number(pct) || 0)) / 100;
   document.documentElement.style.setProperty("--glass-alpha", String(a));
 }
 
@@ -236,7 +268,8 @@ function syncAlphaToSettings(v) {
 }
 
 /**
- * 圆角模式：**圆角 + 不用系统模糊**。
+ * 高级材质（代码里沿用历史名 `round` / `roundMode`，改字段名要迁配置，故只改文案）：
+ * **圆角 + 不用系统模糊**。
  *
  * Win10 的 acrylic 由 DWM 合成、恒为矩形，裁不掉圆角，所以「圆角 + 系统模糊」
  * 必然在四角留下一圈矩形残留。两种模式各自规避这个矛盾：
@@ -248,14 +281,29 @@ function syncAlphaToSettings(v) {
  */
 function applyRoundMode(on) {
   document.body.classList.toggle("round", !!on);
-  document.documentElement.style.setProperty("--radius", (on ? maxRadius : 0) + "px");
+  // 圆角的归属变了（语义反转后）：
+  //   · **开高级材质** → 窗口上有系统材质。Win11 的系统圆角与 backdrop 不冲突，
+  //     保留圆角；Win10 的 acrylic 恒为矩形，给它圆角会在四角露出矩形残影，
+  //     所以那一档只能用直角 —— 这是平台限制，不是取舍。
+  //   · **关** → 窗口是无材质的透明 layered，圆角完全由我们自己画，干净。
+  const acrylic = document.body.classList.contains("tier-acrylic");
+  document.documentElement.style.setProperty("--radius", (on && acrylic ? 0 : maxRadius) + "px");
 }
+
+/** 上一次的最大化状态；null = 还没同步过 */
+let lastMaxState = null;
 
 /** 最大化 ↔ 还原：图标与提示词跟随窗口状态（需求 #6） */
 async function syncMaxState() {
   const maxBtn = document.getElementById("btn-maximize");
   if (!maxBtn) return;
   const max = await appWindow.isMaximized().catch(() => false);
+  // 只在状态**真的变了**时记 —— 它在每次 Resized 都会跑，拖动窗口时会狂刷日志，
+  // 把真正有用的操作序列淹掉。
+  if (lastMaxState !== max) {
+    lastMaxState = max;
+    reportFrontend("INFO", "ui", `窗口最大化 → ${max ? "是" : "否"}`);
+  }
   maxBtn.classList.toggle("is-max", max);
   maxBtn.title = max ? "还原" : "最大化";
 }
@@ -839,6 +887,117 @@ function bindNav() {
     selectMode = false;
     selectedIds.clear();
     render();
+  });
+}
+
+/**
+ * 弹窗行为统一（期 3b）。
+ *
+ * 12 个弹窗的 DOM 结构本来就一致（mask > modal > title/text/actions），
+ * 散的是**行为**：39 处零散的 `hidden = false/true`、Esc 只在 3 处单独处理、
+ * 打开时焦点还留在背后的界面上（键盘用户按 Tab 会走到底下的列表里，
+ * 而弹窗是模态的 —— 焦点跑到模态外面是明确的无障碍错误）。
+ *
+ * 刻意**不替换那 39 处调用点**：改动面太大，漏一处就是「半套行为」。
+ * 改为观察 `.modal-mask` 的 `hidden` 变化统一接管 —— DOM 已经被动过，
+ * 监听它比替换调用点可靠，而且以后新增弹窗**自动生效**，不用再记得调什么函数。
+ */
+function bindModalBehavior() {
+  /** 打开中的弹窗栈（理论上不应嵌套，但留着以防将来从弹窗里再开弹窗） */
+  const stack = [];
+
+  /**
+   * 打开时把焦点放到哪儿。
+   *
+   * **破坏性弹窗的默认焦点必须是「取消」**：这 12 个弹窗里 7 个的确认键是
+   * 「永久删除 / 清空 / 退出并清理」，焦点若落在它上面，用户只是想用键盘关掉弹窗、
+   * 或者手滑按了回车，就直接把内容删了 —— Windows 自己的删除确认框也是这么做的
+   * （默认按钮是「否」）。
+   *
+   * 所以顺序是：取消 → 普通按钮 → 危险按钮（最后才兜底）。
+   */
+  const focusTargetOf = (mask) => {
+    const actions = mask.querySelector(".modal-actions");
+    if (!actions) return mask.querySelector(".modal button:not(:disabled)");
+    return (
+      actions.querySelector('[id*="cancel" i]:not(:disabled), [id*="close" i]:not(:disabled)') ||
+      [...actions.querySelectorAll("button:not(:disabled)")].find((b) =>
+        /^(取消|关闭|知道了|暂不)/.test(b.textContent.trim())
+      ) ||
+      actions.querySelector(".btn-ghost:not(:disabled)") ||
+      actions.querySelector("button:not(:disabled)")
+    );
+  };
+
+  const observer = new MutationObserver((records) => {
+    for (const r of records) {
+      const mask = r.target;
+      if (!mask.classList || !mask.classList.contains("modal-mask")) continue;
+      const open = !mask.hidden;
+      const at = stack.findIndex((x) => x.mask === mask);
+
+      if (open && at < 0) {
+        stack.push({ mask, prev: document.activeElement });
+        // 聚焦到「取消」，并**显式标记** —— 程序化 focus() 不算「键盘交互」，
+        // 浏览器不会给它 :focus-visible，用户看不到焦点落在哪个按钮上
+        // （实测「还是按钮不在当前步骤」）。标记由下一次真实键盘/鼠标操作清除。
+        const put = () => {
+          const el = focusTargetOf(mask);
+          if (!el) return;
+          el.focus({ preventScroll: true });
+          if (document.activeElement === el) el.setAttribute("data-autofocus", "");
+        };
+        // 双保险：元素刚从 hidden 变可见时，下一帧有时还拿不到焦点
+        requestAnimationFrame(put);
+        setTimeout(put, 80);
+      } else if (!open && at >= 0) {
+        const [item] = stack.splice(at, 1);
+        mask.querySelectorAll("[data-autofocus]").forEach((n) =>
+          n.removeAttribute("data-autofocus")
+        );
+        // 焦点还给打开它的元素；它可能已经被列表重绘替换掉了（卡片删除后会重建）
+        if (item.prev && item.prev.isConnected) item.prev.focus({ preventScroll: true });
+      }
+    }
+  });
+
+  document
+    .querySelectorAll(".modal-mask")
+    .forEach((m) => observer.observe(m, { attributes: true, attributeFilter: ["hidden"] }));
+
+  // 用户一旦真的按键 / 点击，焦点样式就交回 :focus-visible ——
+  // 标记只是「刚打开时让人看见默认焦点在哪」，不该一直粘着
+  const clearAutoFocus = () =>
+    document
+      .querySelectorAll("[data-autofocus]")
+      .forEach((n) => n.removeAttribute("data-autofocus"));
+  window.addEventListener("keydown", clearAutoFocus, true);
+  document.addEventListener("mousedown", clearAutoFocus, true);
+
+  // Esc 只关**最上层**那个：底下的（例如先打开的清空确认）不该被连带关掉。
+  // 冒泡阶段监听，让已有的 Esc 处理（编辑器退出、搜索清空）先跑；
+  // 它们若已处理会 preventDefault，这里就不再抢。
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || e.defaultPrevented || stack.length === 0) return;
+    const top = stack[stack.length - 1];
+    // 可能已经被别处直接关掉了，MutationObserver 还没来得及更新栈
+    if (top.mask.hidden) return;
+
+    // ⚠ **不能直接把 hidden 设成 true**：purge / clear-view 这两个弹窗的返回值是
+    // Promise（`new Promise((r) => (purgeResolve = r))`），点取消才会 resolve。
+    // 直接隐藏会让调用方永远 await 着 —— 表现为「点了删除，界面没反应，卡片也删不掉」。
+    // 所以 Esc 等价于**点取消按钮**，走弹窗自己的关闭路径。
+    const cancel =
+      top.mask.querySelector('.modal-actions [id*="cancel" i], .modal-actions [id*="close" i]') ||
+      [...top.mask.querySelectorAll(".modal-actions button")].find((b) =>
+        /^(取消|关闭|知道了)/.test(b.textContent.trim())
+      );
+
+    if (cancel) cancel.click();
+    // 没有取消键的弹窗（引导、详情）直接关；这类不返回 Promise，关掉没有副作用
+    else top.mask.hidden = true;
+
+    e.preventDefault();
   });
 }
 
@@ -2538,7 +2697,7 @@ function settingsHtml() {
       return (
         `<button class="tab${t.id === settingsTab ? " is-active" : ""}` +
         `${dot ? " has-dot" : ""}" data-tab="${t.id}"` +
-        `${dot ? ` title="${esc(dotTip)}"` : ""}>${t.label}</button>`
+        `${dot ? ` data-tip="${esc(dotTip)}"` : ""}>${t.label}</button>`
       );
     }
   ).join("")}</div>`;
@@ -2936,13 +3095,21 @@ function settingsAppearanceHtml(s) {
       rowCtl(
         "材质浓度",
         "越高越厚实 · 越低越通透",
-        `<input type="range" id="set-material" min="10" max="90" value="${s.materialAlpha ?? 50}" /><span class="hint" id="material-val">${s.materialAlpha ?? 50}%</span>`
+        `<input type="range" id="set-material" min="1" max="100" value="${s.materialAlpha ?? 50}" /><span class="hint" id="material-val">${s.materialAlpha ?? 50}%</span>`
       ) +
         rowCheck(
           "set-round",
-          "圆角模式",
-          "圆角 + 无背景模糊（四角干净）／直角 + 保留背景模糊。Win11 本身即圆角，此开关只影响背景模糊与观感",
+          "高级材质",
+          // 原名「圆角模式」有歧义：Win11 上直角模式窗口也是圆角的（系统给的），
+          // 用户会以为关掉会变直角。它实际控制的是**用不用系统背景模糊**。
+          "开启后使用系统毛玻璃，并叠加一层自研增强（更浓的模糊与色彩）。关闭则用不透明底色，更省电、文字更稳",
           s.roundMode
+        ) +
+        rowCheck(
+          "set-auto-dark-alpha",
+          "深色自动加浓",
+          "高级材质下切到深色时，浓度自动升到 90%；切回浅色恢复你设的值。浓度越高，透出的模糊越少",
+          s.autoAlphaDark
         )
     ),
     block(
@@ -3207,7 +3374,7 @@ function settingsAboutHtml() {
           <button class="btn-ghost" id="btn-check-update">${updateBtnLabel()}</button>
           <button class="btn-ghost" id="btn-repo">项目主页</button>
           <button class="btn-ghost" id="btn-feedback">问题反馈</button>
-          <button class="btn-ghost" id="btn-diag" title="复制版本、系统、材质、数据目录等排查信息">复制诊断信息</button>
+          <button class="btn-ghost" id="btn-diag" data-tip="复制版本、系统、材质、数据目录等排查信息">复制诊断信息</button>
         </div>
       </div>
     </div>
@@ -3231,7 +3398,7 @@ function settingsAboutHtml() {
         <span class="about-fact-v" id="ab-tier">—</span>
       </div>
       <div class="about-fact">
-        <span class="about-fact-k">圆角模式</span>
+        <span class="about-fact-k">高级材质</span>
         <span class="about-fact-v" id="ab-round">—</span>
       </div>
       <div class="about-fact">
@@ -3560,7 +3727,7 @@ function showUpdateBanner() {
   el.innerHTML =
     `<span class="ub-text">发现新版本 <b>v${esc(updateInfo.latest)}</b></span>` +
     `<button class="ub-btn" id="ub-go">查看</button>` +
-    `<button class="ub-close" id="ub-close" title="关闭">×</button>`;
+    `<button class="ub-close" id="ub-close" data-tip="关闭" aria-label="关闭">×</button>`;
   document.body.appendChild(el);
 
   el.querySelector("#ub-go").onclick = () => {
@@ -4235,6 +4402,7 @@ function bindSettings(view) {
     material.addEventListener("change", () => {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
+      reportFrontend("INFO", "ui", `材质浓度 → ${v}%`);
       invoke("set_material_alpha", { value: v }).catch((e) =>
         toast("未保存，请重试")
       );
@@ -4247,11 +4415,32 @@ function bindSettings(view) {
   // （后端 alpha_straight / alpha_round），切模式只是换用另一档 ——
   // 直角调到 68 → 切圆角（用圆角那档，比如 45）→ 切回直角仍是 68。
   // 这里把该模式记住的那一档取回来，同步到滑块 / 标签 / 观感。
+  const autoDark = view.querySelector("#set-auto-dark-alpha");
+  if (autoDark)
+    autoDark.onchange = async () => {
+      try {
+        await invoke("set_auto_alpha_dark", { value: autoDark.checked });
+        settings = await invoke("get_settings");
+        // 关掉时若正处在深色 + 高级材质，要把浓度还原成用户设的值，否则会停在 90
+        if (!autoDark.checked) {
+          applyGlassAlpha(settings.materialAlpha ?? 90);
+          const el = view.querySelector("#set-material");
+          const lab = view.querySelector("#material-val");
+          if (el) el.value = String(settings.materialAlpha ?? 90);
+          if (lab) lab.textContent = `${settings.materialAlpha ?? 90}%`;
+        }
+      } catch (e) {
+        reportFrontend("warn", "settings", e);
+        toast("设置没保存，请重试");
+      }
+    };
+
   const round = view.querySelector("#set-round");
   if (round)
     round.onchange = async () => {
       try {
         await invoke("set_round_mode", { value: round.checked });
+        reportFrontend("INFO", "ui", `高级材质 → ${round.checked ? "开" : "关"}`);
         applyRoundMode(round.checked);
         // 模式变了 → 当前生效的那一档（materialAlpha）也随之改变，重新拉一次配置
         settings = await invoke("get_settings");
@@ -4390,6 +4579,8 @@ async function main() {
   bindNav();
   bindThemeToggle();
   bindSearch();
+  createTip();
+  bindModalBehavior();
   startTimeTicker();
 
   await applyEffectInfo();
