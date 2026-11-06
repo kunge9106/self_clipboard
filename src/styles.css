@@ -80,8 +80,9 @@
   /* 按下：物理上「被压下去 = 遮住光」，所以比常态**暗**一档（WinUI 的
      ButtonBackgroundPressed 也是比 normal 暗）。浅色用中性黑，深色用更低的白。 */
   --state-active: rgba(0, 0, 0, 0.06);
-  /* 强调色的淡底：主按钮的悬停/聚焦用。实心蓝在毛玻璃上像贴了块塑料板，
-     与材质语言冲突；但主操作又必须比次操作醒目，所以用「淡色底 + 强调边 + 强调字」。 */
+  /* 强调色的淡底：引导页「下一步」这类主按钮的常态底，也用于焦点环。
+     实心蓝在毛玻璃上像贴了块塑料板，与材质语言冲突；但主操作又必须比次操作醒目，
+     所以用「淡色底 + 强调边 + 正文色字」（字色见 --accent-on-soft）。 */
   --accent-soft: rgba(47, 107, 255, 0.1);
   /* 小控件（按钮 / 图标键 / 菜单项 / 导航项）的悬停与聚焦底色：**淡灰**。
      与卡片用的 --state-hover（白 .45 提亮）刻意分开：
@@ -97,7 +98,13 @@
      Fluent 自己的强调蓝是 #005FB8 那种深沉色。这里取中间值，
      保证白字对比 ≥4.5（实测 5.2）—— --accent 本身继续用于文字/边/焦点环，不动。 */
   --accent-fill: #3560c4;
+  /* 实底填充上的前景：浅色主题的填充是深蓝，所以字用白。 */
   --accent-on: #ffffff;
+  /* 淡底主按钮（`.btn-primary.is-cta`）的前景。
+     **不能复用 --accent-on**：它表达的是「实底填充上的对立色」，浅色白、深色近黑；
+     套到 rgba(47,107,255,.1) 的淡底上恰好反过来 —— 浅色下白字看不见，深色下黑字看不见。
+     淡底本身很浅，前景取正文色对比最高（浅色 #1b1b1f / 深色 #ffffff）。 */
+  --accent-on-soft: #1b1b1f;
   /* 禁用只有这一个强度。原来 4 处各写 .42 / .45 / .45 / .62 ——
      同一个「不可用」有四种淡法，用户看到的是「有的灰有的不灰」。 */
   --disabled-opacity: 0.45;
@@ -344,6 +351,8 @@ body.dark {
   /* 深色下反过来：填充用亮蓝 + **深字**（WinUI 的做法），白字在亮蓝上读不清 */
   --accent-fill: #6b9bff;
   --accent-on: #12121a;
+  /* 深色下淡底主按钮用白字：淡底是半透明亮蓝压在深背景上，仍是深底，白字才读得清。 */
+  --accent-on-soft: #ffffff;
   --card-hover: var(--state-hover);
   --glass-strong: rgba(255, 255, 255, 0.09);
   --glass-hover: var(--state-hover);
@@ -2764,6 +2773,10 @@ body.dark .tour-dot.is-on {
      改用强调色淡底 + 加粗，仍比普通按钮醒目，但不破坏材质。 */
   border-color: var(--accent);
   background: var(--accent-soft);
+  /* 换了底就必须同时换字：底色从 --accent-fill（实底）变成 --accent-soft（淡底）后，
+     继承来的 --accent-on 会变成「淡底上的对立色」，也就是深浅两头都读不清
+     （浅色白字压淡蓝、深色黑字压深底）。这是「只覆盖背景不覆盖前景」的典型后果。 */
+  color: var(--accent-on-soft);
   font-weight: 600;
   transition: transform var(--dur-fast) var(--ease-out),
     box-shadow var(--dur-fast) var(--ease-out);
