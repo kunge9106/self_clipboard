@@ -15,51 +15,17 @@ use std::sync::OnceLock;
 use tauri::Manager;
 
 // ---------------------------------------------------------------------------
-// 材质：交给 Tauri 的窗口材质 API
+// 材质：全部手写 DWM
 //
-// 以前这里手写 DWM（`DwmExtendFrameIntoClientArea` / `DWMWA_SYSTEMBACKDROP_TYPE` /
-// Win10 的 `SetWindowCompositionAttribute`），还要自己判断 build、自己处理
-// 切主题后的重刷 —— 一年下来踩遍了所有坑（材质丢、平色、闪烁）。
-// Tauri 2 自带 `set_effects`，内部就是 `window-vibrancy`：按 Windows 版本自动选
-// Mica / Acrylic / Blur，深浅与重刷由它负责。**跟随系统机制，不要自己造**。
+// 曾短暂试过 Tauri 2 的 `set_effects`（内部是 window-vibrancy）：它按系统版本自动
+// 选 Mica / Acrylic，省事，但**没有"清空 / 重建"的入口** —— 而本项目大量依赖
+// 「先清后设」来强制 DWM 重建（见 `restore_visuals` 的注释）。那条路最后放弃了。
+//
+// 现在档位探测、单档施加、主题重刷、驻留挂起/恢复、看门狗兜底都在这一个文件里，
+// 改动时注意：这些机制是互相咬合的（例如 `suspend_material` 清了材质，
+// 就必须有 `resume_material` 补回来），不要单独改一处。
 // ---------------------------------------------------------------------------
 
-use tauri::window::{Effect, EffectsBuilder};
-
-/// 主窗口句柄（材质 API 需要 `WebviewWindow`，而多数调用点手里只有 hwnd）。
-static MAIN_WINDOW: OnceLock<tauri::WebviewWindow> = OnceLock::new();
-
-/// 启动时登记主窗口，供材质 API 使用。
-pub fn set_main_window(w: &tauri::WebviewWindow) {
-    let _ = MAIN_WINDOW.set(w.clone());
-}
-
-/// 用 Tauri 官方 API 应用/刷新材质。
-///
-/// `round_mode` 关（高级材质关）时清空材质，观感交给 CSS 实底。
-fn apply_effects(dark: bool) -> Result<(), String> {
-    let Some(w) = MAIN_WINDOW.get() else {
-        return Err("主窗口未登记".to_string());
-    };
-    if !is_round() {
-        // 清空：沿用 DWM 的直接清除（Tauri 没有"清除"语义的入口）
-        if let Ok(h) = w.hwnd() {
-            clear_system_material(h.0 as isize, tier_now());
-            clear_accent(h.0 as isize);
-        }
-        return Ok(());
-    }
-    let cfg = EffectsBuilder::new()
-        .effect(Effect::Acrylic)
-        // Windows 上 color 是 acrylic 的 tint（Win10 用它，Win11 由系统着色）
-        .color(if dark {
-            tauri::window::Color(28, 28, 30, 160)
-        } else {
-            tauri::window::Color(252, 252, 252, 80)
-        })
-        .build();
-    w.set_effects(cfg).map_err(|e| e.to_string())
-}
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -131,7 +97,10 @@ struct AccentPolicy {
 }
 
 /// `DwmExtendFrameIntoClientArea` 的边距。全 -1 = 整窗都当"玻璃"。
+/// 字段名必须与 Win32 的 `MARGINS` 逐字一致 —— 这是 FFI 结构体，
+/// 改名会让人以为可以「按 Rust 习惯重命名」，下次改布局时容易出事。
 #[repr(C)]
+#[allow(non_snake_case)]
 struct MARGINS {
     cxLeftWidth: i32,
     cxRightWidth: i32,
@@ -270,18 +239,6 @@ impl Tier {
         }
     }
 
-    /// 窗口区域裁剪用的圆角（逻辑 px）。返回 0 表示不需要 RGN 裁剪。
-    ///
-    /// **现在全部返回 0——不再做任何区域裁剪。** 原因：
-    ///   1. `SetWindowRgn` **管不住 acrylic**（实测 + 社区实证），acrylic 恒为
-    ///      矩形，四角根本切不掉，所以它挡不住「直角」；
-    ///   2. 1-bit 区域**没有抗锯齿**，圆角边缘是一排像素台阶
-    ///      （用户反馈「圆角锯齿很重」的元凶）。
-    /// 既然既挡不住 acrylic 又带来锯齿，就干脆不做裁剪：圆角完全交给 CSS 的
-    /// border-radius（自带抗锯齿），四角残留的 acrylic 靠低 tint 压到看不见。
-    pub fn region_radius(&self) -> u32 {
-        0
-    }
 }
 
 static TIER: OnceLock<Tier> = OnceLock::new();
@@ -611,72 +568,6 @@ pub fn relayout(hwnd: isize) {
     }
 }
 
-/// 把窗口区域裁成圆角矩形（Win10 上 acrylic 不认 CSS 圆角，只能裁窗口本体）。
-///
-/// - 半径按当前 DPI 从逻辑 px 换算成物理 px
-/// - 窗口尺寸变化后 region **不会**自动跟随，必须在 Resized 事件里重设
-/// - SystemBackdrop 档跳过（系统已经给了圆角）
-/// ⚠ **当前所有档位的 `region_radius()` 都是 0，本函数是空操作。**
-///
-/// 留着是因为 ADR-004 记录了「若 Win10 支持系统级圆角，可用区域裁剪兜底」；
-/// 但**不要再新增调用点**——真正会执行的只有下面那句 `if radius == 0 { return }`。
-/// 曾经的 `begin_resize` 在调用它之前先无条件 `SetWindowRgn(hwnd, 0, 1)`，
-/// 结果变成「只会破坏材质、从不会恢复材质」，是「材质消失、点一下深浅色才回来」
-/// 的真凶（见 `begin_resize` 的注释）。
-pub fn apply_rounded_corners(hwnd: isize) {
-    let radius = current_tier().region_radius();
-    if radius == 0 {
-        return;
-    }
-
-    unsafe {
-        extern "system" {
-            fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
-            fn IsIconic(hwnd: isize) -> i32;
-            fn GetDpiForWindow(hwnd: isize) -> u32;
-            fn CreateRoundRectRgn(x1: i32, y1: i32, x2: i32, y2: i32, w: i32, h: i32) -> isize;
-            fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
-            fn DeleteObject(obj: isize) -> i32;
-        }
-
-        // 最小化时 GetWindowRect 返回的是**任务栏上那个小图标矩形**（约 160×28）。
-        // 拿它去 SetWindowRgn，窗口就会被裁成一小块 —— 还原后只剩左上角一点可见，
-        // 表现为「窗口变得很小」。relayout() 早已防了这一手，这里必须同样防。
-        if IsIconic(hwnd) != 0 {
-            return;
-        }
-
-        let mut r: Rect = std::mem::zeroed();
-        if GetWindowRect(hwnd, &mut r as *mut _) == 0 {
-            return;
-        }
-        let w = r.right - r.left;
-        let h = r.bottom - r.top;
-        if w <= 0 || h <= 0 {
-            return;
-        }
-        // 兜底：正常窗口不可能小于最小尺寸的一半（逻辑 720×480）。真拿到更小的值
-        // 只可能是窗口处于异常状态（被 DWM 收起、正在销毁），此时宁可不裁剪。
-        if w < 320 || h < 200 {
-            return;
-        }
-
-        let dpi = GetDpiForWindow(hwnd).max(96);
-        let rad = ((radius as f64) * (dpi as f64 / 96.0)).round() as i32;
-        let d = rad * 2; // 椭圆直径 = 2 × 半径
-
-        let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, d, d);
-        if rgn == 0 {
-            crate::log_warn!("[effects] CreateRoundRectRgn 失败");
-            return;
-        }
-        if SetWindowRgn(hwnd, rgn, 1) == 0 {
-            // 失败时 region 所有权还在我们手里，要释放
-            DeleteObject(rgn);
-            crate::log_warn!("[effects] SetWindowRgn 失败");
-        }
-    }
-}
 
 /// 逐帧 SetWindowRgn 对窗口本体做区域裁剪非常贵（大窗口尤甚），
 /// 会让缩放明显卡顿。这里改成「缩放中不裁剪、缩放后补一次」。
@@ -684,12 +575,12 @@ pub fn apply_rounded_corners(hwnd: isize) {
 ///
 /// ⚠ **这里是「材质莫名其妙丢失、点一下深浅色就恢复」的真正原因**。
 ///
-/// 原来无条件在 120ms 后 `apply_rounded_corners`（= `SetWindowRgn`）。而在有系统
+/// 原来无条件在 120ms 后用 `SetWindowRgn` 把窗口裁成圆角。而在有系统
 /// 材质的档位上（Acrylic / Mica / SystemBackdrop），材质是 DWM **按窗口矩形**画的：
 /// 一旦用 `SetWindowRgn` 把窗口区域改成圆角矩形，DWM 对这块表面的 backdrop 就废了 ——
 /// 窗口还在、内容还在，但毛玻璃没了，退成实色。
 ///
-/// 而切深浅色会走 `reapply_theme_visual` → 重新下发材质 → 「点一下就好了」。
+/// 而切深浅色会重新下发材质 → 看起来「点一下就好了」。
 /// 这就是用户看到的现象。
 ///
 /// 所以两条路分开：
@@ -1677,7 +1568,6 @@ fn handle_drag_msg(hwnd: isize, msg: u32) -> bool {
 /// 前端调用入口（标题栏 mousedown 时 invoke）
 #[tauri::command]
 pub fn drag_start(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::Manager;
     if let Some(w) = app.get_webview_window("main") {
         if let Ok(h) = w.hwnd() {
             begin_custom_drag(h.0 as isize);
@@ -2062,7 +1952,6 @@ fn handle_resize_msg(hwnd: isize, msg: u32) -> bool {
 /// 前端在窗口边缘热区 mousedown 时调用。edge 为方向位掩码（1上 2下 4左 8右）
 #[tauri::command]
 pub fn resize_start(app: tauri::AppHandle, edge: u32) -> Result<(), String> {
-    use tauri::Manager;
     if let Some(w) = app.get_webview_window("main") {
         if let Ok(h) = w.hwnd() {
             begin_custom_resize(h.0 as isize, edge);
@@ -2479,8 +2368,7 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
             }
             if color_scheme {
                 if let Some(app) = HOOK_APP.get() {
-                    use tauri::Manager;
-                    if let Some(w) = app.get_webview_window(crate::idle_release::MAIN_LABEL) {
+                                    if let Some(w) = app.get_webview_window(crate::idle_release::MAIN_LABEL) {
                         crate::log_print!("[effects] WM_SETTINGCHANGE → 系统主题静默重下");
                         // 与焦点路径一致：立即 + 150ms 再补；不做翻转/FRAMECHANGED，不闪。
                         schedule_system_theme_refresh(w, "setting-change");
@@ -2779,7 +2667,6 @@ fn material_is_intact(hwnd: isize) -> bool {
 /// 同类工具（ExplorerBlurMica）的解法就是**定时幂等重刷**：我们做成只读巡检，
 /// 正常时零写入（不闪、不耗 GPU），只有连续两拍（≈800ms）都判异常才复位。
 pub fn spawn_material_watch(app: tauri::AppHandle) {
-    use tauri::Manager;
     // 低占用释放会销毁并重建主窗口，而重建又会走一遍 `setup_effects` ——
     // 以前每重建一次就多一个看门狗线程，几个线程各刷各的材质、各发一次
     // 「系统深浅变化」，日志里同一次切换出现 2–3 条。只允许一个。

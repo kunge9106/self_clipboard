@@ -162,7 +162,6 @@ fn theme_is_dark() -> bool {
 fn panel_dark(app: tauri::AppHandle) -> bool {
     #[cfg(windows)]
     {
-        use tauri::Manager;
         // ⚠ 只能用 `is_dark_now()`（读注册表 / 设置），不能用 `effective_dark(&面板窗口)`：
         // 面板是独立窗口，`tao` 报告的 theme 常常还是上一个（甚至永远是 Light），
         // 于是「系统深色、面板还是白的」——这就是面板深浅不适配的根因。
@@ -232,7 +231,6 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
 
     // 先按当前显示器把窗口夹进工作区，再套材质/圆角 —— 否则高缩放下窗口按
     // 1060×690 铺开、超出屏幕，圆角区域也会按错的尺寸算一遍。
-    effects::set_main_window(&window);
     effects::apply_dpi_policy(&window);
     // 主题要在页面真正渲染前钉好，否则系统深色 + 用户选浅色时会先闪一下深色
     effects::apply_theme_mode(&window);
@@ -285,8 +283,6 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                 // Resized 在最小化和恢复时都会触发，函数内部靠 IsIconic 翻转判断。
                 effects::reapply_after_restore(&window_for_events);
             }
-            // 焦点切换不再裁区域：所有档位 region_radius() 都是 0，
-            // `apply_rounded_corners` 是空操作，留着只会让人误以为这里有作用。
             tauri::WindowEvent::Focused(active) => {
                 // 回到前台 = 用户正在看这个窗口，此时补做系统主题挂起的材质重建。
                 // 失焦时补没有意义（看不见）；前台补一次完整复位才"一定能恢复且不闪"。
