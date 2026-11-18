@@ -289,8 +289,11 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                 if *active {
                     effects::flush_pending_theme_rebuild(&window_for_events);
                 }
-                // 焦点只做**静默** `reapply_visuals_for`（150ms 后台），不走值切换：
-                // 聚焦是高频动作，值切换会闪。系统主题的值切换重建在 ThemeChanged。
+                // 常规聚焦只做**静默**补涂（150ms 后台），不走值切换 —— 聚焦是
+                // 高频动作，值切换会闪。上面那次完整复位是有前提的：只在"系统换过
+                // 深浅、材质重建被挂起"时才发生，且发生在用户刚回到窗口的那一刻。
+                // 系统主题变化本身也不值切换（那条只同步颜色）
+                // 见 effects::schedule_system_theme_refresh。
                 // 实测（Win10/Win11 都有）：失焦/聚焦偶发把材质与 NC 渲染一起丢掉，
                 // 四周围上一圈 Win7 式边框，而托盘唤回路径的补涂管不到这里。
                 // 同步重刷会肉眼可见地闪（聚焦是高频动作），所以延迟 150ms 在后台

@@ -699,8 +699,11 @@ pub fn effective_dark(window: &tauri::WebviewWindow) -> bool {
 
 /// 把 DWM 侧与窗口视觉有关的状态**整份**重设一遍，返回实际档位。
 ///
-/// 这是「材质不恢复」这类问题的**唯一配方**：任何需要重新挂上材质的时机
-/// （启动、切主题、托盘唤回、最小化恢复、缩放结束）都走这里，别再各写一份。
+/// 这是「整份重设」的配方，**只在真的需要重建表面时用**（对外出口是
+/// `refresh_theme_full`）。其余时机各有各的语义，不要混用：
+///   · 日常静默补涂 → `reapply_visuals_for`（设相同值 = no-op，不闪）
+///   · 托盘驻留唤回 → `resume_material`（驻留期间材质已被清空）
+///   · 系统主题变化 → `schedule_system_theme_refresh`（只同步颜色）
 ///
 /// ⚠ 这里有血泪：早先有个"只重下材质"的旁路实现手抄了其中几行
 /// （剥边框 + 下发材质 + nudge），漏掉 `disable_nc_rendering` 与
@@ -822,8 +825,9 @@ pub fn force_redraw(hwnd: isize) {
 ///   · 无 force 的 strip —— 样式位没变就不发 FRAMECHANGED，无整窗重绘。
 ///
 /// 值真的丢了时，Set 一个不同的值照样生效（DWM 自己重建）；值没丢就是纯 no-op。
-/// **旧版不闪靠的就是这个语义**（设相同值 DWM 直接跳过），这里把它找回来 ——
-/// 响亮复位留给「窗口还不可见」的时机（show 前），可见期间一律走这里。
+/// **不闪靠的就是这个语义**（设相同值 DWM 直接跳过）。完整的响亮复位只在
+/// 「用户自己触发了切换」或「窗口刚回到前台」时刻用（见 `refresh_theme_full`），
+/// 其余可见期间一律走这里。
 pub fn reapply_visuals_for(window: &tauri::WebviewWindow, reason: &str) -> Option<Tier> {
     let Ok(h) = window.hwnd() else {
         return None;
@@ -971,15 +975,14 @@ fn clear_window_border(hwnd: isize) {
     }
 }
 
-/// 关闭 DWM 对非客户区的渲染（标题栏边框 + 窗口阴影）。
+/// 关闭 DWM 对非客户区的渲染（1px 边框 + 投影）。
 ///
-/// 背景：tao 的无边框实现**保留了 WS_CAPTION 样式位**，只是用 WM_NCCALCSIZE
-/// 把非客户区吞掉。于是 DWM 依然认为这是个带标题栏的窗口，会沿着
-/// **窗口矩形**画一圈 1px 边框和投影——它是 DWM 合成层，**不受 SetWindowRgn
-/// 影响**。结果就是：四角被 SetWindowRgn 裁成圆角，但圆角外还留着一圈
-/// 直角的亮线/阴影（用户截图里那个「直角」就是这么来的）。
+/// ⚠ **SystemBackdrop 档绝对不能用它**：backdrop / Mica 本身就是以非客户区的
+/// 形式绘制的，关掉 NC 渲染等于把材质一起关掉 —— 回读 type=3、hr=0，画面却
+/// 一片平色。这一档改用 [`clear_window_border`]（只把边框颜色设成透明）。
 ///
-/// DWMNCRP_DISABLED 让 DWM 完全不管非客户区，窗口形状就只剩我们的区域裁剪。
+/// 其它档（Win10 acrylic / 无材质实底）继续用它：那些档没有系统材质可关，
+/// 关掉 NC 才能真正消掉那一圈边框和投影。
 pub fn disable_nc_rendering(hwnd: isize) {
     const DWMWA_NCRENDERING_POLICY: u32 = 2;
     const DWMNCRP_DISABLED: u32 = 1;
@@ -1343,32 +1346,26 @@ pub fn mark_pending_theme_rebuild() {
     THEME_REBUILD_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// 手动切主题：同步一次静默重下。**禁止** `restore_visuals_for`（会闪）。
+/// 系统主题变化（tao `ThemeChanged`）的入口：转给「只同步颜色」那条路。
+/// **不能**在这里做 `restore_visuals_for`（会闪），也不能重建主窗口材质。
 pub fn refresh_after_theme_switch(window: &tauri::WebviewWindow) {
     // 走系统主题那条统一入口：只同步颜色，不重建主窗口材质。
     schedule_system_theme_refresh(window.clone(), "theme-switch");
 }
 
-/// 统一别名：只做静默重下（自动跟随用这条，不闪）。
+/// 统一别名：只做静默重下（看门狗兜底与 IPC 命令走这条，不闪）。
+/// ⚠ 系统主题变化的自动跟跟随**不再走这里**（那条只同步颜色，见
+/// `schedule_system_theme_refresh`）。
 pub fn refresh_theme_colors(window: &tauri::WebviewWindow, reason: &str) {
     let _ = refresh_theme_visuals(window, reason);
 }
 
-/// **手动**切换深浅模式时用：值切换 + 静默重下。
+/// **完整复位**：能恢复「属性还在、画面没有」的材质。
 ///
-/// 要点：**不做 `force_redraw`**（那是「切深浅色闪一下」的来源 —— 它会在
-/// 「中间值 Mica 已设、目标值尚未设」的那一帧立即合成，用户就看到闪）。
-/// 改成：先让 backdrop 值真的变一次（主窗口 ←→ 瞬态），再静默重下设回目标值，
-/// 两次设置都在同一次提交里，交给 DWM 按 vsync 只合成最终态。
-///
-/// 值切换保住了「材质丢了也能恢复」这个能力（这是原来完整复位的价值），
-/// 去掉的只是那次强制合成中间帧。
-/// **完整复位**：能恢复"属性 3、画面没有"的材质。
-///
-/// 只给两种时机用 —— 它们都是"用户正看着窗口"的时刻：
+/// 只给"用户正看着窗口"的时机用 —— 那一刻重建一次是用户自己触发的，可接受：
 ///   · 系统换过深浅、窗口回到前台时（`flush_pending_theme_rebuild`）
-///   · 换深浅时窗口就在前台
-/// 手动点深浅的那条路**不用**它（那条走静默重下，避免闪）。
+///   · 检测到系统深浅变化、且窗口就在前台时（看门狗）
+/// 手动点深浅那条路**不用**它（走静默重下，避免闪）。
 pub fn refresh_theme_full(window: &tauri::WebviewWindow, reason: &str) {
     let t = restore_visuals_for(window, reason);
     dwm_flush();
@@ -1379,6 +1376,12 @@ pub fn refresh_theme_full(window: &tauri::WebviewWindow, reason: &str) {
     );
 }
 
+/// **手动**切深浅时用：一次静默重下，不重建表面。
+///
+/// 不做值切换、不做 `force_redraw` —— 两者都会让「中间值已设、目标值未设」的
+/// 那一帧被合成出来，就是用户说的「切深浅闪一下」。
+/// 深浅切换时 `apply_with` 里的 `set_immersive_dark` 本身就会变，
+/// DWM 会按新属性重算 backdrop 颜色，一次 apply 足够。
 pub fn refresh_theme_manual(window: &tauri::WebviewWindow, reason: &str) {
     let Ok(h) = window.hwnd() else {
         return;
