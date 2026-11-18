@@ -52,6 +52,18 @@ const ST_REBUILDING: u8 = 2;
 
 static STATE: AtomicU8 = AtomicU8::new(ST_NORMAL);
 
+/// 主窗口是不是"被低占用模式重建"出来的（而不是用户正常启动）。
+///
+/// 前端启动时问一次：只有重建出来的窗口才需要把上次停留的页面恢复回去；
+/// 正常启动仍应落在首页（用户打开剪贴板就是要看历史）。
+static REBUILT: AtomicBool = AtomicBool::new(false);
+
+/// 供前端询问一次并清空（`take` 语义：只对紧接着的那一次加载有效）。
+#[tauri::command]
+pub fn take_just_rebuilt() -> bool {
+    REBUILT.swap(false, Ordering::SeqCst)
+}
+
 /// 应用是否正在**主动退出**。
 ///
 /// `app.exit()` 与 `app.restart()` 同样会触发 `RunEvent::ExitRequested`，
@@ -123,7 +135,16 @@ pub(crate) fn release_now(app: &tauri::AppHandle) {
     // 这一轮：下次收起窗口时 `note_hidden` 会重新计时。
     for label in [crate::popup::MENU_LABEL, crate::popup::PANEL_LABEL] {
         if let Some(w) = app.get_webview_window(label) {
-            if w.is_visible().unwrap_or(false) {
+            // ⚠ 面板不能看 `is_visible()`：它收起时是「移到屏幕外驻留」，
+            // 窗口仍然可见 —— 用可见性判断会永远认为「面板还开着」，
+            // 于是低占用释放永远不执行（主窗口再也不会被释放）。
+            // 菜单仍用 hide()，所以那边保持可见性判断。
+            let busy = if label == crate::popup::PANEL_LABEL {
+                crate::panel::is_on_screen(&w)
+            } else {
+                w.is_visible().unwrap_or(false)
+            };
+            if busy {
                 crate::log_print!("[idle] {label} 仍可见，用户在用，本次不释放");
                 return;
             }
@@ -140,8 +161,12 @@ pub(crate) fn release_now(app: &tauri::AppHandle) {
 
     let destroyed = (|| {
         let w = app.get_webview_window(MAIN_LABEL)?;
-        // 不释放仍可见的窗口：那是用户正在用的界面
-        if w.is_visible().unwrap_or(false) {
+        // 不释放仍可见的窗口：那是用户正在用的界面。
+        //
+        // ⚠ 「收进托盘」不是 hide()，而是把窗口挪到屏幕外 —— 这样的窗口
+        // `is_visible()` 恒为 true。只看可见性的话，这个功能**永远不会触发**
+        // （用户实测：设了 1 秒也从没释放过）。判据改成「可见且在屏幕内」。
+        if w.is_visible().unwrap_or(false) && !crate::tray::is_offscreen(&w) {
             return None;
         }
         save_geometry(&w);
@@ -217,6 +242,7 @@ pub(crate) fn ensure_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
     match build_main_window(app) {
         Some(w) => {
             STATE.store(ST_NORMAL, Ordering::SeqCst);
+            REBUILT.store(true, Ordering::SeqCst);
             crate::log_print!("[idle] 界面已重建");
             Some(w)
         }
@@ -256,6 +282,11 @@ fn build_main_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
             ensure_reasonable_size(&w);
             let _ = w.show();
             let _ = w.set_focus();
+            // 重建的窗口是全新的 hwnd：`setup_effects` 里那次材质是在
+            // `visible(false)` 时下发的，而 DWM 对不可见窗口不保留 backdrop ——
+            // 显示之后必须再挂一次，否则就是一个"没有材质"的裸窗口。
+            #[cfg(windows)]
+            let _ = crate::effects::refresh_theme_visuals(&w, "rebuild-shown");
             crate::log_print!(
                 "[idle] 界面就绪，重建耗时 {} ms",
                 started.elapsed().as_millis()
@@ -321,7 +352,20 @@ fn save_geometry(w: &WebviewWindow) {
         crate::log_print!("[idle] 窗口处于最小化，几何不记入（读数不可信）");
         return;
     }
-    let Ok(pos) = w.outer_position() else { return };
+    // 驻留（挪到屏幕外）时读到的坐标是 (-32000,-32000)，不是用户的位置。
+    // 用收进托盘那一刻记下的坐标，否则重建出来的窗口会落在屏幕外看不见。
+    let pos = if crate::tray::is_offscreen(w) {
+        match crate::tray::remembered_position() {
+            Some(p) => tauri::PhysicalPosition::new(p.0, p.1),
+            None => {
+                crate::log_warn!("[idle] 窗口在屏幕外且没有记下位置，几何不记入");
+                return;
+            }
+        }
+    } else {
+        let Ok(p) = w.outer_position() else { return };
+        p
+    };
     let Ok(size) = w.inner_size() else { return };
     if size.width < MIN_TRUST_W || size.height < MIN_TRUST_H {
         crate::log_warn!(

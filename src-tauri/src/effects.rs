@@ -12,6 +12,54 @@
 
 use std::ffi::c_void;
 use std::sync::OnceLock;
+use tauri::Manager;
+
+// ---------------------------------------------------------------------------
+// 材质：交给 Tauri 的窗口材质 API
+//
+// 以前这里手写 DWM（`DwmExtendFrameIntoClientArea` / `DWMWA_SYSTEMBACKDROP_TYPE` /
+// Win10 的 `SetWindowCompositionAttribute`），还要自己判断 build、自己处理
+// 切主题后的重刷 —— 一年下来踩遍了所有坑（材质丢、平色、闪烁）。
+// Tauri 2 自带 `set_effects`，内部就是 `window-vibrancy`：按 Windows 版本自动选
+// Mica / Acrylic / Blur，深浅与重刷由它负责。**跟随系统机制，不要自己造**。
+// ---------------------------------------------------------------------------
+
+use tauri::window::{Effect, EffectsBuilder};
+
+/// 主窗口句柄（材质 API 需要 `WebviewWindow`，而多数调用点手里只有 hwnd）。
+static MAIN_WINDOW: OnceLock<tauri::WebviewWindow> = OnceLock::new();
+
+/// 启动时登记主窗口，供材质 API 使用。
+pub fn set_main_window(w: &tauri::WebviewWindow) {
+    let _ = MAIN_WINDOW.set(w.clone());
+}
+
+/// 用 Tauri 官方 API 应用/刷新材质。
+///
+/// `round_mode` 关（高级材质关）时清空材质，观感交给 CSS 实底。
+fn apply_effects(dark: bool) -> Result<(), String> {
+    let Some(w) = MAIN_WINDOW.get() else {
+        return Err("主窗口未登记".to_string());
+    };
+    if !is_round() {
+        // 清空：沿用 DWM 的直接清除（Tauri 没有"清除"语义的入口）
+        if let Ok(h) = w.hwnd() {
+            clear_system_material(h.0 as isize, tier_now());
+            clear_accent(h.0 as isize);
+        }
+        return Ok(());
+    }
+    let cfg = EffectsBuilder::new()
+        .effect(Effect::Acrylic)
+        // Windows 上 color 是 acrylic 的 tint（Win10 用它，Win11 由系统着色）
+        .color(if dark {
+            tauri::window::Color(28, 28, 30, 160)
+        } else {
+            tauri::window::Color(252, 252, 252, 80)
+        })
+        .build();
+    w.set_effects(cfg).map_err(|e| e.to_string())
+}
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -25,11 +73,14 @@ const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
 /// 与 `SYSTEMBACKDROP_TYPE` 搭配时，backdrop 改从**窗口后方**采样并绘制到重定向表面，
 /// 而不是从视觉后方采样 —— 表现是最大化/还原动画、以及被其他窗口遮挡时材质不再失效
 /// （原生 Acrylic 在动画期间会短暂退回实色，这是 DWM 的既有行为）。
-const DWMWA_USE_HOSTBACKDROPBRUSH: u32 = 17;
 const DWMWA_MICA_EFFECT: u32 = 1029;
 
 // DWM_SYSTEMBACKDROP_TYPE
 const DWMSBT_NONE: u32 = 1;
+/// 主窗口 backdrop（Mica 系）。与 `DWMSBT_TRANSIENTWINDOW` 同为**有效材质**，
+/// 用来做「值切换」时中间帧不会露出灰底/透明。
+const DWMSBT_MAINWINDOW: u32 = 2;
+/// 瞬态窗口 backdrop（Acrylic 系）—— 本应用主窗口用的就是它。
 const DWMSBT_TRANSIENTWINDOW: u32 = 3;
 
 // DWM_WINDOW_CORNER_PREFERENCE
@@ -77,6 +128,15 @@ struct AccentPolicy {
     accent_flags: u32,
     gradient_color: u32, // 0xAABBGGRR
     animation_id: u32,
+}
+
+/// `DwmExtendFrameIntoClientArea` 的边距。全 -1 = 整窗都当"玻璃"。
+#[repr(C)]
+struct MARGINS {
+    cxLeftWidth: i32,
+    cxRightWidth: i32,
+    cyTopHeight: i32,
+    cyBottomHeight: i32,
 }
 
 #[repr(C)]
@@ -159,6 +219,9 @@ extern "system" {
         value_size: u32,
     ) -> i32; // HRESULT
 
+    /// dwmapi.dll —— 把 DWM 边框扩展进客户区（acrylic/mica 的前提）
+    fn DwmExtendFrameIntoClientArea(hwnd: isize, margins: *const MARGINS) -> i32;
+
     /// dwmapi.dll —— 只用于把属性读回来打日志，判断「没设上」还是「没生效」
     fn DwmGetWindowAttribute(
         hwnd: isize,
@@ -225,7 +288,13 @@ static TIER: OnceLock<Tier> = OnceLock::new();
 static BUILD: OnceLock<u32> = OnceLock::new();
 
 pub fn current_tier() -> Tier {
-    *TIER.get_or_init(|| Tier::Solid)
+    // **不能默认 Solid**：前端在页面加载早期就会问一次 `effect_info`，
+    // 那时第一次 `apply_with` 可能还没跑。默认 Solid 会让前端套上
+    // `body.tier-solid` → CSS 直接把窗口画成 94.6% 的不透明实色，
+    // 而且**整个会话都不会再变**（`applyEffectInfo` 只在启动时调一次）。
+    // 这正是「窗口像一块实色、开关一次高级材质才恢复」的根因之一。
+    // 未初始化时现场探测一次，保证任何时候回答的都是真实档位。
+    tier_now()
 }
 
 pub fn current_build() -> u32 {
@@ -253,6 +322,18 @@ pub fn detect_build() -> u32 {
 }
 
 fn classify(build: u32) -> Tier {
+    // 按 Windows 版本选材质，优先级从新到旧：
+    //   ≥22621 `SystemBackdrop`（DWM 系统 acrylic：圆角 + 噪声层都由系统给，观感最好）
+    //   ≥22000 `Mica`
+    //   ≥17763 `Acrylic`（Win10 的 `SetWindowCompositionAttribute`）
+    //   更低    `Solid`（不施加材质，观感交给 CSS 实底）
+    //
+    // 已知代价（选 SystemBackdrop 就是接受它）：DWM 会在系统主题切换 / hide→show /
+    // 非客户区重建之后把这层表面丢掉，此时属性回读仍是 3、hr=0 ——「属性在、画面没有」。
+    // 恢复只能靠"再完整下发一次"（见 `refresh_theme_colors` → `restore_visuals`）。
+    //
+    // 曾评估过的替代方案：全部改用 Win10 accent acrylic（不依赖 DWM 表面，永不丢），
+    // 代价是**圆角要自己裁、且没有系统噪声层**，实测观感与系统材质差距明显，故放弃。
     if build >= 22621 {
         Tier::SystemBackdrop
     } else if build >= 22000 {
@@ -268,12 +349,64 @@ fn classify(build: u32) -> Tier {
 // 施加材质
 // ---------------------------------------------------------------------------
 
+/// 正在「屏幕外驻留」的主窗口 hwnd（0 = 没有驻留）。
+///
+/// 驻留期间窗口对 DWM 来说是不可见的：这时候既不该、也不必重新下发材质 ——
+/// 那会把 [`suspend_material`] 刻意留下的「材质已清空」状态破坏掉，唤回时
+/// 就没有「一次真实的值变化」可用了（见 `resume_material` 的注释）。
+///
+/// 只在 `park_main_window` / `resume_material` 这一对里改写。
+static PARKED_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// 这个窗口是否正处于「屏幕外驻留」。
+fn is_suspended(hwnd: isize) -> bool {
+    PARKED_HWND.load(std::sync::atomic::Ordering::Relaxed) == hwnd
+}
+
+/// 当前是否已有一个窗口驻留在屏幕外。
+pub fn any_suspended() -> bool {
+    PARKED_HWND.load(std::sync::atomic::Ordering::Relaxed) != 0
+}
+
+/// 清掉「驻留中」标记（窗口被销毁重建时用：旧 hwnd 已经不存在了）。
+pub fn clear_suspended() {
+    PARKED_HWND.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 「现在该用哪个档位」：`TIER` 已由某次 `apply_with` 种下就用它，
+/// 否则现场探测一次（驻留可能发生在任何一次 apply 之前）。
+fn tier_now() -> Tier {
+    match TIER.get() {
+        Some(t) => *t,
+        None => classify(detect_build()),
+    }
+}
+
 /// 应用窗口材质。
 ///
 /// `reason` 只用于日志：材质失效这类问题**只能靠「谁在什么时候动了它」定位** ——
 /// 之前排查「最小化后不恢复」时，日志只有「材质应用完成」，根本看不出是谁触发的，
 /// 只能靠猜。现在每条都带来源（startup / theme-refresh / toggle-advanced / restore / …）。
 pub fn apply_with(hwnd: isize, dark: bool, reason: &str) -> Tier {
+    // 驻留中的窗口不要去碰材质：见 `PARKED_HWND` / `suspend_material`。
+    if is_suspended(hwnd) {
+        crate::log_print!("[effects] 跳过材质下发（窗口驻留中，来源={reason}）");
+        return current_tier();
+    }
+    // 取证：窗口的扩展样式决定 backdrop 能不能画。
+    //   WS_EX_LAYERED(0x00080000)          —— 分层窗口由应用自己合成，DWM 不画 backdrop
+    //   WS_EX_NOREDIRECTIONBITMAP(0x00200000) —— 透明窗口常用，部分情况下同样影响合成
+    // 「属性对、画面没有」如果配上异常的 EX_STYLE，根因就在窗口创建侧而不在材质设置侧。
+    unsafe {
+        extern "system" {
+            fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
+        }
+        let style = GetWindowLongW(hwnd, -16) as u32;
+        let ex = GetWindowLongW(hwnd, -20) as u32;
+        crate::log_print!(
+            "[effects] 窗口样式 style=0x{style:08X} ex=0x{ex:08X}（来源={reason}）"
+        );
+    }
     let build = detect_build();
     let tier = classify(build);
     let _ = BUILD.set(build);
@@ -311,8 +444,14 @@ pub fn apply_with(hwnd: isize, dark: bool, reason: &str) -> Tier {
     // 标题栏/系统区域跟随深色
     set_immersive_dark(hwnd, dark);
 
-    // 关掉 DWM 的非客户区渲染（双保险；部分系统上该属性已不再支持）
-    disable_nc_rendering(hwnd);
+    // 系统材质档（Win11 backdrop）**不能**关 NC 渲染：backdrop 就是作为
+    // 非客户区画的，关了它材质也没了。那一档只把 1px 边框颜色设成透明。
+    // 其它档（Win10 acrylic / 无材质）继续用关 NC 渲染来消边框。
+    if tier_now() == Tier::SystemBackdrop {
+        clear_window_border(hwnd);
+    } else {
+        disable_nc_rendering(hwnd);
+    }
 
     // ⚠ **语义已反转**（2026-11-05，用户实测要求「高级材质打开才应该是毛玻璃」）：
     //   开（round_mode = true）→ **施加**系统材质，这才是毛玻璃；
@@ -539,12 +678,6 @@ pub fn apply_rounded_corners(hwnd: isize) {
     }
 }
 
-/// 缩放代际号：连续缩放的每个 Resized 事件都会 +1，
-/// 只有「静止 120ms」后仍是最新代际的那次才恢复圆角。
-static RESIZE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// 缩放中调用：先清掉窗口圆角区域（变直角），停止缩放后再恢复圆角。
-///
 /// 逐帧 SetWindowRgn 对窗口本体做区域裁剪非常贵（大窗口尤甚），
 /// 会让缩放明显卡顿。这里改成「缩放中不裁剪、缩放后补一次」。
 /// 窗口尺寸变化后收尾。
@@ -563,6 +696,9 @@ static RESIZE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 ///   · 有系统材质（高级材质开）：**不裁区域**，改为重新下发一次材质 ——
 ///     拖动/缩放本身也会让 DWM 重建表面，顺手补一次最稳；
 ///   · 无系统材质（高级材质关）：照旧用区域裁剪画圆角。
+/// 缩放世代号：`begin_resize` 每次自增，延迟回调里比对是否还是最后一次。
+static RESIZE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn begin_resize(hwnd: isize, dark: bool) {
     let gen = RESIZE_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     std::thread::spawn(move || {
@@ -596,7 +732,7 @@ pub fn begin_resize(hwnd: isize, dark: bool) {
 /// 主题切换后 DWM 会重建非客户区 —— 样式位看着没被改过，DWM 那边却已经"忘掉"
 /// 我们剥离过边框，于是原生标题栏与那圈投影重新出现。这种情况下只删样式位不发
 /// `FRAMECHANGED` 等于什么都没做，必须强制它重算一次。
-fn strip_window_frame(hwnd: isize, force: bool) {
+pub fn strip_window_frame(hwnd: isize, force: bool) {
     unsafe {
         extern "system" {
             fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
@@ -662,11 +798,12 @@ fn strip_window_frame(hwnd: isize, force: bool) {
 /// 系统是浅色时就会算反 —— tint 变浅、卡片发白，看起来正是「灰扑扑」。
 /// 所有需要 dark 的地方统一从这里取，别各自拼一份。
 pub fn effective_dark(window: &tauri::WebviewWindow) -> bool {
-    match crate::settings::get().theme_mode.as_str() {
-        "dark" => true,
-        "light" => false,
-        _ => matches!(window.theme(), Ok(tauri::Theme::Dark)),
-    }
+    // 窗口参数保留是为了不动所有调用点，但 system 档**不能用 `window.theme()`**：
+    // `set_theme_mode` 早就不调 `window.set_theme()` 了（tao 会重加被剥掉的
+    // WS_CAPTION，Win10 上原生标题栏重现），所以窗口的 theme 永远是建窗时的旧值
+    // —— 这就是「选跟随系统却不变」的根因。
+    let _ = window;
+    crate::effects::is_dark_now()
 }
 
 /// 把 DWM 侧与窗口视觉有关的状态**整份**重设一遍，返回实际档位。
@@ -674,7 +811,7 @@ pub fn effective_dark(window: &tauri::WebviewWindow) -> bool {
 /// 这是「材质不恢复」这类问题的**唯一配方**：任何需要重新挂上材质的时机
 /// （启动、切主题、托盘唤回、最小化恢复、缩放结束）都走这里，别再各写一份。
 ///
-/// ⚠ 这里有血泪：`reapply_after_show` 曾经自己手抄了其中几行
+/// ⚠ 这里有血泪：早先有个"只重下材质"的旁路实现手抄了其中几行
 /// （剥边框 + 下发材质 + nudge），漏掉 `disable_nc_rendering` 与
 /// `set_immersive_dark`。结果托盘唤回后
 /// `DWMWA_SYSTEMBACKDROP_TYPE` 回读是 3（Acrylic）、`hr=0`，**属性明明在、
@@ -684,21 +821,50 @@ pub fn effective_dark(window: &tauri::WebviewWindow) -> bool {
 ///
 /// 「照抄一段能用的代码」本身就是隐患，抄漏一行就是一次线上 bug。
 pub fn restore_visuals(hwnd: isize, dark: bool, reason: &str) -> Tier {
+    // 驻留中的窗口一律不碰（同 `apply_with`）
+    if is_suspended(hwnd) {
+        crate::log_print!("[effects] 跳过整份复位（窗口驻留中，来源={reason}）");
+        return current_tier();
+    }
     set_immersive_dark(hwnd, dark);
     // force：DWM 可能已经「忘掉」剥过边框，样式位没变也必须重发 FRAMECHANGED，
     // 否则原生标题栏会带着投影重新出现
     strip_window_frame(hwnd, true);
-    disable_nc_rendering(hwnd);
-    // 先把 backdrop 显式清成 NONE，再让 apply_with 设回去。
+    if current_tier() == Tier::SystemBackdrop {
+        clear_window_border(hwnd);
+    } else {
+        disable_nc_rendering(hwnd);
+    }
+    // ⚠ **不再 clear 成 NONE**：清成 NONE 再设回会把窗口的合成面拆了重建，
+    // 实测反而造成「属性对、画面没有」（回读 type=3 hr=0）。
     //
-    // DWM 对「设置相同值」直接跳过 —— 之前 4 次补涂全是 3→3，回读永远
-    // type=3 hr=0，画面却灰着。唯一没试过的就是**让值真的变一次**：
-    // 属性变化会强制 DWM 在下一次合成重建 backdrop。中间态 NONE 与目标值
-    // 在同一次同步调用序列里写完，DWM 按 vsync 合成，看不见闪烁。
+    // 但 DWM 对「设置相同值」直接跳过（3→3 无效），所以这里在**两个都有效的值**
+    // 之间切一次（瞬态窗口 ←→ 主窗口）—— 值真的变了会触发重建，
+    // 中间又不会留下「无材质」的空白态。随后 apply_with 设回目标值。
+    unsafe {
+        extern "system" {
+            fn DwmSetWindowAttribute(
+                hwnd: isize,
+                attr: u32,
+                pv: *const c_void,
+                size: u32,
+            ) -> i32;
+        }
+        let alt: u32 = DWMSBT_MAINWINDOW;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &alt as *const _ as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+    // ⚠ 这里**故意不 flush**：中间值（Mica）如果被真正合成一帧，用户就能看到
+    // 一下"变成灰板再变回毛玻璃"——就是「手动切换时闪一下」。
+    // 两次写入紧挨着（中间只隔一次属性写），DWM 会把它们合到同一次合成里：
+    // 目标值照样是一次"真实变化"（会被接受），而中间态不会上屏。
+    // 曾担心"不 flush 就会被当成没变化、留在 Mica 上"——实测那取决于两次写入之间
+    // 是否跨了合成帧，连续写是同一帧，不会停在中间值。
     //
-    // 「后台释放=立即」时反而从不灰，因为那是销毁重建的全新窗口，
-    // DWM 表面是新的 —— 也从侧面印证：旧表面 + 相同值 = 不重建。
-    clear_system_backdrop(hwnd);
     // 重放宿主窗口的「全透明」状态。tao 只在**创建窗口时**调过一次
     // `DwmEnableBlurBehindWindow`，hide→show 之后 DWM 会把它丢掉：
     // 窗口不再透明，backdrop 画在下面也透不出来，整窗变成灰底 ——
@@ -729,35 +895,15 @@ pub fn restore_visuals(hwnd: isize, dark: bool, reason: &str) -> Tier {
 /// 就是「整窗透明、桌面透出来」。需要重绘时由调用方在材质就位之后显式调
 /// [`force_redraw`]。
 fn reassert_transparency(hwnd: isize) {
+    // 旧实现重放的是 `DwmEnableBlurBehindWindow` + 空区域（Vista 时代的透明手法）。
+    // 它和 `DWMWA_SYSTEMBACKDROP_TYPE` 是两套机制：混用时 DWM 可能按"没有 backdrop"
+    // 去合成 —— 表现就是「属性 3、画面平的」。现在统一成文档配方的那一步：
+    // 把 DWM 边框重新铺满客户区（窗口重新可见/唤回后必须重做一次）。
     unsafe {
-        extern "system" {
-            fn DwmEnableBlurBehindWindow(hwnd: isize, bb: *const BlurBehind) -> i32;
-            fn CreateRectRgn(x1: i32, y1: i32, x2: i32, y2: i32) -> isize;
-            fn DeleteObject(obj: isize) -> i32;
-        }
-        #[repr(C)]
-        struct BlurBehind {
-            flags: u32,
-            enable: i32,
-            region: isize,
-            transition: i32,
-        }
-        const DWM_BB_ENABLE: u32 = 0x0000_0001;
-        const DWM_BB_BLURREGION: u32 = 0x0000_0002;
-
-        let rgn = CreateRectRgn(0, 0, -1, -1);
-        if rgn != 0 {
-            let bb = BlurBehind {
-                flags: DWM_BB_ENABLE | DWM_BB_BLURREGION,
-                enable: 1,
-                region: rgn,
-                transition: 0,
-            };
-            let hr = DwmEnableBlurBehindWindow(hwnd, &bb);
-            let _ = DeleteObject(rgn);
-            if hr < 0 {
-                crate::log_warn!("[effects] 重新断言窗口透明失败 hr=0x{:08X}", hr as u32);
-            }
+        let margins = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
+        let hr = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        if hr < 0 {
+            crate::log_warn!("[effects] 重新扩展 DWM 边框失败 hr=0x{:08X}", hr as u32);
         }
     }
 }
@@ -766,7 +912,7 @@ fn reassert_transparency(hwnd: isize) {
 ///
 /// 只在**材质已经下发到位**之后调用。提前调会把中间态（无 backdrop + 全透明）
 /// 合成到屏幕上 —— 见 [`reassert_transparency`] 的注释。
-fn force_redraw(hwnd: isize) {
+pub fn force_redraw(hwnd: isize) {
     unsafe {
         extern "system" {
             fn InvalidateRect(hwnd: isize, rect: *const c_void, erase: i32) -> i32;
@@ -791,6 +937,9 @@ pub fn reapply_visuals_for(window: &tauri::WebviewWindow, reason: &str) -> Optio
     let Ok(h) = window.hwnd() else {
         return None;
     };
+    if is_suspended(h.0 as isize) {
+        return Some(current_tier());
+    }
     // blur-behind 重放仍然要做：它不拆 backdrop，而 hide→show 后被 DWM 丢掉的
     // 恰恰是它。静默 ≠ 省略，只是不拆房子。
     reassert_transparency(h.0 as isize);
@@ -798,6 +947,63 @@ pub fn reapply_visuals_for(window: &tauri::WebviewWindow, reason: &str) -> Optio
     if let Err(e) = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0))) {
         crate::log_warn!("[effects] 重设 WebView 透明背景失败：{e}");
     }
+    Some(tier)
+}
+
+// ---------------------------------------------------------------------------
+// 驻留（收进托盘）与唤回：一对成对的材质操作
+// ---------------------------------------------------------------------------
+
+/// 收进托盘后调用（此时窗口**已经在屏幕外**）：把系统材质清掉，并记为驻留中。
+///
+/// 为什么必须清：`SetWindowPos` 把窗口移出屏幕后，DWM 会把它从合成里摘出去。
+/// 唤回时如果属性**仍是目标值**，`DwmSetWindowAttribute` 就是一次同值 no-op ——
+/// DWM 没有任何理由重建 backdrop，用户看到的就是「关掉再打开没材质」。
+/// 而此刻清掉是**零成本**的：窗口在屏幕外，这一帧没人看得见。
+/// 「真实的那个值变化」留给 [`resume_material`]。
+///
+/// 顺带把「驻留中」这个状态记下来：期间所有材质补涂（看门狗、聚焦、缩放、
+/// 主题刷新）都会自动跳过，否则它们会把属性又设回目标值，前提就没了。
+pub fn suspend_material(hwnd: isize) {
+    use std::sync::atomic::Ordering;
+    if hwnd == 0 {
+        return;
+    }
+    PARKED_HWND.store(hwnd, Ordering::SeqCst);
+    let tier = tier_now();
+    // 圆角模式下本来就没有系统材质；清一遍是幂等的。
+    clear_system_material(hwnd, tier);
+    clear_accent(hwnd);
+    crate::log_print!(
+        "[effects] 驻留：已清空系统材质（tier={}），唤回时将重新下发",
+        tier.as_str()
+    );
+}
+
+/// 从屏幕外驻留唤回后调用（此时窗口**已移回屏幕内**）：按当前深浅重新下发材质。
+///
+/// 与 [`suspend_material`] 成对：驻留期间材质已被清空，所以这里这次下发是一次
+/// **真实的值变化**，DWM 必然重建 backdrop —— 不再依赖「移出屏幕不会丢材质」
+/// 这个假设（它在用户机器上并不成立，正是「关掉再打开材质不应用」的来源）。
+pub fn resume_material(window: &tauri::WebviewWindow, reason: &str) -> Option<Tier> {
+    use std::sync::atomic::Ordering;
+    let Ok(h) = window.hwnd() else {
+        return None;
+    };
+    let hwnd = h.0 as isize;
+    // 先解除驻留标记，否则 apply_with 会把自己跳过
+    PARKED_HWND.store(0, Ordering::SeqCst);
+    let dark = effective_dark(window);
+    // **这里不能做值切换**：驻留时材质已被 `suspend_material` 清成 NONE，
+    // 这次下发本身就是一次真实变化，DWM 必然会重建 —— 不需要中间值。
+    // 而值切换会在窗口已经回到屏幕上时把中间材质（Mica）合成一帧，
+    // 那正是用户看到的「从托盘打开闪一下」。
+    let tier = apply_with(hwnd, dark, reason);
+    dwm_flush();
+    if let Err(e) = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0))) {
+        crate::log_warn!("[effects] 重设 WebView 透明背景失败：{e}");
+    }
+    crate::log_print!("[effects] 唤回：材质已重新下发（dark={dark}，tier={}）", tier.as_str());
     Some(tier)
 }
 
@@ -821,29 +1027,12 @@ pub fn restore_visuals_for(window: &tauri::WebviewWindow, reason: &str) -> Optio
     Some(tier)
 }
 
-/// 把 backdrop 清成 NONE。只配 [`restore_visuals`] 的 toggle 使用，
-/// 别在别处单独调 —— 「清掉不补」正是用户抱怨的画面。
-fn clear_system_backdrop(hwnd: isize) {
-    let v: u32 = DWMSBT_NONE;
-    let hr = unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            &v as *const _ as *const c_void,
-            std::mem::size_of::<u32>() as u32,
-        )
-    };
-    if hr < 0 {
-        crate::log_warn!("[effects] 清除 backdrop 失败 hr=0x{:08X}", hr as u32);
-    }
-}
-
 /// 把 backdrop 相关属性读回来打日志。
 ///
 /// 「材质没生效」有两类完全不同的原因，日志里必须能分清，否则只能靠猜：
 ///   · 属性丢了 / 没设上（hr 失败或 type=0）→ 我们的下发没成功，或有人清掉了；
 ///   · 属性在、画面没有（type≠0 但看不到模糊）→ DWM 没把它挂到当前表面上，
-///     需要一次 frame recalc（正是上面 `reapply_after_show` 处理的那种）。
+///     需要一次 frame recalc（即 `refresh_theme_colors` → `restore_visuals` 做的事）。
 fn log_backdrop_state(hwnd: isize, reason: &str) {
     unsafe {
         let mut kind: u32 = 0;
@@ -853,17 +1042,31 @@ fn log_backdrop_state(hwnd: isize, reason: &str) {
             &mut kind as *mut _ as *mut c_void,
             std::mem::size_of::<u32>() as u32,
         );
-        let mut brush: i32 = 0;
-        let hr2 = DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_USE_HOSTBACKDROPBRUSH,
-            &mut brush as *mut _ as *mut c_void,
-            std::mem::size_of::<i32>() as u32,
-        );
         crate::log_print!(
-            "[effects] backdrop 回读（来源={reason}）type={kind} hr=0x{:08X} hostbrush={brush} hr2=0x{:08X}",
-            hr as u32,
-            hr2 as u32
+            "[effects] backdrop 回读（来源={reason}）type={kind} hr=0x{:08X}",
+            hr as u32
+        );
+    }
+}
+
+/// 把 DWM 画的 1px 窗口边框颜色设为「无」。
+///
+/// Win11 上窗口带一圈极细的边框（失焦时更明显）。过去我们用
+/// `DWMNCRP_DISABLED` 关掉整个非客户区渲染来消掉它 —— 但**系统材质
+/// （backdrop / Mica）本身就是以"边框"形式绘制的**，关掉 NC 渲染等于把材质
+/// 一起关了（属性还在、画面没了）。所以系统材质档改用「只把边框颜色设成透明」。
+const DWMWA_BORDER_COLOR: u32 = 34;
+/// `DWMWA_COLOR_NONE`：表示不画边框。
+const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+
+fn clear_window_border(hwnd: isize) {
+    unsafe {
+        let v: u32 = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &v as *const _ as *const c_void,
+            std::mem::size_of::<u32>() as u32,
         );
     }
 }
@@ -877,7 +1080,7 @@ fn log_backdrop_state(hwnd: isize, reason: &str) {
 /// 直角的亮线/阴影（用户截图里那个「直角」就是这么来的）。
 ///
 /// DWMNCRP_DISABLED 让 DWM 完全不管非客户区，窗口形状就只剩我们的区域裁剪。
-fn disable_nc_rendering(hwnd: isize) {
+pub fn disable_nc_rendering(hwnd: isize) {
     const DWMWA_NCRENDERING_POLICY: u32 = 2;
     const DWMNCRP_DISABLED: u32 = 1;
     unsafe {
@@ -912,17 +1115,19 @@ fn set_immersive_dark(hwnd: isize, dark: bool) {
 /// Win11 22H2+：系统级 backdrop + 系统圆角
 fn apply_system_backdrop(hwnd: isize) -> Result<(), i32> {
     unsafe {
-        // 先声明「本窗口使用 host backdrop 采样」，再设 backdrop 类型。
-        // 顺序有讲究：这个 flag 影响 DWM 为窗口选择的重定向目标，
-        // 后设 backdrop 才能作用在正确的那块表面上。
-        // 失败不算错 —— 老版本（<22000）本来就返回失败，我们只当它不存在。
-        let on: i32 = 1;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_HOSTBACKDROPBRUSH,
-            &on as *const _ as *const c_void,
-            std::mem::size_of::<i32>() as u32,
-        );
+        // **文档配方（顺序固定）**：
+        //   ① `DwmExtendFrameIntoClientArea(hwnd, {-1,-1,-1,-1})` —— 把 DWM 边框
+        //      铺满整个客户区，整块窗口才成为"一片玻璃"。`DWMWA_SYSTEMBACKDROP_TYPE`
+        //      **只在这片玻璃上绘制**；不扩展边框，设了类型也不会画出模糊。
+        //   ② `DWMWA_SYSTEMBACKDROP_TYPE = TRANSIENTWINDOW`（acrylic）。
+        //   ③ 圆角由系统给。
+        //
+        // 早先这里设的是 `DWMWA_USE_HOSTBACKDROPBRUSH` —— 那是给
+        // Win32 + Windows.UI.Composition（XAML 岛屿）用的，普通窗口设它只会让
+        // DWM 拿"宿主画刷"去涂，表现正是「一块平色、没有模糊」，而且切主题后
+        // 状态更乱。已删除。
+        let margins = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
+        let hr_frame = DwmExtendFrameIntoClientArea(hwnd, &margins);
 
         let v: u32 = DWMSBT_TRANSIENTWINDOW;
         let hr = DwmSetWindowAttribute(
@@ -932,7 +1137,11 @@ fn apply_system_backdrop(hwnd: isize) -> Result<(), i32> {
             std::mem::size_of::<u32>() as u32,
         );
         if hr < 0 {
-            // 退回 Mica
+            crate::log_warn!(
+                "[effects] 设置 backdrop 失败 hr=0x{:08X}（扩展边框 hr=0x{:08X}），退回 Mica",
+                hr as u32,
+                hr_frame as u32
+            );
             return apply_mica(hwnd);
         }
         let corner: u32 = DWMWCP_ROUND;
@@ -957,6 +1166,7 @@ fn apply_mica(hwnd: isize) -> Result<(), i32> {
             std::mem::size_of::<u32>() as u32,
         );
         if hr < 0 {
+            crate::log_warn!("[effects] 设置 Mica 失败 hr=0x{:08X}", hr as u32);
             return Err(hr);
         }
         Ok(())
@@ -1086,61 +1296,187 @@ fn set_accent_state(hwnd: isize, accent_state: u32, tint: u32) -> Result<(), i32
     }
 }
 
-/// 系统主题切换时重刷 acrylic 的 tint（只有 Acrylic 档需要）
-pub fn refresh_theme(hwnd: isize, dark: bool) {
-    set_immersive_dark(hwnd, dark);
-    if current_tier() == Tier::Acrylic {
-        let _ = apply_acrylic(hwnd, dark);
+/// 等 DWM 完成一次合成。
+///
+/// 材质类操作里只有「同帧隐藏 / 显示重建」这一处需要等。
+fn dwm_flush() {
+    unsafe {
+        extern "system" {
+            fn DwmFlush() -> i32;
+        }
+        let _ = DwmFlush();
     }
 }
 
-/// 用户手动切换「浅色 / 深色 / 系统」之后，把材质与窗口区域重刷一遍。
+/// 主题变化后的材质刷新：与 `focus-refresh` 同一套静默重下。
 ///
-/// `set_theme` 只改 DWM 的窗口框架主题，**不刷我们自己的 acrylic tint**。浅色与深色
-/// 用的 tint 不同，不重刷就留着上一个主题的色：顶栏一条浅带、圆角边缘一圈异色。
-/// 且 `set_theme` 之后 DWM 会保留旧图层缓存，残影一直挂到窗口重建（用户表现为
-/// 「除非重启」），所以末尾必须 `nudge` 一次强制重算。
-///
-/// 两个模式不能走同一条路：
-/// - 直角模式：系统材质矩形铺满整个窗口，必须重刷 tint；
-/// - 圆角模式：材质已被 `apply_round_mode` 关掉、圆角靠 `SetWindowRgn` 裁，此时
-///   再开 acrylic 会把圆角外的区域重新填上 —— 只重设区域 + nudge。
-pub fn refresh_after_theme_switch(window: &tauri::WebviewWindow) {
-    use tauri::Manager;
-
-    // 第一遍：立刻做，让切完的瞬间观感大致正确
-    apply_theme_visuals(window, 1);
-
-    // 第二遍：`set_theme` 引起的非客户区重建由 DWM 在**下一帧**完成，第一遍的
-    // strip / nudge 会被它覆盖 —— 表现就是原生标题栏连同那圈投影重新出现，且
-    // 不重启不消失。延迟补一次是目前唯一稳定的时序：既盖住这次重建，又不至于
-    // 让用户觉得「切了没反应」。
-    let w = window.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        let w2 = w.clone();
-        let _ = w.app_handle().run_on_main_thread(move || {
-            apply_theme_visuals(&w2, 2);
-        });
-    });
+/// **不做** backdrop 值切换、immersive dark 翻转、额外 FRAMECHANGED ——
+/// 这些都会在可见窗口上闪（用户实测）。Windows 侧只需：正确 immersive dark +
+/// 剥回 tao 可能加回的 WS_CAPTION + 重下材质 + WebView 全透。
+pub fn refresh_theme_visuals(window: &tauri::WebviewWindow, reason: &str) -> Option<Tier> {
+    let Ok(h) = window.hwnd() else {
+        return None;
+    };
+    let hwnd = h.0 as isize;
+    if is_suspended(hwnd) {
+        return Some(current_tier());
+    }
+    // 只在这里设一次 WebView 透明背景（`reapply_visuals_for` 内部还会设一次，
+    // 之前这里前后各设一次等于让 webview 多重绘一轮，是闪的次要来源）。
+    let t = reapply_visuals_for(window, reason);
+    dwm_flush();
+    crate::log_print!(
+        "[effects] 主题变化 → 完整重下（来源={reason}，dark={}，tier={}）",
+        is_dark_now(),
+        t.map(|x| x.as_str()).unwrap_or("unknown")
+    );
+    log_backdrop_state(hwnd, reason);
+    t
 }
 
-/// 主题视觉的实际刷新。`pass` 只用于日志。
+/// 上一次「自动」主题刷新的时刻（毫秒）。
 ///
-/// **走静默补涂，不走响亮复位**：这是窗口**可见期间**的唯一一条材质路径。
-/// `restore_visuals` 会先把 backdrop 清成 NONE 再设回（为了强制 DWM 重建），
-/// 在屏幕上就是「先拆掉材质、再装回去」；配上清屏的时机不稳，用户看到的是
-/// 「切深浅色时有几率闪一下，直接透明出背景」。
+/// 一次系统深浅切换会同时惊动三条路径：`WM_SETTINGCHANGE` 钩子、400ms 看门狗、
+/// 前端事件。它们都会调本函数 —— 实测一次切换刷了 **3 次**材质（日志里三组
+/// 「应用完成 + 完整重下」），而每次重建都是一次可见的闪。这里用时间窗去重：
+/// 1 秒内只认第一次，其余直接跳过。手动切换不走这条，不受影响。
+static LAST_AUTO_REFRESH_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 系统主题变化（无焦点）：立即静默重下 + 150ms 再补一次（对齐 focus-refresh）。
+/// 「系统主题变过、但材质还没重建」的标记。
 ///
-/// 而切主题这里其实没丢东西：`set_theme_mode` 已经不再调 `window.set_theme()`
-/// （见那里的注释），tao 不会重建非客户区，DWM 也不需要整份复位 ——
-/// 只有 `DWMWA_USE_IMMERSIVE_DARK_MODE` 的值真的变了，DWM 自己会重算 backdrop。
-fn apply_theme_visuals(window: &tauri::WebviewWindow, pass: u8) {
-    let tier = reapply_visuals_for(window, "theme-refresh");
+/// 系统切深浅时主窗口往往**正在被看**（用户刚点了 Windows 设置），此时重建
+/// backdrop 一定会闪。所以先只切 CSS，把材质重建挂起；等窗口失焦（用户已经
+/// 去操作别的窗口，看不见它）再补 —— 这样「材质一定跟上」和「绝不闪」两者都能拿到。
+static THEME_REBUILD_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 窗口失焦 / 隐藏时调用：如果系统主题变过，趁用户看不见把材质重建掉。
+pub fn flush_pending_theme_rebuild(window: &tauri::WebviewWindow) {
+    use std::sync::atomic::Ordering;
+    if !THEME_REBUILD_PENDING.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    if any_suspended() {
+        // 驻留/隐藏中：`resume_material` 唤回时会按当前深浅重新下发，这里不用管
+        return;
+    }
+    crate::log_print!("[effects] 窗口回到前台 → 补做挂起的主题材质重建（完整复位）");
+    // 必须是完整复位：静默重下（`refresh_theme_visuals`）只写属性、不重建表面，
+    // 恢复不了"属性 3 / 画面没有"的状态。
+    let _ = restore_visuals_for(window, "pending-theme");
+}
+
+/// 窗口即将重新显示（驻留唤回 / show）时清掉挂起标记 —— 那个路径会自己下发材质。
+pub fn clear_pending_theme_rebuild() {
+    THEME_REBUILD_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn schedule_system_theme_refresh(window: tauri::WebviewWindow, reason: &'static str) {
+    // **不重建主窗口材质**（用户实测结论：「接上不如不接上」）。
+    //
+    // 系统主题变化这条路，tao 已经重走过 `set_window_flags`；要让材质"对上"就得
+    // 重建一次 backdrop —— 而重建在可见窗口上一定是可见变化（闪 / 短暂透明）。
+    // 实测下来这样比"不重建"更难看，所以这条路径只做两件不会闪的事：
+    //   ① 把当前深浅推给前端 —— CSS 是同步的，切换不出帧；
+    //   ② 面板 / 托盘菜单按新深浅重刷 —— 体量小，重建不可感知。
+    // 主窗口材质留到**用户手动切主题**时再重建（`refresh_theme_manual`，
+    // 那条路已验证：不闪，且材质一定能恢复）。
+    use tauri::Emitter;
+    let now = now_ms();
+    let last = LAST_AUTO_REFRESH_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if now.saturating_sub(last) < 800 {
+        return; // 同一事件被多条路径看到，只处理第一次
+    }
+    LAST_AUTO_REFRESH_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+    clear_theme_event_pending();
+    // ① **立刻**把「窗口是不是深色」推下去（只改这一个属性，不重建材质）：
+    //    DWM 会按新属性重算 backdrop 的颜色，材质当场就和新深浅一致 ——
+    //    这解决「切完是半深半浅」。不碰 backdrop 类型、不碰 WebView 背景，所以不闪。
+    if let Ok(h) = window.hwnd() {
+        set_immersive_dark(h.0 as isize, is_dark_now());
+        dwm_flush();
+    }
+    // ② 材料重建仍挂起：万一某些系统版本上属性变化不足以触发重算，
+    //    等窗口失焦（用户看不见）时再完整重建一次兜底。
+    THEME_REBUILD_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let app = window.app_handle();
+    let dark = is_dark_now();
+    let _ = window.emit("system-theme-changed", dark);
+    #[cfg(windows)]
+    if let Some(pw) = app.get_webview_window(crate::popup::PANEL_LABEL) {
+        if let Ok(ph) = pw.hwnd() {
+            let _ = rebuild_popup_material(ph.0 as isize, dark);
+        }
+        let _ = app.emit_to(crate::popup::PANEL_LABEL, "panel-theme", dark);
+    }
+    crate::tray::sync_menu_appearance(app);
+    crate::log_print!("[effects] 系统主题变化 → 同步颜色（不动主窗口材质，来源={reason}）");
+}
+
+static THEME_EVENT_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn note_theme_event_handled() {
+    THEME_EVENT_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn theme_event_handled(_dark: bool) -> bool {
+    THEME_EVENT_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn clear_theme_event_pending() {
+    THEME_EVENT_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 系统主题变过 → 挂起一次材质重建，等窗口**回到前台**时再补。
+///
+/// 这是早期那版的行为：系统换深浅时窗口通常在后台（用户在设置里操作），
+/// 此刻不碰材质（会闪、而且看不见）；等它回到前台再做完整复位 ——
+/// 用户看到的就是"材质跟着窗口一起回来了"，既不闪也一定生效。
+pub fn mark_pending_theme_rebuild() {
+    THEME_REBUILD_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 手动切主题：同步一次静默重下。**禁止** `restore_visuals_for`（会闪）。
+pub fn refresh_after_theme_switch(window: &tauri::WebviewWindow) {
+    // 走系统主题那条统一入口：只同步颜色，不重建主窗口材质。
+    schedule_system_theme_refresh(window.clone(), "theme-switch");
+}
+
+/// 统一别名：只做静默重下（自动跟随用这条，不闪）。
+pub fn refresh_theme_colors(window: &tauri::WebviewWindow, reason: &str) {
+    let _ = refresh_theme_visuals(window, reason);
+}
+
+/// **手动**切换深浅模式时用：值切换 + 静默重下。
+///
+/// 要点：**不做 `force_redraw`**（那是「切深浅色闪一下」的来源 —— 它会在
+/// 「中间值 Mica 已设、目标值尚未设」的那一帧立即合成，用户就看到闪）。
+/// 改成：先让 backdrop 值真的变一次（主窗口 ←→ 瞬态），再静默重下设回目标值，
+/// 两次设置都在同一次提交里，交给 DWM 按 vsync 只合成最终态。
+///
+/// 值切换保住了「材质丢了也能恢复」这个能力（这是原来完整复位的价值），
+/// 去掉的只是那次强制合成中间帧。
+pub fn refresh_theme_manual(window: &tauri::WebviewWindow, reason: &str) {
+    let Ok(h) = window.hwnd() else {
+        return;
+    };
+    let _ = h;
+    let tier = tier_now();
+    // **不做值切换**（用户要求「保留一个」，且值切换会合成中间帧 = 闪）。
+    // 深浅切换时 `apply_with` 里的 `set_immersive_dark(dark)` 本身就会变，
+    // DWM 会按新属性重算 backdrop 颜色 —— 一次 apply 就够。
+    // 记一次时间戳：紧跟着的看门狗不应该再刷一遍。
+    LAST_AUTO_REFRESH_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    let _ = refresh_theme_visuals(window, reason);
+    dwm_flush();
     crate::log_print!(
-        "[effects] 主题视觉重刷完成（第 {pass} 遍，dark={}，tier={}）",
-        effective_dark(window),
-        tier.map(|t| t.as_str()).unwrap_or("unknown")
+        "[effects] 手动切换 → 静默重下一次（来源={reason}，dark={}，tier={}）",
+        is_dark_now(),
+        tier.as_str()
     );
 }
 
@@ -1397,13 +1733,12 @@ fn apps_use_light_theme() -> bool {
             // 签名必须与 about.rs 里的声明逐字一致：同一个 C 符号在同一个 crate
             // 里声明成两种样子，Rust 会报 clashing_extern_declarations；
             // 而参数个数写错更是直接错位调用。
-            fn RegGetValueW(
+            fn RegQueryValueExW(
                 hkey: isize,
-                subkey: *const u16,
                 value: *const u16,
-                flags: u32,
+                reserved: *mut u32,
                 out_type: *mut u32,
-                data: *mut std::ffi::c_void,
+                data: *mut u8,
                 data_size: *mut u32,
             ) -> i32;
             fn RegCloseKey(hkey: isize) -> i32;
@@ -1427,18 +1762,22 @@ fn apps_use_light_theme() -> bool {
         let mut val: u32 = 1;
         let mut out_type: u32 = 0;
         let mut len = std::mem::size_of::<u32>() as u32;
-        let rc = RegGetValueW(
+        // 用 RegQueryValueExW（键已打开，只需要值名）而不是 RegGetValueW ——
+        // 后者实测在这台机器上返回非 0（rc 失败），于是「读不到按浅色处理」，
+        // 深色系统被判成浅色。日志里 `rust=false window=dark mq=true` 就是它。
+        let rc = RegQueryValueExW(
             hkey,
-            // 键已经用 RegOpenKeyExW 打开了，这里不再指定子键
-            std::ptr::null(),
             name.as_ptr(),
-            0,
+            std::ptr::null_mut(),
             &mut out_type,
-            &mut val as *mut u32 as *mut std::ffi::c_void,
+            &mut val as *mut u32 as *mut u8,
             &mut len,
         );
         RegCloseKey(hkey);
         if rc != 0 || out_type != REG_DWORD {
+            crate::log_warn!(
+                "[theme] 读 AppsUseLightTheme 失败 rc={rc} type={out_type}，按浅色处理"
+            );
             return true;
         }
         val != 0
@@ -2085,7 +2424,45 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
             return 0;
         }
         let orig = ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
-        unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }
+        let ret = unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) };
+        // tao 的 ThemeChanged 监听在本机日志里**从未出现**（无「系统主题切换 →」）。
+        // WM_SETTINGCHANGE 是系统主题变化的权威消息：先交给 tao，再在本钩子里
+        // 主线程补一次材质（与焦点路径同等的完整下发 + FRAMECHANGED）。
+        // 仅 system 档；手动钉住时不动，避免把材质改成系统那套。
+        const WM_SETTINGCHANGE: u32 = 0x001A;
+        if msg == WM_SETTINGCHANGE && crate::settings::get().theme_mode == "system" {
+            // 只认配色广播：lParam 常为 "ImmersiveColorSet"（UTF-16）。
+            let mut color_scheme = false;
+            if lparam != 0 {
+                unsafe {
+                    let mut p = lparam as *const u16;
+                    let mut buf = String::new();
+                    for _ in 0..64 {
+                        let c = *p;
+                        if c == 0 {
+                            break;
+                        }
+                        buf.push(char::from_u32(c as u32).unwrap_or('?'));
+                        p = p.add(1);
+                    }
+                    color_scheme =
+                        buf.contains("ImmersiveColorSet") || buf.contains("WindowsThemeElement");
+                }
+            }
+            if color_scheme {
+                if let Some(app) = HOOK_APP.get() {
+                    use tauri::Manager;
+                    if let Some(w) = app.get_webview_window(crate::idle_release::MAIN_LABEL) {
+                        crate::log_print!("[effects] WM_SETTINGCHANGE → 系统主题静默重下");
+                        // 与焦点路径一致：立即 + 150ms 再补；不做翻转/FRAMECHANGED，不闪。
+                        schedule_system_theme_refresh(w, "setting-change");
+                        note_theme_event_handled();
+                        let _ = crate::tray::sync_menu_appearance(app);
+                    }
+                }
+            }
+        }
+        ret
     }
 
     let orig = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as *const () as isize) };
@@ -2112,8 +2489,27 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
 /// 已挂 hook 的弹出窗口句柄（窗口重建后句柄会变，靠它判断要不要重挂）
 static POPUP_HOOKED: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
-static POPUP_ORIG_WNDPROC: std::sync::atomic::AtomicIsize =
-    std::sync::atomic::AtomicIsize::new(0);
+/// 每个弹窗自己的「原窗口过程」，按句柄存。
+///
+/// 原先只有一个槽：面板和托盘菜单**都**会挂钩子，后挂的把前一个的原过程覆盖掉，
+/// 于是先挂的那个窗口收到的消息会被送到另一个窗口的 WndProc 里处理 ——
+/// 表现可能是「某个弹窗的边框/命中测试突然不对」这类说不清的问题。
+static POPUP_ORIG: std::sync::Mutex<Vec<(isize, isize)>> = std::sync::Mutex::new(Vec::new());
+
+fn popup_orig_of(hwnd: isize) -> isize {
+    POPUP_ORIG
+        .lock()
+        .ok()
+        .and_then(|g| g.iter().rev().find(|(h, _)| *h == hwnd).map(|(_, o)| *o))
+        .unwrap_or(0)
+}
+
+fn set_popup_orig(hwnd: isize, orig: isize) {
+    if let Ok(mut g) = POPUP_ORIG.lock() {
+        g.retain(|(h, _)| *h != hwnd);
+        g.push((hwnd, orig));
+    }
+}
 /// `GWL_WNDPROC`：窗口过程的存放槽位（-4）。主窗口那份是写在函数内部的局部常量，
 /// 这里要用在模块作用域，单独定义一份。
 const GWLP_WNDPROC: i32 = -4;
@@ -2133,12 +2529,23 @@ extern "system" fn popup_hook_proc(
             lparam: isize,
         ) -> isize;
     }
+    unsafe extern "system" {
+        fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+    }
     const WM_NCCALCSIZE: u32 = 0x0083;
+    const WM_NCACTIVATE: u32 = 0x0086;
     const WM_NCHITTEST: u32 = 0x0084;
     const HTCLIENT: isize = 1;
 
     if msg == WM_NCCALCSIZE && wparam != 0 {
         return 0;
+    }
+    // **聚焦时系统会发 WM_NCACTIVATE 重绘非客户区** —— 面板本身是
+    // decorations(false)，但一旦聚焦，系统照样照着样式位画出最小化/最大化/关闭，
+    // 失焦又擦掉（用户截图：「聚焦时出现，失焦就消失」）。
+    // `lparam = -1` 表示「不要重绘非客户区」，和主窗口那条钩子完全一样。
+    if msg == WM_NCACTIVATE {
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, -1) };
     }
     if msg == WM_NCHITTEST {
         return HTCLIENT;
@@ -2146,13 +2553,26 @@ extern "system" fn popup_hook_proc(
     if handle_drag_msg(hwnd, msg) {
         return 0;
     }
-    let orig = POPUP_ORIG_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
+    let orig = popup_orig_of(hwnd);
+    if orig == 0 {
+        return 0;
+    }
     unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }
 }
 
 /// 给弹出窗口挂上拖动用的 WndProc（幂等：同一个句柄只挂一次）。
 pub fn install_popup_hook(hwnd: isize) {
-    if hwnd == 0 || POPUP_HOOKED.load(std::sync::atomic::Ordering::Relaxed) == hwnd {
+    if hwnd == 0 {
+        return;
+    }
+    // 幂等必须**按句柄查表**：原来用单槽 `POPUP_HOOKED == hwnd` 判断，
+    // 面板和托盘菜单互相覆盖时会导致同一个窗口被重复挂——
+    // 第二次挂会把 orig 设成我们自己的 proc，消息转发直接成死循环。
+    let already = POPUP_ORIG
+        .lock()
+        .map(|g| g.iter().any(|(h, _)| *h == hwnd))
+        .unwrap_or(false);
+    if already {
         return;
     }
     unsafe {
@@ -2165,8 +2585,228 @@ pub fn install_popup_hook(hwnd: isize) {
             crate::log_warn!("[effects] 弹出窗口 hook 挂载失败");
             return;
         }
-        POPUP_ORIG_WNDPROC.store(orig, std::sync::atomic::Ordering::Relaxed);
+        set_popup_orig(hwnd, orig);
         POPUP_HOOKED.store(hwnd, std::sync::atomic::Ordering::Relaxed);
     }
     crate::log_print!("[effects] 弹出窗口拖动 hook 已挂载");
+}
+
+// ---------------------------------------------------------------------------
+// 浮层（快捷面板）材质：保留系统材质，同时把窗口剪成圆角
+// ---------------------------------------------------------------------------
+
+/// 施加浮层材质，并把窗口剪成圆角。
+///
+/// 为什么需要 region：系统材质恒为**矩形**铺满整个窗口（见 `clear_system_material`
+/// 的注释），CSS 的 `border-radius` 只裁得到自己那层底色，裁不掉它 ——
+/// 四角会露出矩形的材质，看起来就是「直角」（用户实测）。
+/// `SetWindowRgn` 剪的是**窗口形状**本身，DWM 画 backdrop 时会跟着被裁掉，
+/// 材质与圆角才可能同时成立。
+pub fn apply_popup_material(hwnd: isize, dark: bool) -> bool {
+    // 关了高级材质就不施加，与主窗口的语义保持一致
+    if !is_round() {
+        return false;
+    }
+    // **必须先把窗口标成「深色」**：Win11 的系统 backdrop 颜色由 DWM 按窗口的
+    // 沉浸式深色属性决定，不设的话深色主题下拿到的仍是浅色 backdrop ——
+    // 表现为「深色模式下面板还是白的」，CSS 层怎么调都救不回来
+    // （主窗口一直有这一步，面板从没设过，这就是深色面板发白的根因）。
+    set_immersive_dark(hwnd, dark);
+    // 面板窗口同样要剥样式位：系统主题变化时 tao 会重走 `set_window_flags`，
+    // 把 WS_CAPTION 加回来 —— 表现就是「面板右上角冒出最小化/最大化/关闭」
+    // （用户截图）。主窗口一直有这一步，面板缺了。
+    strip_window_frame(hwnd, false);
+    let tier = current_tier();
+    // 与主窗口同一条规则：backdrop 是画在**非客户区**上的，这一档不能关 NC 渲染
+    // （关了材质就没了）；只把 1px 边框设成透明。其它档继续用关 NC 消边框。
+    if tier == Tier::SystemBackdrop {
+        clear_window_border(hwnd);
+    } else {
+        disable_nc_rendering(hwnd);
+    }
+    let ok = match tier {
+        Tier::SystemBackdrop => apply_system_backdrop(hwnd).is_ok(),
+        Tier::Mica => apply_mica(hwnd).is_ok(),
+        Tier::Acrylic => apply_acrylic(hwnd, dark).is_ok(),
+        Tier::Solid => false,
+    };
+    ok
+}
+
+/// 显示前重施一次材质（兜底：首次显示、切主题）。
+///
+/// 面板改成「移屏幕外驻留」而不是 `hide`，材质在驻留期间不会丢，
+/// 所以这里不需要「清成 NONE 再设回」那套 —— 直接施加 + 逼 DWM 重画即可。
+pub fn rebuild_popup_material(hwnd: isize, dark: bool) -> bool {
+    if !is_round() {
+        crate::log_print!("[effects] 浮层材质跳过：高级材质未开启（is_round=false）");
+        return false;
+    }
+    let ok = apply_popup_material(hwnd, dark);
+    nudge(hwnd);
+    force_redraw(hwnd);
+    crate::log_print!(
+        "[effects] 浮层材质施加 成功={ok} tier={}",
+        current_tier().as_str()
+    );
+    ok
+}
+
+// ---------------------------------------------------------------------------
+// 材质看门狗
+// ---------------------------------------------------------------------------
+
+/// 检查窗口的「材质骨架」是否还完整：
+///   ① 样式位里不该有 `WS_CAPTION`（有 = tao 把剥掉的边框加回来了）；
+///   ② Win11 的 system backdrop 类型应该还是瞬态窗口（3）。
+///
+/// 只读、不写。读不到（hr < 0）时按「正常」处理 —— 保守，避免误判造成周期性闪。
+fn material_is_intact(hwnd: isize) -> bool {
+    unsafe {
+        extern "system" {
+            fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
+            fn DwmGetWindowAttribute(
+                hwnd: isize,
+                attr: u32,
+                pv: *mut c_void,
+                size: u32,
+            ) -> i32;
+        }
+        const GWL_STYLE: i32 = -16;
+        const WS_CAPTION: i32 = 0x00C0_0000;
+        if GetWindowLongW(hwnd, GWL_STYLE) & WS_CAPTION != 0 {
+            return false;
+        }
+        // 高级材质关 → 本来就不该有系统材质（backdrop 被主动清成 NONE）。
+        // 这时再按"必须有 backdrop"去判，会每 800ms 误判一次、无脑复位，
+        // 日志里就是一串「看门狗：样式位/backdrop 异常」（用户实测刷屏）。
+        if !is_round() {
+            return true;
+        }
+        match current_tier() {
+            Tier::SystemBackdrop => {
+                let mut v: u32 = 0;
+                let hr = DwmGetWindowAttribute(
+                    hwnd,
+                    DWMWA_SYSTEMBACKDROP_TYPE,
+                    &mut v as *mut u32 as *mut c_void,
+                    std::mem::size_of::<u32>() as u32,
+                );
+                hr < 0 || v == DWMSBT_TRANSIENTWINDOW
+            }
+            Tier::Mica => {
+                let mut v: u32 = 0;
+                let hr = DwmGetWindowAttribute(
+                    hwnd,
+                    DWMWA_MICA_EFFECT,
+                    &mut v as *mut u32 as *mut c_void,
+                    std::mem::size_of::<u32>() as u32,
+                );
+                hr < 0 || v == 1
+            }
+            // acrylic 档的 accent state 读取要另走 GetWindowCompositionAttribute，
+            // 判据不稳定，这里只查样式位（上面那条）。
+            _ => true,
+        }
+    }
+}
+
+/// 材质看门狗：400ms 只读巡检，发现异常才复位一次。
+///
+/// 为什么需要定时检查，而不是靠事件：
+/// 我们已经在这些时机挂了补涂 —— 启动、最小化恢复、主题切换、焦点变化。
+/// 但实测仍有漏网：**启动早期**（DWM 还没铺开）、**系统主题切换**（tao 自己重走
+/// set_window_flags 把 WS_CAPTION 加回来、backdrop 被丢）都可能没有事件可等，
+/// 表现就是「没材质，点一下窗口 / 切一次深浅色才回来」。
+/// Win11 24H2+ 在最小化恢复时甚至不派发任何窗口消息（社区已确认），
+/// 事件驱动天生补不全。
+///
+/// 同类工具（ExplorerBlurMica）的解法就是**定时幂等重刷**：我们做成只读巡检，
+/// 正常时零写入（不闪、不耗 GPU），只有连续两拍（≈800ms）都判异常才复位。
+pub fn spawn_material_watch(app: tauri::AppHandle) {
+    use tauri::Manager;
+    // 低占用释放会销毁并重建主窗口，而重建又会走一遍 `setup_effects` ——
+    // 以前每重建一次就多一个看门狗线程，几个线程各刷各的材质、各发一次
+    // 「系统深浅变化」，日志里同一次切换出现 2–3 条。只允许一个。
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let mut bad = 0u8;
+        // 上一次看到的系统深浅。只用于「发现变化」：一变就按手动切的那条路
+        // 重刷一遍材质（见下面的调用点），不再做任何"是否已经跟上"的判断。
+        let mut last_dark = is_dark_now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let Some(w) = app.get_webview_window(crate::idle_release::MAIN_LABEL) else {
+                continue;
+            };
+
+            // ① 系统深浅变化：CSS/托盘/面板照常；材质仅在 ThemeChanged 未排队时兜底。
+            let now_dark = is_dark_now();
+            if now_dark != last_dark {
+                last_dark = now_dark;
+                crate::log_print!("[theme] 系统深浅变化 → dark={now_dark}，全部窗口重刷");
+                use tauri::Emitter;
+                let _ = w.emit("system-theme-changed", now_dark);
+                #[cfg(windows)]
+                if let Some(pw) = app.get_webview_window(crate::popup::PANEL_LABEL) {
+                    if let Ok(ph) = pw.hwnd() {
+                        let _ = rebuild_popup_material(ph.0 as isize, now_dark);
+                    }
+                    let _ = app.emit_to(crate::popup::PANEL_LABEL, "panel-theme", now_dark);
+                }
+                crate::tray::sync_menu_appearance(&app);
+                // 窗口在前台 → 用户正看着它，直接完整复位（此刻刷新是他期待的）；
+                // 在后台 → 挂起，等他回到前台时由 `flush_pending_theme_rebuild` 补。
+                let focused = w.is_focused().unwrap_or(false);
+                if focused {
+                    let _ = refresh_theme_manual(&w, "theme-focused");
+                    clear_pending_theme_rebuild();
+                } else {
+                    mark_pending_theme_rebuild();
+                }
+                // ThemeChanged 已排队 → 跳过材质，避免与 setting-change 双刷。
+                if !theme_event_handled(now_dark) {
+                    schedule_system_theme_refresh(w.clone(), "watchdog-theme");
+                }
+                bad = 0;
+                continue;
+            }
+
+            // ② 窗口不可见 / 最小化 / 正驻留屏幕外：这一拍什么都不写。
+            //    驻留期间材质是「已清空」状态，写回去会毁掉唤回时的真实值变化。
+            if any_suspended() || !w.is_visible().unwrap_or(false) {
+                bad = 0;
+                continue;
+            }
+            let Ok(h) = w.hwnd() else { continue };
+            unsafe {
+                extern "system" {
+                    fn IsIconic(hwnd: isize) -> i32;
+                }
+                if IsIconic(h.0 as isize) != 0 {
+                    bad = 0;
+                    continue;
+                }
+            }
+
+            // ④ 属性骨架被破坏（WS_CAPTION 回来了 / backdrop 被清成 NONE）→
+            //    连续两拍（≈800ms）都异常才复位，避免误判造成周期性闪。
+            //
+            if material_is_intact(h.0 as isize) {
+                bad = 0;
+                continue;
+            }
+            bad = bad.saturating_add(1);
+            if bad < 2 {
+                continue;
+            }
+            bad = 0;
+            crate::log_print!("[effects] 看门狗：样式位/backdrop 异常，执行一次复位");
+            // 看门狗异常复位：静默重下（禁止 restore，会闪）。
+            refresh_theme_colors(&w, "watchdog");
+        }
+    });
 }

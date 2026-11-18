@@ -68,10 +68,14 @@
 
   /* 玻璃叠加层（light） */
   --glass: rgba(255, 255, 255, calc(0.16 * var(--mat-k)));
-  /* 条目卡片底色。比 --glass 实得多，理由：浅色材质底（Mica 白灰）上叠 16% 白，
-     卡片与背景几乎同色，整块看起来「发灰」、分不出层次（用户实测反馈）。
-     --glass 还要服务侧栏与按钮，那些地方需要更透，所以这里单独一个变量。 */
-  --card-bg: var(--surface-2);
+  /* 条目卡片底色：**与侧栏同一个令牌**（2026-11-17 用户要求「卡片跟侧栏背景一样」）。
+     曾经用 --surface-2（82% 白），理由是 16% 白在浅色材质底上「发灰、分不出层次」。
+     但 82% 白压在玻璃窗口上会读成一张张实心纸，卡片感过重、把材质盖住了。
+     现在靠三样东西分层，不再靠白度：6px 间距、顶部 14% 的 --card-sheen、一圈 --card-rim。
+     ⚠ 实底档（tier-solid）**不能跟着改**：那一档 --glass 是 #f4f5f7，与窗口底
+     #eceef1 只差 8 级，卡片会整块溶掉，所以下面 body.tier-solid 里仍用 --surface-2。
+     嫌层次不够就换回 --surface-2，一处生效。 */
+  --card-bg: var(--glass);
   /* 悬停态：比常态略亮。不能沿用 --glass-hover（那是 10% 的通用悬停层），
      否则鼠标一移上去，实心卡片会瞬间变透明、像被"挖"了一下。 */
   /* 悬浮 = **提亮**，不是压暗。
@@ -153,14 +157,9 @@
      只设背景不设字色 —— 字色保持原样一定可读，设了反而要在深浅两处各调一次。 */
   --selection-bg: rgba(47, 107, 255, 0.24);
 
-  /* 无系统模糊档的「窗口面料」：主窗口与托盘菜单共用一份。
-     原先托盘菜单自己抄了一版简化公式（无低浓度收敛项），于是同样拉到 1% 时
-     托盘比主窗口厚 0.32，拖低浓度会看到两处不一致。收敛到同一份。 */
-  --surface-material: linear-gradient(
-    160deg,
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32 * min(1, calc(var(--glass-alpha) * 2))))),
-    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.2 * min(1, calc(var(--glass-alpha) * 2))))) 62%
-  );
+  /* 选区背景见下；「窗口面料」--surface-material 也见下 —— 它必须定义在 body 上，
+     不能放这里：写在 :root 时其中的 var(--material-rgb) 按 :root 的浅色值解析，
+     body.dark 覆盖不到它，结果是「高级材质关掉后深色模式全白」（用户实测截图）。 */
 
   /* ══ 引导页装饰色 ══════════════════════════════════════════════════
      原来规则体里散着 21 处裸色值 + 4 条 body.dark 覆盖，改主题必漏。
@@ -319,7 +318,13 @@
      232 在 alpha 0.5 下正好合成 **#f3f4f5** —— 这就是 Windows 11 Mica 浅色的实测值，
      不是我们调出来的偏色。再亮（236+）就逼近白、卡片拉不开；再暗（218）就是灰窗。
      层级差不足由卡片白度 + elev-1 阴影补，不靠压低窗口底。 */
-  --material-rgb: 232 234 239;
+  /* 明度层强度（Fluent Acrylic 五层里的第 3 层）：浅色不需要压暗，深色必须有。
+     这一层**不随浓度变** —— 浓度只控制颜色层厚薄，明度层负责把透上来的
+     桌面压暗，这样低浓度时看到的是「暗的玻璃」而不是「白遮罩」。 */
+  --lum-alpha: 0;
+  /* 与快捷面板同色（252 252 252）：原来的 232 234 239 偏灰，
+     在低不透明度下会把整窗「压暗」，而面板是纯白底 —— 两处观感对不上。 */
+  --material-rgb: 252 252 252;
   /* ⚠ 必须与 `STRAIGHT_ALPHA`（settings.rs，默认 50）一致。
      原来这里写 0.62、实际运行是 0.50 —— 审计测的是「一个用户看不到的配置」，
      数字再漂亮也没意义。 */
@@ -495,6 +500,9 @@ body.dark {
      3. hover/strong 同比例下调，保证「越上层越亮」的层次还在，
         但整体保持在黑调里。 */
   --glass: rgba(255, 255, 255, calc(0.05 * var(--mat-k)));
+  /* 深色**不跟随**浅色那条「卡片=侧栏」：这里 --glass 只有 5%，叠在 92% 的近黑上
+     等于没叠，卡片会整块认不出来（上面第 2 点说的就是这个）。所以深色仍用
+     --surface-2 的 11%，靠「比侧栏亮一档」维持层次。 */
   --card-bg: var(--surface-2);
   --state-hover: rgba(255, 255, 255, calc(0.09 * var(--mat-k)));
   /* 深色下「压暗」在深底上看不出来，按下改为比悬停再亮一档。 */
@@ -603,8 +611,13 @@ body.dark {
      曾经写 0.96（怕亮壁纸把深色冲成灰），代价是深色只透 4% —— 等于没有毛玻璃；
      更糟的是它声明在 `body.dark` 上，**比 `html` 上由滑块写入的变量更近**，
      于是「材质浓度」滑块在深色下完全失效（拖了没反应）。
-     深色要保持够深，靠的是更暗的色（--material-rgb: 10 10 12），不是更高的 alpha。 */
-  --material-rgb: 10 10 12;
+     深色要保持够深，靠的是更暗的色（现与快捷面板统一为 34 34 38），不是更高的 alpha。 */
+  /* 深色与面板一致（面板用 34 34 38），原来 10 10 12 比面板黑一截 */
+  --material-rgb: 34 34 38;
+  /* 深色明度层：固定 25% 黑压在模糊之上。没有它时，浓度越低颜色层越薄，
+     背后的亮桌面直接冲上来 —— 这就是「深色下拉低浓度整窗发白」的根因，
+     Fluent 的解法是在颜色层下面放一层独立明度（见 Acrylic 五层结构）。 */
+  --lum-alpha: 0.25;
   --text: #f2f2f5;
   --text-dim: rgba(242, 242, 245, 0.6);
   --accent: #5b8cff;
@@ -688,6 +701,14 @@ body.dark {
   --danger-on: #1b1b1f;
 }
 
+/* 卡片底色对比开关（设置 → 外观 → 窗口）：关掉时回到「实心白卡片」。
+   开（默认）= :root 里的 `--card-bg: var(--glass)`，与侧栏同色。
+   深色下两者本来就都用 --surface-2，所以这个开关只对浅色有可见差别 —— 符合预期，
+   深色 5% 白会让卡片整块认不出来（见 body.dark 里的注释）。 */
+body.cards-plain {
+  --card-bg: var(--surface-2);
+}
+
 /* 兜底档：没有真材质时不透明，观感不能崩 */
 body.tier-solid {
   /* 没有真材质时面要实：基底压一层极淡的灰，卡片才白得出来。
@@ -704,9 +725,11 @@ body.tier-solid {
   --glass-strong: #ffffff;
   /* 描边与悬浮不再在这里单独给值：它们由主题决定（浅色黑系/深色白系），
      这里只管「没有真材质时面要实」。原先各写一套，正是两个源头的由来。 */
-  /* 兜底档没有 acrylic，直接给近不透明实色 */
+  /* 兜底档没有 acrylic，直接给近不透明实色。
+     ⚠ **不要在这里写死 `--glass-alpha`**：它声明在 body 上，比 html 上
+     由滑块写入的 inline 值更近，会把「材质浓度」滑块整个压掉（兜底档拖了没反应）。
+     兜底档的浓度由 `applyGlassAlpha()` 按 0.85–1.0 映射后写入。 */
   --material-rgb: 248 249 251;
-  --glass-alpha: 0.99;
 }
 body.dark.tier-solid {
   /* 兜底档没有 acrylic，本就是实色 —— 与真材质档对齐到同一档黑 */
@@ -719,7 +742,6 @@ body.dark.tier-solid {
   --card-bg: var(--surface-2);
   --glass-strong: rgba(255, 255, 255, 0.09);
   --material-rgb: 14 14 16;
-  --glass-alpha: 0.99;
 }
 
 * {
@@ -872,6 +894,12 @@ body {
   overflow: hidden;
 }
 
+/* html 也必须透明：WebView2 在 PreferredColorScheme 变化时可能按系统色
+   给根元素铺不透明底，整页盖住 DWM backdrop —— 表现为「变色了但没毛玻璃」。 */
+html {
+  background: transparent;
+}
+
 body {
   /* 关键：必须全透明，否则会盖住系统绘制的 acrylic */
   background: transparent;
@@ -881,6 +909,18 @@ body {
   -webkit-font-smoothing: antialiased;
   user-select: none;
   cursor: default;
+  /* 无系统模糊档的「窗口面料」：主窗口与托盘菜单共用一份。
+     ⚠ **必须定义在 body 上，不能放 :root**：写在 :root 时，其中的
+     `var(--material-rgb)` 会按 `:root` 的浅色值解析，`body.dark` 覆盖不到它
+     —— 表现为「高级材质关掉后，深色模式整个窗口是白的」（用户实测截图）。
+     定义在 body 上之后，同一元素内的 var() 会跟着 body.dark 的值重算。
+     原先托盘菜单抄了一版简化公式（无低浓度收敛项），拉到 1% 时比主窗口厚 0.32，
+     已收敛到这一份。 */
+  --surface-material: linear-gradient(
+    160deg,
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.32 * min(1, calc(var(--glass-alpha) * 2))))),
+    rgb(var(--material-rgb) / min(1, calc(var(--glass-alpha) + 0.2 * min(1, calc(var(--glass-alpha) * 2))))) 62%
+  );
 }
 
 /* ---------------------------------------------------------------- */
@@ -907,11 +947,20 @@ body {
      160° 的明暗差（±0.05）在两端收敛到 0：1% 要真的几乎全透，
      100% 要真的是一整块最厚材质。两个 `min(1, 2a)` 分别把靠近 0 / 靠近 1
      的偏移压到 0，中段保持原样。 */
-  background: linear-gradient(
-    160deg,
-    rgb(var(--material-rgb) / min(0.92, calc(var(--glass-alpha) * 0.92 + 0.05 * min(1, calc(var(--glass-alpha) * 2)) * min(1, calc((1 - var(--glass-alpha)) * 2))))),
-    rgb(var(--material-rgb) / max(0, calc(var(--glass-alpha) * 0.92 - 0.05 * min(1, calc(var(--glass-alpha) * 2)) * min(1, calc((1 - var(--glass-alpha)) * 2))))) 62%
-  );
+  background:
+    /* 明度层（最上层，固定强度、不随浓度变）：深色用纯黑压暗，
+       浅色为 0（=.透明，等于不存在）。Fluent Acrylic 的第三层就是它 ——
+       只靠颜色层的深浅去承担亮度，浓度一低就必然发白。 */
+    linear-gradient(
+      rgb(0 0 0 / var(--lum-alpha)),
+      rgb(0 0 0 / var(--lum-alpha))
+    ),
+    /* 颜色层（随浓度变厚薄） */
+    linear-gradient(
+      160deg,
+      rgb(var(--material-rgb) / min(0.92, calc(var(--glass-alpha) * 0.92 + 0.05 * min(1, calc(var(--glass-alpha) * 2)) * min(1, calc((1 - var(--glass-alpha)) * 2))))),
+      rgb(var(--material-rgb) / max(0, calc(var(--glass-alpha) * 0.92 - 0.05 * min(1, calc(var(--glass-alpha) * 2)) * min(1, calc((1 - var(--glass-alpha)) * 2))))) 62%
+    );
   /* ══ 自研「二级玻璃」——**只在高级材质下启用**（见下方 body.round）══════
      为什么不引库：window-vibrancy 用的就是同一套 DWM API（自带性能警告）；
      WinRT Composition 自建配方要重做 WebView2 层级，而且自己跑 blur pass 更耗。
@@ -934,10 +983,23 @@ body {
    再叠 18px 只会让「玻璃厚度」更明显，不会糊成一片色块。
 
    饱和增强是重点：DWM 的 acrylic 是**去饱和**的（这是微软为了文字可读性做的），
-   所以画面发灰。saturate(150%) 把透上来的颜色拉回来 —— 这是「灰扑扑」的直接解药。 */
+   所以画面发灰。saturate(150%) 把透上来的颜色拉回来 —— 这是「灰扑扑」的直接解药。
+
+   ⚠ **brightness 必须分深浅**，这是「深色下拉低浓度像蒙了一层白」的根因：
+   浓度低 = 那层色薄 = 背后的桌面直接透上来。浅色桌面模糊后**仍然是亮的**，
+   叠多薄的白都压不住它，于是整窗发白。
+   微软官方 Acrylic 配方就是 `blur + brightness(80%) + saturate(160%)` ——
+   用 brightness 调背景亮度，而不是靠色层深浅去承担（见 Fluent 文档）。
+   深色下把透上来的桌面压暗，低浓度看到的才是「暗的模糊桌面」而不是「亮桌面」。
+   浅色略提亮，沿用之前「去灰」的经验值。 */
 body.round .app {
-  backdrop-filter: blur(18px) saturate(150%);
-  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%) brightness(1.06);
+  -webkit-backdrop-filter: blur(18px) saturate(150%) brightness(1.06);
+}
+
+body.dark.round .app {
+  backdrop-filter: blur(18px) saturate(150%) brightness(0.72);
+  -webkit-backdrop-filter: blur(18px) saturate(150%) brightness(0.72);
 }
 
 /* 关闭高级材质：**没有系统背景模糊**，半透明透过去就是清晰的桌面（而不是模糊底），
@@ -997,11 +1059,11 @@ body:not(.round) .settings .block {
   background:
     linear-gradient(155deg, var(--app-gloss-linear), transparent 34%),
     radial-gradient(130% 52% at 50% -8%, var(--app-gloss-radial), transparent 58%);
-  /* 这圈 1px 内描边模拟玻璃边缘折光，是「高级」与「塑料感」的分界线；
-     底部再补一点极淡暗角表示厚度。深浅强度全在 :root / body.dark 里，
-     所以下面那条 body.dark .app::after 覆盖已可删除。 */
-  box-shadow: inset 0 0 0 1px var(--app-rim),
-    inset 0 1px 0 var(--app-top-light),
+  /* 顶部高光 + 底部极淡暗角表示厚度（深浅强度全在 :root / body.dark 里）。
+     ⚠ 这里**不能**再加 `inset 0 0 0 1px` 那种整圈内描边：窗口本体是圆角矩形，
+     那圈 1px 白线会沿着四个角的圆弧走 —— 在深色壁纸上就是一圈显眼的「白边」，
+     用户实测截图拍出来就是四个角的白弧。需要勾边缘就只走顶部一条（下面那条）。 */
+  box-shadow: inset 0 1px 0 var(--app-top-light),
     inset 0 -24px 40px -32px var(--app-bottom-shade);
 }
 
@@ -1827,14 +1889,15 @@ html:not(.hovers-off) .btn-primary.is-cta:hover {
      1px 透明边框是**占位**：置顶与批量选中要用它画状态色，
      而临时加 border 会让卡片尺寸跳 2px。 */
   background: var(--card-bg);
-  /* 玻璃感的两个来源，都很克制：
-     ① 上端 14% 的极淡渐隐 —— 光从上方来，材质有厚度，纯平涂会读成一张白纸。
-        跨度再大就变成「渐变卡片」，那是另一套语言，不要。
-     ② 一圈亮边（--card-rim）：比卡片本身亮一点，模拟边缘折射。浅色下几乎
-        看不见，深色下是卡片唯一边界线索 —— 正好补上「深色只有三阶面」的短板。
-     描边宽度不变，置顶 / 批量选中仍用它画状态色，不会跳尺寸。 */
-  background-image: linear-gradient(180deg, var(--card-sheen) 0%, transparent 14%);
-  border: 1px solid var(--card-rim);
+  /* ⚠ 不再画顶部亮带，也不再画白色亮边（2026-11-17）。
+     卡片底色已经降到 16%（与侧栏同色），在这么透的底上：
+       · `--card-rim` 的 1px 白 0.5 描边 → 整圈发亮；
+       · `--card-sheen` 顶部 14% 白 → 一条横贯的亮带。
+     两样叠起来就是「条目上镀了一层玻璃亮色」（用户实测反馈）。
+     层次改由 6px 间距 + hover 提亮负责。
+     border 仍留 1px 透明占位：置顶与批量选中要用它画状态色，
+     去掉会让卡片尺寸跳 2px。 */
+  border: 1px solid transparent;
   box-shadow: var(--elev-1);
   cursor: default;
   transition: background var(--dur-fast) var(--ease-out),
@@ -1846,15 +1909,14 @@ html:not(.hovers-off) .card:hover {
      原来 `background: var(--card-hover)` 是把「白 .94」整个换成「黑 .05」——
      在半透明窗口上等于把卡片压成深灰，和「轻微提亮」完全不是一个意思。
      background-image 叠在 background-color 之上，正好表达「原底色 + 一层灰度」。
-
-     注意要**连顶光一起重写**：background-image 是会整条覆盖的多值属性，
-     只写悬停层会把上面那道 --card-sheen 抹掉，鼠标一移上去卡片的玻璃感
-     就没了 —— 表现为「悬停时突然变平」。第一条在最上，所以顺序是悬停层在前。 */
-  background-image: linear-gradient(var(--state-hover), var(--state-hover)),
-    linear-gradient(180deg, var(--card-sheen) 0%, transparent 14%);
+     卡片本身已不再画顶部亮带（见 .card 的注释），这里也就只叠悬停层。 */
+  background-image: linear-gradient(var(--state-hover), var(--state-hover));
 }
 
 .card.is-pinned {
+  /* 回到 2.7.0 原样：整圈 1px 强调色描边。
+     2026-11-17 试过「左侧 3px 竖条」（加宽 border）与「inset 阴影竖条」两版，
+     用户都不接受、要求回滚 —— 置顶的可见性留到以后单独立项，这里不再动。 */
   border-color: var(--accent);
 }
 
@@ -2304,7 +2366,10 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
    「删除时同时删本地文件」那段 60 多字），而且各行的控件起始位置随标题长度漂移。 */
 .settings .row {
   display: flex;
-  align-items: flex-start;
+  /* 垂直居中而不是 flex-start：说明行被隐藏后左栏只剩一行标题，
+     flex-start 会把标题顶到行上沿，看着像「没对齐」（用户实测反馈）。
+     多行说明的情况也用居中 —— 控件本来就该跟整块文字垂直居中对齐。 */
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   padding: 9px 0;
@@ -2346,6 +2411,10 @@ html:not(.hovers-off) body:not(.round) .settings-tabs .tab:hover {
 }
 
 .settings .row-desc {
+  /* 说明行**按需**保留：标题说不清、或含副作用/推荐值的才写一句。
+     不能全局 display:none —— 有些说明是唯一的信息来源（例如「开启后…会更省电」），
+     全隐藏等于把取舍藏起来。要隐藏某一行，把它的 desc 传空字符串即可（rowText
+     会自动不渲染 .row-desc），不要在这里一刀切。 */
   margin-top: 2px;
   font-size: 12px;
   line-height: 1.55;
