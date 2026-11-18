@@ -37,7 +37,10 @@ const statusEl = $("panel-status");
 // 拖动（后端 SetCapture + 按光标位移 SetWindowPos + 16ms 节流），材质全程不变。
 document.querySelector(".panel-drag")?.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return;
-  e.preventDefault(); // 别让它变成选中/拖拽文字的起点
+  // **不要 preventDefault**：它会一并吃掉焦点转移，于是「点顶部拖拽区」搜索框
+  // 不失焦，而点其它任何地方都会失焦 —— 行为不一致（用户实测）。
+  // 面板是 `user-select: none`，不存在「拖动时选中文字」的问题；
+  // 窗口拖动走的是后端 SetCapture，不依赖这里的默认行为。
   invoke("panel_begin_drag").catch(() => {});
 });
 
@@ -170,9 +173,12 @@ function render() {
     if (isPinned) row.classList.add("is-pinned");
     row.setAttribute("role", "option");
 
+    // 徽章直接用主窗口的 .tag / .tag-kind-*：颜色、圆角、语义全一致，
+    // 自己再写一套 .p-kind 既没有颜色又是重复造轮子（用户反馈过）。
     const kind = document.createElement("span");
-    kind.className = "p-kind";
-    kind.textContent = KIND_LABEL[item.kind] || item.kind || "";
+    const kindKey = item.kind || "";
+    kind.className = "tag tag-kind" + (kindKey ? ` tag-kind-${kindKey}` : "");
+    kind.textContent = KIND_LABEL[kindKey] || kindKey || "";
     row.appendChild(kind);
 
     const text = document.createElement("span");
@@ -386,6 +392,12 @@ listen("panel-open", (ev) => {
   if (ev.payload && typeof ev.payload === "object") {
     prefs = { ...prefs, ...ev.payload };
   }
+  // 深浅色必须每次弹出都刷：面板是独立窗口，不会自动跟主窗口的 body.dark 同步，
+  // 少了这一行深色模式下弹出的永远是浅色底（用户实测截图）。
+  document.body.classList.toggle("dark", !!prefs.dark);
+  // 高级材质开关可能刚被改过：先同步档位，再按新档位重算底色
+  panelRound = prefs.round !== false;
+  applyPanelAlpha(lastAlpha);
   hidePreview();
   reload();
   setTimeout(() => searchEl.focus(), 0);
@@ -414,4 +426,85 @@ listen("panel-refresh", () => {
       }
     }
   }, 300);
+});
+
+// ── 外观同步（深浅色 / 材质浓度）────────────────────────────────────────
+//
+// 面板是独立窗口，读不到主窗口的 CSS 变量，全靠后端推过来。
+
+// 深浅色实时跟随：面板开着的时候切主题，主窗口把结果直接推过来。
+listen("panel-theme", (ev) => {
+  document.body.classList.toggle("dark", !!ev.payload);
+  // 深浅变了 → 曲线也变（深色靠 backdrop 压暗、浅色保 36% 下限），重算一次
+  applyPanelAlpha(lastAlpha);
+});
+
+// 首次显示时 panel-open 可能早于页面加载（emit 会丢），主动取一次兜底 ——
+// 否则深色模式下第一次弹出是一块白板。
+invoke("panel_dark")
+  .then((d) => document.body.classList.toggle("dark", !!d))
+  .catch(() => {});
+
+/** 面板底色：跟随材质浓度，但系数极小。
+ *
+ *  0.02 + 0.02×浓度（35% → 0.027，100% → 0.04）。
+ *  为什么不直接用浓度当 alpha：那层白只要到 0.05 就把系统材质盖成白板，
+ *  而且系统材质按窗口矩形填，一盖连四角都变直角（用户实测多次）。
+ *  宁可「薄」，也不要「白板」。 */
+/** 高级材质是否开着。关了就没有系统材质，面板底色必须接近实底。 */
+let panelRound = true;
+/** 最近一次拿到的浓度（切档位 / 每次弹出时重算用） */
+let lastAlpha = 35;
+
+function applyPanelAlpha(alpha) {
+  const a = Math.max(1, Math.min(100, Number(alpha) || 35)) / 100;
+  lastAlpha = Number(alpha) || 35;
+  // 与主窗口**完全一致**（见 main.js 的 applyGlassAlpha），全程线性无极：
+  //   · 有材质 + 浅色：0.02 + 0.45×浓度（80%–95% 是薄雾感，1% 是通透玻璃）
+  //   · 有材质 + 深色：0.06 + 0.86×浓度（深色要更厚才压得住桌面）
+  //   · 没材质：0.85 + 0.15×浓度（接近实底，否则那层薄白等于没有底板）
+  const dark = document.body.classList.contains("dark");
+  const v = panelRound
+    ? dark
+      ? 0.06 + 0.86 * a
+      : 0.02 + 0.45 * a
+    : 0.85 + 0.15 * a;
+  document.documentElement.style.setProperty("--popup-alpha", v.toFixed(3));
+}
+listen("panel-alpha", (ev) => applyPanelAlpha(ev.payload));
+invoke("panel_alpha")
+  .then((a) => applyPanelAlpha(a))
+  .catch(() => {});
+
+// ── 蓝底只在「鼠标所在行」───────────────────────────────────────────────
+//
+// 鼠标移出整个面板窗口 → 选中行不再画强调色底（`body.mouse-out`）。
+// ⚠ 只认「鼠标在不在窗口内」这一个信号：鼠标悬停**不会**激活窗口，
+// 按窗口焦点判断会在非前台时永远关着蓝底（用户实测）。
+// ⚠ 必须挂 `documentElement`：`document` 没有 mouseleave（那是 Element 的事件），
+// 挂在它上面永远不会触发 —— 表现就是「鼠标移出面板了，蓝底还在」（用户实测截图）。
+document.documentElement.addEventListener("mouseleave", () =>
+  document.body.classList.add("mouse-out")
+);
+document.documentElement.addEventListener("mouseenter", () =>
+  document.body.classList.remove("mouse-out")
+);
+
+// 键盘导航（上下箭头）期间把高亮交给键盘：整行画强调色底。
+// 正常打字搜索不算 —— 否则一敲键盘条目就冒蓝底（用户反馈）。
+// 鼠标一动就交还给鼠标，两套输入不打架。
+document.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    document.body.classList.add("kb-nav");
+  }
+});
+document.addEventListener("mousemove", () => {
+  document.body.classList.remove("kb-nav");
+});
+
+// 失焦变实底（白）：由**窗口 focus 事件**驱动（后端 popup.rs 发 `panel-focus`）。
+// 不做 `document.hasFocus()` 的初始判断 —— 页面加载时窗口多半还没拿到焦点，
+// 按它初始化会把「失焦态」永久挂上，面板就成了常驻白板（用户实测）。
+listen("panel-focus", (ev) => {
+  document.body.classList.toggle("is-inactive", ev.payload === false);
 });
