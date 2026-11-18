@@ -994,10 +994,19 @@ pub fn resume_material(window: &tauri::WebviewWindow, reason: &str) -> Option<Ti
     // 先解除驻留标记，否则 apply_with 会把自己跳过
     PARKED_HWND.store(0, Ordering::SeqCst);
     let dark = effective_dark(window);
-    // **这里不能做值切换**：驻留时材质已被 `suspend_material` 清成 NONE，
-    // 这次下发本身就是一次真实变化，DWM 必然会重建 —— 不需要中间值。
-    // 而值切换会在窗口已经回到屏幕上时把中间材质（Mica）合成一帧，
-    // 那正是用户看到的「从托盘打开闪一下」。
+    // 做一次**值切换**（主窗口 ←→ 瞬态）：窗口在屏幕外时 DWM 不一定为它合成，
+    // 「清空后重新下发」这一步有概率被视为 no-op —— 表现就是「从托盘打开有几率
+    // 没材质」（用户实测）。值切换能让属性真的变化，DWM 必须重建。
+    // 代价是可能合成一帧中间材质（Mica）；相比「没材质」这个取舍是划算的。
+    unsafe {
+        let alt: u32 = DWMSBT_MAINWINDOW;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &alt as *const _ as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
     let tier = apply_with(hwnd, dark, reason);
     dwm_flush();
     if let Err(e) = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0))) {
@@ -1363,9 +1372,8 @@ pub fn flush_pending_theme_rebuild(window: &tauri::WebviewWindow) {
         return;
     }
     crate::log_print!("[effects] 窗口回到前台 → 补做挂起的主题材质重建（完整复位）");
-    // 必须是完整复位：静默重下（`refresh_theme_visuals`）只写属性、不重建表面，
-    // 恢复不了"属性 3 / 画面没有"的状态。
-    let _ = restore_visuals_for(window, "pending-theme");
+    // 必须是完整复位：静默重下只写属性、不重建表面，恢复不了"属性 3 / 画面没有"。
+    refresh_theme_full(window, "pending-theme");
 }
 
 /// 窗口即将重新显示（驻留唤回 / show）时清掉挂起标记 —— 那个路径会自己下发材质。
@@ -1408,7 +1416,11 @@ pub fn schedule_system_theme_refresh(window: tauri::WebviewWindow, reason: &'sta
     #[cfg(windows)]
     if let Some(pw) = app.get_webview_window(crate::popup::PANEL_LABEL) {
         if let Ok(ph) = pw.hwnd() {
-            let _ = rebuild_popup_material(ph.0 as isize, dark);
+            // **只同步深浅属性，不重建材质**。面板是可见的独立窗口，
+            // 重建（清/重设 backdrop）会让它在那一瞬间直接失去材质
+            // （用户实测：「面板打开时切深浅，材质会消失」）。
+            // `set_immersive_dark` 足以让 DWM 按新深浅重算 backdrop 颜色。
+            set_immersive_dark(ph.0 as isize, dark);
         }
         let _ = app.emit_to(crate::popup::PANEL_LABEL, "panel-theme", dark);
     }
@@ -1460,6 +1472,22 @@ pub fn refresh_theme_colors(window: &tauri::WebviewWindow, reason: &str) {
 ///
 /// 值切换保住了「材质丢了也能恢复」这个能力（这是原来完整复位的价值），
 /// 去掉的只是那次强制合成中间帧。
+/// **完整复位**：能恢复"属性 3、画面没有"的材质。
+///
+/// 只给两种时机用 —— 它们都是"用户正看着窗口"的时刻：
+///   · 系统换过深浅、窗口回到前台时（`flush_pending_theme_rebuild`）
+///   · 换深浅时窗口就在前台
+/// 手动点深浅的那条路**不用**它（那条走静默重下，避免闪）。
+pub fn refresh_theme_full(window: &tauri::WebviewWindow, reason: &str) {
+    let t = restore_visuals_for(window, reason);
+    dwm_flush();
+    crate::log_print!(
+        "[effects] 完整复位材质（来源={reason}，dark={}，tier={}）",
+        is_dark_now(),
+        t.map(|x| x.as_str()).unwrap_or("unknown")
+    );
+}
+
 pub fn refresh_theme_manual(window: &tauri::WebviewWindow, reason: &str) {
     let Ok(h) = window.hwnd() else {
         return;
@@ -2642,7 +2670,34 @@ pub fn rebuild_popup_material(hwnd: isize, dark: bool) -> bool {
         crate::log_print!("[effects] 浮层材质跳过：高级材质未开启（is_round=false）");
         return false;
     }
+    // 主题切换后 DWM 会把浮层这层表面也丢掉，此时**再设同一个 backdrop 值会被跳过**，
+    // 面板就成了实底。这里先设一次 NONE（真实变化）再设回目标值 —— 两次写紧挨着、
+    // 中间不 flush，DWM 会合并到同一次合成里，既强制重建又不上屏中间态。
+    if current_tier() == Tier::SystemBackdrop {
+        unsafe {
+            extern "system" {
+                fn DwmSetWindowAttribute(
+                    hwnd: isize,
+                    attr: u32,
+                    pv: *const c_void,
+                    size: u32,
+                ) -> i32;
+            }
+            let none: u32 = DWMSBT_NONE;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                &none as *const _ as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
     let ok = apply_popup_material(hwnd, dark);
+    // ⚠ tint 必须在 backdrop 重建**之后**再钉一次：
+    // `DWMWA_SYSTEMBACKDROP_TYPE` 的 NONE→目标 变化会让 DWM 重新解析这层表面，
+    // 过程中 `DWMWA_USE_IMMERSIVE_DARK_MODE` 会被按窗口当前状态重置回旧值，
+    // 于是出现「文字变了、面板还是深色底」。
+    set_immersive_dark(hwnd, dark);
     nudge(hwnd);
     force_redraw(hwnd);
     crate::log_print!(
@@ -2760,9 +2815,18 @@ pub fn spawn_material_watch(app: tauri::AppHandle) {
                 crate::tray::sync_menu_appearance(&app);
                 // 窗口在前台 → 用户正看着它，直接完整复位（此刻刷新是他期待的）；
                 // 在后台 → 挂起，等他回到前台时由 `flush_pending_theme_rebuild` 补。
-                let focused = w.is_focused().unwrap_or(false);
+                // ⚠ 不能用 `w.is_focused()`：WebView 窗口在"被盖住但仍是焦点窗口"
+                // 等状态下返回值不可靠，实测失焦时报 true，于是走了前台分支却没效果。
+                // 用真实前台窗口判断。
+                let focused = {
+                    extern "system" {
+                        fn GetForegroundWindow() -> isize;
+                    }
+                    let hwnd = w.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+                    hwnd != 0 && unsafe { GetForegroundWindow() } == hwnd
+                };
                 if focused {
-                    let _ = refresh_theme_manual(&w, "theme-focused");
+                    refresh_theme_full(&w, "theme-focused");
                     clear_pending_theme_rebuild();
                 } else {
                     mark_pending_theme_rebuild();
