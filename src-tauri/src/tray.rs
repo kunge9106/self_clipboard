@@ -79,11 +79,14 @@ pub fn create_tray(app: &AppHandle) {
                 position,
                 ..
             } => open_menu(tray.app_handle(), position),
-            TrayIconEvent::DoubleClick {
+            // 左键**单击**就唤出（与系统剪贴板、多数剪贴板工具一致）。
+            // 原来是双击才唤出，单击没有任何反应 —— 用户反馈「点了没动静」。
+            TrayIconEvent::Click {
                 button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
                 ..
             } => {
-                // 与上面同理：回调线程里同步建窗口会死锁，扔到独立线程。
+                // 回调线程里同步建窗口会死锁，扔到独立线程。
                 // 窗口本来就存在时只是 show，走线程也看不出差别。
                 let app = tray.app_handle().clone();
                 std::thread::spawn(move || show_main(&app));
@@ -267,9 +270,14 @@ pub fn tray_quit(app: AppHandle) -> Result<(), String> {
 ///
 /// hide() 会让 DWM 把宿主窗口透明（blur-behind）、NC 渲染策略、backdrop
 /// 一次性全丢，唤回的第一帧必然是灰的，任何补涂都追不上 DWM 的合成节奏。
-/// 屏幕外驻留时窗口对 DWM 依然可见，材质状态一帧都不会丢 ——
-/// 唤回只是移回原位，这就是 2.6.10 式的丝滑（它靠的是「没材质所以看不出丢」，
-/// 现在直接让状态不丢）。
+///
+/// 驻留（移屏幕外）同样**不能假设材质还在**：DWM 会把这个窗口从合成里摘出去，
+/// 唤回时属性虽然还是目标值，表面却不会重建 —— 用户看到的就是「关掉再打开
+/// 没材质」。所以驻留走一对显式操作：
+///   · [`park_main_window`] 在窗口已在屏幕外时**清掉**材质（见 `suspend_material`）；
+///   · [`show_main`] 移回屏幕内后**重新下发**（见 `resume_material`）。
+/// 中间那次"清掉"发生在屏幕外，看不见；而"清掉 → 设回"是一次真实的值变化，
+/// DWM 必然重建 —— 既不闪，也不依赖运气。
 ///
 /// 任务栏条目用 `set_skip_taskbar` 摘掉：tao 走的是 ITaskbarList
 /// DeleteTab/AddTab，不改窗口样式、不闪、不影响可见性。
@@ -312,6 +320,13 @@ pub fn park_main_window(w: &tauri::WebviewWindow) {
             SetFocus(0);
         }
     }
+    // 窗口已经在屏幕外：把系统材质清掉。此刻这一帧没人看得见，却是唤回时
+    // 「一次真实的值变化」的前提 —— 同值下发会被 DWM 跳过，表面就不会重建，
+    // 用户看到的就是「关掉再打开没材质」。见 `effects::suspend_material`。
+    #[cfg(windows)]
+    if let Ok(h) = w.hwnd() {
+        crate::effects::suspend_material(h.0 as isize);
+    }
 }
 
 /// 唤回：若窗口正驻留屏幕外则移回原位，返回 true（调用方不必再做任何材质复位）。
@@ -328,6 +343,30 @@ fn unpark_main_window(w: &tauri::WebviewWindow) -> bool {
     true
 }
 
+/// 窗口是否被挪到了屏幕外（收进托盘时的驻留位置是 (-32000, -32000)）。
+///
+/// 用坐标判断而不是只看 `PARKED`：`PARKED` 只是本进程的一个标记，
+/// 位置才是事实（低占用释放重建成新窗口后标记会过期）。
+pub fn is_offscreen(w: &tauri::WebviewWindow) -> bool {
+    w.outer_position()
+        .map(|p| p.x <= -10000 || p.y <= -10000)
+        .unwrap_or(false)
+}
+
+/// 窗口是否真的在屏幕内（驻留状态丢过 / 刚重建时 `PARKED` 可能已为 false）。
+fn on_screen(w: &tauri::WebviewWindow) -> bool {
+    !is_offscreen(w)
+}
+
+/// 收进托盘那一刻记下的窗口位置（物理像素）。
+///
+/// 低占用释放会在驻留状态下销毁窗口，而那时 `outer_position()` 读到的
+/// 是 (-32000,-32000) —— 不能拿它当"用户调过的位置"存下来，否则重建出来的
+/// 窗口直接落在屏幕外。位置的真值在这里。
+pub fn remembered_position() -> Option<(i32, i32)> {
+    PARK_POS.lock().ok().and_then(|g| *g)
+}
+
 /// 窗口被销毁重建时（低占用释放后），驻留状态作废。
 fn clear_park_state() {
     use std::sync::atomic::Ordering;
@@ -335,6 +374,10 @@ fn clear_park_state() {
     if let Ok(mut g) = PARK_POS.lock() {
         *g = None;
     }
+    // 旧窗口已经不在了，材质那条「驻留中」的标记也必须清掉，
+    // 否则新窗口会被一直当成驻留状态、永远不补材质。
+    #[cfg(windows)]
+    crate::effects::clear_suspended();
 }
 
 pub fn show_main(app: &AppHandle) {
@@ -357,15 +400,50 @@ pub fn show_main(app: &AppHandle) {
         crate::log_print!("[tray] 界面刚重建，交给页面加载完成后显示");
         return;
     }
-    // 驻留恢复：窗口对 DWM 从未消失，材质一帧没丢 —— 直接移回原位 + 聚焦。
-    // 这是「打开就是高级材质」的关键：任何复位都不需要，也不该做。
+    // 驻留恢复：**先在屏幕外把材质就位，再移回原位**。
+    //
+    // 顺序很关键：先移回、再下发材质的话，从「移回」到「材质到达」这一帧里
+    // 窗口是透明的 —— 用户看到的就是「从托盘打开时先露一下透明底」
+    // （实测反馈）。窗口还在屏幕外时设好属性，移回来就是一帧带材质的画面。
+    #[cfg(windows)]
+    let pre_resumed = if crate::effects::any_suspended() {
+        let ok = crate::effects::resume_material(&w, "unpark-pre").is_some();
+        if ok {
+            crate::log_print!("[tray] 材质已在屏幕外就位，随后移回");
+        }
+        ok
+    } else {
+        false
+    };
+
     if unpark_main_window(&w) {
-        crate::log_print!("[tray] 从屏幕外驻留恢复（DWM 状态未丢，无需复位）");
+        crate::log_print!("[tray] 从屏幕外驻留恢复");
         let _ = w.set_focus();
-        // 保险：静默补涂一次（值没变时是纯 no-op，不闪）
         #[cfg(windows)]
         {
-            let _ = crate::effects::reapply_visuals_for(&w, "unpark");
+            use tauri::Emitter;
+            // 兜底：状态不同步时（驻留标记与实际不一致）没在上面下发过，这里补一次
+            if !pre_resumed {
+                let _ = crate::effects::resume_material(&w, "unpark");
+            }
+            // 入场感知：窗口只是被「移回来」，不是 show —— 系统不会播那套
+            // 「从任务栏放大出来」的动画。由前端补一次极短的淡入（见 main.js）。
+            let _ = w.emit("main-revealed", ());
+        }
+        return;
+    }
+    // 已经在屏幕内、可见、没最小化 → 这只是一次「唤到前面」。
+    //
+    // 托盘图标双击会**连发两次** Click：第一次把窗口从驻留里移回来（上面的分支），
+    // 第二次走到这里。旧代码会再跑一遍「整份复位 + relayout」—— 那是在用户眼前
+    // 把材质拆掉再装回去，正好是「打开的瞬间闪一下」。唤回幂等，第二次只聚焦。
+    if w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) && on_screen(&w) {
+        crate::log_print!("[tray] 窗口已在屏幕内，仅前置（无需复位）");
+        let _ = w.set_focus();
+        #[cfg(windows)]
+        {
+            use tauri::Emitter;
+            let _ = w.emit("main-revealed", ());
         }
         return;
     }

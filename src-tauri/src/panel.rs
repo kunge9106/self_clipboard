@@ -25,6 +25,34 @@ const GAP: f64 = 12.0;
 /// 唤出面板之前的前台窗口。0 = 未知（例如从托盘打开面板）。
 static PREV_FG: AtomicIsize = AtomicIsize::new(0);
 
+/// 驻留位置：屏幕外很远处，DWM 仍当它可见，所以材质不会丢。
+const PARK_X: f64 = -32000.0;
+const PARK_Y: f64 = -32000.0;
+
+/// 面板「收起」= 移到屏幕外驻留，**不用 `hide()`**。
+///
+/// `hide()` 会让 DWM 把 backdrop 丢掉，下次 `show()` 时怎么补涂都追不上
+/// （实测反复出现：属性设成功、回读正确、画面没材质）。主窗口靠「移到屏幕外
+/// 驻留」保住了材质（日志「从屏幕外驻留恢复，DWM 状态未丢」），面板走同一条路 ——
+/// 窗口对 DWM 始终可见，只是不在屏内，材质永不丢，唤回 = 移回原位。
+/// `pub(crate)`：`popup.rs` 的失焦收起也要走同一条路径（面板不能 `hide`，
+/// 一 hide 材质就丢了，见函数注释）。
+pub(crate) fn park_panel(w: &tauri::WebviewWindow) {
+    let _ = w.set_skip_taskbar(true);
+    let _ = w.set_position(PhysicalPosition::new(PARK_X, PARK_Y));
+}
+
+/// 面板是否「在屏幕内」。
+///
+/// 驻留后 `is_visible()` 仍然是 true（窗口只是被挪走了，没有隐藏），
+/// 所以「收起了没」只能看坐标 —— 用 `is_visible()` 判断会永远认为它开着，
+/// 表现是「快捷键唤不出来」「剪贴板变化白发刷新事件」。
+pub(crate) fn is_on_screen(w: &tauri::WebviewWindow) -> bool {
+    w.outer_position()
+        .map(|p| p.x > -10000 && p.y > -10000)
+        .unwrap_or(false)
+}
+
 extern "system" {
     fn GetForegroundWindow() -> isize;
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
@@ -76,11 +104,13 @@ pub fn show(app: &AppHandle) {
 /// 别的窗口，这时按快捷键用户想的是「把面板叫回来」，收起来最反直觉。
 pub fn toggle(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(PANEL_LABEL) {
-        let visible = win.is_visible().unwrap_or(false);
-        let hwnd = win.hwnd().map(|h| h.0 as isize).unwrap_or(0);
-        if visible && hwnd != 0 && unsafe { GetForegroundWindow() } == hwnd {
+        // 判据是「**只要在屏幕内**就收起」，不看前台。
+        // 上一版还要「在前台」才算，而鼠标一移出、焦点一走就不是前台了 ——
+        // 按快捷键会走「重新唤出」，面板不但不消失还跟着鼠标跳到新位置
+        // （用户实测：「再次快捷键他不是消失，而是移动到鼠标所在位置」）。
+        if is_on_screen(&win) {
             crate::log_print!("[panel] 快捷键再次按下，收起面板");
-            let _ = win.hide();
+            park_panel(&win);
             return;
         }
     }
@@ -111,9 +141,41 @@ fn show_now(app: &AppHandle) {
 
     let (x, y) = crate::popup::place(app, PANEL_W, PANEL_H, anchor, false, GAP);
     let _ = win.set_position(PhysicalPosition::new(x, y));
+    // 从驻留位移回屏幕：任务栏入口跟着恢复
+    let _ = win.set_skip_taskbar(false);
+
+    // **一显示就挂无边框钩子**。原先只有拖动面板时（`panel_begin_drag`）才挂，
+    // 所以「刚打开、还没拖过」的面板完全没有这个钩子 —— 系统按默认算非客户区，
+    // 一聚焦就画出最小化/最大化/关闭（用户实测：聚焦出现、失焦消失）。
+    #[cfg(windows)]
+    if let Ok(h) = win.hwnd() {
+        let hwnd = h.0 as isize;
+        let _ = app.run_on_main_thread(move || {
+            crate::effects::install_popup_hook(hwnd);
+        });
+    }
+
+    // 材质在**显示之前**施加，用户看不到中间态。
+    // 靠驻留保住了材质，所以这里是兜底：首次显示、以及切主题之后。
+    #[cfg(windows)]
+    let dark = {
+        let dark = crate::effects::effective_dark(&win);
+        if let Ok(h) = win.hwnd() {
+            let _ = crate::effects::rebuild_popup_material(h.0 as isize, dark);
+        }
+        dark
+    };
+    #[cfg(not(windows))]
+    let dark = false;
 
     let _ = win.show();
     crate::popup::mark_shown(PANEL_LABEL);
+    // 深浅直接写进页面，不依赖事件时序。
+    // `panel-open` 是 emit，页面没加载完就会丢（首次），而面板是驻留窗口，
+    // 之后的每次弹出页面都已就绪 —— 这一句保证「一出现就是对的深浅」。
+    let _ = win.eval(&format!(
+        "document.body && document.body.classList.toggle('dark', {dark})"
+    ));
     let _ = win.set_focus();
     // 再显式抢一次前台。后台进程直接 `SetForegroundWindow` 常被系统拒绝
     // （实测：焦点会落到同进程的主窗口上，面板刚弹出就因为失焦被收起）。
@@ -129,6 +191,11 @@ fn show_now(app: &AppHandle) {
     // 单独为此发一次 IPC 会让弹出路径多一个来回，不值得。
     let prefs = serde_json::json!({
         "closeKey": crate::settings::get().panel_close_key,
+        // 深浅一起推下去：面板是独立窗口，前端只认这一次推送
+        "dark": dark,
+        // 高级材质开关：关掉时面板没有系统材质，底色必须接近实底，
+        // 否则那层 0.07 的白等于没有底板（文字压在桌面上）
+        "round": crate::effects::is_round(),
     });
     let _ = app.emit_to(PANEL_LABEL, "panel-open", prefs);
 }
@@ -275,7 +342,7 @@ pub fn paste_after_copy(app: &AppHandle) -> Result<(), String> {
     // 开了「点选后保持打开」就不收，但焦点照样要还回去，否则 Ctrl+V 会发给面板。
     if !crate::settings::get().panel_keep_after_copy {
         if let Some(w) = app.get_webview_window(PANEL_LABEL) {
-            let _ = w.hide();
+            park_panel(&w);
         }
     }
 
@@ -310,11 +377,11 @@ pub fn paste_after_copy(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 前端按 Esc 或点空白处时收起面板。
+/// 前端按 Esc 或点空白处时收起面板（驻留到屏幕外，材质不丢）。
 #[tauri::command]
 pub fn panel_hide(app: AppHandle) {
     if let Some(w) = app.get_webview_window(PANEL_LABEL) {
-        let _ = w.hide();
+        park_panel(&w);
     }
 }
 
@@ -323,21 +390,19 @@ pub fn panel_hide(app: AppHandle) {
 /// 为什么只在可见时发：面板收起时下次唤出本来就会重拉（`panel-open` → `reload`），
 /// 这时发通知纯属白跑一次查询。
 ///
-/// 可见性用 Win32 的 `IsWindowVisible` 查，不用 `WebviewWindow::is_visible()` ——
-/// 后者在非主线程上是**无超时地等事件循环**，而这里正跑在采集线程上。
+/// 判「在屏幕内」而不是窗口可见性：面板收起是移到屏幕外驻留（见 `park_panel`），
+/// 窗口的 `is_visible` 恒为 true。`notify_if_visible` 正跑在采集线程上，
+/// 也不该调 `WebviewWindow::is_visible()`（它无超时地等事件循环）——
+/// 这里只看 `outer_position`，纯读坐标，不做跨线程合成操作。
 pub fn notify_if_visible(app: &AppHandle) {
     use tauri::{Emitter, Manager};
     let Some(w) = app.get_webview_window(PANEL_LABEL) else {
         return;
     };
-    let Ok(h) = w.hwnd() else { return };
-    unsafe {
-        extern "system" {
-            fn IsWindowVisible(hwnd: isize) -> i32;
-        }
-        if IsWindowVisible(h.0 as isize) == 0 {
-            return;
-        }
+    // 判「在屏幕内」而不是 IsWindowVisible：面板收起是移到屏幕外驻留，
+    // 窗口仍然可见，只看可见性会永远发刷新事件（白跑一次查询）。
+    if !is_on_screen(&w) {
+        return;
     }
     let _ = app.emit_to(PANEL_LABEL, "panel-refresh", ());
 }
