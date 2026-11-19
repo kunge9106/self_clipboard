@@ -469,29 +469,44 @@ GUI 程序由双击启动，`stderr` 无人接收，出问题时用户只看到�
 | **直角（默认）** | 保留系统 acrylic；不做任何区域裁剪 | 窗口矩形与 acrylic 完全吻合，四角无残留，保留真模糊 |
 | **圆角** | 关掉系统 blur（`clear_accent`），窗口为纯透明 layered | 四角真透明、无残留，圆角交给 CSS `border-radius`（自带抗锯齿）；代价是背后壁纸不再被模糊 |
 
-两种模式的共同点是不做 `SetWindowRgn` 裁剪，`region_radius()` 恒返回 0。区域裁剪既挡不住 acrylic，又带来锯齿，因此不使用。
+两种模式的共同点是**不做 `SetWindowRgn` 区域裁剪**：它既挡不住 acrylic 的矩形底，又因为 1-bit 区域没有抗锯齿而带来圆角锯齿。圆角完全交给 CSS `border-radius`（自带抗锯齿）。
 
 ### 5.4 tint 压到 8%，浓度交给 CSS
 
 `TINT_ALPHA = 0x14`，约 8%。压低的理由：acrylic 的 tint 是单色的，偏高会在纯色背景上显得发平；把 tint 降到只剩模糊后，窗口的明暗改由 CSS 层负责。
 
-因此「材质浓度」滑块控制的是 CSS 变量 `--glass-alpha`，即窗口主体的不透明度，可在前端实时调整，不触发窗口重建。
+因此「材质浓度」滑块控制的是 CSS 变量 `--glass-alpha`（窗口主体那层的不透明度），前端实时写入，**不触发窗口重建**。范围 `ALPHA_MIN..=ALPHA_MAX` = 1–100 无极，每一格都有变化。
 
-两个模式各记一档浓度（v2.1.9 起）：直角模式与圆角模式分别存 `alpha_straight` / `alpha_round`，切换模式只是换用另一档，互不覆盖。直角调到 68、圆角调到 45 后，来回切换仍分别为 68 / 45。默认档：直角 50、圆角 90。圆角模式没有背景模糊，相同浓度会显得更透。
+浓度存两档：
 
-```
-设置 → 材质浓度 [40 … 90]（默认：直角 50 / 圆角 90）
-        ↓ invoke set_material_alpha
-Rust: settings.set_alpha(v)   // 只写当前模式那一档，clamp(40,90)
-      + reapply_material()    // 重刷 acrylic
-前端: --glass-alpha = v/100
-切模式 ↓ invoke set_round_mode（只改 round_mode，不动浓度）
-      前端重新 get_settings → materialAlpha 已是另一档的值 → 同步滑块与观感
-```
+- `material_alpha`：日常那一档（浅色用）
+- `dark_alpha`：深色专属值，默认 100。在深色下拖滑块改的就是它；`auto_alpha_dark` 关掉后深色也按 `material_alpha` 走
 
-老配置（v2.1.8 及更早）只有一个 `material_alpha` 字段，加载时按当时的 `round_mode` 归入对应档，随后该字段置空并不再序列化，见 `Config::migrate`。
+**曲线按档位分开算**（`main.js` 的 `applyGlassAlpha`；快捷面板 `panel.js` 的 `applyPanelAlpha` 必须同源，否则两处观感对不上）：
 
-圆角模式另有一层观感补偿：`body.round .app` 把 `--glass-alpha` 加厚，上段 `+0.32`、下段 `+0.20`，经 `min(1, …)` 夹住。原因是该档没有系统背景模糊，半透明透过去是清晰的桌面而非模糊底，相同浓度比直角模式显透。加厚后浓度 90% 经 `min(1, …)` 夹到 1.0，即完全不透明。该补偿是圆角模式特有的 CSS 观感处理，与「浓度」这个设置值本身无关，两档仍各存各的值。
+| 档位 | 公式 | 说明 |
+|---|---|---|
+| 有材质 + 浅色 | `0.02 + 0.45 × 浓度` | 1% 是通透玻璃；80%–95% 才是「薄雾感」 |
+| 有材质 + 深色 | `0.06 + 0.86 × 浓度` | 深色要更厚才压得住桌面，1% 仍留一点深色底 |
+| 关高级材质 | 直通：1% → 0.01、100% → 1.0 | 没有模糊可看，浓度就是「窗口有多实」 |
+| 兜底档 `tier-solid` | `0.85 + 0.15 × 浓度` | 没有系统材质，必须接近不透明 |
+
+⚠ **禁止在 CSS 里写死 `--glass-alpha`**（例如 `body.tier-solid { --glass-alpha: 0.99 }`）：它声明在 `body` 上，比 `html` 上的内联值更「近」，会把滑块整个压掉 —— 表现为「兜底档拖了没反应」。
+
+内部层（卡片 / 侧栏 / 控件底）靠 `--mat-k = min(1, 2 × 浓度)` 跟着收敛，否则底透了、卡片还是 68% 白，「拉到 1 不够极端」。
+
+### 5.4.1 深色低浓度必须补「明度层」
+
+Acrylic 在 Fluent 规范里是**五层**：背景 → 高斯模糊 → **明度层** → 颜色层（tint）→ 噪点。
+
+只做「模糊 + 颜色」两层时，浓度一低颜色层就薄，背后亮桌面直接透上来 —— 无论怎么调 alpha，深色下都是「整窗发白」。
+
+现在的做法（两者缺一不可）：
+
+- `--lum-alpha`：浅色 0、深色 0.25，作为最上层固定黑压在颜色层之上，**不随浓度变**
+- `.app` 的 `backdrop-filter` 分深浅加 `brightness`（深 0.72 / 浅 1.06）—— 微软官方配方里「用亮度调背景，而不是靠色层深浅」那一步
+
+于是深色下把浓度拉到 1%，看到的是「暗的通透玻璃」，不是一层白雾。
 
 ### 5.5 去掉 DWM 画的 1px 边框
 
@@ -784,8 +799,22 @@ light/dark 两档）与设置 → 外观 → 主题的三选一，都收敛到�
 历史上按色板空位定的徽章色（置顶蓝/收藏琥珀/编辑绿/失效红/图片紫/文件青绿/文本黄绿）
 与危险色 `--danger` 三件套（字色/淡底/实心底上的字色）都遵循此约定。
 
-跟随系统时：`getCurrentWindow().theme()` 与 `onThemeChanged`，切换 `body.dark` 类。
-Rust 侧在 `ThemeChanged` 事件中重刷材质。CSS 变量在 `body.dark` 作用域整体替换。
+**跟随系统的判定不信 `getCurrentWindow().theme()`**：窗口的 `set_theme` 早已禁用
+（tao 会借它重加 `WS_CAPTION`，Win10 上原生标题栏整条重现），它返回的是建窗时的旧值。
+也不信 `prefers-color-scheme`：WebView2 上实测「系统深色时它给 false」。
+权威来源是 Rust 的 `is_dark_now()`：读注册表 `AppsUseLightTheme`。
+
+系统主题变化的处理，**不闪是硬约束**：
+
+- `WM_SETTINGCHANGE`（钩子）/ tao `ThemeChanged` → `schedule_system_theme_refresh`：
+  只把深浅推给前端（CSS 同步替换 `body.dark` 作用域的变量，不出帧），面板与托盘菜单跟上，
+  **主窗口材质重建挂起**；1 秒时间窗内只处理第一次（一次切换会同时惊动三条路径）
+- 窗口回到前台 → `flush_pending_theme_rebuild` 做一次完整复位（用户正在看，且是他自己触发的）
+- 400ms 看门狗兜底：用 `GetForegroundWindow()` 判断是否真在前台（`is_focused()` 在
+  「被盖住但仍持焦点」时不可靠）
+
+⚠ 手动切深浅走的是「一次静默重下」（`refresh_theme_manual`），**不做值切换、不做
+`force_redraw`** —— 那两者都会让中间态被合成一帧，就是「切深浅闪一下」。
 
 ### 8.6 关于页（`about.rs` + 前端）
 

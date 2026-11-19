@@ -109,7 +109,7 @@ pub fn toggle(app: &AppHandle) {
         // 按快捷键会走「重新唤出」，面板不但不消失还跟着鼠标跳到新位置
         // （用户实测：「再次快捷键他不是消失，而是移动到鼠标所在位置」）。
         if is_on_screen(&win) {
-            crate::log_print!("[panel] 快捷键再次按下，收起面板");
+            crate::log_print!("[panel] toggle action=hide");
             park_panel(&win);
             return;
         }
@@ -181,7 +181,7 @@ fn show_now(app: &AppHandle) {
     // （实测：焦点会落到同进程的主窗口上，面板刚弹出就因为失焦被收起）。
     if let Ok(h) = win.hwnd() {
         if !unsafe { force_foreground(h.0 as isize) } {
-            crate::log_warn!("[panel] 焦点没抢到，面板可能刚弹出就被失焦收起");
+            crate::log_warn!("[panel] focus.grab fail action=defer");
         }
     }
 
@@ -349,7 +349,7 @@ pub fn paste_after_copy(app: &AppHandle) -> Result<(), String> {
     let target = PREV_FG.load(Ordering::SeqCst);
     if target == 0 {
         // 没有可回的目标：内容已经在剪贴板里，用户自己按 Ctrl+V 即可
-        crate::log_print!("[panel] 无目标窗口，已只复制不粘贴");
+        crate::log_print!("[panel] paste.skip cause=no-target copied=true");
         toast_after_copy(anchor, keep_open);
         return Ok(());
     }
@@ -359,7 +359,7 @@ pub fn paste_after_copy(app: &AppHandle) -> Result<(), String> {
         // 焦点切换不是同步的，给系统一点时间；80ms 是实测「不会漏按键」的下限
         std::thread::sleep(Duration::from_millis(80));
         if GetForegroundWindow() != target {
-            crate::log_warn!("[panel] 焦点没能切回原窗口，跳过模拟粘贴（内容已在剪贴板）");
+            crate::log_warn!("[panel] paste.skip cause=focus-restore copied=true");
             toast_after_copy(anchor, keep_open);
             return Ok(());
         }
@@ -367,12 +367,12 @@ pub fn paste_after_copy(app: &AppHandle) -> Result<(), String> {
         // 注入实现只有 `input` 一份，截图取消发 Esc 走的是同一个函数。
         if !crate::input::send_keys(&[VK_CONTROL, VK_V]) {
             // 按键被拦（目标程序以管理员身份运行时常见）：内容在剪贴板，但没有粘上
-            crate::log_warn!("[panel] SendInput 未能送出全部按键（可能被权限拦截）");
+            crate::log_warn!("[panel] paste.partial cause=input-blocked");
             toast_after_copy(anchor, keep_open);
             return Ok(());
         }
     }
-    crate::log_print!("[panel] 已粘贴回原窗口");
+    crate::log_print!("[panel] paste.done");
     toast_after_copy(anchor, keep_open);
     Ok(())
 }

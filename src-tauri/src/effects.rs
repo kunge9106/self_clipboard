@@ -347,7 +347,7 @@ fn tier_now() -> Tier {
 pub fn apply_with(hwnd: isize, dark: bool, reason: &str) -> Tier {
     // 驻留中的窗口不要去碰材质：见 `PARKED_HWND` / `suspend_material`。
     if is_suspended(hwnd) {
-        crate::log_print!("[effects] 跳过材质下发（窗口驻留中，来源={reason}）");
+        crate::log_print!("[effects] material.skip reason={reason} cause=suspended");
         return current_tier();
     }
     // 取证：窗口的扩展样式决定 backdrop 能不能画。
@@ -360,9 +360,7 @@ pub fn apply_with(hwnd: isize, dark: bool, reason: &str) -> Tier {
         }
         let style = GetWindowLongW(hwnd, -16) as u32;
         let ex = GetWindowLongW(hwnd, -20) as u32;
-        crate::log_print!(
-            "[effects] 窗口样式 style=0x{style:08X} ex=0x{ex:08X}（来源={reason}）"
-        );
+        crate::log_print!("[effects] window.style style=0x{style:08X} ex=0x{ex:08X} reason={reason}");
     }
     let build = detect_build();
     let tier = classify(build);
@@ -370,14 +368,9 @@ pub fn apply_with(hwnd: isize, dark: bool, reason: &str) -> Tier {
     let _ = TIER.set(tier);
 
     crate::log_print!(
-        "[effects] 应用材质（来源={reason}）build={} tier={} 高级材质={} (radius≤{}px)",
-        build,
+        "[effects] material.apply tier={} dark={dark} reason={reason} build={build} advanced={}",
         tier.as_str(),
-        if is_round() { "开" } else { "关" },
-        match tier.max_radius() {
-            u32::MAX => 0,
-            r => r,
-        }
+        if is_round() { "on" } else { "off" }
     );
 
     // 先清掉 WS_CAPTION | WS_THICKFRAME 等样式位——DWM 正是靠它们才
@@ -431,15 +424,14 @@ pub fn apply_with(hwnd: isize, dark: bool, reason: &str) -> Tier {
 
     match result {
         Ok(()) => {
-            crate::log_print!("[effects] 材质应用完成：{}（来源={reason}）", tier.as_str());
+            crate::log_print!("[effects] material.done tier={} reason={reason}", tier.as_str());
             tier
         }
         Err(code) => {
             // 开发原则 3：降级必须显式，不能假装成功
             crate::log_warn!(
-                "[effects] 材质 {} 应用失败 code=0x{:08X}，降级为 solid",
-                tier.as_str(),
-                code
+                "[effects] material.fail tier={} hr=0x{code:08X} fallback=solid",
+                tier.as_str()
             );
             let _ = TIER.set(Tier::Solid);
             Tier::Solid
@@ -717,7 +709,7 @@ pub fn effective_dark(window: &tauri::WebviewWindow) -> bool {
 pub fn restore_visuals(hwnd: isize, dark: bool, reason: &str) -> Tier {
     // 驻留中的窗口一律不碰（同 `apply_with`）
     if is_suspended(hwnd) {
-        crate::log_print!("[effects] 跳过整份复位（窗口驻留中，来源={reason}）");
+        crate::log_print!("[effects] restore.skip reason={reason} cause=suspended");
         return current_tier();
     }
     set_immersive_dark(hwnd, dark);
@@ -869,10 +861,7 @@ pub fn suspend_material(hwnd: isize) {
     // 圆角模式下本来就没有系统材质；清一遍是幂等的。
     clear_system_material(hwnd, tier);
     clear_accent(hwnd);
-    crate::log_print!(
-        "[effects] 驻留：已清空系统材质（tier={}），唤回时将重新下发",
-        tier.as_str()
-    );
+    crate::log_print!("[effects] material.suspend tier={}", tier.as_str());
 }
 
 /// 从屏幕外驻留唤回后调用（此时窗口**已移回屏幕内**）：按当前深浅重新下发材质。
@@ -907,7 +896,7 @@ pub fn resume_material(window: &tauri::WebviewWindow, reason: &str) -> Option<Ti
     if let Err(e) = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0))) {
         crate::log_warn!("[effects] 重设 WebView 透明背景失败：{e}");
     }
-    crate::log_print!("[effects] 唤回：材质已重新下发（dark={dark}，tier={}）", tier.as_str());
+    crate::log_print!("[effects] material.resume tier={} dark={dark}", tier.as_str());
     Some(tier)
 }
 
@@ -1319,7 +1308,7 @@ pub fn schedule_system_theme_refresh(window: tauri::WebviewWindow, reason: &'sta
         let _ = app.emit_to(crate::popup::PANEL_LABEL, "panel-theme", dark);
     }
     crate::tray::sync_menu_appearance(app);
-    crate::log_print!("[effects] 系统主题变化 → 同步颜色（不动主窗口材质，来源={reason}）");
+    crate::log_print!("[effects] theme.sync reason={reason} material=deferred");
 }
 
 static THEME_EVENT_PENDING: std::sync::atomic::AtomicBool =
@@ -2372,7 +2361,7 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
             if color_scheme {
                 if let Some(app) = HOOK_APP.get() {
                                     if let Some(w) = app.get_webview_window(crate::idle_release::MAIN_LABEL) {
-                        crate::log_print!("[effects] WM_SETTINGCHANGE → 系统主题静默重下");
+                        crate::log_print!("[effects] wm.settingchange theme=sync");
                         // 与焦点路径一致：立即 + 150ms 再补；不做翻转/FRAMECHANGED，不闪。
                         schedule_system_theme_refresh(w, "setting-change");
                         note_theme_event_handled();
@@ -2390,7 +2379,7 @@ pub fn install_focus_hook(hwnd: isize, app: &tauri::AppHandle) {
         return;
     }
     ORIG_WNDPROC.store(orig, std::sync::atomic::Ordering::Relaxed);
-    crate::log_print!("[effects] 焦点 hook 已挂载（WM_NCACTIVATE → 不重绘 NC 区）");
+    crate::log_print!("[effects] hook.attach target=focus ok=true");
 }
 
 // ---------------------------------------------------------------------------
@@ -2507,7 +2496,7 @@ pub fn install_popup_hook(hwnd: isize) {
         set_popup_orig(hwnd, orig);
         POPUP_HOOKED.store(hwnd, std::sync::atomic::Ordering::Relaxed);
     }
-    crate::log_print!("[effects] 弹出窗口拖动 hook 已挂载");
+    crate::log_print!("[effects] hook.attach target=popup ok=true");
 }
 
 // ---------------------------------------------------------------------------
@@ -2558,7 +2547,7 @@ pub fn apply_popup_material(hwnd: isize, dark: bool) -> bool {
 /// 所以这里不需要「清成 NONE 再设回」那套 —— 直接施加 + 逼 DWM 重画即可。
 pub fn rebuild_popup_material(hwnd: isize, dark: bool) -> bool {
     if !is_round() {
-        crate::log_print!("[effects] 浮层材质跳过：高级材质未开启（is_round=false）");
+        crate::log_print!("[effects] popup.material.skip cause=advanced-off");
         return false;
     }
     // 主题切换后 DWM 会把浮层这层表面也丢掉，此时**再设同一个 backdrop 值会被跳过**，
@@ -2692,7 +2681,7 @@ pub fn spawn_material_watch(app: tauri::AppHandle) {
             let now_dark = is_dark_now();
             if now_dark != last_dark {
                 last_dark = now_dark;
-                crate::log_print!("[theme] 系统深浅变化 → dark={now_dark}，全部窗口重刷");
+                crate::log_print!("[theme] system.changed dark={now_dark} scope=all");
                 use tauri::Emitter;
                 let _ = w.emit("system-theme-changed", now_dark);
                 #[cfg(windows)]
@@ -2758,7 +2747,7 @@ pub fn spawn_material_watch(app: tauri::AppHandle) {
                 continue;
             }
             bad = 0;
-            crate::log_print!("[effects] 看门狗：样式位/backdrop 异常，执行一次复位");
+            crate::log_print!("[effects] watchdog.repair cause=style-or-backdrop");
             // 看门狗异常复位：静默重下（禁止 restore，会闪）。
             refresh_theme_colors(&w, "watchdog");
         }

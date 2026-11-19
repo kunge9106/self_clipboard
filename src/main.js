@@ -344,7 +344,7 @@ function bindThemeToggle() {
 async function applyThemeMode(mode) {
   // 记录「用户点了什么」—— 材质类问题只能靠操作序列定位。
   // 之前排查「材质不恢复」，日志里只有「材质应用完成」，看不出是谁触发的。
-  reportFrontend("INFO", "ui", `切换主题 → ${mode}`);
+  reportFrontend("INFO", "ui", `theme.mode value=${mode}`);
   if (mode === "light") return applyTheme(false);
   if (mode === "dark") return applyTheme(true);
   // system：三个来源互相校验，并写一条日志（只靠猜已经错了好几轮）。
@@ -354,7 +354,7 @@ async function applyThemeMode(mode) {
   //     （tao 的 ThemeChanged 日志里出现过 "Light" 而注册表是深色）；
   //   · `prefers-color-scheme` —— WebView2 自己的判断（实战项目反馈不可靠）。
   const rust = await invoke("theme_is_dark").catch((e) => {
-    reportFrontend("warn", "ui", `theme_is_dark 调用失败：${e}`);
+    reportFrontend("warn", "ui", `theme.detect fail=${e}`);
     return null;
   });
   const winTheme = await appWindow.theme().catch(() => null);
@@ -362,7 +362,7 @@ async function applyThemeMode(mode) {
   reportFrontend(
     "INFO",
     "ui",
-    `system 深浅判定：rust=${rust} window=${winTheme} mq=${mq}`
+    `theme.detect rust=${rust} window=${winTheme} mq=${mq}`
   );
   // **优先用 Rust 那一路**（注册表）。CSS 与窗口材质必须同一个来源，
   // 否则会出现「CSS 深色、backdrop 还是浅色」—— 看起来正是
@@ -385,7 +385,7 @@ listen("system-theme-changed", (ev) => {
   if (settings?.themeMode !== "system") return;
   applyTheme(!!ev.payload);
   syncEffectiveAlpha();
-  reportFrontend("INFO", "ui", `系统主题变化 → ${ev.payload ? "深色" : "浅色"}`);
+  reportFrontend("INFO", "ui", `theme.changed dark=${!!ev.payload}`);
   // 材质只由 Rust 的 ThemeChanged / 看门狗负责（值切换重建）。
   // 这里再 invoke set_theme_mode / refresh_material 会重复写配置、重复下发，
   // 和「无感」冲突；前端只同步 CSS 与浓度。
@@ -428,7 +428,7 @@ function applyGlassAlpha(pct) {
   reportFrontend(
     "INFO",
     "ui",
-    `材质浓度 → --glass-alpha=${v.toFixed(3)}（设定=${Math.round(a * 100)}% solid=${solid} round=${on} dark=${dark} body=${document.body.className}）`
+    `material.alpha value=${v.toFixed(3)} pct=${Math.round(a * 100)} advanced=${on} solid=${solid} dark=${dark}`
   );
 }
 
@@ -4747,7 +4747,7 @@ function bindSettings(view) {
     material.addEventListener("change", () => {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
-      reportFrontend("INFO", "ui", `材质浓度 → ${v}%`);
+      reportFrontend("INFO", "ui", `material.alpha pct=${v}`);
       const cmd = darkBoostActive() ? "set_dark_alpha" : "set_material_alpha";
       invoke(cmd, { value: v }).catch((e) => toast("未保存，请重试"));
     });

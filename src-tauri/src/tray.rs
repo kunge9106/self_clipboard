@@ -101,7 +101,7 @@ pub fn create_tray(app: &AppHandle) {
     match built {
         Ok(t) => {
             *guard = Some(t);
-            crate::log_print!("[tray] 托盘图标已常驻");
+            crate::log_print!("[tray] tray.ready");
         }
         Err(e) => crate::log_warn!("[tray] 创建托盘失败：{e}"),
     }
@@ -242,11 +242,11 @@ pub async fn tray_show_main(app: AppHandle) -> Result<(), String> {
     // 死锁的后果远不止这一个按钮：整个事件循环被卡住，之后所有 IPC 都不再
     // 响应。实测现象正是「菜单两个按钮都没反应」—— 第一个把循环堵死了。
     tauri::async_runtime::spawn_blocking(move || {
-        crate::log_print!("[tray] 菜单点了「打开轻贴」");
+        crate::log_print!("[tray] menu.open");
         let had = app.get_webview_window("main").is_some();
         show_main(&app);
         let now = app.get_webview_window("main").is_some();
-        crate::log_print!("[tray] 打开轻贴完成：主窗口 之前={had} 之后={now}");
+        crate::log_print!("[tray] window.show before={had} after={now}");
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -255,7 +255,7 @@ pub async fn tray_show_main(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn tray_quit(app: AppHandle) -> Result<(), String> {
-    crate::log_print!("[tray] 用户从托盘菜单退出");
+    crate::log_print!("[tray] menu.exit");
     crate::idle_release::note_exiting();
     // 用户主动退出 →「关闭时清理数据」才有机会生效
     crate::clipboard::note_user_quit();
@@ -397,7 +397,7 @@ pub fn show_main(app: &AppHandle) {
     if just_built {
         // 新窗口是全新建的，驻留状态作废（skipTaskbar 默认就是 false）
         clear_park_state();
-        crate::log_print!("[tray] 界面刚重建，交给页面加载完成后显示");
+        crate::log_print!("[tray] window.rebuild show=deferred");
         return;
     }
     // 驻留恢复：**先在屏幕外把材质就位，再移回原位**。
@@ -409,7 +409,7 @@ pub fn show_main(app: &AppHandle) {
     let pre_resumed = if crate::effects::any_suspended() {
         let ok = crate::effects::resume_material(&w, "unpark-pre").is_some();
         if ok {
-            crate::log_print!("[tray] 材质已在屏幕外就位，随后移回");
+            crate::log_print!("[tray] material.prewarm ok=true");
         }
         ok
     } else {
@@ -417,7 +417,7 @@ pub fn show_main(app: &AppHandle) {
     };
 
     if unpark_main_window(&w) {
-        crate::log_print!("[tray] 从屏幕外驻留恢复");
+        crate::log_print!("[tray] window.restore mode=parked");
         let _ = w.set_focus();
         #[cfg(windows)]
         {
@@ -438,7 +438,7 @@ pub fn show_main(app: &AppHandle) {
     // 第二次走到这里。旧代码会再跑一遍「整份复位 + relayout」—— 那是在用户眼前
     // 把材质拆掉再装回去，正好是「打开的瞬间闪一下」。唤回幂等，第二次只聚焦。
     if w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) && on_screen(&w) {
-        crate::log_print!("[tray] 窗口已在屏幕内，仅前置（无需复位）");
+        crate::log_print!("[tray] window.raise restored=false");
         let _ = w.set_focus();
         #[cfg(windows)]
         {

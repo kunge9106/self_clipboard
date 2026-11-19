@@ -224,7 +224,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     let window = match app.get_webview_window("main") {
         Some(w) => w,
         None => {
-            crate::log_warn!("[effects] 找不到 main 窗口，跳过材质设置");
+            crate::log_warn!("[effects] material.skip cause=window-missing");
             return;
         }
     };
@@ -238,7 +238,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     let hwnd = match window.hwnd() {
         Ok(h) => h.0 as isize,
         Err(e) => {
-            crate::log_warn!("[effects] 获取 hwnd 失败：{}，按 solid 处理", e);
+            crate::log_warn!("[effects] material.fail cause=hwnd err={} fallback=solid", e);
             return;
         }
     };
@@ -263,7 +263,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     window.on_window_event(move |event| {
         match event {
             tauri::WindowEvent::ThemeChanged(theme) => {
-                crate::log_print!("[effects] 系统主题切换 → {:?}", theme);
+                crate::log_print!("[theme] event.received source=tao theme={:?}", theme);
                 // 只有「跟随系统」时才响应。手动钉了浅色/深色后，系统怎么切都与
                 // 本窗口无关 —— 照旧重刷会把材质改成系统那套（手动选深色、
                 // 系统切浅色 → 窗口发灰），前端 body.dark 却没变，两边对不上。
@@ -329,7 +329,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                     // 窗口对 DWM 始终可见，材质永不丢，唤回 = 移回原位。
                     tray::park_main_window(&window_for_events);
                     tray::create_tray(&app_for_events);
-                    crate::log_print!("[tray] 窗口已驻留屏幕外（托盘模式）");
+                    crate::log_print!("[tray] window.park");
                     // 低占用模式：闲置够久就把 WebView 一起释放
                     idle_release::note_hidden(app_for_events.clone());
                 }
@@ -349,7 +349,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
             // 窗口已可见：静默补涂，别把刚铺好的材质拆了重建
             let _ = effects::reapply_visuals_for(&window, "startup-delayed");
         }
-        crate::log_print!("[effects] 补涂流程结束，最终档位：{}", effects::current_tier().as_str());
+        crate::log_print!("[effects] startup.repaint.done tier={}", effects::current_tier().as_str());
     });
 
     // 挂材质看门狗：启动早期、系统主题切换这类「没有事件可等」的材质丢失，
