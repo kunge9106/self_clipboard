@@ -1,5 +1,3 @@
-use tauri::Theme;
-
 #[cfg(windows)]
 use tauri::Manager;
 
@@ -86,6 +84,97 @@ fn set_round_mode(app: tauri::AppHandle, value: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// 卡片底色对比开关：只存偏好，观感由前端的 body class 承担（不动窗口材质）。
+#[tauri::command]
+fn set_card_glass(value: bool) -> Result<(), String> {
+    settings::update(|c| c.card_glass = value);
+    Ok(())
+}
+
+/// 切换视图时是否记住滚动位置：纯前端行为，后端只负责记住偏好。
+#[tauri::command]
+fn set_keep_scroll(value: bool) -> Result<(), String> {
+    settings::update(|c| c.keep_scroll = value);
+    Ok(())
+}
+
+/// 把「当前生效的材质浓度」推给快捷面板。
+///
+/// 面板是独立窗口，读不到主窗口的 CSS 变量；浓度又是前端算的（含深色加浓），
+/// 所以由主窗口算好后推过来，面板只负责套用。
+#[tauri::command]
+fn set_panel_alpha(app: tauri::AppHandle, alpha: u32) {
+    use tauri::Emitter;
+    let _ = app.emit_to(
+        crate::popup::PANEL_LABEL,
+        "panel-alpha",
+        alpha.min(100).max(1),
+    );
+}
+
+/// 面板启动兜底：取一次当前浓度（首次显示时推送可能早于页面加载而丢掉）。
+#[tauri::command]
+fn panel_alpha() -> u32 {
+    settings::get().alpha()
+}
+
+/// 系统深浅变化（「跟随系统」档）时重刷窗口材质。
+///
+/// 为什么需要：前端的 `applyTheme` 只切 `body.dark` 这个 class，
+/// 而系统材质（backdrop / acrylic / immersive dark）在 Rust 侧 ——
+/// 不重刷的话要等一次焦点变化才更新，用户看到的就是
+/// 「切了深色，必须点一下窗口才恢复高级材质」。
+#[tauri::command]
+fn refresh_material(app: tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("main") {
+        // 统一走 `refresh_theme_visuals`：深浅只认 `is_dark_now()`，
+        // SystemBackdrop 档会先值切换再完整下发（同值重设 DWM 会跳过）。
+        crate::effects::refresh_theme_colors(&w, "system-theme");
+    }
+    #[cfg(windows)]
+    if let Some(w) = app.get_webview_window(crate::popup::PANEL_LABEL) {
+        use tauri::Emitter;
+        let dark = crate::effects::is_dark_now();
+        if let Ok(h) = w.hwnd() {
+            let _ = crate::effects::rebuild_popup_material(h.0 as isize, dark);
+        }
+        let _ = app.emit_to(crate::popup::PANEL_LABEL, "panel-theme", dark);
+    }
+    crate::tray::sync_menu_appearance(&app);
+}
+
+/// 系统当前是不是深色（已考虑 light/dark/system 三档设置）。
+///
+/// 前端「跟随系统」必须用它，不能用 `appWindow.theme()` —— 窗口的 theme
+/// 只反映建窗那一刻，`set_theme_mode` 出于「会重加原生标题栏」的原因早就不设它了。
+#[tauri::command]
+fn theme_is_dark() -> bool {
+    effects::is_dark_now()
+}
+
+/// 面板当前应使用的深浅。
+///
+/// 面板首次显示时 `panel-open` 的 emit 可能早于页面加载完成而丢掉，
+/// 结果第一次弹出永远是浅色（深色模式下弹出一块白板）。面板启动时主动取一次，
+/// 之后每次弹出靠 `panel-open` 的 payload 更新。
+#[tauri::command]
+fn panel_dark(app: tauri::AppHandle) -> bool {
+    #[cfg(windows)]
+    {
+        // ⚠ 只能用 `is_dark_now()`（读注册表 / 设置），不能用 `effective_dark(&面板窗口)`：
+        // 面板是独立窗口，`tao` 报告的 theme 常常还是上一个（甚至永远是 Light），
+        // 于是「系统深色、面板还是白的」——这就是面板深浅不适配的根因。
+        let _ = app;
+        effects::is_dark_now()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        false
+    }
+}
+
 /// 材质浓度（设置页滑块）：更新 tint alpha 并立即重刷亚克力。
 ///
 /// 只写入**当前模式**那一档，另一个模式记住的值不受影响。
@@ -135,7 +224,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     let window = match app.get_webview_window("main") {
         Some(w) => w,
         None => {
-            crate::log_warn!("[effects] 找不到 main 窗口，跳过材质设置");
+            crate::log_warn!("[effects] material.skip cause=window-missing");
             return;
         }
     };
@@ -149,7 +238,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     let hwnd = match window.hwnd() {
         Ok(h) => h.0 as isize,
         Err(e) => {
-            crate::log_warn!("[effects] 获取 hwnd 失败：{}，按 solid 处理", e);
+            crate::log_warn!("[effects] material.fail cause=hwnd err={} fallback=solid", e);
             return;
         }
     };
@@ -174,14 +263,13 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
     window.on_window_event(move |event| {
         match event {
             tauri::WindowEvent::ThemeChanged(theme) => {
-                crate::log_print!("[effects] 系统主题切换 → {:?}", theme);
+                crate::log_print!("[theme] event.received source=tao theme={:?}", theme);
                 // 只有「跟随系统」时才响应。手动钉了浅色/深色后，系统怎么切都与
-                // 本窗口无关 —— 照旧重刷会把 tint 改成系统那套（手动选深色、
+                // 本窗口无关 —— 照旧重刷会把材质改成系统那套（手动选深色、
                 // 系统切浅色 → 窗口发灰），前端 body.dark 却没变，两边对不上。
                 if settings::get().theme_mode == "system" {
-                    effects::refresh_theme(hwnd, matches!(theme, Theme::Dark));
-                    // 菜单页的配色靠 JS 里的 `body.dark`，不会自己跟随系统事件 ——
-                    // 隐藏时就推过去，右键弹出那一刻才是对的颜色。
+                    effects::note_theme_event_handled();
+                    let _ = effects::refresh_after_theme_switch(&window_for_events);
                     crate::tray::sync_menu_appearance(&app_for_events);
                 }
             }
@@ -195,9 +283,17 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                 // Resized 在最小化和恢复时都会触发，函数内部靠 IsIconic 翻转判断。
                 effects::reapply_after_restore(&window_for_events);
             }
-            // 焦点切换不再裁区域：所有档位 region_radius() 都是 0，
-            // `apply_rounded_corners` 是空操作，留着只会让人误以为这里有作用。
-            tauri::WindowEvent::Focused(_active) => {
+            tauri::WindowEvent::Focused(active) => {
+                // 回到前台 = 用户正在看这个窗口，此时补做系统主题挂起的材质重建。
+                // 失焦时补没有意义（看不见）；前台补一次完整复位才"一定能恢复且不闪"。
+                if *active {
+                    effects::flush_pending_theme_rebuild(&window_for_events);
+                }
+                // 常规聚焦只做**静默**补涂（150ms 后台），不走值切换 —— 聚焦是
+                // 高频动作，值切换会闪。上面那次完整复位是有前提的：只在"系统换过
+                // 深浅、材质重建被挂起"时才发生，且发生在用户刚回到窗口的那一刻。
+                // 系统主题变化本身也不值切换（那条只同步颜色）
+                // 见 effects::schedule_system_theme_refresh。
                 // 实测（Win10/Win11 都有）：失焦/聚焦偶发把材质与 NC 渲染一起丢掉，
                 // 四周围上一圈 Win7 式边框，而托盘唤回路径的补涂管不到这里。
                 // 同步重刷会肉眼可见地闪（聚焦是高频动作），所以延迟 150ms 在后台
@@ -233,7 +329,7 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
                     // 窗口对 DWM 始终可见，材质永不丢，唤回 = 移回原位。
                     tray::park_main_window(&window_for_events);
                     tray::create_tray(&app_for_events);
-                    crate::log_print!("[tray] 窗口已驻留屏幕外（托盘模式）");
+                    crate::log_print!("[tray] window.park");
                     // 低占用模式：闲置够久就把 WebView 一起释放
                     idle_release::note_hidden(app_for_events.clone());
                 }
@@ -245,14 +341,21 @@ pub(crate) fn setup_effects(app: &tauri::AppHandle) {
 
     // Win10 acrylic 在窗口刚创建时不一定立刻铺开，
     // 显示后补涂一次并 nudge 触发 DWM 重算（v1 里踩过：节流会吞掉必要的补涂）。
+    // 先取一份 AppHandle：下面的闭包会把 `window` move 走。
+    let watch_app = window.app_handle().clone();
     std::thread::spawn(move || {
         for delay in [200u64, 600, 1200] {
             std::thread::sleep(std::time::Duration::from_millis(delay));
             // 窗口已可见：静默补涂，别把刚铺好的材质拆了重建
             let _ = effects::reapply_visuals_for(&window, "startup-delayed");
         }
-        crate::log_print!("[effects] 补涂流程结束，最终档位：{}", effects::current_tier().as_str());
+        crate::log_print!("[effects] startup.repaint.done tier={}", effects::current_tier().as_str());
     });
+
+    // 挂材质看门狗：启动早期、系统主题切换这类「没有事件可等」的材质丢失，
+    // 只能靠定时巡检补回来（见 `spawn_material_watch` 的注释）。
+    // 只读巡检，正常时零写入 —— 不影响任何既有行为。
+    effects::spawn_material_watch(watch_app);
 }
 
 pub fn run() {
@@ -292,6 +395,14 @@ pub fn run() {
             effect_info,
             set_material_alpha,
             set_round_mode,
+            set_card_glass,
+            set_keep_scroll,
+            theme_is_dark,
+            refresh_material,
+            panel_dark,
+            panel_alpha,
+            idle_release::take_just_rebuilt,
+            set_panel_alpha,
             about::about_info,
             about::check_update,
             about::update_state,
@@ -409,6 +520,15 @@ pub fn run() {
         about::auto_check(app.handle().clone());
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
+            // 窗口**真正可见之后**再强制挂一次材质。
+            //
+            // 启动时那次 `restore_visuals_for("startup")` 是在窗口还不可见
+            //（`visible: false`，等 setup 结束才 show）时下发的，而 DWM 对不可见
+            // 窗口不保留 backdrop：属性设上了、表面却没有 —— 于是窗口是"平的"。
+            // 后面那几次 `startup-delayed` 补涂设的是**同一个值**，被 DWM 跳过，
+            // 修不回来。值切换 + 等一帧才能真的重建（启动、重建窗口、唤回都适用）。
+            #[cfg(windows)]
+            let _ = effects::refresh_theme_visuals(&w, "startup-shown");
         }
         // 截图覆盖层不再需要预热：原生实现是新建一个普通窗口，创建耗时在毫秒级，
         // 不存在旧版「首次要现建 WebView，1–2 秒没画面」的问题。

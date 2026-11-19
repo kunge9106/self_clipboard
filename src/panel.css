@@ -14,33 +14,74 @@ body {
   user-select: none;
 }
 
+/* 注册成 <number>，这样才能参与 transition —— 聚焦 ↔ 失焦时底色从
+   「薄薄一层」平滑过渡到「实底」，而不是硬跳一下（用户要的「考虑失焦和聚焦」）。
+   不注册的普通自定义属性变化是瞬间的，transition 对它无效。 */
+@property --popup-alpha {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0.02;
+}
+
+/* 面板底色：RGB 跟主题走，透明度由 panel.js 按「材质浓度 × 是否聚焦」写入。
+   有材质时 1% ≈ 全透（只剩系统模糊）、100% ≈ 不透；失焦时抬到实底
+   （DWM 会把材质降级成纯色，半透明只剩一块脏灰）。 */
+:root {
+  --popup-rgb: 252 252 252;
+  --popup-alpha: 0.02;
+}
+
+body.dark {
+  --popup-rgb: 34 34 38;
+}
+
+/* 首帧兜底：面板窗口显示时，`panel-open` 还没到，页面是浅色默认。
+   系统是深色时先按深色铺一帧，避免「深色下先闪一块白板」。 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --popup-rgb: 34 34 38;
+  }
+}
+
+/* 失焦：DWM 会把系统材质降级成纯色，此时半透明只剩「脏灰」。
+   用户明确要求「失焦后是灰色，改成白色」—— 所以失焦时变**实底**
+   （浅色 = 白、深色 = 近黑，跟主题走）。
+   ⚠ 只在真失焦时生效：上一版因为「页面加载时 document.hasFocus() 为假」
+   把 is-inactive 永久挂上，面板成了常驻白板。现在改由窗口 focus 事件
+   驱动（panel.rs → panel-focus），**不做初始判断**。 */
+body.is-inactive {
+  --popup-alpha: 0.94;
+}
+
 .panel {
   display: flex;
   flex-direction: column;
   height: 100vh;
   box-sizing: border-box;
-  /* 用不透明底（--solid-bg）而不是半透明面板色：面板浮在任意内容之上，
-     半透明会把背后的文字透出来，读自己的列表都费劲。 */
-  background: var(--solid-bg, rgba(252, 252, 252, 0.98));
+  /* 材质分两层：
+     ① 系统 backdrop（Rust 施加）—— 提供桌面的模糊，窗口形状已由 region 剪成圆角；
+     ② 这里这层薄白 —— 只负责提亮，让文字压在任意背景上都读得清。
+     不要 backdrop-filter：面板是独立窗口，CSS 采不到桌面，写了也不糊
+     （实测「没模糊，是透明的」），徒增一帧开销。 */
+  background: rgb(var(--popup-rgb) / var(--popup-alpha));
   border: 1px solid var(--line);
   border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
   overflow: hidden;
+  /* 聚焦 ↔ 失焦的底色变化走过渡（变量已 @property 注册，可动画） */
+  transition: --popup-alpha 160ms var(--ease-out);
 }
 
-/* 拖拽把手：顶部一道 14px 高的窄条，中间一根小横条做视觉暗示。
-   只占一点点高度（列表是 flex 自适应，少 14px 不影响可用性），
-   但把「面板能挪走」这件事变得可发现 —— 否则用户只能忍着它挡视线。 */
+/* 拖拽把手：顶部一整条都能拖，中间一根小横条只做视觉暗示。
+   高度 18px：14 太窄（用户「很难选中」，看到一片空白却按不到），24 又空出一大块。
+   光标**保持箭头**：面板不是网页，抓手光标反而显得这块是「可拖拽的网页元素」。 */
 .panel-drag {
-  height: 14px;
+  height: 18px;
   flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: grab;
-}
-
-.panel-drag:active {
-  cursor: grabbing;
+  cursor: default;
 }
 
 .panel-drag-grip {
@@ -51,7 +92,9 @@ body {
 }
 
 .panel-head {
-  padding: 8px 12px 8px;
+  /* 上内距 2：拖拽条 18px + 再叠 8px 会让顶部空白显得偏高，
+     横条看着「没居中、像下面还藏着东西」（用户实测）。 */
+  padding: 2px 12px 8px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -68,8 +111,13 @@ body {
   outline: none;
 }
 
+/* 聚焦**完全不画**：面板一打开就自动聚焦搜索框（为了能直接打字），
+   任何可见的聚焦样式都会变成「静态画面上常亮的一圈框」，看着像鼠标悬停
+   卡住了（用户两次反馈）。功能不变，只是不给视觉反馈 —— 光标在输入框里
+   本身就是「可以打字」的提示。 */
 .panel-search:focus {
-  border-color: var(--accent);
+  border-color: var(--line);
+  box-shadow: none;
 }
 
 .panel-list {
@@ -90,9 +138,20 @@ body {
   cursor: default;
 }
 
-.p-row.is-sel {
+/* 强调色底只在「鼠标正悬停的那一行」或「键盘导航中」画。
+   原来是选中行常驻：鼠标根本不在上面也一直蓝着，用户反馈
+   「没有聚焦在条目上就不该有蓝色底」；鼠标移出面板也要撤掉
+   （`mouse-out`，鼠标悬停不会激活窗口，不能用窗口焦点判断）。
+   选中索引本身不变（回车仍粘当前行），只是不再无条件画出来。 */
+body.kb-nav .p-row.is-sel,
+.p-row:hover {
   background: var(--accent);
   color: #fff;
+}
+
+body.mouse-out .p-row.is-sel {
+  background: transparent;
+  color: var(--text);
 }
 
 /* 置顶标识：行左侧一道内阴影竖条，让「置顶组」在视觉上连成一片。
@@ -130,22 +189,26 @@ body {
   padding-top: 2px;
 }
 
-.p-row.is-sel.is-pinned::before {
+/* 置顶竖条只在**真的画了蓝底**时才换成白色。
+   挂在 `.is-sel` 上是错的：选中索引一直存在，鼠标移出后蓝底撤了、
+   竖条却还是白的（用户实测）。和徽章同一个道理。 */
+.p-row:hover.is-pinned::before,
+body.kb-nav .p-row.is-sel.is-pinned::before {
   background: rgba(255, 255, 255, 0.75);
 }
 
 
-.p-kind {
+/* 徽章复用主窗口的 .tag / .tag-kind-*（见 styles.css），颜色、圆角、语义全部继承。
+   不要再写一套 .p-kind —— 那是重复造轮子，而且没有颜色（用户反馈过）。
+   ⚠ 白徽章只在**真的画蓝底时**换（hover / 键盘导航）：上一版挂在 `.is-sel` 上，
+   鼠标移出后蓝底撤了、徽章却还是半透明白 —— 看着就是「徽章变白色」（用户实测）。 */
+.tag {
   flex: none;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--glass-strong);
-  color: var(--text-dim);
   font-size: 11px;
 }
 
-.p-row.is-sel .p-kind {
-  /* 选中态整行是强调色底，徽章改为半透明白，否则深色徽章压在蓝底上看不清 */
+.p-row:hover .tag,
+body.kb-nav .p-row.is-sel .tag {
   background: rgba(255, 255, 255, 0.22);
   color: #fff;
 }

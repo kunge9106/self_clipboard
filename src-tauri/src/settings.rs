@@ -146,6 +146,19 @@ pub struct Config {
     /// 首次运行引导：第一次点关闭按钮时「后台运行还是退出」问过了吗
     #[serde(default)]
     pub asked_tray_on_close: bool,
+    /// 卡片底色是否与侧栏一致（对比开关，2026-11-17）。
+    ///
+    /// 开：`--card-bg = --glass`（16% 白），与侧栏完全同色，靠间距 + 顶部微光分层；
+    /// 关：回到 `--surface-2`（82% 白），卡片更「实」，层次更强。
+    /// 做成开关是因为两种观感各有道理，用户要并排对比后再定。
+    #[serde(default = "default_true")]
+    pub card_glass: bool,
+    /// 切换视图/设置栏目时是否记住各自的滚动位置。
+    ///
+    /// 关（默认）：沿用「换内容就回顶部」，主流做法，也不会出现「切回来停在空白处」。
+    /// 开：每个视图各记一个 scrollTop，切回来还在原处；内容变少时由浏览器 clamp。
+    #[serde(default)]
+    pub keep_scroll: bool,
     /// 圆角模式：**圆角 + 不用系统 blur**
     ///
     /// 为什么要有这个开关：Win10 的 acrylic 恒为**矩形**、`SetWindowRgn` 对它
@@ -481,8 +494,13 @@ fn default_alpha_round() -> u32 {
     ROUND_ALPHA
 }
 
+/// 深色自动加浓的默认浓度。
+///
+/// 曾经是 100：深色 + 高级材质 + 亮壁纸时，只有接近实心才压得住。
+/// 但 100% 在深色下会把材质压没（看着就是一块死黑），80% 仍能压住壁纸、
+/// 又留得住玻璃感 —— 用户实测后定为 80。文案里的数字必须跟着这里改。
 fn default_dark_alpha() -> u32 {
-    100
+    80
 }
 
 /// 浓度的合法区间（前端滑块 10–90，后端一律夹到这个范围）
@@ -542,6 +560,10 @@ impl Default for Config {
             clean_on_close: false,
             clean_include_pinned: false,
             clean_confirm_exit: false,
+            // 默认与侧栏同色（新观感）；想对比就关掉这个开关
+            card_glass: true,
+            // 默认沿用「换内容回顶部」的既有行为
+            keep_scroll: false,
             retention_days: default_retention(),
             // 深色自动加浓的指定值：默认 100（见 dark_alpha 字段注释）
             dark_alpha: default_dark_alpha(),
@@ -798,6 +820,11 @@ pub fn get_settings() -> serde_json::Value {
         "alphaStraight": cfg.alpha_straight,
         "alphaRound": cfg.alpha_round,
         "roundMode": cfg.round_mode,
+        // 2026-11-17 两个对比开关。**漏了这两行前端就是 undefined**：
+        // cardGlass 会被当成 true，任何一次重绘都把开关弹回去；keepScroll
+        // 永远 falsy，记位置的逻辑根本不跑 —— 表现为「开关点了没效果」。
+        "cardGlass": cfg.card_glass,
+        "keepScroll": cfg.keep_scroll,
         "autoAlphaDark": cfg.auto_alpha_dark,
         "darkAlpha": cfg.dark_alpha,
         "fileCopy": cfg.file_copy,
@@ -919,22 +946,37 @@ pub fn set_theme_mode(app: tauri::AppHandle, value: String) -> Result<(), String
         return Err(format!("未知主题模式：{value}"));
     }
     update(|c| c.theme_mode = value);
-    // 托盘菜单窗口也要跟上，否则主界面深色、菜单浅色
-    for label in ["main", "tray-menu"] {
-        if let Some(w) = app.get_webview_window(label) {
-            // **不再调 window.set_theme()**。对 decorations=false 的窗口它本来就没有
-            // 可见效果（它只作用于原生装饰），而 tao 处理 theme change 时会重走
-            // set_window_flags，把 strip_window_frame 剥掉的 WS_CAPTION /
-            // WS_THICKFRAME 又加回来 —— Win10 上表现为原生标题栏（标题文字 +
-            // 最小化/最大化/关闭）整条重现，且只有重启才消失。
-            // 深色偏好改由 set_immersive_dark 直接下发，见 refresh_after_theme_switch。
-            crate::effects::refresh_after_theme_switch(&w);
-        }
+    // 窗口材质只刷**主窗口**：它是唯一带系统材质（backdrop / acrylic）的窗口。
+    // 菜单与面板分别是「恒为 CSS 实底圆角」和「自己的浮层材质」，各自有专门的刷新
+    // （`sync_menu_appearance` / `rebuild_popup_material`，见下）——
+    // 在主窗口那套里顺手刷它们，等于往一个不该有系统材质的窗口上硬加 backdrop。
+    //
+    // **不再调 window.set_theme()**。对 decorations=false 的窗口它本来就没有
+    // 可见效果（它只作用于原生装饰），而 tao 处理 theme change 时会重走
+    // set_window_flags，把 strip_window_frame 剥掉的 WS_CAPTION /
+    // WS_THICKFRAME 又加回来 —— Win10 上表现为原生标题栏（标题文字 +
+    // 最小化/最大化/关闭）整条重现，且只有重启才消失。
+    // 深色偏好改由 set_immersive_dark 直接下发，见 refresh_after_theme_switch。
+    if let Some(w) = app.get_webview_window("main") {
+        // 手动切换：完整复位（静默重下无法恢复已丢失的表面，见函数注释）
+        crate::effects::refresh_theme_manual(&w, "setting-change");
     }
     // 菜单的配色是页面里的 `body.dark` 类（CSS 无 prefers-color-scheme），
     // 只能在窗口**隐藏时**推过去 —— 等到右键 show 之后再推，用户看到的就是
     // 「菜单先按旧配色出来，再闪一下变色」。
     crate::tray::sync_menu_appearance(&app);
+
+    // 快捷面板：常驻的独立窗口，只认页面里的 body.dark。这里推一次，
+    // 面板**开着**的时候切主题就能实时变，不必关掉重开。
+    #[cfg(windows)]
+    if let Some(w) = app.get_webview_window(crate::popup::PANEL_LABEL) {
+        use tauri::Emitter;
+        let dark = crate::effects::effective_dark(&w);
+        if let Ok(h) = w.hwnd() {
+            let _ = crate::effects::rebuild_popup_material(h.0 as isize, dark);
+        }
+        let _ = app.emit_to(crate::popup::PANEL_LABEL, "panel-theme", dark);
+    }
     Ok(())
 }
 

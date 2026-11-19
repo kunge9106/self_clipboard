@@ -122,19 +122,52 @@ pub fn ensure(app: &AppHandle, label: &'static str, url: &str, title: &str, w: f
     // 不放宽就会「闪一下就消失」。
     let w2 = win.clone();
     win.on_window_event(move |e| match e {
-        tauri::WindowEvent::Focused(false) => {
-            if !in_grace(label) && closes_on_blur(label) {
-                let _ = w2.hide();
+        tauri::WindowEvent::Focused(b) => {
+            // 面板需要知道「自己是不是前台」：失焦时把底色变成实底（白）。
+            // 必须由**窗口事件**驱动 —— 前端在页面加载时 `document.hasFocus()`
+            // 为假（窗口还没拿到焦点），按它初始化会把「失焦态」永久挂上，
+            // 面板就成了常驻白板（用户实测）。
+            if label == PANEL_LABEL {
+                use tauri::Emitter;
+                // 聚焦时 DWM 会重走一遍窗口样式，把 tao 的 WS_CAPTION/SYSMENU 带回来，
+                // 于是右上角出现最小化/最大化/关闭三个按钮（不可点）。
+                // 这里只**剥样式位**，绝不碰 `DWMNCRP_DISABLED` —— 后者会把
+                // 面板的材质一起关掉（实测）。剥完补一次材质。
+                #[cfg(windows)]
+                if *b {
+                    if let Ok(h) = w2.hwnd() {
+                        crate::effects::strip_window_frame(h.0 as isize, false);
+                        let dark = crate::effects::is_dark_now();
+                        let _ = crate::effects::rebuild_popup_material(h.0 as isize, dark);
+                    }
+                }
+                let _ = w2.emit("panel-focus", *b);
+            }
+            if !*b && !in_grace(label) && closes_on_blur(label) {
+                dismiss(label, &w2);
             }
         }
         tauri::WindowEvent::CloseRequested { api, .. } => {
             api.prevent_close();
-            let _ = w2.hide();
+            dismiss(label, &w2);
         }
         _ => {}
     });
 
     Some(win)
+}
+
+/// 收起浮层。
+///
+/// 快捷面板走「移屏幕外驻留」：`hide()` 会让 DWM 把 backdrop 丢掉，
+/// 下次唤出就只剩一块白板（用户实测多次，见 `panel::park_panel`）。
+/// 其余浮层（托盘菜单等）没有「材质要一直好看」的要求，直接隐藏更省事。
+fn dismiss(label: &str, w: &tauri::WebviewWindow) {
+    if label == PANEL_LABEL {
+        crate::panel::park_panel(w);
+    } else {
+        let _ = w.hide();
+    }
 }
 
 /// 某窗口失焦时是否收起。

@@ -106,6 +106,41 @@ const TIER_CLASS = {
 let items = [];
 let currentView = "history";
 
+/**
+ * 视图与设置页标签的"会话内记忆"。
+ *
+ * 为什么需要：低占用模式会**销毁并重建**主窗口（省内存），重建时页面会重新加载，
+ * JS 状态全部丢失 —— 用户明明在「设置 → 外观」，回来却变成首页。
+ * 存在 `sessionStorage` 而不是 config：它只该跨"窗口重建"，不该跨"程序重启"。
+ */
+const VIEW_KEY = "qingtie.view";
+const TAB_KEY = "qingtie.settingsTab";
+function rememberView() {
+  // 用 localStorage 而不是 sessionStorage：低占用释放会**销毁 WebView**，
+  // 重建时是一个新的浏览会话，sessionStorage 会被清空（实测就是这么丢的）。
+  try {
+    localStorage.setItem(VIEW_KEY, currentView);
+    localStorage.setItem(TAB_KEY, settingsTab);
+  } catch {}
+}
+/** 启动时把上次的视图/标签恢复回来；值不认识就回首页，避免出现空白页。 */
+function restoreView() {
+  let v = "history";
+  let tab = "general";
+  try {
+    v = localStorage.getItem(VIEW_KEY) || "history";
+    tab = localStorage.getItem(TAB_KEY) || "general";
+  } catch {}
+  // 用导航项校验，不依赖 `titles`（它在模块里定义得比这里晚，取用会踩 TDZ）
+  const views = [...document.querySelectorAll(".nav-item")].map((n) => n.dataset.view);
+  if (views.length && !views.includes(v)) v = "history";
+  currentView = v;
+  settingsTab = tab;
+  document
+    .querySelectorAll(".nav-item")
+    .forEach((n) => n.classList.toggle("is-active", n.dataset.view === v));
+}
+
 // 批量删除：由右键菜单进入。进入后点击条目即切换选中（不再复制回剪贴板），
 // 顶部搜索栏让位给选中操作条（见 index.html 的 .selectbar）。
 let selectMode = false;
@@ -116,6 +151,13 @@ let settings = null; // 后端配置（get_settings）
 // 设置页当前激活的分类。改这个变量只会影响「下次渲染时显示哪一组」，
 // 切换标签后重新 settingsHtml() + bindSettings() 即可（见 bindSettings 里的标签点击）。
 let settingsTab = "general";
+
+// 「切换时记住位置」用：每个视图/设置栏目各记一个 scrollTop。
+// 只在设置开关打开时读写；关掉时清空，行为回到「换内容回顶部」。
+const viewScrollMemo = new Map();
+// 本次切换要恢复到的位置。null = 不恢复（正常回顶部）。
+// 由 bindNav / 设置页标签点击写入，由 render 的收尾处消费并清空。
+let pendingScrollRestore = null;
 
 // 更新检查结果。Rust 在启动时会自检一次并（有新版本时）推 update-available；
 // 前端其余时候只读缓存（update_state），**只有用户点按钮才重新联网**。
@@ -224,7 +266,11 @@ function syncEffectiveAlpha() {
  * 用哪一档由 `effectiveAlpha` 判定。启动时 `applyTheme` 也会被调，那时不用整。
  */
 function applyThemeDependentAlpha(wasDark, isDark) {
-  if (wasDark === isDark) return;
+  // ⚠ 不再「深浅没变就跳过」：浓度还依赖 `body.round` / `body.tier-solid`，
+  // 这两者可能在别的路径上被改过。重算是一次纯赋值，幂等且便宜 ——
+  // 一旦漏算，窗口就会一直停在错的浓度上（看起来正是「材质没生效」）。
+  void wasDark;
+  void isDark;
   syncEffectiveAlpha();
 }
 
@@ -298,11 +344,52 @@ function bindThemeToggle() {
 async function applyThemeMode(mode) {
   // 记录「用户点了什么」—— 材质类问题只能靠操作序列定位。
   // 之前排查「材质不恢复」，日志里只有「材质应用完成」，看不出是谁触发的。
-  reportFrontend("INFO", "ui", `切换主题 → ${mode}`);
+  reportFrontend("INFO", "ui", `theme.mode value=${mode}`);
   if (mode === "light") return applyTheme(false);
   if (mode === "dark") return applyTheme(true);
-  applyTheme((await appWindow.theme().catch(() => "light")) === "dark");
+  // system：三个来源互相校验，并写一条日志（只靠猜已经错了好几轮）。
+  //   · Rust 读注册表 AppsUseLightTheme —— 系统设置的权威值，**也是材质侧
+  //     唯一用的那个值**（`effects::is_dark_now`）；
+  //   · `appWindow.theme()` —— Tauri 的窗口主题；实测会滞后/给反
+  //     （tao 的 ThemeChanged 日志里出现过 "Light" 而注册表是深色）；
+  //   · `prefers-color-scheme` —— WebView2 自己的判断（实战项目反馈不可靠）。
+  const rust = await invoke("theme_is_dark").catch((e) => {
+    reportFrontend("warn", "ui", `theme.detect fail=${e}`);
+    return null;
+  });
+  const winTheme = await appWindow.theme().catch(() => null);
+  const mq = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  reportFrontend(
+    "INFO",
+    "ui",
+    `theme.detect rust=${rust} window=${winTheme} mq=${mq}`
+  );
+  // **优先用 Rust 那一路**（注册表）。CSS 与窗口材质必须同一个来源，
+  // 否则会出现「CSS 深色、backdrop 还是浅色」—— 看起来正是
+  // 「深色不跟随 / 材质不应用」。窗口主题只在 Rust 拿不到值时兜底。
+  // 材质：`set_theme_mode`（Rust）已同步 `refresh_after_theme_switch`，
+  // 这里再 `refresh_material` 会二次值切换下发（多余 DWM 重建）。只改 CSS。
+  if (rust !== null) applyTheme(rust);
+  else if (winTheme === "dark" || winTheme === "light") applyTheme(winTheme === "dark");
+  else applyTheme(mq);
 }
+
+/**
+ * 系统深浅变化的**唯一入口**：由 Rust 侧轮询探测后推送（事件 `system-theme-changed`）。
+ *
+ * 为什么不用 `prefers-color-scheme`：实测系统是深色时它给 false（WebView2 上不可靠），
+ * 而窗口 theme 事件在 tao 层也不一定派发。Rust 侧读注册表是唯一可信来源。
+ * 材质由 Rust 的 ThemeChanged / 看门狗负责；这里只同步 CSS 与浓度。
+ */
+listen("system-theme-changed", (ev) => {
+  if (settings?.themeMode !== "system") return;
+  applyTheme(!!ev.payload);
+  syncEffectiveAlpha();
+  reportFrontend("INFO", "ui", `theme.changed dark=${!!ev.payload}`);
+  // 材质只由 Rust 的 ThemeChanged / 看门狗负责（值切换重建）。
+  // 这里再 invoke set_theme_mode / refresh_material 会重复写配置、重复下发，
+  // 和「无感」冲突；前端只同步 CSS 与浓度。
+});
 
 /**
  * 材质浓度 → 控制 CSS 层 --glass-alpha（窗口主体的不透明度）。
@@ -312,15 +399,37 @@ async function applyThemeMode(mode) {
  * 看不见；窗口的明暗改由 CSS 这一层负责，浓度也就可以在这里实时调。
  */
 function applyGlassAlpha(pct) {
-  // 兜底档（没有真材质）必须保持不透明，否则会直接看见桌面
-  if (document.body.classList.contains("tier-solid")) return;
-  // 与后端 ALPHA_MIN / ALPHA_MAX 一致：1–100 无极，两端都是真极端：
-  //   1%   → 窗口底只剩 ~1%（高级材质下看到的就是纯系统模糊）
-  //   100% → 关材质时完全不透；开材质时封顶 92%，留住材质感（见 styles.css）
+  // 与后端 ALPHA_MIN / ALPHA_MAX 一致：1–100 无极，两端都是真极端。
   // 表面层（卡片 / 侧栏 / 控件底）由 CSS 的 --mat-k 跟着一起收敛，
   // 否则底透了、卡片还是 68% 白，「拉到 1 不够极端」。
   const a = Math.max(1, Math.min(100, Number(pct) || 0)) / 100;
-  document.documentElement.style.setProperty("--glass-alpha", String(a));
+  // **四种档位四条曲线**（一套值伺候不了，历史上已经因此坏了两处）：
+  //   · 兜底档（tier-solid，没有系统材质）：必须接近不透明，否则直接看见桌面；
+  //     但仍留 85%–100% 的可调区间 —— 原来这里直接 return，滑块等于失效。
+  //   · 开高级材质（浅色）：**0.02 + 0.45×浓度** —— 1% 是通透的玻璃，
+  //     **80% ≈ 0.38、95% ≈ 0.45 才是那种「薄雾感」**（用户指定这个区间），
+  //     100% 略过一点。全程线性、无极，每 1% 都有变化。
+  //   · 开高级材质（深色）：0.06 + 0.86×浓度 —— 深色需要更厚才压得住桌面，
+  //     1% 保留一点深色底，配合 `.app` 的 brightness(0.72) 防止透上来发白。
+  //   · 关高级材质：没有模糊可看，浓度就是「窗口有多实」，直通即可。
+  const solid = document.body.classList.contains("tier-solid");
+  const on = document.body.classList.contains("round");
+  const dark = document.body.classList.contains("dark");
+  const v = solid
+    ? 0.85 + 0.15 * a
+    : on
+      ? dark
+        ? 0.06 + 0.86 * a
+        : 0.02 + 0.45 * a
+      : a;
+  document.documentElement.style.setProperty("--glass-alpha", String(v));
+  // 排障：浓度是"材质看不见"的常见元凶（CSS 层太厚就把背后的模糊盖死了）。
+  // 每次重算都记一行，和 Rust 侧的材质日志对时间戳即可判断是哪一层的问题。
+  reportFrontend(
+    "INFO",
+    "ui",
+    `material.alpha value=${v.toFixed(3)} pct=${Math.round(a * 100)} advanced=${on} solid=${solid} dark=${dark}`
+  );
 }
 
 /**
@@ -361,6 +470,12 @@ function applyRoundMode(on) {
 
 /** 上一次的最大化状态；null = 还没同步过 */
 let lastMaxState = null;
+
+/** 卡片底色对比开关：只切 body 上的 class，卡片通过 --card-bg 自动跟随。
+ *  偏好本身存在配置里（`set_card_glass`），这里只负责观感。 */
+function applyCardGlass(on) {
+  document.body.classList.toggle("cards-plain", !on);
+}
 
 /** 最大化 ↔ 还原：图标与提示词跟随窗口状态（需求 #6） */
 async function syncMaxState() {
@@ -980,6 +1095,23 @@ function bindNav() {
     const navItems = [...document.querySelectorAll(".nav-item[data-view]")];
     const prevIdx = navItems.findIndex((n) => n.classList.contains("is-active"));
     navSwapDir = navItems.indexOf(item) >= prevIdx ? 1 : -1;
+    // 「切换时记住位置」：必须在改 DOM **之前**读旧容器的 scrollTop，
+    // 一旦 innerHTML 被换掉，旧位置就没了。
+    if (settings?.keepScroll) {
+      const oldView = document.getElementById("view");
+      const cur =
+        oldView.querySelector(".history")?.scrollTop ??
+        oldView.querySelector(".settings-body")?.scrollTop ??
+        0;
+      viewScrollMemo.set(currentView, cur);
+      // 设置页的位置按「栏目」记（见 bindSettings 的标签点击），这里取当前栏目那一个
+      pendingScrollRestore =
+        item.dataset.view === "settings"
+          ? (viewScrollMemo.get("tab:" + settingsTab) ?? 0)
+          : (viewScrollMemo.get(item.dataset.view) ?? 0);
+    } else {
+      pendingScrollRestore = null;
+    }
     // 旧页面快照要在改 DOM 之前拍：等渲染完成时它已经被 innerHTML 换掉了
     pendingGhost = captureGhost(document.querySelector(".view"));
     document
@@ -987,6 +1119,7 @@ function bindNav() {
       .forEach((n) => n.classList.remove("is-active"));
     item.classList.add("is-active");
     currentView = item.dataset.view;
+    rememberView();
     // 换分类 = 换了一批条目，选中集合不再对应，直接退出批量模式
     selectMode = false;
     selectedIds.clear();
@@ -1475,6 +1608,12 @@ async function renderWindow({ keepScroll = false } = {}) {
   wl.setWindow(wlState.start, wlState.items);
   if (anchor) wl.restoreAnchor(anchor);
   wl.render();
+  // 「切换时记住位置」：必须在内容进 DOM **之后**设置，否则高度还是 0，
+  // 浏览器会把 scrollTop 夹回 0（赋值不报错，表现为「开关开了也没用」）。
+  if (pendingScrollRestore !== null) {
+    wl.scroller.scrollTop = pendingScrollRestore;
+    pendingScrollRestore = null;
+  }
   schedulePrefetch();
   // 文件失效检测只查**已加载**的行 —— 全量查一次 10 万个 id 是旧路径的成本
   refreshMissing(wlState.items);
@@ -1488,6 +1627,9 @@ function rerenderNow() {
 
 function render({ keepScroll = false } = {}) {
   hideHoverPreview(); // 重绘后旧卡片已销毁，避免浮层残留
+  // 卡片底色开关。放在 render 里而不是只在设置页绑定：任何一次重绘都保证
+  // body 上的 class 与配置一致（启动首帧、切主题、外部改配置都能跟上）。
+  applyCardGlass(settings?.cardGlass !== false);
   const view = document.getElementById("view");
   const toolbar = document.querySelector(".toolbar");
   const isSettings = currentView === "settings";
@@ -1510,10 +1652,14 @@ function render({ keepScroll = false } = {}) {
     const prevBodyTop = keepScroll
       ? (view.querySelector(".settings-body")?.scrollTop ?? 0)
       : 0;
+    // 切栏目时用「记住位置」的值；同一栏目内的重绘仍用 prevBodyTop
+    const restoreTo =
+      pendingScrollRestore !== null ? pendingScrollRestore : prevBodyTop;
     view.innerHTML = settingsHtml();
     bindSettings(view);
     const nextBody = view.querySelector(".settings-body");
-    if (prevBodyTop > 0 && nextBody) nextBody.scrollTop = prevBodyTop;
+    pendingScrollRestore = null;
+    if (restoreTo > 0 && nextBody) nextBody.scrollTop = restoreTo;
     // 设置页整块是新 DOM：滑块要重新挂载（挂载是幂等的，重复调无副作用）
     initMotion(view);
     flushNavSwap(view);
@@ -2815,6 +2961,7 @@ function settingsHtml() {
   // 只渲染当前分类 —— 其余分类的控件这一刻**不在 DOM 里**，所以 bindSettings 里
   // 每一个 querySelector 都必须做存在性保护，否则会 null.onclick / null.onchange 报错。
   let body = "";
+  rememberView();
   if (settingsTab === "appearance") body = settingsAppearanceHtml(s);
   else if (settingsTab === "about") body = settingsAboutHtml();
   // "record" 已并入 "data"；带上这个旧值兜底，万一 settingsTab 还是它，
@@ -3029,17 +3176,19 @@ function settingsGeneralHtml(s) {
   return [
     block(
       "启动",
-      rowCheck("set-autostart", "开机自启", "开机后自动运行", s.autoStart) +
+      // 说明行不是必需的：标题已经说清的事（如「开机后自动运行」之于「开机自启」）
+      // 只增加噪声，一律留空。只有标题看不出来、或含副作用/推荐值时才写。
+      rowCheck("set-autostart", "开机自启", "", s.autoStart) +
         rowCheck(
           "set-tray",
           "关闭时收进托盘",
-          "关掉窗口后在后台继续记录；右键托盘图标可打开菜单",
+          "",
           s.trayOnClose
         ) +
         rowCheck(
           "set-release-idle",
           "后台释放",
-          "收起后释放界面内存；再次唤出时稍慢一点（约 0.3 秒）",
+          "",
           (s.releaseIdleSecs || 0) > 0
         ) +
         rowCtl(
@@ -3179,7 +3328,7 @@ function settingsGeneralHtml(s) {
       "帮助",
       rowCtl(
         "功能导览",
-        "随时可以再看一遍这 12 步说明",
+        "",
         `<button class="btn-ghost" id="replay-tour">重新查看</button>`
       )
     ),
@@ -3196,7 +3345,7 @@ function settingsAppearanceHtml(s) {
       "主题",
       rowCtl(
         "深浅模式",
-        "「系统」跟随 Windows 的深浅色设置；侧栏底部也有一键切换",
+        "",
         `<div class="seg" id="set-theme">
           <button type="button" data-theme="light" ${s.themeMode === "light" ? 'class="on"' : ""}>浅色</button>
           <button type="button" data-theme="dark" ${s.themeMode === "dark" ? 'class="on"' : ""}>深色</button>
@@ -3208,7 +3357,7 @@ function settingsAppearanceHtml(s) {
       "窗口",
       rowCtl(
         "材质浓度",
-        "越高越厚实 · 越低越通透",
+        "",
         `<input type="range" id="set-material" min="1" max="100" value="${shownAlpha}" /><span class="hint" id="material-val">${shownAlpha}%</span>`
       ) +
         rowCheck(
@@ -3222,8 +3371,14 @@ function settingsAppearanceHtml(s) {
         rowCheck(
           "set-auto-dark-alpha",
           "深色自动加浓",
-          "高级材质下切至深色模式浓度自动升至 100%，支持手动调整；切回浅色模式自动恢复。推荐：浅色 35%，深色 60%",
+          "高级材质下切至深色模式浓度自动升至 80%，支持手动调整；切回浅色模式自动恢复。推荐：浅色 35%，深色 80%",
           s.autoAlphaDark
+        ) +
+        rowCheck(
+          "set-card-glass",
+          "卡片与侧栏同色",
+          "开启后列表卡片与侧栏共用一层底色，更通透、材质更连贯；关闭则用更实的白色卡片，条目之间更好区分",
+          s.cardGlass !== false
         )
     ),
     block(
@@ -3233,7 +3388,13 @@ function settingsAppearanceHtml(s) {
         "不跟随系统缩放",
         "界面固定按 100% 显示。Windows 调整缩放后窗口与布局不再跟着变（含托盘菜单）；关掉则恢复跟随",
         s.ignoreDpiScale
-      )
+      ) +
+        rowCheck(
+          "set-keep-scroll",
+          "保留滚动位置",
+          "",
+          s.keepScroll === true
+        )
     ),
   ].join("");
 }
@@ -3255,14 +3416,14 @@ function settingsDataHtml(s) {
       rowCheck(
         "set-file-copy",
         "文件复制",
-        "记录在资源管理器中复制的文件",
+        "",
         s.fileCopy
       ) +
         // 相同内容怎么处理：默认 60 秒内合并并置顶（Windows 剪贴板 / Ditto 的语义）。
         // 只比较内容完全相同的条目，不同内容不受影响。
         rowCtl(
           "相同内容去重",
-          "相同内容再次复制时，合并到原条目并置顶",
+          "",
           `<div class="seg" id="set-dedup-mode">
             <button type="button" data-mode="window" ${(s.dedupMode || "window") === "window" ? 'class="on"' : ""}>60 秒内</button>
             <button type="button" data-mode="always" ${s.dedupMode === "always" ? 'class="on"' : ""}>不限时间</button>
@@ -4186,6 +4347,15 @@ function bindSettings(view) {
       const prevIdx = SETTINGS_TABS.findIndex((t) => t.id === settingsTab);
       const nextIdx = SETTINGS_TABS.findIndex((t) => t.id === id);
       const dirX = nextIdx >= prevIdx ? 1 : -1;
+      // 「切换时记住位置」：每个设置栏目各记一个位置（键带 tab: 前缀，
+      // 与侧栏视图分开，避免和 settings 那一格互相覆盖）
+      if (settings?.keepScroll) {
+        const cur = view.querySelector(".settings-body")?.scrollTop ?? 0;
+        viewScrollMemo.set("tab:" + settingsTab, cur);
+        pendingScrollRestore = viewScrollMemo.get("tab:" + id) ?? 0;
+      } else {
+        pendingScrollRestore = null;
+      }
       settingsTab = id;
       // 换 DOM 之前拍快照，之后放它离场 —— 与新内容入场同时进行
       const ghost = captureGhost(view);
@@ -4194,7 +4364,14 @@ function bindSettings(view) {
       initMotion(view);
       releaseGhost(ghost, { axis: "x", from: dirX });
       const body = view.querySelector(".settings-body");
-      if (body) swap(body, { axis: "x", from: dirX });
+      if (body) {
+        // 内容已进 DOM 才恢复，否则高度为 0 会被夹回顶部
+        if (pendingScrollRestore !== null) {
+          body.scrollTop = pendingScrollRestore;
+          pendingScrollRestore = null;
+        }
+        swap(body, { axis: "x", from: dirX });
+      }
     };
   });
 
@@ -4570,7 +4747,7 @@ function bindSettings(view) {
     material.addEventListener("change", () => {
       const v = parseInt(material.value, 10);
       if (!Number.isFinite(v)) return;
-      reportFrontend("INFO", "ui", `材质浓度 → ${v}%`);
+      reportFrontend("INFO", "ui", `material.alpha pct=${v}`);
       const cmd = darkBoostActive() ? "set_dark_alpha" : "set_material_alpha";
       invoke(cmd, { value: v }).catch((e) => toast("未保存，请重试"));
     });
@@ -4631,6 +4808,45 @@ function bindSettings(view) {
       } catch (e) {
         toast("未保存，请重试");
         round.checked = !round.checked;
+      }
+    };
+
+  // 卡片底色对比开关：只切 body class，立刻生效，方便和侧栏并排看差别
+  const cardGlassEl = view.querySelector("#set-card-glass");
+  if (cardGlassEl)
+    cardGlassEl.onchange = async () => {
+      applyCardGlass(cardGlassEl.checked);
+      try {
+        await invoke("set_card_glass", { value: cardGlassEl.checked });
+        settings = await invoke("get_settings");
+        // 一句话就够：开关的意义看标题即可，toast 只确认「已生效」
+        toast(cardGlassEl.checked ? "卡片与侧栏同色" : "卡片恢复白色");
+        reportFrontend(
+          "INFO",
+          "ui",
+          `卡片与侧栏同色 → ${cardGlassEl.checked ? "开" : "关"}`
+        );
+      } catch (e) {
+        toast("设置没保存，请重试");
+        cardGlassEl.checked = !cardGlassEl.checked;
+        applyCardGlass(cardGlassEl.checked);
+      }
+    };
+
+  // 切换时记住位置：纯前端行为，后端只存偏好。关掉时清空记忆，
+  // 避免「先关后开」还残留上次的位置。
+  const keepScrollEl = view.querySelector("#set-keep-scroll");
+  if (keepScrollEl)
+    keepScrollEl.onchange = async () => {
+      try {
+        await invoke("set_keep_scroll", { value: keepScrollEl.checked });
+        settings = await invoke("get_settings");
+        if (!keepScrollEl.checked) viewScrollMemo.clear();
+        // 一句话就够：这个开关的效果要切一次才看得见，文案说明状态而不解释原理
+        toast(keepScrollEl.checked ? "保留滚动位置" : "关闭位置记忆");
+      } catch (e) {
+        toast("设置没保存，请重试");
+        keepScrollEl.checked = !keepScrollEl.checked;
       }
     };
 
@@ -4749,6 +4965,18 @@ async function main() {
   bindNav();
   // 首屏静态 DOM 里的分段/栏目控件挂一次；设置页每次重绘后会再挂
   initMotion();
+
+  // 从托盘 / 任务栏唤回时的入场。
+  // 窗口是「从屏幕外移回来」而不是 show，系统不会播那套「从任务栏放大」的动画，
+  // 这里补一次极短的淡入。**只动 opacity，不动 transform**：`.app` 上有
+  // backdrop-filter，transform 会新建 containing block，采样范围一变材质就闪
+  // （本项目已知的坑，别在这里加 scale）。
+  listen("main-revealed", () => {
+    document.querySelector(".app")?.animate([{ opacity: 0.86 }, { opacity: 1 }], {
+      duration: 170,
+      easing: "cubic-bezier(0.32, 0.72, 0, 1)",
+    });
+  });
   bindThemeToggle();
   bindSearch();
   createTip();
@@ -4777,9 +5005,18 @@ async function main() {
     // 主题三档（浅色/深色/系统）：单独 try，避免权限缺失时中断其余绑定
     try {
       await applyThemeMode(settings.themeMode);
-      await appWindow.onThemeChanged(({ payload }) => {
-        // 手动钉住时不跟系统；只有 system 档才响应
-        if ((settings.themeMode || "system") === "system") applyTheme(payload === "dark");
+      await appWindow.onThemeChanged(() => {
+        // 手动钉住时不跟系统；只有 system 档才响应。
+        //
+        // ⚠ **不用事件里的 payload**：tao 转发的这个值实测会给反/滞后
+        // （日志里出现过事件说 Light、而注册表 AppsUseLightTheme 是深色），
+        // 直接拿它切 body.dark，就会出现「CSS 浅色、窗口材质深色」这种
+        // 两层打架 —— 用户看到的就是「深色不跟随 / 材质不应用」。
+        // 深浅一律问 Rust（`theme_is_dark` 读注册表），与材质同一个来源。
+        if ((settings.themeMode || "system") !== "system") return;
+        invoke("theme_is_dark")
+          .then((d) => applyTheme(!!d))
+          .catch(() => {});
       });
     } catch (e) {
       console.error("theme setup failed", e);
@@ -4805,6 +5042,10 @@ async function main() {
     document.getElementById("status-version").textContent = "Version：—";
   }
 
+  // 页面可能是「低占用释放后重建」加载的：把上次停的视图/标签恢复回来再渲染。
+  // 正常启动（不是重建）仍落在首页 —— 打开剪贴板就是要看历史。
+  const rebuilt = await invoke("take_just_rebuilt").catch(() => false);
+  if (rebuilt) restoreView();
   render();
 
   // 首次运行引导（只在全新安装后的第一次启动出现）。
