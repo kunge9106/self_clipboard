@@ -1656,6 +1656,16 @@ pub fn init(app: &AppHandle) {
         }
     }
 
+    // 图片一致性：先修 / 清掉「记录在、文件没了」的死条目，再做保留期清理。
+    // 顺序有讲究：死条目已经点不动了，不该占着保留期统计。
+    let (img_repaired, img_dropped) = verify_image_integrity(&dir, &mut hist);
+    if img_repaired > 0 || img_dropped > 0 {
+        save_index(&dir, &hist);
+        crate::log_print!(
+            "[clipboard] 图片一致性：修复 {img_repaired} 条，移除 {img_dropped} 条失效条目"
+        );
+    }
+
     // 保留策略：按配置天数清理过期条目（0 = 永久保留）
     let cfg = crate::settings::get();
     let mut hist = prune_history(hist, &dir, cfg.retention_days, cfg.prune_include_pinned);
@@ -4199,6 +4209,90 @@ pub fn organize_image_layout() -> usize {
     drop(h);
     crate::settings::update(|c| c.image_layout_ver = IMAGE_LAYOUT_VERSION);
     moved
+}
+
+/// 图片条目一致性校验：`img_path` 必须指向真实存在的文件。
+///
+/// 为什么需要这一道：`img_path` 与磁盘文件是两份状态。改名迁移、清理删文件、
+/// 外部删缓存，任何一处只完成一半，就会留下「记录在、文件没了」的**死条目** ——
+/// 列表照样显示缩略图（缩略图是另一份文件），点复制只得到
+/// 「系统找不到指定的文件 (os error 2)」，用户在界面上没有任何线索。
+///
+/// 启动时执行一次，规则：
+///   1. 文件存在 → 跳过（绝大多数）；
+///   2. 不在，但按时间戳能在图片目录里找到同一时刻的文件 → 回写路径（迁移遗留）；
+///   3. 都找不到 → 记 ERROR（含期望路径与时间戳）并移除该条目。
+///      内容已经不在磁盘上，留着只会让人反复点到失败。
+///
+/// 返回 `(修复数, 移除数)`。
+fn verify_image_integrity(dir: &Path, hist: &mut Vec<crate::store::Meta>) -> (usize, usize) {
+    let mut repaired = 0usize;
+    let mut dropped = 0usize;
+
+    // 先把图片目录里的文件按「时间戳前缀」建索引：条目可能有上千条，
+    // 逐条扫盘会把启动时间拉长成秒级。
+    let mut by_stamp: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for sub in ["images", "images/copy", "images/shot"] {
+        let Ok(rd) = fs::read_dir(dir.join(sub)) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let ext = Path::new(&name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !matches!(
+                ext.as_str(),
+                "bmp" | "dib" | "png" | "jpg" | "jpeg" | "tiff" | "webp" | "gif"
+            ) {
+                continue;
+            }
+            // 文件名形如 `20261103_153700.bmp` / 同一秒多张时 `20261103_153700-2.bmp`
+            let stem = name.split('.').next().unwrap_or("");
+            let key = stem.split('-').next().unwrap_or(stem).to_string();
+            by_stamp.entry(key).or_default().push(format!("{sub}/{name}"));
+        }
+    }
+
+    hist.retain_mut(|item| {
+        let Some(rel) = item.img_path.clone() else {
+            return true;
+        };
+        if safe_join(dir, &rel).is_some_and(|p| p.is_file()) {
+            return true;
+        }
+        let key = local_stamp(item.ts);
+        // 同一秒可能存了多张（`-2`、`-3` 后缀），候选多于一个时**不做猜测** ——
+        // 猜错等于把别人的图挂到这条记录上，比判失效更糟。
+        let pick = by_stamp.get(&key).filter(|v| v.len() == 1).and_then(|v| v.first());
+        if let Some(found) = pick {
+            crate::log_warn!(
+                "[clipboard] 图片路径失效，按时间戳修复：{rel} → {found}（id={}）",
+                item.id
+            );
+            item.img_path = Some(found.clone());
+            repaired += 1;
+            return true;
+        }
+        crate::log_err!(
+            "clipboard",
+            "图片文件缺失且无法修复，移除条目 id={} ts={} 期望路径={} —— 检查保留天数与缓存目录是否被手动清理",
+            item.id,
+            item.ts,
+            rel
+        );
+        dropped += 1;
+        false
+    });
+
+    (repaired, dropped)
 }
 
 /// 图片该放哪个目录。落盘与整理共用一处判断，免得两边走偏。
