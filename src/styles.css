@@ -1462,6 +1462,69 @@ html:not(.hovers-off) .seg button:not(.on):hover {
 }
 
 /* 右侧内容 */
+/* 回到顶部：滚过一屏才出现。
+   材质沿用玻璃令牌 —— `--glass-strong` 深浅各定一档、且乘了 `--mat-k`，
+   所以它会跟着「材质浓度」滑块一起变，深色下不会发白。 */
+.to-top {
+  position: fixed;
+  right: 20px;
+  bottom: 46px;
+  z-index: 6;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--glass-rim);
+  border-radius: 50%;
+  background: var(--glass-strong);
+  color: var(--text-dim);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  backdrop-filter: blur(14px) saturate(140%);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12), inset 0 1px 0 var(--glass-spec-soft);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(6px) scale(0.96);
+  pointer-events: none;
+  transition:
+    opacity 0.16s var(--ease-out),
+    transform 0.16s var(--ease-out),
+    color 0.16s,
+    border-color 0.16s;
+}
+
+.to-top.is-on {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.to-top:hover {
+  color: var(--text);
+  border-color: var(--glass-spec-soft);
+}
+
+.to-top:active {
+  transform: scale(0.94);
+}
+
+/* 描边属性归 CSS（见图标线宽约定）：viewBox 24 视图，用 1.3 档 */
+.to-top svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: var(--icon-stroke);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .to-top {
+    transition: none;
+  }
+}
+
 .content {
   flex: 1;
   min-width: 0;
