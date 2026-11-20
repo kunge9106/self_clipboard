@@ -158,6 +158,14 @@ const viewScrollMemo = new Map();
 // 本次切换要恢复到的位置。null = 不恢复（正常回顶部）。
 // 由 bindNav / 设置页标签点击写入，由 render 的收尾处消费并清空。
 let pendingScrollRestore = null;
+/**
+ * 切视图时记下的**锚点**（位置 + 那条的 id）。
+ *
+ * 为什么不能只记像素：列表是虚拟窗口，数据从 `from` 开始取。只还原 scrollTop
+ * 会让视口停在中间、数据仍从第 0 条开始 —— 表现就是「切回来中间被当成顶部」，
+ * 后续收藏/新增也会按错误的位置算锚点。锚点带着 id，取页时会从它所在页开始。
+ */
+let pendingAnchor = null;
 
 // 更新检查结果。Rust 在启动时会自检一次并（有新版本时）推 update-available；
 // 前端其余时候只读缓存（update_state），**只有用户点按钮才重新联网**。
@@ -1099,17 +1107,18 @@ function bindNav() {
     // 一旦 innerHTML 被换掉，旧位置就没了。
     if (settings?.keepScroll) {
       const oldView = document.getElementById("view");
+      const oldHist = oldView.querySelector(".history");
       const cur =
-        oldView.querySelector(".history")?.scrollTop ??
-        oldView.querySelector(".settings-body")?.scrollTop ??
-        0;
+        oldHist?.scrollTop ?? oldView.querySelector(".settings-body")?.scrollTop ?? 0;
       viewScrollMemo.set(currentView, cur);
-      // 设置页的位置按「栏目」记（见 bindSettings 的标签点击），这里取当前栏目那一个
+      // 列表用锚点（虚拟窗口要按它对齐数据）；设置页不是虚拟列表，继续用像素
+      pendingAnchor = oldHist && wl ? wl.getAnchor() : null;
       pendingScrollRestore =
         item.dataset.view === "settings"
           ? (viewScrollMemo.get("tab:" + settingsTab) ?? 0)
-          : (viewScrollMemo.get(item.dataset.view) ?? 0);
+          : null;
     } else {
+      pendingAnchor = null;
       pendingScrollRestore = null;
     }
     // 旧页面快照要在改 DOM 之前拍：等渲染完成时它已经被 innerHTML 换掉了
@@ -1383,6 +1392,35 @@ function scheduleWindowRender() {
   }, 80);
 }
 
+/**
+ * 回到顶部：滚过一屏才出现。
+ *
+ * 节流用 `passive` 就行：这里只读 `scrollTop`、只切一个 class，
+ * 不需要额外防抖（滚动事件本身已经是按帧合并的）。
+ * 平滑滚动要尊重系统的「减少动画」开关。
+ */
+function bindToTop(scroller) {
+  const btn = document.getElementById("to-top");
+  if (!btn) return;
+  const update = () => {
+    // 只有超过一屏才给按钮：短列表一屏装得下，按钮反而碍事
+    btn.classList.toggle("is-on", scroller.scrollTop > scroller.clientHeight);
+  };
+  scroller.addEventListener("scroll", update, { passive: true });
+  btn.onclick = () => {
+    // **不能用 `behavior: "smooth"`**：这是虚拟列表，平滑滚动会连续几十帧触发
+    // 行重建与行高标定，浏览器只能把动画一帧一帧拖着走 —— 实测表现就是
+    // 「一点一点往上挪」，最后还未必到顶。直接归零，一帧到位。
+    scroller.scrollTop = 0;
+  };
+  update();
+}
+
+/** 非列表视图（设置页 / 文件说明页）要收起回到顶部按钮。 */
+function hideToTop() {
+  document.getElementById("to-top")?.classList.remove("is-on");
+}
+
 /** 当前筛选条件。搜索词原样传 —— 后端负责 trim 与折叠大小写。 */
 function currentFilter() {
   return buildFilter({ view: currentView, query });
@@ -1408,6 +1446,7 @@ function ensureWindow(view) {
   scroller.className = "history";
   view.innerHTML = "";
   view.appendChild(scroller);
+  bindToTop(scroller);
   wl = new VirtualList({
     scroller,
     classHeights: prevClasses,
@@ -1530,7 +1569,11 @@ async function renderWindow({ keepScroll = false } = {}) {
   const view = document.getElementById("view");
   const token = ++wlToken;
   const wasAtTop = !wl || wl.scroller.scrollTop <= TOP_EPS;
-  const anchor = keepScroll && wl && !wasAtTop ? wl.getAnchor() : null;
+  // 切视图回来时优先用记下的锚点：它带着 id，取页会从那条所在页开始，
+  // 数据窗口与视口才对得上（只还原像素会出现「中间被当成顶部」）。
+  const navAnchor = pendingAnchor;
+  pendingAnchor = null;
+  const anchor = navAnchor ?? (keepScroll && wl && !wasAtTop ? wl.getAnchor() : null);
   // 保位置时取「锚点所在的那一页」而不是窗口起点：窗口可能有上千条（一路滚下来
   // 累积的），只取起点那一页会把视口里的内容整片丢掉。
   let from = 0;
@@ -1606,14 +1649,25 @@ async function renderWindow({ keepScroll = false } = {}) {
   if (!keepScroll) wl.scroller.scrollTop = 0;
   wl.setTotal(wlTotal);
   wl.setWindow(wlState.start, wlState.items);
-  if (anchor) wl.restoreAnchor(anchor);
   wl.render();
+  if (anchor) {
+    // **必须在行进 DOM 之后**再设 scrollTop。新容器刚 appendChild、行还没填时，
+    // 浏览器算出的 scrollHeight / clientHeight 都是 0，赋进去的值会被静默夹回 0
+    // —— 表现就是「点了收藏 / 来了新内容，列表跳回顶部」，而且不报任何错。
+    wl.restoreAnchor(anchor);
+    // 图片行的高度要等首帧标定，个别情况下这一帧仍被夹住 → 下一帧再对齐一次。
+    const restoreToken = wlToken;
+    requestAnimationFrame(() => {
+      if (restoreToken === wlToken && wl?.scroller) wl.restoreAnchor(anchor);
+    });
+  }
   // 「切换时记住位置」：必须在内容进 DOM **之后**设置，否则高度还是 0，
   // 浏览器会把 scrollTop 夹回 0（赋值不报错，表现为「开关开了也没用」）。
-  if (pendingScrollRestore !== null) {
+  // 像素还原只作兜底：锚点已经能精确定位，再叠一次像素会把位置带偏
+  if (!anchor && pendingScrollRestore !== null) {
     wl.scroller.scrollTop = pendingScrollRestore;
-    pendingScrollRestore = null;
   }
+  pendingScrollRestore = null;
   schedulePrefetch();
   // 文件失效检测只查**已加载**的行 —— 全量查一次 10 万个 id 是旧路径的成本
   refreshMissing(wlState.items);
@@ -1663,6 +1717,7 @@ function render({ keepScroll = false } = {}) {
     // 设置页整块是新 DOM：滑块要重新挂载（挂载是幂等的，重复调无副作用）
     initMotion(view);
     flushNavSwap(view);
+    hideToTop();
     return;
   }
 
@@ -1675,6 +1730,7 @@ function render({ keepScroll = false } = {}) {
       <div class="empty-title">文件复制已关闭</div>
       <div class="empty-sub">可在「设置 → 数据 → 记录」里打开</div>
     </div>`;
+    hideToTop();
     return;
   }
 
